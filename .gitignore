@@ -1,0 +1,29 @@
+# Real credentials stay local. Use Dependencies/.env.example as the template.
+.env
+Dependencies/.env
+Dependencies/all_instrument*.csv
+
+# Generated scanner data can be refreshed/rebuilt, so keep it out of source.
+data/cache/
+data/universes/
+
+# Python/runtime noise.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Streamlit local secrets should never be committed.
+.streamlit/secrets.toml
+
+# Virtual environments.
+.venv/
+venv/
+env/
+
+# Editor / IDE.
+.vscode/
+.idea/
+
+# OS noise.
+.DS_Store
+Thumbs.db

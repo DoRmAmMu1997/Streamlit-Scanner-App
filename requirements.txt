@@ -1,0 +1,25 @@
+# Web UI.
+streamlit
+
+# Data handling and calculations.
+pandas
+numpy
+pyarrow
+plotly
+
+# Accelerated technical-indicator backends. Both are OPTIONAL: backend/
+# indicators.py routes through them when present and falls back to pure-pandas
+# maths if they are missing or fail to import.
+# - TA-Lib needs its underlying C library installed first (see ta-lib.org).
+# - pandas_ta: use a release compatible with your numpy (numpy 2.x needs a
+#   recent pandas_ta).
+TA-Lib
+pandas_ta
+
+# Dhan API and environment loading.
+requests
+python-dotenv
+dhanhq
+
+# Test runner.
+pytest
