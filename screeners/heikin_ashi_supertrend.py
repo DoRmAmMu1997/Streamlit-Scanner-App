@@ -10,7 +10,6 @@ Flow in plain English:
 """
 
 import pandas as pd
-import plotly.graph_objects as go
 
 from backend.charts import add_supertrend_overlay, candlestick_with_volume
 from backend.indicators import build_heikin_ashi, supertrend
@@ -180,7 +179,7 @@ def run(universe_df, data_loader, params) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=RESULT_COLUMNS)
 
 
-def build_chart(candles: pd.DataFrame, params: dict) -> go.Figure:
+def build_chart(candles: pd.DataFrame, params: dict) -> dict:
     """Render a Heikin Ashi chart with the SuperTrend line overlaid.
 
     The screener decides which candle type the user sees: this strategy is

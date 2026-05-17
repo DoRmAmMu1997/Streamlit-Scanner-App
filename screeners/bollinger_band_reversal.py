@@ -11,7 +11,6 @@ Flow in plain English:
 """
 
 import pandas as pd
-import plotly.graph_objects as go
 
 from backend.charts import add_bollinger_overlay, candlestick_with_volume
 from backend.indicators import bollinger_bands
@@ -165,7 +164,7 @@ def run(universe_df, data_loader, params) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=RESULT_COLUMNS)
 
 
-def build_chart(candles: pd.DataFrame, params: dict) -> go.Figure:
+def build_chart(candles: pd.DataFrame, params: dict) -> dict:
     """Render a regular candlestick chart with Bollinger Bands overlaid."""
     period = int(params.get("period", SCREENER["default_params"]["period"]))
     std_multiplier = float(params.get("std_multiplier", SCREENER["default_params"]["std_multiplier"]))

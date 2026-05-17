@@ -5,7 +5,6 @@ streamlit
 pandas
 numpy
 pyarrow
-plotly
 
 # Accelerated technical-indicator backends. Both are OPTIONAL: backend/
 # indicators.py routes through them when present and falls back to pure-pandas
