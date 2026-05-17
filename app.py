@@ -36,8 +36,10 @@ from typing import Any
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit.runtime.scriptrunner import get_script_run_ctx
 
+from backend.charts import render_chart_html
 from backend.config import (
     DAILY_CACHE_DIR,
     credential_status,
@@ -696,27 +698,21 @@ def _render_results_with_chart(
         return chart_symbol
 
     try:
-        fig = selected.build_chart(candles, cache["params_for_chart"])
+        # The screener returns a chart "spec" (plain dict); `render_chart_html`
+        # turns it into a TradingView Lightweight Charts widget.
+        spec = selected.build_chart(candles, cache["params_for_chart"])
+        chart_html = render_chart_html(spec)
     except Exception as exc:
         logger.exception("build_chart failed for %s on %s", selected.key, chart_symbol)
         st.error(f"Could not build chart: {_redact_secrets(str(exc))}")
         return chart_symbol
 
-    # `width="stretch"` replaces the deprecated `use_container_width=True`.
-    # `config={"scrollZoom": True}` enables mouse-wheel zoom; the figure's
-    # `dragmode="pan"` (set in backend/charts.py) makes LMB-drag pan.
-    st.plotly_chart(
-        fig,
-        width="stretch",
-        theme="streamlit",
-        config={"scrollZoom": True},
-    )
-    # Beginner tip: Plotly supports per-axis interaction natively. Dragging
-    # directly on the price axis scales just that axis (TradingView-style),
-    # and scroll-wheel over an axis zooms only that axis.
+    # The chart is an embedded Lightweight Charts widget. Its price scale is
+    # natively drag-to-scale — exactly the TradingView-style Y-axis zoom.
+    components.html(chart_html, height=int(spec.get("height", 640)), scrolling=False)
     st.caption(
-        "Chart controls: drag the price axis to scale it · scroll over an axis "
-        "to zoom just that axis · drag the chart body to pan · double-click to reset."
+        "Chart controls: drag the price scale (right edge) to scale the Y-axis · "
+        "drag the chart to pan · scroll to zoom · double-click to reset."
     )
     return chart_symbol
 

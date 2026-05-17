@@ -26,10 +26,10 @@ dropped into the `screeners/` folder.
 - **Automatic data prefetch** — running `python app.py` first downloads the
   stock universes and ~10 years of daily candles, *then* opens the UI, so the
   app never blocks on downloads.
-- **Interactive Plotly charts** — click any shortlisted stock to see a
-  TradingView-style candlestick chart with the screener's own indicator
-  overlaid (Heikin Ashi candles for HA-based screeners; a dedicated oscillator
-  panel for Stochastic).
+- **Interactive TradingView Lightweight Charts** — click any shortlisted stock
+  to see a candlestick chart (with a drag-to-scale price axis) showing the
+  screener's own indicator overlaid (Heikin Ashi candles for HA-based screeners;
+  a dedicated oscillator panel for Stochastic).
 - **Library-backed indicators** — indicators run through `TA-Lib` / `pandas_ta`
   when installed, and fall back to pure-pandas implementations otherwise.
 - **Local Parquet cache** — candles are cached on disk; subsequent runs only
@@ -141,7 +141,7 @@ Streamlit Scanner App/
 │   ├── universe_loader.py  # Reads the universe CSVs
 │   ├── screener_registry.py# Discovers + validates screeners
 │   ├── indicators.py       # Indicators (TA-Lib/pandas_ta + fallbacks)
-│   └── charts.py           # Plotly chart builders
+│   └── charts.py           # Lightweight Charts chart-spec builders
 ├── screeners/              # One file per screener (the strategy logic)
 │   ├── heikin_ashi_supertrend.py
 │   ├── bollinger_band_reversal.py
@@ -169,8 +169,8 @@ exposes:
   `timeframe`, `lookback_days`, `default_params`).
 - `run(universe_df, data_loader, params) -> pandas.DataFrame` — returns the
   shortlist table.
-- `build_chart(candles, params)` *(optional)* — returns a Plotly figure for the
-  per-stock chart.
+- `build_chart(candles, params)` *(optional)* — returns a chart-spec dict for
+  the per-stock Lightweight Charts chart.
 
 The app discovers it automatically on the next start — no other file needs to
 change. Use `screeners/heikin_ashi_supertrend.py` as a template.

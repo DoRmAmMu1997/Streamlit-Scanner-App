@@ -21,7 +21,6 @@ today" scan, so they are intentionally not implemented here. The informational
 """
 
 import pandas as pd
-import plotly.graph_objects as go
 
 from backend.charts import add_line_overlay, add_stochastic_overlay, candlestick_volume_oscillator
 from backend.indicators import ema, sma, stochastic
@@ -304,7 +303,7 @@ def run(universe_df, data_loader, params) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=RESULT_COLUMNS)
 
 
-def build_chart(candles: pd.DataFrame, params: dict) -> go.Figure:
+def build_chart(candles: pd.DataFrame, params: dict) -> dict:
     """Render a 3-panel chart: price + SMA200 + EMA5 / volume / Stochastic.
 
     The Stochastic is an oscillator bounded 0-100, so it gets its own panel
@@ -320,28 +319,28 @@ def build_chart(candles: pd.DataFrame, params: dict) -> go.Figure:
     overbought = float(params.get("overbought", defaults["overbought"]))
 
     frame = _prepare_candles(candles)
-    fig = candlestick_volume_oscillator(
+    spec = candlestick_volume_oscillator(
         frame,
         title=f"Daily candles + SMA{sma_period}/EMA{ema_period} + Stochastic",
         ha=False,
     )
     if frame.empty:
-        # `candlestick_volume_oscillator` already returned a placeholder figure.
-        return fig
+        # `candlestick_volume_oscillator` already returned a placeholder spec.
+        return spec
 
-    # Price-panel overlays: the slow trend (SMA200) and the fast line (EMA5).
+    # Price-pane overlays (pane 0): the slow trend (SMA200) and fast line (EMA5).
     add_line_overlay(
-        fig, frame["timestamp"], sma(frame["close"], sma_period),
-        name=f"SMA {sma_period}", color="#ab47bc", row=1,
+        spec, frame["timestamp"], sma(frame["close"], sma_period),
+        name=f"SMA {sma_period}", color="#ab47bc", pane=0,
     )
     add_line_overlay(
-        fig, frame["timestamp"], ema(frame["close"], ema_period),
-        name=f"EMA {ema_period}", color="#ffca28", row=1,
+        spec, frame["timestamp"], ema(frame["close"], ema_period),
+        name=f"EMA {ema_period}", color="#ffca28", pane=0,
     )
-    # Oscillator panel: %K, %D, and the 20/80 guide lines.
+    # Oscillator pane (pane 2): %K, %D, and the 20/80 guide lines.
     add_stochastic_overlay(
-        fig, frame,
+        spec, frame,
         k_period=k_period, k_smoothing=k_smoothing, d_smoothing=d_smoothing,
-        oversold=oversold, overbought=overbought, row=3,
+        oversold=oversold, overbought=overbought, pane=2,
     )
-    return fig
+    return spec
