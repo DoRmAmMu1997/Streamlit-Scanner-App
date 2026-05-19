@@ -253,6 +253,32 @@ def _redact_secrets(text: str) -> str:
 # UI helpers
 # ---------------------------------------------------------------------------
 
+# A small, targeted stylesheet. It tweaks documented Streamlit hooks only —
+# `.block-container` (the main content wrapper) and the `stMetric*` test-ids —
+# so a future Streamlit upgrade would, at worst, need these four rules
+# re-checked. Kept deliberately tiny to keep that risk low.
+_CUSTOM_CSS = """
+<style>
+  /* Trim Streamlit's large default top gap so content starts higher. */
+  .block-container { padding-top: 2.5rem; padding-bottom: 3rem; }
+  /* The status metrics are a secondary health strip — quieten the big numbers. */
+  [data-testid="stMetricValue"] { font-size: 1.4rem; }
+  [data-testid="stMetricLabel"] { opacity: 0.85; }
+  /* Even breathing room around horizontal dividers. */
+  hr { margin: 1.1rem 0; }
+</style>
+"""
+
+
+def _inject_css() -> None:
+    """Apply the app's custom CSS once per page render.
+
+    Called right after `st.set_page_config`. `unsafe_allow_html=True` is
+    required for a raw <style> block; the CSS here is a fixed literal string
+    (no user input), so there is no injection surface.
+    """
+    st.markdown(_CUSTOM_CSS, unsafe_allow_html=True)
+
 
 def cache_summary(cache_dir: Path = DAILY_CACHE_DIR) -> dict[str, object]:
     """Count cached candle files so the UI can show whether caching is active."""
@@ -287,33 +313,36 @@ def show_status_panel(selected: ScreenerDefinition) -> None:
     mapped_rows = int(universe.get("mapped_rows") or 0)
 
     # Four metrics: credentials, universe identity + count, last refresh time,
-    # local cache size. Each metric uses Streamlit's delta slot as a short
-    # contextual line so the user knows what the number actually means.
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric(
-        label="Dhan credentials",
-        value="Ready" if creds["ready"] else "Missing",
-        delta="signed in" if creds["ready"] else "set Dependencies/.env",
-        delta_color="normal" if creds["ready"] else "inverse",
-    )
-    col2.metric(
-        label=f"{universe_display} symbols",
-        value=mapped_rows,
-        delta=f"{int(universe.get('rows') or 0)} total rows",
-        delta_color="off",
-    )
-    col3.metric(
-        label="Universe refreshed",
-        value=_universe_mtime(selected.universe),
-        delta="local CSV mtime",
-        delta_color="off",
-    )
-    col4.metric(
-        label="Daily cache",
-        value=int(cache["files"]),
-        delta=f"{cache['size_mb']} MB on disk",
-        delta_color="off",
-    )
+    # local cache size. They live inside a bordered container so they read as a
+    # quiet "system status" card rather than the loudest thing on the page.
+    # Each metric uses Streamlit's delta slot as a short contextual line.
+    with st.container(border=True):
+        st.caption("System status")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric(
+            label="Dhan credentials",
+            value="Ready" if creds["ready"] else "Missing",
+            delta="signed in" if creds["ready"] else "set Dependencies/.env",
+            delta_color="normal" if creds["ready"] else "inverse",
+        )
+        col2.metric(
+            label=f"{universe_display} symbols",
+            value=mapped_rows,
+            delta=f"{int(universe.get('rows') or 0)} total rows",
+            delta_color="off",
+        )
+        col3.metric(
+            label="Universe refreshed",
+            value=_universe_mtime(selected.universe),
+            delta="local CSV mtime",
+            delta_color="off",
+        )
+        col4.metric(
+            label="Daily cache",
+            value=int(cache["files"]),
+            delta=f"{cache['size_mb']} MB on disk",
+            delta_color="off",
+        )
 
     if not creds["ready"]:
         st.warning(
@@ -384,7 +413,8 @@ def main() -> None:
     # crashes when `data/cache/daily` or `data/universes` does not exist yet.
     ensure_project_dirs()
 
-    st.set_page_config(page_title="Streamlit Scanner App", layout="wide")
+    st.set_page_config(page_title="Streamlit Scanner App", page_icon="📈", layout="wide")
+    _inject_css()
     st.title("Streamlit Scanner App")
     st.caption(
         "Pluggable daily-candle scanner for Indian equities. "
@@ -425,7 +455,7 @@ def main() -> None:
 
     cache = st.session_state.get("scan_cache")
     if cache is None or cache["screener_key"] != selected.key:
-        st.info("Choose a screener and press **Run screener** in the sidebar.")
+        st.info("Press **Run screener** in the sidebar to scan for matches.", icon="👈")
         return
 
     _render_scan_output(selected, cache)
@@ -456,10 +486,13 @@ def _render_sidebar(screeners: dict[str, ScreenerDefinition]) -> ScreenerDefinit
         universe_display = UNIVERSE_CONFIG.get(selected.universe, {}).get(
             "display_name", selected.universe
         )
-        st.caption(selected.description)
-        st.write(f"**Universe:** {universe_display} (`{selected.universe}`)")
-        st.write(f"**Timeframe:** `{selected.timeframe}`")
-        st.write(f"**Lookback:** {selected.lookback_days} days")
+        # Compact metadata block. The screener's description is intentionally
+        # NOT repeated here — it is shown once, in the main area.
+        st.markdown(
+            f"**Universe** &nbsp; {universe_display}  \n"
+            f"**Timeframe** &nbsp; {selected.timeframe}  \n"
+            f"**Lookback** &nbsp; {selected.lookback_days} days"
+        )
 
         st.divider()
         if st.button("Run screener", type="primary", width="stretch"):
@@ -566,14 +599,16 @@ def _render_scan_output(selected: ScreenerDefinition, cache: dict[str, Any]) -> 
     stats = cache["stats"]
     failures: list[dict[str, Any]] = cache["failures"]
 
-    st.metric("Result rows", len(results))
-    st.caption(
-        f"Cache hits: {stats['cache_hits']} · "
-        f"API cache misses: {stats['cache_misses']} · "
-        f"API attempts incl. retries: {stats['api_attempts']} · "
-        f"Rate-limit retries: {stats['rate_limit_retries']} · "
-        f"Failures: {len(failures)}"
-    )
+    # A short summary line, with the per-run diagnostics tucked into a
+    # collapsed expander so they are available but never clutter the results.
+    st.markdown(f"### {len(results)} stock(s) shortlisted")
+    with st.expander("Run details", expanded=False):
+        detail_col1, detail_col2 = st.columns(2)
+        detail_col1.metric("Cache hits", stats["cache_hits"])
+        detail_col1.metric("API cache misses", stats["cache_misses"])
+        detail_col2.metric("API attempts (incl. retries)", stats["api_attempts"])
+        detail_col2.metric("Rate-limit retries", stats["rate_limit_retries"])
+        st.caption(f"Fetch failures: {len(failures)}")
 
     if results.empty:
         st.warning("The screener returned no rows.")
