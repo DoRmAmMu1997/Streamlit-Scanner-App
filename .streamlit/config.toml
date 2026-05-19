@@ -1,0 +1,13 @@
+# Streamlit theme for the Scanner App.
+#
+# The colors are chosen to match the embedded Lightweight Charts widget
+# (see backend/charts.py): the page background equals the chart background,
+# so the chart iframe blends seamlessly into the page, and the accent color
+# is the chart's bullish-candle teal.
+[theme]
+base = "dark"
+primaryColor = "#26a69a"
+backgroundColor = "#0e1117"
+secondaryBackgroundColor = "#161b26"
+textColor = "#d0d4dc"
+font = "sans serif"
