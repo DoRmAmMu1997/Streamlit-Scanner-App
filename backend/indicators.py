@@ -116,9 +116,31 @@ def _sma_fallback(series: pd.Series, period: int) -> pd.Series:
 
 
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    """Relative Strength Index, a momentum oscillator between 0 and 100."""
+    """Relative Strength Index, a momentum oscillator between 0 and 100.
+
+    Uses `talib.RSI` when TA-Lib is installed, otherwise a pandas fallback.
+    """
+    period = max(1, int(period))
+    if talib is not None:
+        try:
+            # TA-Lib is the standard library implementation. Convert to a
+            # float64 numpy array because TA-Lib expects plain numeric arrays,
+            # not pandas objects or strings from CSV/API data.
+            values = talib.RSI(np.asarray(series, dtype="float64"), timeperiod=period)
+            return pd.Series(values, index=series.index, name=getattr(series, "name", None))
+        except Exception:
+            # A bad dtype or unexpected library issue should not break the app;
+            # the pandas fallback below keeps the screener usable.
+            pass
+    return _rsi_fallback(series, period)
+
+
+def _rsi_fallback(series: pd.Series, period: int = 14) -> pd.Series:
+    """Pure-pandas RSI used when TA-Lib is unavailable."""
+    period = max(1, int(period))
     # `diff()` tells us how much the close changed from the previous candle.
-    delta = series.diff()
+    close_numeric = pd.to_numeric(series, errors="coerce")
+    delta = close_numeric.diff()
     # Positive changes are gains; negative changes are losses. The clipping
     # keeps each side separate so average gain and average loss are independent.
     gains = delta.clip(lower=0)
@@ -129,6 +151,33 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     average_loss = losses.ewm(alpha=1 / int(period), adjust=False, min_periods=int(period)).mean()
     relative_strength = average_gain / average_loss.replace(0, pd.NA)
     return 100 - (100 / (1 + relative_strength))
+
+
+def momentum(series: pd.Series, period: int = 20) -> pd.Series:
+    """Momentum oscillator: today's close minus the close `period` bars ago.
+
+    Knoxville Divergence uses this to ask whether downside momentum is weakening
+    while price is still making a lower low.
+    """
+    period = max(1, int(period))
+    if talib is not None:
+        try:
+            # TA-Lib MOM is simply close[today] - close[N bars ago]. We wrap it
+            # so screeners can use one stable helper regardless of whether
+            # TA-Lib is installed on the user's machine.
+            values = talib.MOM(np.asarray(series, dtype="float64"), timeperiod=period)
+            return pd.Series(values, index=series.index, name=getattr(series, "name", None))
+        except Exception:
+            pass
+    return _momentum_fallback(series, period)
+
+
+def _momentum_fallback(series: pd.Series, period: int = 20) -> pd.Series:
+    """Pure-pandas Momentum used when TA-Lib is unavailable."""
+    period = max(1, int(period))
+    # The first `period` rows are NaN because there is no candle far enough back
+    # to compare against yet. That warm-up behavior matches TA-Lib's MOM output.
+    return pd.to_numeric(series, errors="coerce").diff(periods=period)
 
 
 def volume_average(volume: pd.Series, period: int = 20) -> pd.Series:

@@ -8,9 +8,12 @@ import pandas as pd
 
 from backend import universe_builder
 from backend.universe_builder import (
+    HEMANT_SOURCE_FILES,
     build_equity_lookup,
     build_fno_universe,
     build_index_universe,
+    build_symbol_list_universe,
+    load_symbol_list_csv,
     load_instrument_master,
     normalize_instrument_master_columns,
     refresh_universe_files,
@@ -143,6 +146,103 @@ def test_build_fno_universe_prefers_underlying_symbol_over_contract_name():
     assert universe.iloc[0]["security_id"] == "2885"
 
 
+def test_build_symbol_list_universe_maps_aliases_and_preserves_order():
+    equity_lookup = pd.DataFrame(
+        [
+            {
+                "symbol": "NAM-INDIA",
+                "security_id": "357",
+                "exchange_segment": "NSE_EQ",
+                "instrument_type": "EQUITY",
+                "company_name": "Nippon Life India AMC",
+                "series": "EQ",
+            },
+            {
+                "symbol": "TCS",
+                "security_id": "11536",
+                "exchange_segment": "NSE_EQ",
+                "instrument_type": "EQUITY",
+                "company_name": "Tata Consultancy Services",
+                "series": "EQ",
+            },
+            {
+                "symbol": "ULTRACEMCO",
+                "security_id": "11532",
+                "exchange_segment": "NSE_EQ",
+                "instrument_type": "EQUITY",
+                "company_name": "UltraTech Cement",
+                "series": "EQ",
+            },
+        ]
+    )
+
+    universe = build_symbol_list_universe(
+        "hemant_super_45",
+        ["NSE:NAM_INDIA", "TCS", "UTLTRACEMCO", "AKZOINDIA"],
+        equity_lookup,
+        source="memory://hemant",
+    )
+
+    assert universe["symbol"].tolist() == ["NAM-INDIA", "TCS", "ULTRACEMCO", "AKZOINDIA"]
+    assert universe.loc[0, "source_symbol"] == "NAM_INDIA"
+    assert universe.loc[2, "source_symbol"] == "UTLTRACEMCO"
+    assert universe.loc[0, "security_id"] == "357"
+    assert universe.loc[3, "security_id"] == ""
+    assert universe.loc[3, "mapping_status"] == "missing_security_id"
+
+
+def test_load_symbol_list_csv_reads_symbol_column(tmp_path):
+    source_path = tmp_path / "symbols.csv"
+    pd.DataFrame({"symbol": ["NSE:NAM_INDIA", "TCS", " UTLTRACEMCO "]}).to_csv(
+        source_path, index=False
+    )
+
+    symbols = load_symbol_list_csv(source_path)
+
+    assert symbols == ["NSE:NAM_INDIA", "TCS", " UTLTRACEMCO "]
+
+
+def test_load_symbol_list_csv_prefers_source_symbol_from_generated_csv(tmp_path):
+    source_path = tmp_path / "generated_hemant.csv"
+    # This shape mirrors a Hemant file after refresh: `symbol` is the Dhan-ready
+    # value, while `source_symbol` preserves the original Google Doc spelling.
+    # The loader should use source_symbol so a second refresh keeps alias audit
+    # history instead of slowly replacing it with Dhan symbols.
+    pd.DataFrame(
+        {
+            "symbol": ["NAM-INDIA", "ULTRACEMCO", "TCS"],
+            "source_symbol": ["NAM_INDIA", "UTLTRACEMCO", ""],
+        }
+    ).to_csv(source_path, index=False)
+
+    symbols = load_symbol_list_csv(source_path)
+
+    assert symbols == ["NAM_INDIA", "UTLTRACEMCO", "TCS"]
+
+
+def test_hemant_source_csvs_are_pinned_from_google_doc_snapshot():
+    assert HEMANT_SOURCE_FILES["hemant_super_45"].parent.name == "universes"
+    assert HEMANT_SOURCE_FILES["hemant_super_45"].parent.parent.name == "data"
+    for universe_key, source_path in HEMANT_SOURCE_FILES.items():
+        config = universe_builder.UNIVERSE_CONFIG[universe_key]
+        assert config["source_file"] == str(source_path)
+        assert "source_url" not in config
+
+    super_45 = load_symbol_list_csv(HEMANT_SOURCE_FILES["hemant_super_45"])
+    good_45 = load_symbol_list_csv(HEMANT_SOURCE_FILES["hemant_good_45"])
+    good_200 = load_symbol_list_csv(HEMANT_SOURCE_FILES["hemant_good_200"])
+
+    assert len(super_45) == 43
+    assert len(good_45) == 43
+    assert len(good_200) == 261
+    assert super_45[-3:] == [
+        "BAJAJ_AUTO",
+        "UTLTRACEMCO",
+        "AMBUJACEM",
+    ]
+    assert good_200[-3:] == ["HDFCBANK", "SBIN", "BLS"]
+
+
 def test_refresh_universe_files_writes_requested_csvs(tmp_path):
     # This uses injected fake DataFrames so the test does not download anything.
     source = pd.DataFrame({"Symbol": ["RELIANCE"], "Company Name": ["Reliance"], "Series": ["EQ"]})
@@ -157,6 +257,24 @@ def test_refresh_universe_files_writes_requested_csvs(tmp_path):
     assert written["nifty_100"].exists()
     saved = pd.read_csv(written["nifty_100"], dtype=str)
     assert saved.iloc[0]["symbol"] == "RELIANCE"
+
+
+def test_refresh_universe_files_writes_hemant_universe_from_csv_source(tmp_path):
+    # The Hemant source file lives in data/universes, but the test writes output
+    # to tmp_path so it never overwrites the checked-in source snapshot.
+    written = refresh_universe_files(
+        universe_keys=["hemant_super_45"],
+        universe_dir=tmp_path,
+        instrument_master=fake_instrument_master(),
+    )
+
+    assert written["hemant_super_45"].exists()
+    saved = pd.read_csv(written["hemant_super_45"], dtype=str).fillna("")
+    assert saved["universe"].unique().tolist() == ["hemant_super_45"]
+    assert saved["universe_name"].unique().tolist() == ["Hemant Super 45"]
+    assert saved["symbol"].tolist()[:3] == ["HDFCBANK", "ICICIBANK", "AXISBANK"]
+    assert saved.loc[saved["symbol"].eq("TCS"), "security_id"].item() == "11536"
+    assert saved.loc[saved["symbol"].eq("HDFCBANK"), "mapping_status"].item() == "missing_security_id"
 
 
 def test_load_instrument_master_writes_dated_snapshot(tmp_path, monkeypatch):
