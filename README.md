@@ -15,17 +15,22 @@ dropped into the `screeners/` folder.
 
 ## Features
 
-- **Three built-in screeners**
+- **Four built-in screeners**
   - **Heikin Ashi SuperTrend** — F&O stocks where the daily Heikin Ashi close
     crosses the SuperTrend line.
   - **Bollinger Band Reversal** — F&O stocks printing a daily Bollinger Band
     rejection candle.
+  - **Bollinger Knoxville Buy** - Hemant Super 45 stocks near the lower
+    Bollinger Band(200, 2.5) with a recent bullish Knoxville Divergence.
   - **Stochastic Swing** — NIFTY 500 stocks with a fresh Stochastic swing entry
     (a `%K`/`%D` cross out of the oversold/overbought zone, confirmed by the
     200 SMA trend and a recent 5 EMA / 200 SMA crossover).
 - **Automatic data prefetch** — running `python app.py` first downloads the
   stock universes and ~10 years of daily candles, *then* opens the UI, so the
   app never blocks on downloads.
+- **Reusable scanner universes** — built-in universe keys include `nifty_100`,
+  `nifty_500`, `fno`, `hemant_super_45`, `hemant_good_45`, and
+  `hemant_good_200`.
 - **Interactive TradingView Lightweight Charts** — click any shortlisted stock
   to see a candlestick chart (with a drag-to-scale price axis) showing the
   screener's own indicator overlaid (Heikin Ashi candles for HA-based screeners;
@@ -45,7 +50,7 @@ dropped into the `screeners/` folder.
 python app.py
    │
    ├─ 1. Prefetch (plain Python, before the UI)
-   │     • refresh the universe CSVs (NIFTY 100 / 500 / F&O)
+   │     • refresh the universe CSVs (NIFTY 100 / 500 / F&O / Hemant lists)
    │     • download ~10 years of daily candles for every mapped stock
    │
    └─ 2. Launch the Streamlit UI
@@ -151,7 +156,7 @@ Streamlit Scanner App/
 │   └── dhan_token_setup.py # One-time OAuth token helper
 ├── data/                   # Generated at runtime (git-ignored)
 │   ├── cache/daily/         # Cached candles (Parquet)
-│   └── universes/           # Generated universe CSVs
+│   └── universes/           # Universe CSVs, including tracked Hemant lists
 └── tests/                  # pytest suite
 ```
 
@@ -174,6 +179,11 @@ exposes:
 
 The app discovers it automatically on the next start — no other file needs to
 change. Use `screeners/heikin_ashi_supertrend.py` as a template.
+
+Supported universe keys are `nifty_100`, `nifty_500`, `fno`,
+`hemant_super_45`, `hemant_good_45`, and `hemant_good_200`. The Hemant lists
+live in `data/universes/` alongside the other universe CSVs and are mapped to
+Dhan cash-equity IDs when universe files are refreshed.
 
 ---
 

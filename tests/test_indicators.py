@@ -18,11 +18,14 @@ import pytest
 from backend.indicators import (
     _bollinger_bands_fallback,
     _build_heikin_ashi_fallback,
+    _momentum_fallback,
     _stochastic_fallback,
     _supertrend_fallback,
     bollinger_bands,
     build_heikin_ashi,
     ema,
+    momentum,
+    rsi,
     sma,
     stochastic,
     supertrend,
@@ -131,6 +134,16 @@ def test_stochastic_fallback_matches_hand_computed_value():
     assert result.loc[3, "stoch_d"] == pytest.approx(50.0)
 
 
+def test_momentum_fallback_is_close_difference_over_period():
+    close = pd.Series([100.0, 102.0, 99.0, 108.0, 111.0])
+
+    result = _momentum_fallback(close, period=3)
+
+    assert result.iloc[:3].isna().all()
+    assert result.iloc[3] == pytest.approx(8.0)
+    assert result.iloc[4] == pytest.approx(9.0)
+
+
 # ---------------------------------------------------------------------------
 # Layer 2: public dispatchers — schema + agreement
 # ---------------------------------------------------------------------------
@@ -154,6 +167,8 @@ def test_public_indicators_return_expected_schema():
     # EMA/SMA return a Series the same length as the input.
     assert len(ema(frame["close"], 5)) == len(frame)
     assert len(sma(frame["close"], 10)) == len(frame)
+    assert len(rsi(frame["close"], 14)) == len(frame)
+    assert len(momentum(frame["close"], 20)) == len(frame)
 
 
 def test_public_heikin_ashi_close_is_mean_of_ohlc():

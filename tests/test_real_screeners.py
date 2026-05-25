@@ -5,7 +5,12 @@ from types import SimpleNamespace
 
 import pandas as pd
 
-from screeners import bollinger_band_reversal, heikin_ashi_supertrend, stochastic_swing
+from screeners import (
+    bollinger_band_reversal,
+    bollinger_knoxville_buy,
+    heikin_ashi_supertrend,
+    stochastic_swing,
+)
 
 
 class FakeDataLoader:
@@ -72,6 +77,82 @@ def _bollinger_candles(open_values, high_values, low_values, close_values) -> pd
             "volume": [1000.0] * len(close_values),
         }
     )
+
+
+def _knoxville_candles(*, with_divergence: bool = True, near_lower_band: bool = True) -> pd.DataFrame:
+    """Build compact candles for the BUY-only Bollinger + Knoxville screener."""
+    # These values are intentionally tiny compared with the real 200-bar setup.
+    # `_knoxville_params()` below shrinks the indicator periods so this fixture
+    # can test the same logic without hundreds of repetitive candles.
+    close_values = [
+        100.0,
+        100.0,
+        100.0,
+        100.0,
+        100.0,
+        92.0,
+        96.0,
+        100.0 if with_divergence else 92.0,
+        99.0,
+        100.0,
+        90.0,
+        94.0,
+        91.0,
+        88.0,
+        88.0,
+        88.0,
+        88.0,
+        88.0,
+        88.0,
+    ]
+    if not with_divergence:
+        # A flat close path keeps RSI/Momentum from forming the lower-low /
+        # higher-momentum-low disagreement needed for Knoxville.
+        close_values = [88.0] * len(close_values)
+    if not near_lower_band:
+        # Lift the final closes far away from the lower Bollinger Band while
+        # preserving the earlier divergence pivots. That isolates the BB filter.
+        close_values[-5:] = [88.0, 110.0, 110.0, 110.0, 110.0]
+
+    low_values = [value - 0.5 for value in close_values]
+    if with_divergence:
+        # Force clear pivot lows. The latest pivot is lower in price but has a
+        # higher momentum reading than the earlier pivot when with_divergence=True.
+        low_values[10] = 89.0
+        low_values[13] = 87.0
+
+    return pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-01-01", periods=len(close_values), freq="D"),
+            "open": [value + 0.25 for value in close_values],
+            "high": [value + 1.0 for value in close_values],
+            "low": low_values,
+            "close": close_values,
+            "volume": [1000.0] * len(close_values),
+        }
+    )
+
+
+def _knoxville_params() -> dict:
+    params = dict(bollinger_knoxville_buy.SCREENER["default_params"])
+    params.update(
+        {
+            "start_date": date(2026, 1, 1),
+            "end_date": date(2026, 1, 19),
+            # Short periods make the synthetic candles easy to reason about.
+            # The production defaults remain BB200, RSI21, Momentum20.
+            "bb_period": 5,
+            "bb_std": 2.5,
+            "rsi_period": 3,
+            "momentum_period": 3,
+            "divergence_bars_back": 10,
+            "signal_recency_bars": 10,
+            "pivot_left": 1,
+            "pivot_right": 1,
+            "oversold": 30.0,
+        }
+    )
+    return params
 
 
 def _universe() -> pd.DataFrame:
@@ -208,6 +289,39 @@ def test_bollinger_band_reversal_screener_tolerates_empty_and_short_frames():
     assert result.empty
     # Fixed columns make the UI predictable even when no symbols pass the scan.
     assert list(result.columns) == bollinger_band_reversal.RESULT_COLUMNS
+
+
+def test_bollinger_knoxville_buy_screener_returns_buy_only_when_both_filters_pass():
+    # BUY passes both filters. NO_KD is near the lower band but lacks Knoxville.
+    # NO_BB has Knoxville but is no longer near the lower band. The screener
+    # should only return the stock where both conditions are true.
+    frames = {
+        "BUY": _knoxville_candles(with_divergence=True, near_lower_band=True),
+        "NO_KD": _knoxville_candles(with_divergence=False, near_lower_band=True),
+        "NO_BB": _knoxville_candles(with_divergence=True, near_lower_band=False),
+    }
+
+    result = bollinger_knoxville_buy.run(_universe(), FakeDataLoader(frames), _knoxville_params())
+
+    assert result["symbol"].tolist() == ["BUY"]
+    row = result.iloc[0]
+    assert row["rating"] == "BUY"
+    assert row["close"] <= row["bb_lower"] * 1.01
+    assert row["rsi"] <= 30.0
+    assert row["momentum"] > -10.0
+    assert "Knoxville" in row["reason"]
+
+
+def test_bollinger_knoxville_buy_screener_tolerates_empty_and_short_frames():
+    frames = {
+        "EMPTY": pd.DataFrame(),
+        "SHORT": _knoxville_candles().head(4),
+    }
+
+    result = bollinger_knoxville_buy.run(_universe(), FakeDataLoader(frames), _knoxville_params())
+
+    assert result.empty
+    assert list(result.columns) == bollinger_knoxville_buy.RESULT_COLUMNS
 
 
 def _synthetic_daily(periods: int) -> pd.DataFrame:

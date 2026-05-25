@@ -16,8 +16,11 @@ def test_discover_screeners_loads_stochastic_swing():
 
     assert "stochastic_swing" in screeners
     assert screeners["stochastic_swing"].universe == "nifty_500"
+    assert "bollinger_knoxville_buy" in screeners
+    assert screeners["bollinger_knoxville_buy"].universe == "hemant_super_45"
     # Every discovered screener exposes a chart builder.
     assert screeners["stochastic_swing"].build_chart is not None
+    assert screeners["bollinger_knoxville_buy"].build_chart is not None
     # The connection-test screener was removed.
     assert "connection_test" not in screeners
 

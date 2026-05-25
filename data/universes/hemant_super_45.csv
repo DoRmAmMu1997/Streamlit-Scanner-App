@@ -1,0 +1,44 @@
+universe,universe_name,symbol,security_id,exchange_segment,instrument_type,company_name,series,source,mapping_status,source_symbol
+hemant_super_45,Hemant Super 45,HDFCBANK,1333,NSE_EQ,EQUITY,HDFC Bank,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,HDFCBANK
+hemant_super_45,Hemant Super 45,ICICIBANK,4963,NSE_EQ,EQUITY,ICICI Bank,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,ICICIBANK
+hemant_super_45,Hemant Super 45,AXISBANK,5900,NSE_EQ,EQUITY,Axis Bank,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,AXISBANK
+hemant_super_45,Hemant Super 45,KOTAKBANK,1922,NSE_EQ,EQUITY,Kotak Bank,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,KOTAKBANK
+hemant_super_45,Hemant Super 45,BAJFINANCE,317,NSE_EQ,EQUITY,Bajaj Finance,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,BAJFINANCE
+hemant_super_45,Hemant Super 45,ICICIGI,21770,NSE_EQ,EQUITY,ICICI Lombard General Insurance,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,ICICIGI
+hemant_super_45,Hemant Super 45,HDFCLIFE,467,NSE_EQ,EQUITY,HDFC Life Insurance,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,HDFCLIFE
+hemant_super_45,Hemant Super 45,BAJAJFINSV,16675,NSE_EQ,EQUITY,Bajaj Finserv,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,BAJAJFINSV
+hemant_super_45,Hemant Super 45,ICICIPRULI,18652,NSE_EQ,EQUITY,ICICI Prudential Life Insurance,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,ICICIPRULI
+hemant_super_45,Hemant Super 45,HDFCAMC,4244,NSE_EQ,EQUITY,HDFC AMC,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,HDFCAMC
+hemant_super_45,Hemant Super 45,NAM-INDIA,357,NSE_EQ,EQUITY,Nippon Life India AMC,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,NAM_INDIA
+hemant_super_45,Hemant Super 45,PGHH,2535,NSE_EQ,EQUITY,P&G Hygiene and Health Care,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,PGHH
+hemant_super_45,Hemant Super 45,MARICO,4067,NSE_EQ,EQUITY,Marico,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,MARICO
+hemant_super_45,Hemant Super 45,COLPAL,15141,NSE_EQ,EQUITY,Colgate Palmolive,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,COLPAL
+hemant_super_45,Hemant Super 45,HINDUNILVR,1394,NSE_EQ,EQUITY,Hindustan Unilever,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,HINDUNILVR
+hemant_super_45,Hemant Super 45,BAJAJHLDNG,305,NSE_EQ,EQUITY,Bajaj Holdings & Investments,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,BAJAJHLDNG
+hemant_super_45,Hemant Super 45,DABUR,772,NSE_EQ,EQUITY,Dabur India,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,DABUR
+hemant_super_45,Hemant Super 45,NESTLEIND,17963,NSE_EQ,EQUITY,Nestle,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,NESTLEIND
+hemant_super_45,Hemant Super 45,ITC,1660,NSE_EQ,EQUITY,ITC,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,ITC
+hemant_super_45,Hemant Super 45,ASIANPAINT,236,NSE_EQ,EQUITY,Asian Paints,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,ASIANPAINT
+hemant_super_45,Hemant Super 45,BERGEPAINT,404,NSE_EQ,EQUITY,Berger Paints,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,BERGEPAINT
+hemant_super_45,Hemant Super 45,KANSAINER,1196,NSE_EQ,EQUITY,Kansai Nerolac Paints,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,KANSAINER
+hemant_super_45,Hemant Super 45,AKZOINDIA,,,,,,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,missing_security_id,AKZOINDIA
+hemant_super_45,Hemant Super 45,TITAN,3506,NSE_EQ,EQUITY,Titan,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,TITAN
+hemant_super_45,Hemant Super 45,BATAINDIA,371,NSE_EQ,EQUITY,Bata,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,BATAINDIA
+hemant_super_45,Hemant Super 45,PAGEIND,14413,NSE_EQ,EQUITY,Page Industries,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,PAGEIND
+hemant_super_45,Hemant Super 45,WHIRLPOOL,18011,NSE_EQ,EQUITY,Whirlpool,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,WHIRLPOOL
+hemant_super_45,Hemant Super 45,HAVELLS,9819,NSE_EQ,EQUITY,Havells,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,HAVELLS
+hemant_super_45,Hemant Super 45,TCS,11536,NSE_EQ,EQUITY,Tata Consultancy Services,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,TCS
+hemant_super_45,Hemant Super 45,INFY,1594,NSE_EQ,EQUITY,Infosys,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,INFY
+hemant_super_45,Hemant Super 45,HCLTECH,7229,NSE_EQ,EQUITY,HCL Technologies,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,HCLTECH
+hemant_super_45,Hemant Super 45,WIPRO,3787,NSE_EQ,EQUITY,Wipro,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,WIPRO
+hemant_super_45,Hemant Super 45,ABBOTINDIA,17903,NSE_EQ,EQUITY,Abbott,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,ABBOTINDIA
+hemant_super_45,Hemant Super 45,GLAXO,1153,NSE_EQ,EQUITY,GlaxoSmithKline Pharmaceuticals,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,GLAXO
+hemant_super_45,Hemant Super 45,SANOFI,1442,NSE_EQ,EQUITY,Sanofi,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,SANOFI
+hemant_super_45,Hemant Super 45,PFIZER,2643,NSE_EQ,EQUITY,Pfizer,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,PFIZER
+hemant_super_45,Hemant Super 45,PIDILITIND,2664,NSE_EQ,EQUITY,Pidilite Industries,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,PIDILITIND
+hemant_super_45,Hemant Super 45,GILLETTE,1576,NSE_EQ,EQUITY,Gillette,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,GILLETTE
+hemant_super_45,Hemant Super 45,NIFTYBEES,10576,NSE_EQ,EQUITY,Nippon Nifty 50 ETF (NIFTYBEES),EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,NIFTYBEES
+hemant_super_45,Hemant Super 45,BANKBEES,11439,NSE_EQ,EQUITY,Nippon Nifty Bank ETF (BANKBEES),EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,BANKBEES
+hemant_super_45,Hemant Super 45,BAJAJ-AUTO,16669,NSE_EQ,EQUITY,Bajaj Auto,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,BAJAJ_AUTO
+hemant_super_45,Hemant Super 45,ULTRACEMCO,11532,NSE_EQ,EQUITY,UltraTech Cement,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,UTLTRACEMCO
+hemant_super_45,Hemant Super 45,AMBUJACEM,1270,NSE_EQ,EQUITY,Ambuja Cements,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_super_45.csv,mapped,AMBUJACEM

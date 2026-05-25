@@ -5,7 +5,10 @@ Dependencies/all_instrument*.csv
 
 # Generated scanner data can be refreshed/rebuilt, so keep it out of source.
 data/cache/
-data/universes/
+data/universes/*
+!data/universes/hemant_super_45.csv
+!data/universes/hemant_good_45.csv
+!data/universes/hemant_good_200.csv
 
 # Python/runtime noise.
 __pycache__/
