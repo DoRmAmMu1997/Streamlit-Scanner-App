@@ -13,7 +13,12 @@ import numpy as np
 import pandas as pd
 
 from backend import charts
-from screeners import bollinger_band_reversal, heikin_ashi_supertrend, stochastic_swing
+from screeners import (
+    bollinger_band_reversal,
+    bollinger_knoxville_buy,
+    heikin_ashi_supertrend,
+    stochastic_swing,
+)
 
 
 def _candles(periods: int = 260) -> pd.DataFrame:
@@ -153,6 +158,7 @@ def test_each_screener_build_chart_returns_serializable_spec():
     expectations = [
         (heikin_ashi_supertrend, 2),
         (bollinger_band_reversal, 2),
+        (bollinger_knoxville_buy, 2),
         (stochastic_swing, 3),
     ]
     for module, expected_panes in expectations:

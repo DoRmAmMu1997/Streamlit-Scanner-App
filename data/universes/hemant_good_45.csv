@@ -1,0 +1,44 @@
+universe,universe_name,symbol,security_id,exchange_segment,instrument_type,company_name,series,source,mapping_status,source_symbol
+hemant_good_45,Hemant Good 45,3MINDIA,474,NSE_EQ,EQUITY,3M India,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,3MINDIA
+hemant_good_45,Hemant Good 45,PGHL,940,NSE_EQ,EQUITY,Procter & Gamble Health,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,PGHL
+hemant_good_45,Hemant Good 45,ASTRAZEN,5610,NSE_EQ,EQUITY,AstraZeneca Pharma,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,ASTRAZEN
+hemant_good_45,Hemant Good 45,AVANTIFEED,7936,NSE_EQ,EQUITY,Avanti Feeds,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,AVANTIFEED
+hemant_good_45,Hemant Good 45,BAYERCROP,17927,NSE_EQ,EQUITY,Bayer Crop Science,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,BAYERCROP
+hemant_good_45,Hemant Good 45,BOSCHLTD,2181,NSE_EQ,EQUITY,Bosch,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,BOSCHLTD
+hemant_good_45,Hemant Good 45,CAPLIPOINT,3906,NSE_EQ,EQUITY,Caplin Point Laboratories,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,CAPLIPOINT
+hemant_good_45,Hemant Good 45,KAJARIACER,1808,NSE_EQ,EQUITY,Kajaria Ceramics,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,KAJARIACER
+hemant_good_45,Hemant Good 45,CERA,15039,NSE_EQ,EQUITY,Cera Sanitaryware,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,CERA
+hemant_good_45,Hemant Good 45,DIXON,21690,NSE_EQ,EQUITY,Dixon Technologies,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,DIXON
+hemant_good_45,Hemant Good 45,TVSMOTOR,8479,NSE_EQ,EQUITY,TVS Motors,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,TVSMOTOR
+hemant_good_45,Hemant Good 45,HEROMOTOCO,1348,NSE_EQ,EQUITY,Hero Motocorp,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,HEROMOTOCO
+hemant_good_45,Hemant Good 45,EICHERMOT,910,NSE_EQ,EQUITY,Eicher Motors,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,EICHERMOT
+hemant_good_45,Hemant Good 45,EQUITAS,,,,,,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,missing_security_id,EQUITAS
+hemant_good_45,Hemant Good 45,ERIS,21154,NSE_EQ,EQUITY,Eris Lifesciences,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,ERIS
+hemant_good_45,Hemant Good 45,KEI,13310,NSE_EQ,EQUITY,KEI Industries,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,KEI
+hemant_good_45,Hemant Good 45,FINCABLES,1038,NSE_EQ,EQUITY,Finolex Cables,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,FINCABLES
+hemant_good_45,Hemant Good 45,FINEORG,3744,NSE_EQ,EQUITY,Fine Organic Industries,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,FINEORG
+hemant_good_45,Hemant Good 45,GODREJCP,10099,NSE_EQ,EQUITY,Godrej Consumer Products,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,GODREJCP
+hemant_good_45,Hemant Good 45,HONAUT,3417,NSE_EQ,EQUITY,Honeywell Automation,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,HONAUT
+hemant_good_45,Hemant Good 45,ISEC,,,,,,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,missing_security_id,ISEC
+hemant_good_45,Hemant Good 45,JCHAC,,,,,,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,missing_security_id,JCHAC
+hemant_good_45,Hemant Good 45,KANSAINER,1196,NSE_EQ,EQUITY,Kansai Nerolac Paints,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,KANSAINER
+hemant_good_45,Hemant Good 45,LALPATHLAB,11654,NSE_EQ,EQUITY,Dr. Lal Path Labs,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,LALPATHLAB
+hemant_good_45,Hemant Good 45,UNITDSPR,10447,NSE_EQ,EQUITY,United Spirits,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,MCDOWELL_N
+hemant_good_45,Hemant Good 45,MCX,31181,NSE_EQ,EQUITY,MCX,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,MCX
+hemant_good_45,Hemant Good 45,MOTILALOFS,14947,NSE_EQ,EQUITY,Motilal Oswal Financial Services,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,MOTILALOFS
+hemant_good_45,Hemant Good 45,OFSS,10738,NSE_EQ,EQUITY,Oracle Financial Services Software,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,OFSS
+hemant_good_45,Hemant Good 45,POLYCAB,9590,NSE_EQ,EQUITY,Polycab,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,POLYCAB
+hemant_good_45,Hemant Good 45,RADICO,10990,NSE_EQ,EQUITY,Radico Khaitan,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,RADICO
+hemant_good_45,Hemant Good 45,RAJESHEXPO,760461,NSE_EQ,EQUITY,Rajesh Exports,BZ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,RAJESHEXPO
+hemant_good_45,Hemant Good 45,RELAXO,24225,NSE_EQ,EQUITY,Relaxo Footwears,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,RELAXO
+hemant_good_45,Hemant Good 45,SFL,19184,NSE_EQ,EQUITY,Sheela Foam,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,SFL
+hemant_good_45,Hemant Good 45,SIS,21501,NSE_EQ,EQUITY,SIS,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,SIS
+hemant_good_45,Hemant Good 45,SUNTV,13404,NSE_EQ,EQUITY,Sun TV Network,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,SUNTV
+hemant_good_45,Hemant Good 45,SYMPHONY,24190,NSE_EQ,EQUITY,Symphony,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,SYMPHONY
+hemant_good_45,Hemant Good 45,TASTYBITE,20092,NSE_EQ,EQUITY,Tasty Bite Eatables,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,TASTYBITE
+hemant_good_45,Hemant Good 45,TEAMLEASE,12716,NSE_EQ,EQUITY,Teamlease Services,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,TEAMLEASE
+hemant_good_45,Hemant Good 45,TTKPRESTIG,3546,NSE_EQ,EQUITY,TTK Prestige,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,TTKPRESTIG
+hemant_good_45,Hemant Good 45,UJJIVANSFB,15228,NSE_EQ,EQUITY,Ujjivan Small Finance Bank,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,UJJIVANSFB
+hemant_good_45,Hemant Good 45,VGUARD,15362,NSE_EQ,EQUITY,V-Guard Industries,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,VGUARD
+hemant_good_45,Hemant Good 45,VINATIORGA,17364,NSE_EQ,EQUITY,Vinati Organics,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,VINATIORGA
+hemant_good_45,Hemant Good 45,VIPIND,3703,NSE_EQ,EQUITY,VIP Industries,EQ,C:\Users\Sunny\Desktop\Coding Practice\Algo Trading\Streamlit Scanner App\data\universes\hemant_good_45.csv,mapped,VIPIND

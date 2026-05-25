@@ -26,6 +26,26 @@ from backend.config import (
     UNIVERSE_DIR,
 )
 
+# The Hemant lists are intentionally local CSVs. Unlike NIFTY 100/500, there is
+# no stable public CSV endpoint to download during startup, so we keep the
+# pinned source lists next to the generated universe files in `data/universes/`.
+HEMANT_SOURCE_FILES: dict[str, Path] = {
+    "hemant_super_45": UNIVERSE_DIR / "hemant_super_45.csv",
+    "hemant_good_45": UNIVERSE_DIR / "hemant_good_45.csv",
+    "hemant_good_200": UNIVERSE_DIR / "hemant_good_200.csv",
+}
+
+# Some symbols in the Hemant source use the Google Doc's naming, while Dhan's
+# cash-equity master uses NSE trading symbols. Apply these known one-off
+# translations before joining to Dhan, otherwise those rows would look unmapped
+# even though the stock exists in the instrument master.
+MANUAL_SYMBOL_ALIASES = {
+    "NAM_INDIA": "NAM-INDIA",
+    "BAJAJ_AUTO": "BAJAJ-AUTO",
+    "UTLTRACEMCO": "ULTRACEMCO",
+    "MCDOWELL_N": "UNITDSPR",
+}
+
 
 # One place to define every supported universe. Screeners refer to these keys
 # in their metadata, so keep keys stable once a screener uses them.
@@ -44,6 +64,24 @@ UNIVERSE_CONFIG = {
         "file_name": "fno_stocks.csv",
         "display_name": "NSE F&O Stocks",
         "source_url": DHAN_SCRIP_MASTER_URL,
+    },
+    # Hemant lists are local `source_file` universes, not remote `source_url`
+    # universes. The refresh loop sees `source_file` and routes through
+    # `load_symbol_list_csv()` + `build_symbol_list_universe()` below.
+    "hemant_super_45": {
+        "file_name": "hemant_super_45.csv",
+        "display_name": "Hemant Super 45",
+        "source_file": str(HEMANT_SOURCE_FILES["hemant_super_45"]),
+    },
+    "hemant_good_45": {
+        "file_name": "hemant_good_45.csv",
+        "display_name": "Hemant Good 45",
+        "source_file": str(HEMANT_SOURCE_FILES["hemant_good_45"]),
+    },
+    "hemant_good_200": {
+        "file_name": "hemant_good_200.csv",
+        "display_name": "Hemant Good 200",
+        "source_file": str(HEMANT_SOURCE_FILES["hemant_good_200"]),
     },
 }
 
@@ -364,16 +402,107 @@ def build_index_universe(
     return finalize_universe(universe)
 
 
-def finalize_universe(universe: pd.DataFrame) -> pd.DataFrame:
+def load_symbol_list_csv(source_path: Path | str) -> list[str]:
+    """Read the raw symbols from a local universe-list CSV.
+
+    Hemant CSVs can exist in two useful shapes:
+    - before the first refresh: a tiny one-column file with `symbol`
+    - after refresh: the full generated universe CSV, which also has
+      `source_symbol`
+
+    When `source_symbol` exists, prefer it because it preserves the original
+    Google Doc token such as `UTLTRACEMCO`. The generated `symbol` column may
+    already contain the Dhan-friendly alias `ULTRACEMCO`; using `source_symbol`
+    lets later refreshes keep showing what the pinned source list actually said.
+    """
+    path = Path(source_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Universe source CSV not found: {path}")
+
+    source_df = pd.read_csv(path, dtype=str).fillna("")
+    normalized_columns = {str(column).strip().lower(): column for column in source_df.columns}
+    source_symbol_col = normalized_columns.get("source_symbol")
+    symbol_col = normalized_columns.get("symbol")
+
+    if source_symbol_col is not None:
+        source_symbols = source_df[source_symbol_col].astype(str)
+        if symbol_col is not None:
+            # A row-level fallback makes hand-edited generated CSVs forgiving:
+            # if someone leaves source_symbol blank but symbol populated, we
+            # can still refresh that row instead of failing the entire file.
+            fallback_symbols = source_df[symbol_col].astype(str)
+            source_symbols = source_symbols.where(source_symbols.str.strip() != "", fallback_symbols)
+        return source_symbols.tolist()
+
+    if symbol_col is None:
+        raise ValueError(f"{path} is missing required column: symbol or source_symbol")
+
+    return source_df[symbol_col].tolist()
+
+
+def normalize_source_symbol(raw_symbol: str) -> str:
+    """Return a clean NSE token while preserving the source's symbol spelling."""
+    symbol = str(raw_symbol or "").upper().strip()
+    symbol = re.sub(r"^NSE\s*:\s*", "", symbol, flags=re.IGNORECASE)
+    symbol = symbol.strip(" ,\t\r\n")
+    return re.sub(r"\s+", "", symbol)
+
+
+def normalize_manual_symbol(raw_symbol: str) -> str:
+    """Return the Dhan lookup symbol for one pinned/manual source token."""
+    symbol = normalize_source_symbol(raw_symbol)
+    return MANUAL_SYMBOL_ALIASES.get(symbol, symbol)
+
+
+def build_symbol_list_universe(
+    universe_key: str,
+    raw_symbols: Iterable[str],
+    equity_lookup: pd.DataFrame,
+    source: str | None = None,
+) -> pd.DataFrame:
+    """Build a universe from a CSV-backed list of NSE symbols."""
+    if universe_key not in UNIVERSE_CONFIG:
+        raise KeyError(f"Unknown universe key: {universe_key}")
+
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw_symbol in raw_symbols:
+        # `source_symbol` is kept for audit/debugging. `symbol` is the value we
+        # actually use to join to Dhan. For most rows they match; alias rows are
+        # where preserving both values helps explain what happened.
+        source_symbol = normalize_source_symbol(raw_symbol)
+        symbol = normalize_manual_symbol(raw_symbol)
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        rows.append({"symbol": symbol, "source_symbol": source_symbol})
+
+    universe = pd.DataFrame(rows, columns=["symbol", "source_symbol"])
+    # The manual CSV only knows stock symbols. This merge attaches Dhan's
+    # security_id/exchange_segment/instrument_type so the existing candle loader
+    # can fetch data exactly like it does for NIFTY and F&O universes.
+    universe = universe.merge(equity_lookup, on="symbol", how="left")
+    universe["universe"] = universe_key
+    universe["universe_name"] = UNIVERSE_CONFIG[universe_key]["display_name"]
+    universe["source"] = source or UNIVERSE_CONFIG[universe_key].get("source_file", "")
+    # Do not alphabetize custom source lists. Their order comes from the pinned
+    # CSV snapshot and may be meaningful to the user reviewing the list.
+    return finalize_universe(universe, sort_symbols=False)
+
+
+def finalize_universe(universe: pd.DataFrame, sort_symbols: bool = True) -> pd.DataFrame:
     """Return a consistent universe CSV shape for all universe builders."""
     # All universe CSVs should have the same columns. That lets loaders and
     # screeners treat NIFTY 100, NIFTY 500, and F&O files the same way.
     for column in ("security_id", "exchange_segment", "instrument_type", "company_name", "series"):
         if column not in universe.columns:
             universe[column] = ""
+        universe[column] = universe[column].fillna("").astype(str)
 
     # A missing security_id means we know the symbol exists in the source list,
     # but cannot fetch its daily candles from Dhan until the mapping is fixed.
+    # Keeping that row in the CSV is friendlier than silently dropping it:
+    # the status table can still show that a source symbol needs attention.
     universe["mapping_status"] = universe["security_id"].fillna("").astype(str).str.strip().ne("").map(
         lambda value: "mapped" if value else "missing_security_id"
     )
@@ -389,7 +518,15 @@ def finalize_universe(universe: pd.DataFrame) -> pd.DataFrame:
         "source",
         "mapping_status",
     ]
-    return universe[columns].sort_values("symbol").reset_index(drop=True)
+    if "source_symbol" in universe.columns:
+        # Custom CSV-backed universes include this extra column so alias changes
+        # stay visible after refresh. Standard NIFTY/F&O files do not need it.
+        columns.append("source_symbol")
+
+    result = universe[columns]
+    if sort_symbols:
+        result = result.sort_values("symbol")
+    return result.reset_index(drop=True)
 
 
 def universe_file_path(universe_key: str, universe_dir: Path | str = UNIVERSE_DIR) -> Path:
@@ -429,6 +566,17 @@ def refresh_universe_files(
             # F&O comes entirely from Dhan's instrument master because it is a
             # derivatives universe rather than a NIFTY constituent CSV.
             universe_df = build_fno_universe(master, equity_lookup)
+        elif "source_file" in UNIVERSE_CONFIG[key]:
+            # Hemant-style custom universes come from local CSVs instead of a
+            # remote download. They are then mapped against the same Dhan master
+            # snapshot as every other universe, keeping security IDs consistent.
+            source_file = Path(UNIVERSE_CONFIG[key]["source_file"])
+            universe_df = build_symbol_list_universe(
+                universe_key=key,
+                raw_symbols=load_symbol_list_csv(source_file),
+                equity_lookup=equity_lookup,
+                source=str(source_file),
+            )
         else:
             source_df = index_sources.get(key)
             if source_df is None:
