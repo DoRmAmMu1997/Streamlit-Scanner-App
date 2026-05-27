@@ -181,6 +181,60 @@ def test_observation_sentiment_must_be_valid():
         )
 
 
+def test_agent_verdict_json_schema_omits_min_max_on_integer_fields():
+    """Regression guard: Anthropic's structured-output API rejects
+    `minimum` / `maximum` on `integer` JSON Schema types. If a future
+    change re-adds Pydantic `Field(ge=..., le=...)` on the integer fields,
+    this test catches it BEFORE a live call hits a 400 from Anthropic.
+    """
+    schema = AgentVerdict.model_json_schema()
+
+    rating_props = schema["properties"]["rating"]
+    assert rating_props["type"] == "integer"
+    assert "minimum" not in rating_props, (
+        "rating field must not emit 'minimum' — Anthropic rejects it. "
+        "Use @field_validator instead of Field(ge=...)."
+    )
+    assert "maximum" not in rating_props, (
+        "rating field must not emit 'maximum' — Anthropic rejects it. "
+        "Use @field_validator instead of Field(le=...)."
+    )
+
+    pcc_props = schema["properties"]["passed_criteria_count"]
+    assert pcc_props["type"] == "integer"
+    assert "minimum" not in pcc_props
+    assert "maximum" not in pcc_props
+
+
+def test_agent_verdict_field_validator_still_rejects_out_of_range_rating():
+    """The field_validator must keep enforcing 0 <= rating <= 10 at parse time."""
+    valid = dict(
+        symbol="DEMO",
+        rating=8,
+        passed_criteria_count=6,
+        total_criteria=7,
+        criteria_breakdown=[],
+        additional_observations=[],
+        summary_comments="ok",
+        data_freshness="2026-01-01",
+        model_used="m",
+    )
+    # Sanity: a valid verdict still parses.
+    AgentVerdict.model_validate(valid)
+
+    # Out-of-range rating raises.
+    with pytest.raises(Exception):
+        AgentVerdict.model_validate({**valid, "rating": 11})
+    with pytest.raises(Exception):
+        AgentVerdict.model_validate({**valid, "rating": -1})
+
+    # Out-of-range passed_criteria_count raises.
+    with pytest.raises(Exception):
+        AgentVerdict.model_validate({**valid, "passed_criteria_count": 8})
+    with pytest.raises(Exception):
+        AgentVerdict.model_validate({**valid, "passed_criteria_count": -1})
+
+
 # ---------------------------------------------------------------------------
 # End-to-end agent loop with the fake LLM
 # ---------------------------------------------------------------------------
