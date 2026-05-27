@@ -27,6 +27,7 @@ import re
 import time
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -274,12 +275,274 @@ def _section_markdown(soup: BeautifulSoup, section_id: str, max_chars: int = 150
 
 
 # ---------------------------------------------------------------------------
+# HTMX-loaded peer comparison (second HTTP request)
+# ---------------------------------------------------------------------------
+
+
+# Screener.in renders the company-info section with a peers card. The card has
+# an empty placeholder div (id="peers" or similar) carrying an HTMX attribute
+# that points to the AJAX URL serving the real peer-table HTML fragment. The
+# scraper has to follow that URL to actually see the peer data.
+_PEERS_URL_REGEX = re.compile(r"/api/company/\d+/peers/[^\s\"'<>]*")
+
+
+def _extract_peers_url(soup: BeautifulSoup) -> str | None:
+    """Find the screener.in HTMX URL that returns the peers table fragment.
+
+    Returns a relative path like ``/api/company/12345/peers/?...`` or ``None``
+    if no such URL is present in the page. Tries multiple strategies because
+    screener.in occasionally renames or moves the placeholder.
+    """
+    # Strategy 1: dedicated placeholder element with an hx-get attribute.
+    candidates = []
+    for element_id in ("peers", "peers-table-placeholder", "peers-table"):
+        element = soup.find(id=element_id)
+        if element is not None:
+            candidates.append(element)
+    # Also include any element with class "peers-cell" or similar; if the page
+    # changes the wrapper structure we still want to find the attribute.
+    candidates.extend(soup.find_all(attrs={"hx-get": True}))
+
+    for element in candidates:
+        for attr_name in ("hx-get", "data-href", "data-url", "data-peers-url"):
+            value = element.get(attr_name)
+            if isinstance(value, str) and "peers" in value:
+                return value.strip()
+
+    # Strategy 2: regex-scan the whole HTML for the well-known URL shape. This
+    # catches the case where the URL is rendered inside a <script> tag or as
+    # part of a data attribute on a parent we did not enumerate.
+    raw = str(soup)
+    match = _PEERS_URL_REGEX.search(raw)
+    if match:
+        return match.group(0)
+
+    return None
+
+
+def _parse_peer_fragment_html(fragment_html: str) -> list[dict[str, str]]:
+    """Parse the HTML fragment returned by screener.in's peers endpoint.
+
+    The fragment is a partial document containing one ``<table>`` whose
+    header row labels each column. Returns ``[{column_header: cell}, ...]``.
+    """
+    try:
+        fragment_soup = BeautifulSoup(fragment_html, "lxml")
+        table = fragment_soup.find("table")
+        if table is None:
+            return []
+        headers: list[str] = []
+        head = table.find("thead")
+        if head is not None:
+            headers = [th.get_text(" ", strip=True) for th in head.find_all("th")]
+
+        rows: list[dict[str, str]] = []
+        body = table.find("tbody")
+        for tr in (body.find_all("tr") if body else []):
+            cells = [td.get_text(" ", strip=True) for td in tr.find_all(["td", "th"])]
+            if not cells:
+                continue
+            if headers and len(headers) == len(cells):
+                rows.append(dict(zip(headers, cells)))
+            else:
+                rows.append({str(idx): cell for idx, cell in enumerate(cells)})
+        return rows
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not parse peer-table fragment", exc_info=True)
+        return []
+
+
+def _fetch_peer_table(
+    soup: BeautifulSoup,
+    *,
+    base_url: str,
+    session: requests.Session,
+    limit: int = 7,
+) -> list[dict[str, str]]:
+    """Follow the HTMX peers URL and return the top-N rows (default 7).
+
+    Soft-fails by returning ``[]`` on any error so the agent can still produce
+    a verdict (with the Market-leader criterion marked "data unavailable").
+    """
+    relative = _extract_peers_url(soup)
+    if not relative:
+        logger.info("No HTMX peers URL found on page %s", base_url)
+        return []
+
+    absolute = urljoin(base_url, relative)
+    try:
+        fragment = _fetch_html(absolute, session)
+    except ScreenerInFetchError:
+        logger.warning("Peer-table fetch failed for %s", absolute, exc_info=True)
+        return []
+    if not fragment:
+        return []
+
+    rows = _parse_peer_fragment_html(fragment)
+    # Drop the screener.in "median" footer row if present — it's an
+    # aggregate, not a real peer.
+    rows = [
+        row for row in rows
+        if not any("median" in str(value).strip().lower() for value in row.values())
+    ]
+    return rows[: max(1, int(limit))]
+
+
+# ---------------------------------------------------------------------------
+# Documents section: announcements + concalls
+# ---------------------------------------------------------------------------
+
+
+def _extract_announcements(soup: BeautifulSoup, *, limit: int = 10) -> list[dict[str, str | None]]:
+    """Return the most recent corporate announcements shown on the page.
+
+    Each item: ``{title, posted_at_text, source_url, summary_snippet}``.
+    Soft-fails to an empty list if screener.in restructures the section.
+    """
+    try:
+        documents = soup.find(id="documents")
+        if documents is None:
+            return []
+        # The Announcements card is the first card under #documents whose
+        # heading text is "Announcements".
+        announcements_card = None
+        for card in documents.find_all(["div", "section"]):
+            header = card.find(["h2", "h3", "h4"])
+            if header is None:
+                continue
+            if header.get_text(strip=True).lower().startswith("announcements"):
+                announcements_card = card
+                break
+        if announcements_card is None:
+            return []
+
+        items: list[dict[str, str | None]] = []
+        # Each announcement is typically an <a> wrapping the title + a small
+        # timestamp + an optional summary snippet block.
+        for link in announcements_card.find_all("a", href=True):
+            href = link["href"].strip()
+            # Skip in-page tabs (#href) and obvious nav links.
+            if not href or href.startswith("#"):
+                continue
+            title_el = link.find(["h4", "strong", "span"])
+            title = (title_el.get_text(" ", strip=True) if title_el
+                     else link.get_text(" ", strip=True))
+            if not title:
+                continue
+            posted_at = ""
+            posted_el = link.find(class_=re.compile(r"(time|date|ago)", re.IGNORECASE))
+            if posted_el is not None:
+                posted_at = posted_el.get_text(" ", strip=True)
+            summary_snippet = ""
+            # Look for any sibling paragraph or div that holds a short summary.
+            summary_el = link.find_next_sibling(["p", "div"])
+            if summary_el is not None:
+                summary_text = summary_el.get_text(" ", strip=True)
+                # Only keep short snippets; long blocks are usually unrelated.
+                if 0 < len(summary_text) <= 400:
+                    summary_snippet = summary_text
+
+            items.append(
+                {
+                    "title": title,
+                    "posted_at_text": posted_at or None,
+                    "source_url": href,
+                    "summary_snippet": summary_snippet or None,
+                }
+            )
+            if len(items) >= limit:
+                break
+        return items
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not parse announcements section", exc_info=True)
+        return []
+
+
+def _extract_concalls(soup: BeautifulSoup, *, limit: int = 8) -> list[dict[str, str | None]]:
+    """Return the most recent concalls with their transcript / summary / PPT / REC URLs.
+
+    Each item: ``{month, transcript_url, ai_summary_url, ppt_url, rec_url}``.
+    Any missing button maps to ``None`` so the agent can decide whether to
+    request the transcript.
+    """
+    try:
+        documents = soup.find(id="documents")
+        if documents is None:
+            return []
+        concalls_card = None
+        for card in documents.find_all(["div", "section"]):
+            header = card.find(["h2", "h3", "h4"])
+            if header is None:
+                continue
+            if header.get_text(strip=True).lower().startswith("concalls"):
+                concalls_card = card
+                break
+        if concalls_card is None:
+            return []
+
+        items: list[dict[str, str | None]] = []
+        # Each row is typically a flexbox containing the month label and
+        # up to four buttons/links: Transcript, AI Summary, PPT, REC.
+        for row in concalls_card.find_all(["li", "div"], recursive=True):
+            # Find a month label — short text like "Apr 2026", "Mar 2026", etc.
+            month_text = ""
+            for tag in row.find_all(["span", "div", "p"], recursive=False):
+                candidate = tag.get_text(" ", strip=True)
+                if re.match(r"^[A-Za-z]{3,9}\s+\d{4}$", candidate):
+                    month_text = candidate
+                    break
+            if not month_text:
+                continue
+
+            # Map each link by its visible label.
+            link_by_label: dict[str, str] = {}
+            for link in row.find_all("a", href=True):
+                label = link.get_text(" ", strip=True).lower()
+                if not label:
+                    continue
+                link_by_label[label] = link["href"].strip()
+
+            def _get(*labels: str) -> str | None:
+                for label in labels:
+                    if label in link_by_label:
+                        return link_by_label[label]
+                return None
+
+            items.append(
+                {
+                    "month": month_text,
+                    "transcript_url": _get("transcript"),
+                    "ai_summary_url": _get("ai summary", "summary"),
+                    "ppt_url": _get("ppt", "notes"),
+                    "rec_url": _get("rec", "recording"),
+                }
+            )
+            if len(items) >= limit:
+                break
+        return items
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not parse concalls section", exc_info=True)
+        return []
+
+
+# ---------------------------------------------------------------------------
 # Public fetch + parse
 # ---------------------------------------------------------------------------
 
 
-def _parse_company_page(html: str, *, symbol: str, source_url: str) -> dict[str, Any]:
-    """Turn one screener.in HTML page into the structured dict the agent uses."""
+def _parse_company_page(
+    html: str,
+    *,
+    symbol: str,
+    source_url: str,
+    session: requests.Session | None = None,
+) -> dict[str, Any]:
+    """Turn one screener.in HTML page into the structured dict the agent uses.
+
+    `session` is required to fetch the HTMX-loaded peer table; when ``None``
+    (unit tests) the peer table simply stays empty. The rest of the parse is
+    pure / IO-free.
+    """
     soup = BeautifulSoup(html, "lxml")
 
     # Header: company name and "About" / sector. About text often mentions
@@ -313,7 +576,17 @@ def _parse_company_page(html: str, *, symbol: str, source_url: str) -> dict[str,
     cash_flow = _parse_table(soup, "cash-flow")
     ratios_yearly = _parse_table(soup, "ratios")
     shareholding = _parse_table(soup, "shareholding")
-    peers = _parse_table(soup, "peers-table-placeholder") or _parse_table(soup, "peers")
+    # The peer table is HTMX-loaded — the static page only ships a placeholder.
+    # When a session is provided, follow the HTMX URL and parse the fragment.
+    # Without a session (unit tests) the peers list stays empty, which the
+    # agent already tolerates.
+    if session is not None:
+        peers = _fetch_peer_table(soup, base_url=source_url, session=session)
+    else:
+        peers = []
+    # Announcements + concalls live in the static HTML, no extra fetch needed.
+    announcements = _extract_announcements(soup)
+    concalls = _extract_concalls(soup)
 
     # Yearly time series for the criteria.
     revenue_history = _yearly_series_from_row(_find_row_by_label(profit_loss, "Sales"))
@@ -378,6 +651,8 @@ def _parse_company_page(html: str, *, symbol: str, source_url: str) -> dict[str,
         "ratios_yearly": ratios_yearly,
         "shareholding": shareholding,
         "peers": peers,
+        "announcements": announcements,
+        "concalls": concalls,
         "pros_cons": _find_pros_cons(soup),
         # Compact text dumps for the agent's free-form reasoning. Keeping them
         # under ~1500 chars each avoids blowing up the token budget while
@@ -426,7 +701,14 @@ def fetch_company_data(
         # Polite pause AFTER the successful fetch so a burst of calls from the
         # same process still respects the configured delay.
         time.sleep(_request_delay_seconds())
-        return _parse_company_page(html, symbol=normalized, source_url=source_url)
+        # Pass the session through so `_parse_company_page` can fire the
+        # second HTMX request that fetches the peers-table fragment.
+        return _parse_company_page(
+            html,
+            symbol=normalized,
+            source_url=source_url,
+            session=sess,
+        )
     finally:
         if owned_session:
             sess.close()

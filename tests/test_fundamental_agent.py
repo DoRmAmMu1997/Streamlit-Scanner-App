@@ -124,12 +124,19 @@ class _BoundLLM:
     def invoke(self, messages):
         self.invocations += 1
         if self.invocations == 1:
-            # First call → request the fetch tool with a symbol.
+            # First call → request the fetch_company_data tool with a symbol.
+            # Find the company-data tool by name so this still works after
+            # Job 4 added a second tool (read_recent_concall_transcript).
+            fetch_tool_name = next(
+                tool.name
+                for tool in self.tools
+                if tool.name == "fetch_company_data_tool"
+            )
             return AIMessage(
                 content="",
                 tool_calls=[
                     {
-                        "name": self.tools[0].name,
+                        "name": fetch_tool_name,
                         "args": {"symbol": "DEMO"},
                         "id": "tool-call-1",
                     }
@@ -179,6 +186,60 @@ def test_observation_sentiment_must_be_valid():
             sentiment="bullish",  # invalid; only positive/negative/neutral
             evidence="x",
         )
+
+
+def test_agent_verdict_json_schema_omits_min_max_on_integer_fields():
+    """Regression guard: Anthropic's structured-output API rejects
+    `minimum` / `maximum` on `integer` JSON Schema types. If a future
+    change re-adds Pydantic `Field(ge=..., le=...)` on the integer fields,
+    this test catches it BEFORE a live call hits a 400 from Anthropic.
+    """
+    schema = AgentVerdict.model_json_schema()
+
+    rating_props = schema["properties"]["rating"]
+    assert rating_props["type"] == "integer"
+    assert "minimum" not in rating_props, (
+        "rating field must not emit 'minimum' — Anthropic rejects it. "
+        "Use @field_validator instead of Field(ge=...)."
+    )
+    assert "maximum" not in rating_props, (
+        "rating field must not emit 'maximum' — Anthropic rejects it. "
+        "Use @field_validator instead of Field(le=...)."
+    )
+
+    pcc_props = schema["properties"]["passed_criteria_count"]
+    assert pcc_props["type"] == "integer"
+    assert "minimum" not in pcc_props
+    assert "maximum" not in pcc_props
+
+
+def test_agent_verdict_field_validator_still_rejects_out_of_range_rating():
+    """The field_validator must keep enforcing 0 <= rating <= 10 at parse time."""
+    valid = dict(
+        symbol="DEMO",
+        rating=8,
+        passed_criteria_count=6,
+        total_criteria=7,
+        criteria_breakdown=[],
+        additional_observations=[],
+        summary_comments="ok",
+        data_freshness="2026-01-01",
+        model_used="m",
+    )
+    # Sanity: a valid verdict still parses.
+    AgentVerdict.model_validate(valid)
+
+    # Out-of-range rating raises.
+    with pytest.raises(Exception):
+        AgentVerdict.model_validate({**valid, "rating": 11})
+    with pytest.raises(Exception):
+        AgentVerdict.model_validate({**valid, "rating": -1})
+
+    # Out-of-range passed_criteria_count raises.
+    with pytest.raises(Exception):
+        AgentVerdict.model_validate({**valid, "passed_criteria_count": 8})
+    with pytest.raises(Exception):
+        AgentVerdict.model_validate({**valid, "passed_criteria_count": -1})
 
 
 # ---------------------------------------------------------------------------
@@ -285,3 +346,90 @@ def test_fundamental_agent_normalize_verdict_fills_blank_fields(tmp_path):
     verdict = agent.check("DEMO")
     assert verdict.symbol == "DEMO"
     assert verdict.model_used == "test-model"
+
+
+# ---------------------------------------------------------------------------
+# Job 4 schema + tool-binding tests
+# ---------------------------------------------------------------------------
+
+
+def test_agent_verdict_schema_has_string_forward_outlook_field():
+    """The forward_outlook field is the Job 4 addition for the analyst opinion."""
+    schema = AgentVerdict.model_json_schema()
+    assert "forward_outlook" in schema["properties"], (
+        "AgentVerdict must include the forward_outlook field added in Job 4."
+    )
+    field_schema = schema["properties"]["forward_outlook"]
+    assert field_schema["type"] == "string"
+
+
+def test_fundamental_agent_binds_both_tools(tmp_path):
+    """The agent should now bind two tools: fetch + concall transcript reader."""
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("DEMO", _sample_screener_data())
+
+    verdict = _sample_verdict().model_copy(
+        update={"forward_outlook": "Demand environment looks supportive over FY26."}
+    )
+    fake_llm = _FakeLLM(verdict)
+    agent = FundamentalAgent(
+        api_key="test-key",
+        model="test-model",
+        cache=cache,
+        llm=fake_llm,  # type: ignore[arg-type]
+    )
+
+    agent.check("DEMO")
+
+    # The fake records the bound tools list for inspection.
+    assert fake_llm.bound_tool is not None
+    tool_names = {tool.name for tool in fake_llm.bound_tool.tools}
+    assert "fetch_company_data_tool" in tool_names
+    assert "read_recent_concall_transcript" in tool_names
+
+
+def test_concall_transcript_tool_uses_cached_concalls(tmp_path, monkeypatch):
+    """When invoked directly, the transcript tool reads concalls from cache + downloads."""
+    from backend.fundamentals import fundamental_agent as agent_module
+
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data(
+        "DEMO",
+        {
+            **_sample_screener_data(),
+            "concalls": [
+                {"month": "Jan 2026", "transcript_url": "https://example.com/jan.pdf"},
+            ],
+        },
+    )
+
+    # Patch the orchestrator so we don't actually hit the network or open a PDF.
+    monkeypatch.setattr(
+        agent_module,
+        "read_recent_concall_text",
+        lambda concalls, **_kwargs: "Management called out 12% growth guidance for FY26.",
+    )
+
+    agent = FundamentalAgent(
+        api_key="test-key",
+        model="test-model",
+        cache=cache,
+        llm=_FakeLLM(_sample_verdict()),  # type: ignore[arg-type]
+    )
+    tool = agent._build_transcript_tool()
+    text = tool.invoke({"symbol": "DEMO"})
+    assert "12% growth guidance" in text
+
+
+def test_concall_transcript_tool_returns_message_when_no_cache(tmp_path):
+    """Calling the transcript tool without first calling fetch should return a clear hint."""
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    agent = FundamentalAgent(
+        api_key="test-key",
+        model="test-model",
+        cache=cache,
+        llm=_FakeLLM(_sample_verdict()),  # type: ignore[arg-type]
+    )
+    tool = agent._build_transcript_tool()
+    text = tool.invoke({"symbol": "UNCACHED"})
+    assert "fetch_company_data" in text
