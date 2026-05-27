@@ -29,6 +29,7 @@ from __future__ import annotations
 # module documentation in `#` comments here.
 
 import logging
+import os
 import sys
 from datetime import date, datetime
 from pathlib import Path
@@ -404,6 +405,113 @@ def _has_rating_column(results: pd.DataFrame) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Parameter override helpers
+#
+# Every screener declares `default_params` in its SCREENER dict. The sidebar
+# renders one editable widget per default so the user can A/B test parameter
+# tweaks (e.g. "what if discount_pct were 5% instead of 14%?") without
+# editing source code. Overrides live in `st.session_state` keyed by
+# screener+param, so switching screeners does not cross-contaminate values.
+# ---------------------------------------------------------------------------
+
+
+def _param_state_key(screener_key: str, param_key: str) -> str:
+    """Stable session_state key for one (screener, parameter) override widget.
+
+    Including both pieces ensures `discount_pct` on screener A does not
+    overwrite `discount_pct` on screener B if both define one.
+    """
+    return f"param_override::{screener_key}::{param_key}"
+
+
+def _render_parameter_overrides(selected: ScreenerDefinition) -> None:
+    """Render an expandable sidebar block to tune the selected screener's params.
+
+    Number-input widgets are bound to `st.session_state` directly via `key=`,
+    so reading them back later (in `_apply_param_overrides`) does not need
+    any extra plumbing.
+    """
+    defaults = dict(selected.default_params or {})
+    if not defaults:
+        # A screener without tunable params (rare) skips the expander entirely.
+        return
+
+    with st.expander("Tune parameters", expanded=False):
+        st.caption(
+            "Values override the screener's defaults for the **next** run. "
+            "Click 'Reset to defaults' to discard your edits."
+        )
+
+        # The reset button removes any user-set keys so the next widget
+        # render falls back to the screener's declared defaults. `st.rerun()`
+        # gives the widgets a chance to repaint with the default values
+        # immediately rather than waiting for the user's next interaction.
+        if st.button(
+            "Reset to defaults",
+            key=f"reset_params_{selected.key}",
+            help="Discard any parameter tweaks and use the screener's declared defaults.",
+        ):
+            for param_key in defaults.keys():
+                state_key = _param_state_key(selected.key, param_key)
+                st.session_state.pop(state_key, None)
+            st.rerun()
+
+        for param_key, default_value in defaults.items():
+            state_key = _param_state_key(selected.key, param_key)
+            # Seed the session_state on the first render. Without this seed,
+            # the number_input would use `value=default_value` only once and
+            # then store its own state, which gets messy on screener switch.
+            if state_key not in st.session_state:
+                st.session_state[state_key] = default_value
+
+            if isinstance(default_value, bool):
+                st.checkbox(param_key, key=state_key)
+            elif isinstance(default_value, int):
+                # Integer parameters: step=1 keeps the widget arrows
+                # incrementing cleanly. The default value (already in state)
+                # tells Streamlit it is an int widget.
+                st.number_input(param_key, step=1, key=state_key)
+            else:
+                # Float parameters: 4-decimal format covers percentages like
+                # 0.0150 cleanly. The user can still type a wider value.
+                st.number_input(param_key, key=state_key, format="%.4f")
+
+
+def _apply_param_overrides(selected: ScreenerDefinition, params: dict[str, Any]) -> dict[str, Any]:
+    """Merge any sidebar-edited values from `st.session_state` into `params`.
+
+    `params` is mutated in place (and also returned) so the caller can chain
+    if desired. Only keys declared in the screener's `default_params` are
+    pulled — that keeps random session_state values from leaking through.
+    """
+    for param_key in (selected.default_params or {}).keys():
+        state_key = _param_state_key(selected.key, param_key)
+        if state_key in st.session_state:
+            params[param_key] = st.session_state[state_key]
+    return params
+
+
+def _configure_logging() -> None:
+    """Set up root logging once per Streamlit session.
+
+    Honors `SCANNER_DEBUG=1` for DEBUG output; otherwise stays at WARNING so
+    indicator/screener internals do not flood the terminal. `force=False`
+    means we do not stomp on a logger already configured by the CLI prefetch
+    path, where `launch_streamlit_from_plain_python` has its own setup.
+    """
+    if logging.getLogger().handlers:
+        # Some Python entry point already configured the root logger
+        # (e.g. the CLI prefetch). Honor that rather than reconfiguring.
+        return
+    level = logging.DEBUG if os.getenv("SCANNER_DEBUG") == "1" else logging.WARNING
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main Streamlit flow
 # ---------------------------------------------------------------------------
 
@@ -412,6 +520,11 @@ def main() -> None:
     # Create safe runtime folders on every startup. This avoids first-run
     # crashes when `data/cache/daily` or `data/universes` does not exist yet.
     ensure_project_dirs()
+
+    # Root logger setup happens before any screener code runs so per-symbol
+    # warnings inside BaseScanner.run() reach the terminal (or DEBUG logs in
+    # SCANNER_DEBUG=1 mode).
+    _configure_logging()
 
     st.set_page_config(page_title="Streamlit Scanner App", page_icon="📈", layout="wide")
     _inject_css()
@@ -494,6 +607,10 @@ def _render_sidebar(screeners: dict[str, ScreenerDefinition]) -> ScreenerDefinit
             f"**Lookback** &nbsp; {selected.lookback_days} days"
         )
 
+        # Per-screener parameter overrides. Lives inside the sidebar because
+        # tweaking values is the SAME conceptual decision as picking a screener.
+        _render_parameter_overrides(selected)
+
         st.divider()
         if st.button("Run screener", type="primary", width="stretch"):
             # Invalidate any previously cached scan so the next pass through
@@ -558,6 +675,9 @@ def _execute_screener(selected: ScreenerDefinition) -> dict[str, Any] | None:
     # separate `params_for_chart` without the callback so `build_chart` later
     # never receives a stale function reference.
     params_for_chart: dict[str, Any] = dict(selected.default_params)
+    # User overrides (typed into the sidebar's "Tune parameters" expander)
+    # take precedence over the screener's declared defaults.
+    _apply_param_overrides(selected, params_for_chart)
     params_for_chart.update({"start_date": start_date, "end_date": end_date})
     params: dict[str, Any] = dict(params_for_chart)
     params["progress_callback"] = progress_callback
