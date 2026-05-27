@@ -46,7 +46,9 @@ from backend.config import (
     credential_status,
     ensure_project_dirs,
     get_dhan_credentials,
+    get_openrouter_credentials,
 )
+from backend.fundamentals import AgentVerdict, FundamentalAgent
 from backend.daily_data_loader import DailyDataLoader
 from backend.dhan_client import DhanDataClient
 from backend.screener_registry import ScreenerDefinition, ScreenerRegistryError, discover_screeners
@@ -225,26 +227,33 @@ def _escape_cell(value: Any) -> Any:
 
 
 def _redact_secrets(text: str) -> str:
-    """Strip any loaded Dhan credentials from an error message before display.
+    """Strip any loaded credentials from an error message before display.
 
-    The Dhan SDK occasionally embeds the request payload (including headers
-    that contain the access token) in its exception messages. We never want
-    those characters in the browser UI, so we replace them with a fixed mask
-    before passing the text to `st.error(...)`.
+    Currently masks the Dhan access token / client code AND the OpenRouter
+    API key. The Dhan SDK occasionally embeds request payloads (including
+    auth headers) in its exception messages, and the LangChain / OpenRouter
+    error path can leak the API key in tracebacks. We replace any of those
+    values with a fixed mask before passing text to `st.error(...)`.
     """
     if not isinstance(text, str) or not text:
         return text
-    creds = get_dhan_credentials(required=False)
-    if creds is None:
+    secrets: list[str] = []
+
+    dhan = get_dhan_credentials(required=False)
+    if dhan is not None:
+        secrets.extend(filter(None, [dhan.access_token, dhan.client_code]))
+
+    openrouter = get_openrouter_credentials(required=False)
+    if openrouter is not None and openrouter.api_key:
+        secrets.append(openrouter.api_key)
+
+    if not secrets:
         return text
+
     redacted = text
     # Replace the longest values first so substring overlaps cannot leak parts
     # of a longer secret after the shorter one is masked.
-    for secret in sorted(
-        filter(None, [creds.access_token, creds.client_code]),
-        key=len,
-        reverse=True,
-    ):
+    for secret in sorted(secrets, key=len, reverse=True):
         if secret:
             redacted = redacted.replace(secret, "***REDACTED***")
     return redacted
@@ -402,6 +411,207 @@ def _decimal_column_config(results: pd.DataFrame) -> dict[str, Any]:
 def _has_rating_column(results: pd.DataFrame) -> bool:
     """Return True when the results table carries a BUY/SELL-style column."""
     return any(column in results.columns for column in ("rating", "signal"))
+
+
+# ---------------------------------------------------------------------------
+# Check Fundamentals — eligibility, agent caching, UI rendering
+#
+# The fundamental-analysis agent is gated to the Hemant Super 45 ∪ Nifty 100
+# universes per the user's spec. Two helpers below build that eligibility
+# set, and a third lazily instantiates the LangChain agent. None of the
+# OpenRouter / LangChain code runs unless the user actually clicks the
+# "Check Fundamentals" button.
+# ---------------------------------------------------------------------------
+
+
+_FUNDAMENTALS_UNIVERSES: tuple[str, ...] = ("hemant_super_45", "nifty_100")
+
+
+@st.cache_data(ttl=600)
+def _eligible_symbols_set(universe_keys: tuple[str, ...]) -> frozenset[str]:
+    """Return the uppercase symbol set across the given universe keys.
+
+    Cached for 10 minutes because universe CSVs are refreshed at most once
+    per CLI prefetch run — re-reading on every Streamlit rerun is wasteful.
+    """
+    symbols: set[str] = set()
+    for key in universe_keys:
+        try:
+            df = load_universe(key)
+        except Exception:
+            # A missing universe CSV must not break the rest of the UI.
+            logger.warning("Could not load universe %s for fundamentals eligibility", key)
+            continue
+        if "symbol" not in df.columns:
+            continue
+        for symbol in df["symbol"].astype(str):
+            cleaned = symbol.strip().upper()
+            if cleaned:
+                symbols.add(cleaned)
+    return frozenset(symbols)
+
+
+def _is_eligible_for_fundamentals(symbol: str | None) -> bool:
+    """True when `symbol` belongs to Hemant Super 45 OR Nifty 100."""
+    if not symbol:
+        return False
+    return str(symbol).strip().upper() in _eligible_symbols_set(_FUNDAMENTALS_UNIVERSES)
+
+
+@st.cache_resource(show_spinner=False)
+def _get_fundamental_agent(api_key: str, model: str) -> FundamentalAgent:
+    """Memoize one agent per (api_key, model) pair across reruns.
+
+    Building a `ChatOpenAI` client is cheap, but caching the agent also
+    keeps the on-disk cache instance and bound tool consistent. Note that
+    `cache_resource` keys on the function arguments, so rotating the key
+    or model rebuilds the agent automatically.
+    """
+    return FundamentalAgent(api_key=api_key, model=model)
+
+
+def _render_fundamentals_panel(symbol: str | None) -> None:
+    """Render the per-stock Check Fundamentals section under the chart.
+
+    Stays hidden when:
+      - no symbol is selected,
+      - the symbol is not in Hemant Super 45 ∪ Nifty 100, OR
+      - OPENROUTER_API_KEY is not configured (shows guidance text instead).
+    """
+    if not symbol or not _is_eligible_for_fundamentals(symbol):
+        return
+
+    st.divider()
+    st.subheader("Fundamentals")
+    st.caption(
+        "AI agent applies the seven user-defined criteria, adds its own "
+        "expert observations, and produces a holistic 0–10 rating."
+    )
+
+    creds = get_openrouter_credentials(required=False)
+    if creds is None:
+        st.info(
+            "Add `OPENROUTER_API_KEY` to `Dependencies/.env` (see "
+            "`Dependencies/.env.example`) to enable the Check Fundamentals "
+            "agent. The button stays hidden until the key is configured."
+        )
+        return
+
+    session_key = f"fundamentals_verdict::{symbol}::{creds.model}"
+    cached_verdict_dict = st.session_state.get(session_key)
+
+    button_col, rerun_col, _spacer = st.columns([2, 1, 2])
+    primary_label = (
+        f"View cached verdict: {symbol}"
+        if cached_verdict_dict is not None
+        else f"Check Fundamentals: {symbol}"
+    )
+    run_now = button_col.button(
+        primary_label,
+        type="primary",
+        key=f"check_fund_btn::{symbol}::{creds.model}",
+        disabled=cached_verdict_dict is not None,
+    )
+    rerun_now = False
+    if cached_verdict_dict is not None:
+        rerun_now = rerun_col.button(
+            "Re-run analysis",
+            key=f"rerun_fund_btn::{symbol}::{creds.model}",
+            help="Bypass the cache and re-fetch screener.in + re-query the LLM.",
+        )
+
+    if run_now or rerun_now:
+        try:
+            agent = _get_fundamental_agent(creds.api_key, creds.model)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Could not build FundamentalAgent")
+            st.error(f"Could not build FundamentalAgent: {_redact_secrets(str(exc))}")
+            return
+
+        with st.spinner(f"Senior analyst evaluating **{symbol}** — this can take 20–60s..."):
+            try:
+                verdict = agent.check(symbol, force_refresh=rerun_now)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Fundamental agent failed for %s", symbol)
+                st.error(f"Fundamental check failed: {_redact_secrets(str(exc))}")
+                return
+        # Persist verdict as plain dict so it survives reruns even after
+        # the Pydantic class changes shape.
+        st.session_state[session_key] = verdict.model_dump(mode="json")
+        cached_verdict_dict = st.session_state[session_key]
+
+    if cached_verdict_dict is None:
+        return
+
+    try:
+        verdict = AgentVerdict.model_validate(cached_verdict_dict)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Cached verdict for %s is invalid; clearing", symbol, exc_info=True)
+        st.session_state.pop(session_key, None)
+        st.error(f"Cached verdict could not be parsed: {exc}")
+        return
+
+    _render_verdict_block(verdict)
+
+
+def _render_verdict_block(verdict: AgentVerdict) -> None:
+    """Render the rating metric + criteria table + observations + summary."""
+    # Headline numbers
+    metric_cols = st.columns([1, 1, 2])
+    metric_cols[0].metric(
+        "Fundamental rating",
+        f"{verdict.rating}/10",
+        help="Holistic expert judgment — NOT a count of passed criteria.",
+    )
+    metric_cols[1].metric(
+        "Criteria passed",
+        f"{verdict.passed_criteria_count} / {verdict.total_criteria}",
+    )
+    metric_cols[2].metric(
+        "Model",
+        verdict.model_used.split("/")[-1] if "/" in verdict.model_used else verdict.model_used,
+    )
+
+    # Criteria breakdown table
+    st.markdown("**Criteria breakdown**")
+    breakdown_rows = [
+        {
+            "Criterion": criterion.name,
+            "Pass": "✅" if criterion.passed else "❌",
+            "Measured": criterion.measured_value,
+            "Threshold": criterion.threshold,
+            "Reasoning": criterion.reasoning,
+        }
+        for criterion in verdict.criteria_breakdown
+    ]
+    if breakdown_rows:
+        st.dataframe(
+            pd.DataFrame(breakdown_rows),
+            width="stretch",
+            hide_index=True,
+        )
+
+    # Additional agent-chosen observations, grouped by sentiment
+    if verdict.additional_observations:
+        st.markdown("**Additional observations (beyond the seven criteria)**")
+        sentiment_order = {"positive": 0, "negative": 1, "neutral": 2}
+        sentiment_icon = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}
+        sorted_observations = sorted(
+            verdict.additional_observations,
+            key=lambda obs: sentiment_order.get(obs.sentiment, 3),
+        )
+        for observation in sorted_observations:
+            icon = sentiment_icon.get(observation.sentiment, "•")
+            st.markdown(
+                f"- {icon} **{observation.topic}** — {observation.finding}  \n"
+                f"  _Evidence:_ {observation.evidence}"
+            )
+
+    # Summary callout
+    st.info(verdict.summary_comments)
+    st.caption(
+        f"Data fetched: `{verdict.data_freshness}` · Model: `{verdict.model_used}`"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -734,6 +944,12 @@ def _render_scan_output(selected: ScreenerDefinition, cache: dict[str, Any]) -> 
         st.warning("The screener returned no rows.")
     else:
         chart_symbol = _render_results_with_chart(selected, results, cache)
+        # If the selected stock belongs to Hemant Super 45 or Nifty 100, show
+        # the Check Fundamentals agent panel after the chart. The helper
+        # hides itself for ineligible symbols, so screeners scanning the F&O
+        # universe still get this section for any HS45/N100 member that
+        # happens to be shortlisted.
+        _render_fundamentals_panel(chart_symbol)
         # CSV-safe wrapper neutralizes formula injection before download. The
         # raw DataFrame still has full precision; only the on-screen Styler
         # rounds to 2 decimals, so the CSV mirrors the source data.
@@ -743,9 +959,6 @@ def _render_scan_output(selected: ScreenerDefinition, cache: dict[str, Any]) -> 
             file_name=f"{selected.key}_results.csv",
             mime="text/csv",
         )
-        # Keep `chart_symbol` referenced so future enhancements (e.g., a
-        # "selected stock" header) can use it without restructuring.
-        del chart_symbol
 
     if failures:
         with st.expander("Fetch failures", expanded=True):

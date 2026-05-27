@@ -27,7 +27,12 @@ ENV_PATH = DEPENDENCIES_DIR / ".env"
 DATA_DIR = PROJECT_ROOT / "data"
 UNIVERSE_DIR = DATA_DIR / "universes"
 DAILY_CACHE_DIR = DATA_DIR / "cache" / "daily"
+FUNDAMENTALS_CACHE_DIR = DATA_DIR / "cache" / "fundamentals"
 SCREENERS_DIR = PROJECT_ROOT / "screeners"
+
+# Default model used by the Check Fundamentals agent when OPENROUTER_MODEL
+# is not set. Lives here so tests can import it without re-typing the string.
+DEFAULT_OPENROUTER_MODEL = "anthropic/claude-sonnet-4.5"
 
 # Public URLs used to build stock universes. These do not require Dhan
 # credentials. Dhan credentials are only needed when fetching candle data.
@@ -53,11 +58,25 @@ class DhanCredentials:
     access_token: str
 
 
+@dataclass(frozen=True)
+class OpenRouterCredentials:
+    """API key + model name needed to call the OpenRouter chat completions API."""
+
+    api_key: str
+    model: str
+
+
 def ensure_project_dirs() -> None:
     """Create runtime folders that are safe to generate locally."""
     # These folders hold generated files. Creating them at runtime keeps the
     # repository lightweight while still giving the app a predictable layout.
-    for path in (DEPENDENCIES_DIR, UNIVERSE_DIR, DAILY_CACHE_DIR, SCREENERS_DIR):
+    for path in (
+        DEPENDENCIES_DIR,
+        UNIVERSE_DIR,
+        DAILY_CACHE_DIR,
+        FUNDAMENTALS_CACHE_DIR,
+        SCREENERS_DIR,
+    ):
         path.mkdir(parents=True, exist_ok=True)
 
 
@@ -107,11 +126,36 @@ def get_dhan_credentials(required: bool = False) -> DhanCredentials | None:
     return None
 
 
+def get_openrouter_credentials(required: bool = False) -> OpenRouterCredentials | None:
+    """Return OpenRouter credentials from Dependencies/.env or the process env.
+
+    Mirrors `get_dhan_credentials`. The Check Fundamentals agent is the only
+    consumer today. Returning `None` (instead of raising) when not required
+    lets the UI hide the button gracefully when the user has not set up the
+    key yet.
+    """
+    load_environment()
+    api_key = _clean_env_value(os.getenv("OPENROUTER_API_KEY"))
+    model = _clean_env_value(os.getenv("OPENROUTER_MODEL")) or DEFAULT_OPENROUTER_MODEL
+
+    if api_key:
+        return OpenRouterCredentials(api_key=api_key, model=model)
+
+    if required:
+        raise RuntimeError(
+            "Missing OPENROUTER_API_KEY. Add it to "
+            f"{ENV_PATH} (see Dependencies/.env.example) to use the "
+            "Check Fundamentals agent."
+        )
+    return None
+
+
 def credential_status() -> dict[str, object]:
     """Return a UI-friendly credential summary without exposing secrets."""
     load_environment()
     client_code = _clean_env_value(os.getenv("DHAN_CLIENT_CODE"))
     access_token = _clean_env_value(os.getenv("DHAN_ACCESS_TOKEN"))
+    openrouter_key = _clean_env_value(os.getenv("OPENROUTER_API_KEY"))
     # Never return the actual access token to Streamlit. The UI only needs
     # booleans so it can show whether setup is complete.
     return {
@@ -119,6 +163,7 @@ def credential_status() -> dict[str, object]:
         "env_exists": ENV_PATH.exists(),
         "has_client_code": bool(client_code),
         "has_access_token": bool(access_token),
+        "has_openrouter_key": bool(openrouter_key),
         "ready": bool(client_code and access_token),
     }
 

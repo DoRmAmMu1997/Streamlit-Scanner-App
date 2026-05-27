@@ -20,5 +20,14 @@ requests
 python-dotenv
 dhanhq
 
+# Fundamental analysis: screener.in scraper + LangChain agent over OpenRouter.
+# `langchain-openai` is used because OpenRouter exposes the OpenAI-compatible
+# /v1/chat/completions surface — the same client wrapper works.
+beautifulsoup4
+lxml
+langchain
+langchain-core
+langchain-openai
+
 # Test runner.
 pytest
