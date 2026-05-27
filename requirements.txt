@@ -23,8 +23,10 @@ dhanhq
 # Fundamental analysis: screener.in scraper + LangChain agent over OpenRouter.
 # `langchain-openai` is used because OpenRouter exposes the OpenAI-compatible
 # /v1/chat/completions surface — the same client wrapper works.
+# `pdfplumber` extracts text from downloaded concall transcript PDFs.
 beautifulsoup4
 lxml
+pdfplumber
 langchain
 langchain-core
 langchain-openai

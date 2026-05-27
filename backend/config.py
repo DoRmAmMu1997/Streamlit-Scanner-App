@@ -28,6 +28,9 @@ DATA_DIR = PROJECT_ROOT / "data"
 UNIVERSE_DIR = DATA_DIR / "universes"
 DAILY_CACHE_DIR = DATA_DIR / "cache" / "daily"
 FUNDAMENTALS_CACHE_DIR = DATA_DIR / "cache" / "fundamentals"
+# Downloaded PDFs (concall transcripts, etc.) live in their own subdir so the
+# JSON data/verdict files in FUNDAMENTALS_CACHE_DIR are easy to inspect.
+FUNDAMENTALS_PDF_DIR = FUNDAMENTALS_CACHE_DIR / "pdfs"
 SCREENERS_DIR = PROJECT_ROOT / "screeners"
 
 # Default model used by the Check Fundamentals agent when OPENROUTER_MODEL
@@ -75,6 +78,7 @@ def ensure_project_dirs() -> None:
         UNIVERSE_DIR,
         DAILY_CACHE_DIR,
         FUNDAMENTALS_CACHE_DIR,
+        FUNDAMENTALS_PDF_DIR,
         SCREENERS_DIR,
     ):
         path.mkdir(parents=True, exist_ok=True)

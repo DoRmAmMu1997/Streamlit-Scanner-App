@@ -42,6 +42,7 @@ from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field, field_validator
 
 from backend.fundamentals.fundamentals_cache import FundamentalsCache
+from backend.fundamentals.pdf_reader import read_recent_concall_text
 from backend.fundamentals.screener_in_client import (
     ScreenerInFetchError,
     fetch_company_data,
@@ -123,6 +124,16 @@ class AgentVerdict(BaseModel):
     summary_comments: str = Field(
         description="3-6 sentence plain-English explanation of the rating."
     )
+    forward_outlook: str = Field(
+        default="",
+        description=(
+            "5-10 sentence forward-looking view on where the company is headed "
+            "over the next 1-4 quarters. Informed by the most recent corporate "
+            "announcements and (if the read_recent_concall_transcript tool was "
+            "called) the latest concall transcript. Distinct from criterion (e) "
+            "which is a pass/fail; this is the standalone analyst opinion."
+        ),
+    )
     data_freshness: str = Field(
         description="ISO timestamp of when the underlying screener.in data was fetched."
     )
@@ -161,6 +172,20 @@ listed companies. You think like Warren Buffett and Charlie Munger:
 business quality, durable competitive advantages, capital allocation
 discipline, balance-sheet integrity, and long-term earnings power — not
 short-term price action.
+
+You have access to TWO tools:
+- `fetch_company_data(symbol)` — returns the structured screener.in
+  snapshot for the stock (ratios, history tables, peer comparison, the
+  most recent corporate announcements, and metadata for the most recent
+  concall transcripts). Call this ONCE per evaluation.
+- `read_recent_concall_transcript(symbol)` — downloads and returns the
+  PLAIN TEXT of the most recent quarterly concall transcript. The text is
+  large (~8-15K tokens). Call it ONLY when you genuinely need management
+  commentary to (a) judge criterion (e) "Future growth prospects" or
+  (b) write the `forward_outlook` field. Skip it for obvious cases where
+  the structured data is already decisive. Returns "" if no transcript
+  is available — in that case fall back to announcements + your sector
+  knowledge.
 
 When asked to evaluate a stock:
 
@@ -229,6 +254,14 @@ When asked to evaluate a stock:
    in plain English. Mention both the strongest positives and the most
    important concerns.
 
+6. Write a `forward_outlook` field of 5-10 sentences that integrates the
+   recent announcements (always available in the base payload) and, when
+   you fetched it, the concall transcript. This is your standalone view
+   on where the company is headed in the next 1-4 quarters. Reference
+   specific guidance, deal pipelines, capex plans, sector trends, or
+   regulatory shifts when they appear in the source material. Avoid
+   generic statements that could apply to any company in the sector.
+
 When you are ready, return your answer as a single AgentVerdict object.
 Never write free-form text in your final answer — only the structured
 schema.
@@ -270,7 +303,10 @@ class FundamentalAgent:
     mock LLM via the `llm` constructor argument.
     """
 
-    MAX_TURNS = 4  # one fetch, one reasoning pass, one final structuring
+    # Up to two tool calls (fetch + optional transcript) + reasoning + final
+    # structuring pass leaves enough headroom without letting the loop run
+    # away on a misbehaving model.
+    MAX_TURNS = 6
     TEMPERATURE = 0.2
 
     def __init__(
@@ -321,8 +357,9 @@ class FundamentalAgent:
 
             Returns a JSON string with valuation ratios, ROCE/ROE, the
             full annual and quarterly tables, peer comparison, shareholding,
-            and a free-form text dump (about, pros, cons). Call this tool
-            exactly ONCE per analysis.
+            recent announcements, concall metadata, and a free-form text
+            dump (about, pros, cons). Call this tool exactly ONCE per
+            analysis.
             """
             normalized = (symbol or "").strip().upper()
             if not normalized:
@@ -341,6 +378,48 @@ class FundamentalAgent:
             return json.dumps(fresh, default=str)
 
         return fetch_company_data_tool
+
+    def _build_transcript_tool(self):
+        """Return the LangChain Tool that downloads + reads the latest concall PDF.
+
+        The tool reads the cached company data (set by `fetch_company_data_tool`)
+        to find the `concalls` metadata, then downloads + extracts the most
+        recent transcript's text. Returns an empty string when no transcript
+        is available so the model can gracefully fall back to announcements
+        + structured data for its forward outlook.
+        """
+        cache = self._cache
+
+        @tool
+        def read_recent_concall_transcript(symbol: str) -> str:
+            """Fetch and return the plain text of the most recent quarterly
+            concall transcript for one NSE stock. Use this when forming your
+            forward outlook or when criterion (e) Future growth prospects is
+            unclear from the structured data alone. The transcript is large
+            (~8-15K tokens), so only call this when it will materially change
+            your judgment. Returns "" if no transcript is available."""
+            normalized = (symbol or "").strip().upper()
+            if not normalized:
+                return ""
+
+            data = cache.get_data(normalized)
+            if data is None:
+                # The model called the transcript tool before fetch_company_data —
+                # signal that with a short message so it knows to call fetch first.
+                return (
+                    "[no company data cached yet; call fetch_company_data first]"
+                )
+
+            concalls = data.get("concalls") or []
+            try:
+                return read_recent_concall_text(concalls) or ""
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "Concall transcript fetch failed for %s", normalized, exc_info=True
+                )
+                return ""
+
+        return read_recent_concall_transcript
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -375,16 +454,27 @@ class FundamentalAgent:
                 if cached_verdict is not None:
                     return AgentVerdict.model_validate(cached_verdict)
 
-        # 2. Run the tool-calling loop with the LLM.
+        # 2. Run the tool-calling loop with the LLM. Two tools are bound:
+        # the always-needed company-data fetch, and the optional concall
+        # transcript reader the model can invoke when it needs management
+        # commentary for the forward outlook.
         fetch_tool = self._build_fetch_tool()
-        llm_with_tools = self._llm.bind_tools([fetch_tool])
+        transcript_tool = self._build_transcript_tool()
+        tools_by_name = {
+            fetch_tool.name: fetch_tool,
+            transcript_tool.name: transcript_tool,
+        }
+        llm_with_tools = self._llm.bind_tools(list(tools_by_name.values()))
         messages = [
             SystemMessage(content=SYSTEM_PROMPT),
             HumanMessage(
                 content=(
                     f"Evaluate the fundamentals of NSE stock '{normalized}'. "
-                    "Call the fetch tool exactly once, then produce the "
-                    "AgentVerdict per the system prompt."
+                    "Call fetch_company_data once. If the structured data and "
+                    "recent announcements are sufficient, skip the concall "
+                    "transcript tool; otherwise call it once to inform your "
+                    "forward outlook. Then produce the AgentVerdict per the "
+                    "system prompt."
                 )
             ),
         ]
@@ -399,10 +489,12 @@ class FundamentalAgent:
                 break
             for call in tool_calls:
                 # `call` shape from LangChain: {"name", "args", "id"}.
+                tool_name = call.get("name", fetch_tool.name)
+                target = tools_by_name.get(tool_name, fetch_tool)
                 try:
-                    tool_output = fetch_tool.invoke(call["args"])
+                    tool_output = target.invoke(call["args"])
                 except Exception as exc:  # noqa: BLE001
-                    tool_output = json.dumps({"error": f"Tool failed: {exc}"})
+                    tool_output = json.dumps({"error": f"Tool {tool_name} failed: {exc}"})
                 messages.append(
                     ToolMessage(
                         content=str(tool_output),
