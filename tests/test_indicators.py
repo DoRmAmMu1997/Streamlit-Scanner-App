@@ -25,6 +25,8 @@ from backend.indicators import (
     build_heikin_ashi,
     ema,
     momentum,
+    pivot_lows,
+    prepare_ohlc,
     rsi,
     sma,
     stochastic,
@@ -197,3 +199,76 @@ def test_public_stochastic_stays_within_zero_to_hundred():
     # The Stochastic oscillator is bounded 0-100 by construction.
     assert (valid["stoch_k"] >= -1e-6).all() and (valid["stoch_k"] <= 100.0 + 1e-6).all()
     assert (valid["stoch_d"] >= -1e-6).all() and (valid["stoch_d"] <= 100.0 + 1e-6).all()
+
+
+# ---------------------------------------------------------------------------
+# prepare_ohlc — the public name of the boundary cleaner used by BaseScanner
+# ---------------------------------------------------------------------------
+
+
+def test_prepare_ohlc_sorts_and_drops_duplicate_timestamps():
+    # Out-of-order rows + one duplicate timestamp. After prep the frame should
+    # be sorted oldest-to-newest with each day appearing exactly once.
+    raw = pd.DataFrame({
+        "timestamp": pd.to_datetime(["2026-01-03", "2026-01-01", "2026-01-02", "2026-01-02"]),
+        "open": [10.0, 9.0, 11.0, 11.5],
+        "high": [11.0, 10.0, 12.0, 12.5],
+        "low": [9.0, 8.0, 10.0, 10.5],
+        "close": [10.5, 9.5, 11.5, 11.7],
+    })
+    prepared = prepare_ohlc(raw)
+    assert list(prepared["timestamp"].dt.day) == [1, 2, 3]
+
+
+def test_prepare_ohlc_coerces_string_prices_to_numeric():
+    # API/CSV data sometimes lands as strings. The helper must turn them into
+    # numbers so indicator math does not fail with a TypeError. (pd.to_numeric
+    # may return either int or float depending on the input; either is fine.)
+    raw = pd.DataFrame({
+        "timestamp": pd.to_datetime(["2026-01-01", "2026-01-02"]),
+        "open": ["10", "11"],
+        "high": ["12", "13"],
+        "low": ["9", "10"],
+        "close": ["11", "12"],
+    })
+    prepared = prepare_ohlc(raw)
+    assert pd.api.types.is_numeric_dtype(prepared["close"])
+    assert prepared["close"].tolist() == [11, 12]
+
+
+def test_prepare_ohlc_returns_empty_frame_when_input_is_empty():
+    empty = pd.DataFrame({"open": [], "high": [], "low": [], "close": []})
+    prepared = prepare_ohlc(empty)
+    assert prepared.empty
+
+
+# ---------------------------------------------------------------------------
+# pivot_lows — vectorized confirmed-pivot detection
+# ---------------------------------------------------------------------------
+
+
+def test_pivot_lows_flags_only_confirmed_lows():
+    # A V-shaped dip at index 3 should be detected as a pivot low.
+    lows = pd.Series([5.0, 4.0, 3.0, 1.0, 2.5, 3.5, 4.5])
+    mask = pivot_lows(lows, left=2, right=2)
+    # Index 3 is lower than both its 2-bar neighbors on each side.
+    assert mask.tolist() == [False, False, False, True, False, False, False]
+
+
+def test_pivot_lows_does_not_mark_last_right_candles():
+    # The last `right` candles cannot be confirmed pivots because they have no
+    # future bars yet. Even a clear-looking minimum at the end stays False.
+    lows = pd.Series([5.0, 4.0, 3.0, 2.0, 1.0])
+    mask = pivot_lows(lows, left=1, right=1)
+    # Index 4 is the global minimum but has no future bar → not confirmed.
+    assert mask.iloc[-1] is False or bool(mask.iloc[-1]) is False
+
+
+def test_pivot_lows_handles_nan_inputs_without_raising():
+    # Real candle data sometimes has NaN lows (warm-up rows, parser issues).
+    # The helper must accept them, mark them False, and not crash.
+    lows = pd.Series([float("nan"), 5.0, 3.0, 5.0, float("nan")])
+    mask = pivot_lows(lows, left=1, right=1)
+    assert mask.iloc[0] is False or bool(mask.iloc[0]) is False
+    # The interior candle at index 2 has lower neighbors on both sides.
+    assert bool(mask.iloc[2]) is True

@@ -1,0 +1,221 @@
+from __future__ import annotations
+
+"""Shared base class for every screener in this app.
+
+What this module gives a new screener:
+
+1. **A common contract** — a `BaseScanner` subclass only needs to override
+   `SCREENER`, `EXTRA_RESULT_COLUMNS`, and `compute_signal(...)`. Everything
+   else (data fetching, per-symbol loop, progress callback, empty result
+   shape, exception capture) is inherited from this file.
+
+2. **A normalized result schema** — every screener returns at least
+   `["symbol", "rating", "signal_date", "close", "reason"]`. The UI can rely
+   on these columns to render emoji BUY/SELL badges, build chart titles,
+   and group rows consistently. Screeners append their own extra columns
+   via `EXTRA_RESULT_COLUMNS`.
+
+3. **Tiny utility helpers** so screeners do not repeat boilerplate:
+   - `prepare_candles(candles)` — same cleaning logic as
+     `backend.indicators.prepare_ohlc`, exposed as an instance method.
+   - `coerce_param(params, key, cast)` — read a value from `params` with
+     fallback to the screener's `default_params`, with type coercion.
+   - `empty_result()` — return an empty DataFrame with the right columns so
+     "no signals today" still renders cleanly.
+
+Beginner note on Abstract Base Classes (ABC):
+- `BaseScanner` declares `compute_signal(...)` as `@abstractmethod`. Python
+  will refuse to instantiate a subclass that does not override it, which
+  catches "I forgot to implement the strategy" mistakes at import time
+  instead of mysterious "no rows ever shortlist" mistakes at runtime.
+"""
+
+import logging
+from abc import ABC, abstractmethod
+from typing import Any, Callable
+
+import pandas as pd
+
+from backend.indicators import prepare_ohlc
+
+
+logger = logging.getLogger(__name__)
+
+
+# Every screener result has these columns first, in this order. Streamlit's
+# emoji-badge logic, chart symbol pick, and download-CSV all expect them.
+COMMON_RESULT_COLUMNS: list[str] = [
+    "symbol",
+    "rating",
+    "signal_date",
+    "close",
+    "reason",
+]
+
+
+class BaseScanner(ABC):
+    """Abstract base for every screener.
+
+    A subclass MUST set:
+      - `SCREENER`: metadata dict picked up by `backend.screener_registry`.
+      - `compute_signal(self, symbol, candles, params)`: the strategy rule.
+
+    A subclass MAY set:
+      - `EXTRA_RESULT_COLUMNS`: list of additional columns appended to the
+        common schema. Order is preserved in the result DataFrame.
+      - `build_chart(self, candles, params)`: returns a Lightweight Charts
+        spec dict, or `None` to hide the chart section in the UI. The
+        default implementation returns `None`.
+    """
+
+    # Subclasses overwrite these. The base class uses placeholder values so
+    # static type checkers do not complain; the registry validates real
+    # values are present at discovery time.
+    SCREENER: dict = {}
+    EXTRA_RESULT_COLUMNS: list[str] = []
+
+    # ------------------------------------------------------------------
+    # Public helpers used by the UI and the registry
+    # ------------------------------------------------------------------
+
+    @property
+    def result_columns(self) -> list[str]:
+        """Common columns first, then the screener's extras."""
+        # Deduplicate while preserving order. A screener that accidentally
+        # lists "symbol" again in EXTRA_RESULT_COLUMNS should not produce a
+        # duplicate column in the output DataFrame.
+        seen = set()
+        ordered: list[str] = []
+        for column in (*COMMON_RESULT_COLUMNS, *self.EXTRA_RESULT_COLUMNS):
+            if column in seen:
+                continue
+            seen.add(column)
+            ordered.append(column)
+        return ordered
+
+    def empty_result(self) -> pd.DataFrame:
+        """Return a properly shaped empty DataFrame for the Streamlit UI."""
+        return pd.DataFrame([], columns=self.result_columns)
+
+    def build_chart(self, candles: pd.DataFrame, params: dict) -> dict | None:
+        """Render a per-stock chart spec. Default: no chart."""
+        # Returning None tells the Streamlit UI to hide the chart pane for
+        # this screener. Subclasses that DO want a chart override this.
+        return None
+
+    # ------------------------------------------------------------------
+    # Helpers shared with every concrete strategy
+    # ------------------------------------------------------------------
+
+    def prepare_candles(self, candles: pd.DataFrame) -> pd.DataFrame:
+        """Sort/clean/numeric-coerce candles before any indicator math.
+
+        Delegates to `backend.indicators.prepare_ohlc` so there is exactly
+        one definition of "ready for math" across the whole app.
+        """
+        return prepare_ohlc(candles)
+
+    def coerce_param(self, params: dict, key: str, cast: Callable[[Any], Any] = float) -> Any:
+        """Read a parameter from `params` with fallback to the screener's defaults.
+
+        Example:
+            bb_period = self.coerce_param(params, "bb_period", int)
+
+        Why this helper exists: every screener used to repeat
+        `int(params.get("bb_period", SCREENER["default_params"]["bb_period"]))`
+        for each parameter. This one-liner is shorter and harder to mistype.
+        """
+        defaults = self.SCREENER.get("default_params", {})
+        if key not in defaults and key not in params:
+            raise KeyError(
+                f"{type(self).__name__}: parameter '{key}' is not in params "
+                f"and has no default in SCREENER['default_params']"
+            )
+        return cast(params.get(key, defaults.get(key)))
+
+    # ------------------------------------------------------------------
+    # The strategy hook every subclass must implement
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    def compute_signal(self, symbol: str, candles: pd.DataFrame, params: dict) -> dict | None:
+        """Return a result row for `symbol`, or `None` when the strategy says skip.
+
+        Implementations should:
+          - Call `self.prepare_candles(candles)` once.
+          - Run indicator math on the prepared frame.
+          - Return a dict whose keys match `self.result_columns`, OR `None`.
+        """
+        raise NotImplementedError
+
+    # ------------------------------------------------------------------
+    # Template method: this is what the Streamlit UI calls
+    # ------------------------------------------------------------------
+
+    def run(
+        self,
+        universe_df: pd.DataFrame,
+        data_loader,
+        params: dict,
+    ) -> pd.DataFrame:
+        """Fetch candles, evaluate every symbol, return a result DataFrame.
+
+        Subclasses should rarely override this. The structure (one row per
+        BUY/SELL signal, empty DataFrame when no symbol matches) is fixed
+        so the UI does not need per-screener special cases.
+        """
+        # Centralized data fetching: every screener uses the same loader
+        # contract. The loader handles caching, rate limits, and failures.
+        batch = data_loader.load_universe_history(
+            universe_df=universe_df,
+            start_date=params["start_date"],
+            end_date=params["end_date"],
+            force_refresh=bool(params.get("force_refresh", False)),
+            progress_callback=params.get("progress_callback"),
+        )
+
+        rows: list[dict] = []
+        for symbol, candles in batch.frames.items():
+            try:
+                signal = self.compute_signal(symbol, candles, params)
+            except Exception as exc:  # noqa: BLE001 — we log and continue intentionally
+                # A bad candle frame for ONE symbol should not abort the
+                # whole scan. The warning is enough for diagnosis in DEBUG
+                # mode without breaking the user's overall workflow.
+                logger.warning(
+                    "%s.compute_signal failed for %s: %s",
+                    type(self).__name__,
+                    symbol,
+                    exc,
+                )
+                continue
+            if signal is not None:
+                rows.append(signal)
+
+        # Returning with the fixed column order keeps the Streamlit table
+        # stable even when no row matches today.
+        return pd.DataFrame(rows, columns=self.result_columns)
+
+
+def export_module_compat(scanner: BaseScanner) -> dict[str, Any]:
+    """Bundle module-level back-compat aliases for an existing screener test suite.
+
+    Older tests import a screener as a module and call `module.run(...)`,
+    `module.SCREENER`, `module.RESULT_COLUMNS`. New screeners are classes,
+    so each module exposes those names via this helper:
+
+        _scanner = MyScanner()
+        SCREENER = _scanner.SCREENER
+        RESULT_COLUMNS = _scanner.result_columns
+        run = _scanner.run
+        build_chart = _scanner.build_chart
+
+    Returning a dict here just documents the convention; modules still
+    bind the names explicitly so the names are obvious to readers.
+    """
+    return {
+        "SCREENER": scanner.SCREENER,
+        "RESULT_COLUMNS": scanner.result_columns,
+        "run": scanner.run,
+        "build_chart": scanner.build_chart,
+    }
