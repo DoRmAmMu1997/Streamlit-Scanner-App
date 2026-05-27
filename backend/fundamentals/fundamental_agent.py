@@ -39,7 +39,7 @@ from langchain_core.messages import (
 )
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from backend.fundamentals.fundamentals_cache import FundamentalsCache
 from backend.fundamentals.screener_in_client import (
@@ -88,20 +88,26 @@ class Observation(BaseModel):
 
 
 class AgentVerdict(BaseModel):
-    """Structured verdict returned by the agent for one stock."""
+    """Structured verdict returned by the agent for one stock.
+
+    Note on integer ranges:
+    Anthropic's structured-output API (which OpenRouter forwards to when the
+    user picks `anthropic/claude-*`) does NOT accept `minimum` / `maximum`
+    properties on `integer` JSON Schema types. So we deliberately avoid the
+    Pydantic `Field(ge=..., le=...)` shorthand for `rating` and
+    `passed_criteria_count` — those would emit those properties into the
+    schema and trigger a 400. Instead, the `@field_validator` decorators
+    below run at parse time without polluting the JSON schema.
+    """
 
     symbol: str
     rating: int = Field(
-        ge=0,
-        le=10,
         description=(
             "Holistic 0-10 fundamental rating reflecting the agent's expert "
             "weighted judgment. NOT a count of passed criteria."
         ),
     )
     passed_criteria_count: int = Field(
-        ge=0,
-        le=7,
         description="How many of the seven user-defined criteria the stock passes.",
     )
     total_criteria: int = Field(default=7)
@@ -121,6 +127,27 @@ class AgentVerdict(BaseModel):
         description="ISO timestamp of when the underlying screener.in data was fetched."
     )
     model_used: str = Field(description="Which LLM produced this verdict.")
+
+    @field_validator("rating")
+    @classmethod
+    def _validate_rating_range(cls, value: int) -> int:
+        # Validation runs at parse time so a malformed LLM output still
+        # raises, but the JSON schema we send to Anthropic stays clean of
+        # `minimum` / `maximum` (which Anthropic rejects on integer types).
+        if not 0 <= value <= 10:
+            raise ValueError(
+                f"rating must be between 0 and 10 inclusive, got {value}"
+            )
+        return value
+
+    @field_validator("passed_criteria_count")
+    @classmethod
+    def _validate_passed_criteria_count(cls, value: int) -> int:
+        if not 0 <= value <= 7:
+            raise ValueError(
+                f"passed_criteria_count must be between 0 and 7 inclusive, got {value}"
+            )
+        return value
 
 
 # ---------------------------------------------------------------------------
