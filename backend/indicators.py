@@ -42,13 +42,22 @@ def _require_columns(frame: pd.DataFrame, required_columns: list[str]) -> None:
         raise ValueError(f"Input candles are missing required column(s): {', '.join(missing)}")
 
 
-def _prepare_ohlc(ohlc: pd.DataFrame) -> pd.DataFrame:
+def prepare_ohlc(ohlc: pd.DataFrame) -> pd.DataFrame:
     """
     Return a clean OHLC frame sorted from oldest candle to newest candle.
 
     Screeners can receive data from Dhan, cache, or tests. This helper makes
-    sure all indicator functions start with the same predictable shape.
+    sure all indicator functions start with the same predictable shape, and
+    is also what `BaseScanner.prepare_candles` calls.
     """
+    # If candles is empty we still need it to be a DataFrame the screener
+    # can chain `.iloc[-1]` etc. against. Returning a fresh empty frame keeps
+    # the boundary tidy.
+    if ohlc is None:
+        return pd.DataFrame()
+    if isinstance(ohlc, pd.DataFrame) and ohlc.empty:
+        return pd.DataFrame(columns=list(ohlc.columns))
+
     _require_columns(ohlc, ["open", "high", "low", "close"])
     # Work on a copy so this helper never changes the caller's original candles.
     # That keeps one screener's indicator preparation from affecting another
@@ -69,6 +78,49 @@ def _prepare_ohlc(ohlc: pd.DataFrame) -> pd.DataFrame:
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
 
     return frame.dropna(subset=["open", "high", "low", "close"]).reset_index(drop=True)
+
+
+# Backwards-compatible alias. Some older modules still import the
+# leading-underscore name; new code should use `prepare_ohlc` directly.
+_prepare_ohlc = prepare_ohlc
+
+
+def pivot_lows(low: pd.Series, left: int, right: int) -> pd.Series:
+    """Return a boolean Series marking confirmed pivot lows.
+
+    A pivot low is a candle whose `low` is strictly less than:
+      - every low in the previous `left` candles, AND
+      - every low in the next `right` candles.
+
+    Confirmation requires `right` future candles to exist, so the LAST
+    `right` rows of the input are always `False` — that is intentional, it
+    prevents acting on a low that tomorrow's bar could invalidate.
+
+    This vectorized implementation runs in O(n) regardless of `left`/`right`,
+    replacing the older O(n*left*right) per-candle loop used by the Knoxville
+    screener. It is reusable from any divergence-based screener that needs
+    pivot detection.
+    """
+    left = max(1, int(left))
+    right = max(1, int(right))
+    series = pd.to_numeric(low, errors="coerce")
+
+    # Rolling minimum of the `left` candles BEFORE today. `shift(1)` lines up
+    # the window so today's value is compared against its left neighbors only.
+    left_min = series.rolling(window=left, min_periods=left).min().shift(1)
+
+    # For the right window we reverse the series, take a rolling min, and
+    # reverse back. After `shift(1)` on the reversed view, each row sees the
+    # minimum of its `right` future candles in the original ordering.
+    reversed_series = series.iloc[::-1]
+    right_min = (
+        reversed_series.rolling(window=right, min_periods=right).min().shift(1).iloc[::-1]
+    )
+
+    # A NaN low cannot be a pivot. A pivot must be strictly less than both
+    # the left and the right rolling minimum (so equal lows do not qualify).
+    mask = series.notna() & (series < left_min) & (series < right_min)
+    return mask.fillna(False).astype(bool)
 
 
 # ---------------------------------------------------------------------------

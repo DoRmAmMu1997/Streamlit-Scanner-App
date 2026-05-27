@@ -8,8 +8,10 @@ import pandas as pd
 from screeners import (
     bollinger_band_reversal,
     bollinger_knoxville_buy,
+    ema200_14percent_below,
     heikin_ashi_supertrend,
     stochastic_swing,
+    week52_low_ceyhun,
 )
 
 
@@ -374,3 +376,153 @@ def test_stochastic_swing_screener_tolerates_empty_and_short_frames():
 
     assert result.empty
     assert list(result.columns) == stochastic_swing.RESULT_COLUMNS
+
+
+# ---------------------------------------------------------------------------
+# 52 Week High/Low (Ceyhun)
+# ---------------------------------------------------------------------------
+
+
+def _week52_params(**overrides):
+    """Compact defaults so the fixture does not need 252+ candles."""
+    params = dict(week52_low_ceyhun.SCREENER["default_params"])
+    # Smaller windows let the synthetic data prove the rule in ~20 candles.
+    params.update({
+        "window_bars": 10,
+        "recent_window_bars": 3,
+        "proximity_pct": 0.02,
+        "start_date": date(2026, 1, 1),
+        "end_date": date(2026, 1, 31),
+    })
+    params.update(overrides)
+    return params
+
+
+def test_week52_low_ceyhun_returns_buy_when_close_revisits_low():
+    # First 12 candles establish a baseline low; the very last candle returns
+    # close to that low. With proximity_pct=2%, the signal should fire.
+    base = [100.0] * 8 + [90.0] + [100.0] * 4 + [91.5]
+    frames = {
+        "NEAR_LOW": _bollinger_candles(
+            open_values=[v for v in base],
+            high_values=[v + 1.0 for v in base],
+            low_values=[v - 0.5 for v in base],
+            close_values=base,
+        ),
+    }
+    # Use window_bars=8 so the rolling 52w low forms early enough in the
+    # synthetic 14-candle dataset. Recent window = last 3 candles.
+    params = _week52_params(window_bars=8, recent_window_bars=3, proximity_pct=0.03)
+
+    result = week52_low_ceyhun.run(_universe(), FakeDataLoader(frames), params)
+
+    assert result["symbol"].tolist() == ["NEAR_LOW"]
+    row = result.iloc[0]
+    assert row["rating"] == "BUY"
+    # The signal proximity should be at most the configured threshold.
+    assert row["proximity_pct_at_signal"] <= 0.03
+
+
+def test_week52_low_ceyhun_skips_when_close_is_far_from_low():
+    # All-time low of 90 is set early, but recent closes are at 130 — nowhere
+    # near the 52w low. Signal must NOT fire.
+    closes = [100.0] * 4 + [90.0] + [100.0] * 4 + [130.0, 131.0, 132.0]
+    frames = {
+        "FAR_FROM_LOW": _bollinger_candles(
+            open_values=closes,
+            high_values=[v + 1.0 for v in closes],
+            low_values=[v - 0.5 for v in closes],
+            close_values=closes,
+        ),
+    }
+    params = _week52_params(window_bars=8, recent_window_bars=3, proximity_pct=0.02)
+
+    result = week52_low_ceyhun.run(_universe(), FakeDataLoader(frames), params)
+
+    assert result.empty
+    assert list(result.columns) == week52_low_ceyhun.RESULT_COLUMNS
+
+
+def test_week52_low_ceyhun_tolerates_empty_and_short_frames():
+    # Empty frames and frames shorter than `window_bars` must be skipped, not
+    # raise an exception that would abort the entire scan.
+    frames = {
+        "EMPTY": pd.DataFrame(),
+        "SHORT": _bollinger_candles([10.0, 10.0], [11.0, 11.0], [9.0, 9.0], [10.0, 10.0]),
+    }
+    params = _week52_params(window_bars=8, recent_window_bars=3)
+
+    result = week52_low_ceyhun.run(_universe(), FakeDataLoader(frames), params)
+
+    assert result.empty
+    assert list(result.columns) == week52_low_ceyhun.RESULT_COLUMNS
+
+
+# ---------------------------------------------------------------------------
+# 14% Below 200 EMA
+# ---------------------------------------------------------------------------
+
+
+def _ema200_params(**overrides):
+    """Smaller EMA period keeps the synthetic dataset short."""
+    params = dict(ema200_14percent_below.SCREENER["default_params"])
+    params.update({
+        "ema_period": 5,
+        "discount_pct": 0.14,
+        "start_date": date(2026, 1, 1),
+        "end_date": date(2026, 1, 31),
+    })
+    params.update(overrides)
+    return params
+
+
+def test_ema200_14percent_below_fires_when_close_is_well_below_ema():
+    # Steady at 100 for several candles to build an EMA near 100, then a sharp
+    # drop to 80. 80 vs an EMA still near 95 is comfortably more than 14%.
+    closes = [100.0] * 10 + [80.0]
+    frames = {
+        "DISCOUNT": _bollinger_candles(
+            open_values=closes,
+            high_values=[v + 0.5 for v in closes],
+            low_values=[v - 0.5 for v in closes],
+            close_values=closes,
+        ),
+    }
+
+    result = ema200_14percent_below.run(_universe(), FakeDataLoader(frames), _ema200_params())
+
+    assert result["symbol"].tolist() == ["DISCOUNT"]
+    row = result.iloc[0]
+    assert row["rating"] == "BUY"
+    # The realized discount must be at least the configured threshold.
+    assert row["actual_discount_pct"] >= 0.14
+
+
+def test_ema200_14percent_below_skips_when_close_is_close_to_ema():
+    # A 3% dip is below the 14% threshold; no signal should appear.
+    closes = [100.0] * 10 + [97.0]
+    frames = {
+        "MILD": _bollinger_candles(
+            open_values=closes,
+            high_values=[v + 0.5 for v in closes],
+            low_values=[v - 0.5 for v in closes],
+            close_values=closes,
+        ),
+    }
+
+    result = ema200_14percent_below.run(_universe(), FakeDataLoader(frames), _ema200_params())
+
+    assert result.empty
+    assert list(result.columns) == ema200_14percent_below.RESULT_COLUMNS
+
+
+def test_ema200_14percent_below_tolerates_empty_and_short_frames():
+    frames = {
+        "EMPTY": pd.DataFrame(),
+        "SHORT": _bollinger_candles([10.0], [11.0], [9.0], [10.0]),
+    }
+
+    result = ema200_14percent_below.run(_universe(), FakeDataLoader(frames), _ema200_params())
+
+    assert result.empty
+    assert list(result.columns) == ema200_14percent_below.RESULT_COLUMNS

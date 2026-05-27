@@ -5,6 +5,21 @@ from __future__ import annotations
 The registry is what turns Python files in `screeners/` into dropdown options
 in Streamlit. It also protects the rest of the app by checking every screener
 uses the same small contract before the user can run it.
+
+Two patterns are accepted:
+
+1. **Class-based** (preferred). The module defines a `BaseScanner` subclass.
+   The registry finds the class, instantiates it, and pulls metadata from
+   the instance's `SCREENER` dict. New screeners should use this pattern.
+
+2. **Module-based** (legacy). The module exposes `SCREENER`, `run`, and an
+   optional `build_chart` at the top level. The registry still accepts this
+   shape, both for backwards compatibility with older tests and so anyone
+   following the existing pattern is not forced to refactor at once.
+
+Both paths produce the same `ScreenerDefinition` dataclass, so the rest of
+the app (Streamlit UI, tests) does not need to care which style a screener
+used.
 """
 
 import importlib
@@ -15,6 +30,8 @@ from types import ModuleType
 from typing import Callable
 
 import pandas as pd
+
+from backend.scanner_base import BaseScanner
 
 
 # Every screener must include these metadata fields in its SCREENER dict. They
@@ -48,42 +65,104 @@ class ScreenerDefinition:
     build_chart: Callable | None = None
 
 
-def validate_screener_module(module: ModuleType) -> ScreenerDefinition:
-    """Check one Python module and convert it into a ScreenerDefinition."""
-    metadata = getattr(module, "SCREENER", None)
-    if not isinstance(metadata, dict):
-        raise ScreenerRegistryError(f"{module.__name__} must define SCREENER as a dict")
+def _find_scanner_class(module: ModuleType) -> type[BaseScanner] | None:
+    """Return the first `BaseScanner` subclass defined inside `module`, or None.
 
+    Why "defined inside": importing `BaseScanner` into the module's namespace
+    should not make it a screener. We only count classes whose `__module__`
+    matches the file we are inspecting.
+    """
+    for attribute_name, attribute in vars(module).items():
+        if (
+            inspect.isclass(attribute)
+            and issubclass(attribute, BaseScanner)
+            and attribute is not BaseScanner
+            and attribute.__module__ == module.__name__
+        ):
+            return attribute
+    return None
+
+
+def _validate_metadata(metadata: object, module_name: str) -> dict:
+    """Confirm a SCREENER dict has every required key. Raise otherwise."""
+    if not isinstance(metadata, dict):
+        raise ScreenerRegistryError(f"{module_name} must define SCREENER as a dict")
     # Fail fast on missing metadata. This gives a future screener author a clear
     # error message instead of a mysterious Streamlit dropdown failure.
     missing = [key for key in REQUIRED_METADATA_KEYS if key not in metadata]
     if missing:
-        raise ScreenerRegistryError(f"{module.__name__} SCREENER missing: {', '.join(missing)}")
+        raise ScreenerRegistryError(f"{module_name} SCREENER missing: {', '.join(missing)}")
+    return metadata
 
-    run_func = getattr(module, "run", None)
+
+def _validate_run_signature(run_func: object, module_name: str) -> None:
+    """Confirm `run` is callable and takes (universe_df, data_loader, params)."""
     if not callable(run_func):
-        raise ScreenerRegistryError(f"{module.__name__} must define callable run(...)")
+        raise ScreenerRegistryError(f"{module_name} must define callable run(...)")
 
     signature = inspect.signature(run_func)
-    expected = ["universe_df", "data_loader", "params"]
     # The parameter names are part of the teaching/documentation value here:
     # new screeners can copy an existing screener's run(...) signature exactly.
+    # For bound methods, `self` is already excluded from `signature.parameters`.
+    expected = ["universe_df", "data_loader", "params"]
     if list(signature.parameters)[:3] != expected:
         raise ScreenerRegistryError(
-            f"{module.__name__}.run must accept (universe_df, data_loader, params)"
+            f"{module_name}.run must accept (universe_df, data_loader, params)"
         )
 
     return_type = signature.return_annotation
     # We allow no return annotation for convenience, but if one is present it
     # should advertise that the screener returns a pandas DataFrame.
     if return_type not in (inspect.Signature.empty, pd.DataFrame, "pd.DataFrame"):
-        raise ScreenerRegistryError(f"{module.__name__}.run should return a pandas DataFrame")
+        raise ScreenerRegistryError(f"{module_name}.run should return a pandas DataFrame")
 
-    # `build_chart` is purely optional. We do not validate its signature so
-    # screener authors are free to keep it minimal or accept extra kwargs.
-    build_chart_func = getattr(module, "build_chart", None)
-    if build_chart_func is not None and not callable(build_chart_func):
-        raise ScreenerRegistryError(f"{module.__name__}.build_chart must be callable if defined")
+
+def validate_screener_module(module: ModuleType) -> ScreenerDefinition:
+    """Check one Python module and convert it into a ScreenerDefinition.
+
+    Beginner note:
+    Both class-based and module-based screeners pass through this single
+    function. The branch below figures out which style is in use so the rest
+    of the app sees a uniform `ScreenerDefinition` either way.
+    """
+    scanner_class = _find_scanner_class(module)
+    if scanner_class is not None:
+        # ---- Class-based screener (preferred) ----
+        try:
+            instance = scanner_class()
+        except TypeError as exc:
+            # Most likely cause: a subclass forgot to implement compute_signal,
+            # so Python refuses to instantiate the abstract class.
+            raise ScreenerRegistryError(
+                f"{module.__name__}: cannot instantiate {scanner_class.__name__}: {exc}"
+            ) from exc
+
+        metadata = _validate_metadata(getattr(instance, "SCREENER", None), module.__name__)
+        # `run` is a bound method on the instance. Inspect treats it like a
+        # regular callable that drops `self`, so signature validation works.
+        run_func: Callable = instance.run
+        _validate_run_signature(run_func, module.__name__)
+
+        # `build_chart` on `BaseScanner` is always defined (default returns
+        # None). Only register it on the definition if a subclass actually
+        # overrode it, so the UI can keep hiding the chart pane when not needed.
+        if type(instance).build_chart is BaseScanner.build_chart:
+            build_chart_func: Callable | None = None
+        else:
+            build_chart_func = instance.build_chart
+    else:
+        # ---- Legacy module-based screener ----
+        metadata = _validate_metadata(getattr(module, "SCREENER", None), module.__name__)
+        run_func = getattr(module, "run", None)
+        _validate_run_signature(run_func, module.__name__)
+
+        # `build_chart` is purely optional. We do not validate its signature so
+        # screener authors are free to keep it minimal or accept extra kwargs.
+        build_chart_func = getattr(module, "build_chart", None)
+        if build_chart_func is not None and not callable(build_chart_func):
+            raise ScreenerRegistryError(
+                f"{module.__name__}.build_chart must be callable if defined"
+            )
 
     return ScreenerDefinition(
         key=str(metadata["key"]),
