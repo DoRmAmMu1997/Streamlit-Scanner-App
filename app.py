@@ -607,7 +607,15 @@ def _render_verdict_block(verdict: AgentVerdict) -> None:
                 f"  _Evidence:_ {observation.evidence}"
             )
 
+    # Forward outlook (analyst view). Distinct from the criterion-(e) pass/fail —
+    # this is the agent's free-form view on the company's next 1–4 quarters,
+    # informed by recent announcements and (if requested) the concall transcript.
+    if getattr(verdict, "forward_outlook", "").strip():
+        st.markdown("**Forward outlook (analyst view)**")
+        st.info(verdict.forward_outlook)
+
     # Summary callout
+    st.markdown("**Summary**")
     st.info(verdict.summary_comments)
     st.caption(
         f"Data fetched: `{verdict.data_freshness}` · Model: `{verdict.model_used}`"
