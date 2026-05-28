@@ -285,7 +285,7 @@ def test_fundamental_agent_caches_verdict_per_symbol_model_date(tmp_path):
 
     # First call writes to disk
     agent.check("DEMO")
-    cached = cache.get_verdict("DEMO", "test-model", "2026-05-27")
+    cached = cache.get_verdict("DEMO", "test-model::criteria", "2026-05-27")
     assert cached is not None
     assert cached["rating"] == 8
 
@@ -311,7 +311,7 @@ def test_fundamental_agent_force_refresh_invalidates_cache_and_reruns(tmp_path):
 
     # Seed the verdict cache so we can prove force_refresh wipes it.
     agent.check("DEMO")
-    assert cache.get_verdict("DEMO", "test-model", "2026-05-27") is not None
+    assert cache.get_verdict("DEMO", "test-model::criteria", "2026-05-27") is not None
 
     # force_refresh should invalidate the data cache (which triggers a fetch
     # attempt) — we monkey-patch the fetch by writing fresh data back into
@@ -433,3 +433,96 @@ def test_concall_transcript_tool_returns_message_when_no_cache(tmp_path):
     tool = agent._build_transcript_tool()
     text = tool.invoke({"symbol": "UNCACHED"})
     assert "fetch_company_data" in text
+
+
+# ---------------------------------------------------------------------------
+# Job 5: insights-only mode + AgentVerdict.mode field
+# ---------------------------------------------------------------------------
+
+
+def test_agent_verdict_accepts_insights_only_mode_with_empty_criteria():
+    """The schema must allow a verdict with mode='insights_only' and an empty
+    criteria breakdown — that's the standard insights-only output shape."""
+    verdict = AgentVerdict(
+        symbol="OUTSIDE",
+        mode="insights_only",
+        rating=7,
+        # Defaults: passed_criteria_count=0, criteria_breakdown=[].
+        additional_observations=[],
+        summary_comments="Strong fundamentals; insights-only assessment.",
+        data_freshness="2026-05-27T00:00:00+00:00",
+        model_used="test-model",
+    )
+    assert verdict.mode == "insights_only"
+    assert verdict.criteria_breakdown == []
+    assert verdict.passed_criteria_count == 0
+
+
+def test_agent_verdict_default_mode_is_criteria_for_backward_compat():
+    """Pre-Job-5 verdicts (no `mode` in the dict) should validate to 'criteria'."""
+    verdict = AgentVerdict.model_validate(
+        {
+            "symbol": "LEGACY",
+            "rating": 8,
+            "passed_criteria_count": 7,
+            "criteria_breakdown": [],
+            "additional_observations": [],
+            "summary_comments": "ok",
+            "data_freshness": "2026-01-01",
+            "model_used": "m",
+        }
+    )
+    assert verdict.mode == "criteria"
+
+
+def test_fundamental_agent_check_insights_mode_enforces_invariants(tmp_path):
+    """Running in insights_only mode produces a verdict with empty criteria
+    breakdown AND passed_criteria_count=0, even if the LLM returns otherwise."""
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("OUTSIDE", _sample_screener_data())
+
+    # The LLM returns a verdict that DOES include criteria — the agent's
+    # _normalize_verdict must override it because the call is insights-only.
+    polluted = _sample_verdict()  # has criteria_breakdown with 7 entries
+    fake_llm = _FakeLLM(polluted)
+
+    agent = FundamentalAgent(
+        api_key="test-key",
+        model="test-model",
+        cache=cache,
+        llm=fake_llm,  # type: ignore[arg-type]
+    )
+    verdict = agent.check("OUTSIDE", mode="insights_only")
+
+    assert verdict.mode == "insights_only"
+    assert verdict.criteria_breakdown == []
+    assert verdict.passed_criteria_count == 0
+    # Rating and observations survive — they're independent of the mode override.
+    assert verdict.rating == polluted.rating
+
+
+def test_fundamental_agent_verdict_cache_keys_by_mode(tmp_path):
+    """Criteria-mode and insights-only verdicts for the same symbol must NOT
+    overwrite each other in the cache."""
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("BOTH", _sample_screener_data())
+
+    fake_llm = _FakeLLM(_sample_verdict())
+    agent = FundamentalAgent(
+        api_key="test-key",
+        model="test-model",
+        cache=cache,
+        llm=fake_llm,  # type: ignore[arg-type]
+    )
+
+    criteria_verdict = agent.check("BOTH", mode="criteria")
+    insights_verdict = agent.check("BOTH", mode="insights_only")
+
+    # Two distinct cache files should exist for the same symbol + model + date.
+    cached_criteria = cache.get_verdict("BOTH", "test-model::criteria", "2026-05-27")
+    cached_insights = cache.get_verdict("BOTH", "test-model::insights_only", "2026-05-27")
+    assert cached_criteria is not None
+    assert cached_insights is not None
+    assert cached_criteria["mode"] == "criteria"
+    assert cached_insights["mode"] == "insights_only"
+    assert cached_insights["criteria_breakdown"] == []

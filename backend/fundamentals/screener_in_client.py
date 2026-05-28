@@ -171,6 +171,52 @@ def _find_top_ratio(soup: BeautifulSoup, label: str) -> float | None:
     return None
 
 
+def _find_median_pe(soup: BeautifulSoup, ratios_yearly: list[dict[str, str]] | None = None) -> float | None:
+    """Return the stock's own median P/E from screener.in, or None if unavailable.
+
+    The agent uses this as the preferred reference for valuation observations
+    (current P/E vs the stock's own historical median). When this returns
+    None the agent falls back to industry_pe.
+
+    screener.in exposes median P/E in two common shapes — we try both:
+      1. A row in the top-ratios card labelled with a `median` variant
+         (e.g., "Median P/E", "Stock P/E (Median)", "5Y Median P/E"). The
+         existing `_find_top_ratio` helper handles label matching.
+      2. A row inside the yearly `ratios` table whose first column is
+         "Stock P/E" / "PE" / "P/E". When the explicit median row is
+         absent, take the median of the non-NaN numeric cells from that
+         row — that mirrors what the on-page chart would show.
+    """
+    # Strategy 1: explicit median-P/E label in the top-ratios card.
+    for label in ("Median P/E", "Median PE", "Stock P/E (Median)", "5Y Median P/E", "PE Median"):
+        value = _find_top_ratio(soup, label)
+        if value is not None:
+            return value
+
+    # Strategy 2: median of the P/E row in the yearly ratios table.
+    if ratios_yearly:
+        for label in ("Stock P/E", "P/E", "PE"):
+            row = _find_row_by_label(ratios_yearly, label)
+            if not row:
+                continue
+            values: list[float] = []
+            for index, cell in enumerate(row.values()):
+                if index == 0:
+                    # First cell is the row label, not a value.
+                    continue
+                parsed = _to_number(cell)
+                if parsed is not None:
+                    values.append(parsed)
+            if values:
+                values.sort()
+                middle = len(values) // 2
+                if len(values) % 2 == 1:
+                    return values[middle]
+                return (values[middle - 1] + values[middle]) / 2.0
+
+    return None
+
+
 def _find_pros_cons(soup: BeautifulSoup) -> dict[str, list[str]]:
     """Return the pros/cons bullets screener.in shows at the top of the page.
 
@@ -629,6 +675,10 @@ def _parse_company_page(
         "roe_ttm": _find_top_ratio(soup, "ROE"),
         "face_value": _find_top_ratio(soup, "Face Value"),
         "industry_pe": _find_top_ratio(soup, "Industry P/E"),
+        # The stock's own median P/E (preferred valuation anchor). Falls back
+        # to None when screener.in doesn't expose it cleanly; the agent then
+        # uses industry_pe as a fallback in its valuation observation.
+        "median_pe": _find_median_pe(soup, ratios_yearly),
         "promoter_holding_latest": _find_top_ratio(soup, "Promoter holding"),
         # Latest annual values (used by deterministic criteria + agent reasoning)
         "latest_revenue": _latest(revenue_history),
