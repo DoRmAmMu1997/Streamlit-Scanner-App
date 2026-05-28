@@ -99,9 +99,27 @@ class AgentVerdict(BaseModel):
     `passed_criteria_count` — those would emit those properties into the
     schema and trigger a 400. Instead, the `@field_validator` decorators
     below run at parse time without polluting the JSON schema.
+
+    Note on `mode`:
+    The agent runs in one of two modes depending on whether the stock is
+    in the user's curated universe:
+    - `criteria` (Hemant Super 45 ∪ Nifty 100): apply the seven user-defined
+      criteria + observations + forward outlook + holistic rating.
+    - `insights_only` (every other stock): skip the criteria checklist,
+      leave `criteria_breakdown` empty and `passed_criteria_count=0`. Still
+      produce additional observations, forward outlook, summary, and the
+      same 0-10 holistic rating.
     """
 
     symbol: str
+    mode: Literal["criteria", "insights_only"] = Field(
+        default="criteria",
+        description=(
+            "Which evaluation mode was used. 'criteria' fills the criteria "
+            "breakdown; 'insights_only' leaves it empty because the stock is "
+            "outside the user's curated universe."
+        ),
+    )
     rating: int = Field(
         description=(
             "Holistic 0-10 fundamental rating reflecting the agent's expert "
@@ -109,11 +127,19 @@ class AgentVerdict(BaseModel):
         ),
     )
     passed_criteria_count: int = Field(
-        description="How many of the seven user-defined criteria the stock passes.",
+        default=0,
+        description=(
+            "How many of the seven user-defined criteria the stock passes. "
+            "Always 0 in insights_only mode (the criteria are not evaluated)."
+        ),
     )
     total_criteria: int = Field(default=7)
     criteria_breakdown: list[CriterionResult] = Field(
-        description="One CriterionResult per user-defined criterion (all seven)."
+        default_factory=list,
+        description=(
+            "One CriterionResult per user-defined criterion in 'criteria' "
+            "mode. Empty list in 'insights_only' mode."
+        ),
     )
     additional_observations: list[Observation] = Field(
         description=(
@@ -226,8 +252,21 @@ When asked to evaluate a stock:
 
 3. BEYOND the seven criteria, identify 4-8 ADDITIONAL fundamental
    dimensions you consider most relevant for THIS specific company.
-   Examples (pick what fits — don't be exhaustive, and don't repeat the
-   seven):
+
+   ONE of these observations MUST be a Valuation observation. When
+   forming it, ALWAYS compare the current P/E (`pe` field) to:
+     a. The stock's own median P/E (`median_pe` field) if present, OR
+     b. The industry P/E (`industry_pe` field) as a fallback.
+   State the premium or discount in plain terms — e.g., "Trading at a
+   22% premium to its 5-year median P/E of 18.3", or "Trading at a 30%
+   discount to industry P/E of 25". Mark the sentiment as positive when
+   the stock is cheap relative to its own history (or industry), negative
+   when stretched, neutral when broadly in line. If neither median_pe
+   nor industry_pe is available, say so explicitly and explain the
+   limitation.
+
+   Examples for the OTHER additional observations (pick what fits —
+   don't be exhaustive, and don't repeat the seven):
    - Margin trend (operating / net) over 3-5 years
    - Capital allocation: dividend payout, buybacks, capex intensity
    - Working-capital quality: receivables, inventory days
@@ -269,6 +308,36 @@ schema.
 Note on tool calls: this agent is configured for tool-calling models. The
 default OpenRouter model (anthropic/claude-sonnet-4.5) supports this. If
 you cannot call tools, abort and explain the constraint to the user."""
+
+
+# Appended to the system prompt when the agent is invoked in insights-only
+# mode. The base prompt above tells the agent to apply the seven criteria;
+# this addendum overrides step 2 and adjusts the AgentVerdict requirements
+# so an insights-only stock never gets a misleading 0/7 criteria score.
+_INSIGHTS_ONLY_PROMPT_ADDENDUM = """\
+
+============================================================
+MODE OVERRIDE: insights_only
+============================================================
+
+This stock is OUTSIDE the user's curated universe (Hemant Super 45 +
+Nifty 100), so the seven user-defined criteria DO NOT apply.
+
+What changes:
+- SKIP step 2 entirely. Do not evaluate any of the seven criteria.
+- In your AgentVerdict, set `mode = "insights_only"`,
+  `criteria_breakdown = []` (empty list), and `passed_criteria_count = 0`.
+
+What stays the same:
+- Steps 1, 3, 4, 5, 6 still apply. Fetch the data once, do 4-8
+  additional observations (including the mandatory Valuation comparison),
+  synthesize a holistic 0-10 rating from screener.in data alone, write
+  a 3-6 sentence summary, and produce the forward outlook.
+
+The rating is your standalone analyst judgment based on what the
+fundamentals look like — there is no checklist anchor. Mention in
+`summary_comments` that this is an insights-only assessment because the
+stock is outside the curated universe."""
 
 
 # ---------------------------------------------------------------------------
@@ -434,8 +503,20 @@ class FundamentalAgent:
             self._mutable_state = state
         return state
 
-    def check(self, symbol: str, *, force_refresh: bool = False) -> AgentVerdict:
-        """Run the agent and return a verdict, hitting the cache when possible."""
+    def check(
+        self,
+        symbol: str,
+        *,
+        force_refresh: bool = False,
+        mode: Literal["criteria", "insights_only"] = "criteria",
+    ) -> AgentVerdict:
+        """Run the agent and return a verdict, hitting the cache when possible.
+
+        Pass `mode="insights_only"` for stocks outside the user's curated
+        universe (Hemant Super 45 ∪ Nifty 100). In that mode the agent
+        skips the 7-criteria checklist and produces observations + forward
+        outlook + holistic rating only.
+        """
         if not symbol or not str(symbol).strip():
             raise ValueError("FundamentalAgent.check: symbol must be a non-empty string")
         normalized = str(symbol).strip().upper()
@@ -446,11 +527,14 @@ class FundamentalAgent:
             self._cache.invalidate(normalized)
 
         # 1. Try the verdict cache first (free re-clicks on the same day).
+        # The cache key includes the mode so a criteria-mode cached verdict
+        # never gets returned for an insights-only request (and vice versa).
         if not force_refresh:
             data_for_key = self._cache.get_data(normalized)
             if data_for_key is not None:
                 data_date = _data_date_from_payload(data_for_key)
-                cached_verdict = self._cache.get_verdict(normalized, self._model, data_date)
+                cache_key_model = f"{self._model}::{mode}"
+                cached_verdict = self._cache.get_verdict(normalized, cache_key_model, data_date)
                 if cached_verdict is not None:
                     return AgentVerdict.model_validate(cached_verdict)
 
@@ -465,18 +549,23 @@ class FundamentalAgent:
             transcript_tool.name: transcript_tool,
         }
         llm_with_tools = self._llm.bind_tools(list(tools_by_name.values()))
+        # The system prompt is mode-aware: insights_only appends an override
+        # that tells the agent to skip the seven-criteria checklist while
+        # still producing observations, rating, summary, and forward outlook.
+        system_prompt = SYSTEM_PROMPT
+        if mode == "insights_only":
+            system_prompt = SYSTEM_PROMPT + _INSIGHTS_ONLY_PROMPT_ADDENDUM
+        user_intent = (
+            f"Evaluate the fundamentals of NSE stock '{normalized}'. "
+            f"You are running in mode='{mode}'. Call fetch_company_data once. "
+            "If the structured data and recent announcements are sufficient, "
+            "skip the concall transcript tool; otherwise call it once to inform "
+            "your forward outlook. Then produce the AgentVerdict per the system "
+            "prompt."
+        )
         messages = [
-            SystemMessage(content=SYSTEM_PROMPT),
-            HumanMessage(
-                content=(
-                    f"Evaluate the fundamentals of NSE stock '{normalized}'. "
-                    "Call fetch_company_data once. If the structured data and "
-                    "recent announcements are sufficient, skip the concall "
-                    "transcript tool; otherwise call it once to inform your "
-                    "forward outlook. Then produce the AgentVerdict per the "
-                    "system prompt."
-                )
-            ),
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_intent),
         ]
 
         for turn in range(self.MAX_TURNS):
@@ -518,23 +607,32 @@ class FundamentalAgent:
             HumanMessage(
                 content=(
                     "Now output the final AgentVerdict JSON. The symbol is "
-                    f"'{normalized}' and the model is '{self._model}'. "
-                    "Populate data_freshness from the screener.in fetched_at "
-                    "field if available."
+                    f"'{normalized}', the model is '{self._model}', and the "
+                    f"mode is '{mode}'. Populate data_freshness from the "
+                    "screener.in fetched_at field if available. "
+                    + (
+                        "In insights_only mode you MUST leave criteria_breakdown "
+                        "as [] and passed_criteria_count as 0."
+                        if mode == "insights_only"
+                        else "In criteria mode populate criteria_breakdown with "
+                        "all seven CriterionResult entries."
+                    )
                 )
             )
         ]
         verdict_raw = structuring_llm.invoke(structuring_messages)
 
-        verdict = self._normalize_verdict(verdict_raw, symbol=normalized)
+        verdict = self._normalize_verdict(verdict_raw, symbol=normalized, mode=mode)
 
         # 4. Persist the verdict to the cache so the next click is instant.
+        # Cache key includes the mode so criteria-mode and insights-only runs
+        # for the same symbol do not collide.
         data_payload = self._cache.get_data(normalized)
         data_date = _data_date_from_payload(data_payload or {})
         try:
             self._cache.set_verdict(
                 normalized,
-                self._model,
+                f"{self._model}::{mode}",
                 data_date,
                 verdict.model_dump(mode="json"),
             )
@@ -543,12 +641,21 @@ class FundamentalAgent:
 
         return verdict
 
-    def _normalize_verdict(self, raw: Any, *, symbol: str) -> AgentVerdict:
+    def _normalize_verdict(
+        self,
+        raw: Any,
+        *,
+        symbol: str,
+        mode: Literal["criteria", "insights_only"] = "criteria",
+    ) -> AgentVerdict:
         """Ensure the model's structured output is a valid AgentVerdict.
 
         `with_structured_output` typically returns the Pydantic instance
         directly, but if a custom or older model returns a dict (or the
-        structuring failed), this helper coerces it sensibly.
+        structuring failed), this helper coerces it sensibly. It also
+        enforces the mode invariants — insights_only verdicts always have
+        empty criteria + zero passed count, regardless of what the LLM
+        emitted, so a misbehaving model can't pollute the UI.
         """
         if isinstance(raw, AgentVerdict):
             verdict = raw
@@ -559,14 +666,17 @@ class FundamentalAgent:
                 f"Agent returned an unexpected output type: {type(raw).__name__}"
             )
 
-        # Stamp model + symbol defensively — some models forget to fill them.
-        updates: dict[str, Any] = {}
+        # Stamp model + symbol + mode defensively — some models forget to fill them.
+        updates: dict[str, Any] = {"mode": mode}
         if not verdict.symbol:
             updates["symbol"] = symbol
         if not verdict.model_used:
             updates["model_used"] = self._model
         if not verdict.data_freshness:
             updates["data_freshness"] = datetime.now(UTC).isoformat()
-        if updates:
-            verdict = verdict.model_copy(update=updates)
+        # Enforce mode invariants: insights_only never carries criteria data.
+        if mode == "insights_only":
+            updates["criteria_breakdown"] = []
+            updates["passed_criteria_count"] = 0
+        verdict = verdict.model_copy(update=updates)
         return verdict
