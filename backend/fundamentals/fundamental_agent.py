@@ -431,6 +431,16 @@ _DEFAULT_HEADERS = {
     "X-Title": "Hemant Scanner - Fundamental Check",
 }
 
+# Cap the model's output tokens. Without an explicit value, OpenRouter
+# pre-authorizes credits for the model's FULL output capacity (64K tokens for
+# Claude Sonnet 4.5) before running the request — which 402s with
+# "requires more credits, or fewer max_tokens" once the key balance dips below
+# that worst-case reservation. A structured AgentVerdict is only ~2-3K output
+# tokens, so 16K is generous headroom while keeping the per-call reservation
+# (and cost) well within a modest key balance. This only caps OUTPUT; reading
+# concall transcripts is input and is unaffected.
+_MAX_OUTPUT_TOKENS = 16000
+
 
 def _data_date_from_payload(data: dict[str, Any]) -> str:
     """Return YYYY-MM-DD of when the data was fetched, for the verdict cache key."""
@@ -477,6 +487,9 @@ class FundamentalAgent:
             base_url=_OPENROUTER_BASE_URL,
             api_key=api_key,
             temperature=self.TEMPERATURE,
+            # See _MAX_OUTPUT_TOKENS: keeps OpenRouter's pre-flight credit
+            # reservation small so a modest key balance doesn't 402.
+            max_tokens=_MAX_OUTPUT_TOKENS,
             default_headers=_DEFAULT_HEADERS,
             timeout=60,
             max_retries=2,

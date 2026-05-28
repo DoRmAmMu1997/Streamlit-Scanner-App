@@ -14,6 +14,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from backend.fundamentals.fundamental_agent import (
+    _MAX_OUTPUT_TOKENS,
     AgentVerdict,
     CriterionResult,
     ForwardOutlook,
@@ -328,6 +329,25 @@ def test_fundamental_agent_force_refresh_invalidates_cache_and_reruns(tmp_path):
 def test_fundamental_agent_requires_api_key():
     with pytest.raises(ValueError):
         FundamentalAgent(api_key="", model="test-model")
+
+
+def test_fundamental_agent_caps_output_tokens(tmp_path):
+    """The real ChatOpenAI client must be built with a bounded max_tokens.
+
+    Without this cap OpenRouter pre-authorizes credits for the model's full
+    output capacity (64K for Claude Sonnet 4.5) and returns HTTP 402 once the
+    key balance dips below that worst-case reservation. Building the agent
+    WITHOUT an injected llm constructs the real client; we assert the cap is
+    wired through. (Construction makes no network call.)
+    """
+    assert _MAX_OUTPUT_TOKENS == 16000
+
+    agent = FundamentalAgent(
+        api_key="test-key",
+        model="anthropic/claude-sonnet-4.5",
+        cache=FundamentalsCache(cache_dir=tmp_path),
+    )
+    assert agent._llm.max_tokens == _MAX_OUTPUT_TOKENS
 
 
 def test_fundamental_agent_normalize_verdict_fills_blank_fields(tmp_path):
