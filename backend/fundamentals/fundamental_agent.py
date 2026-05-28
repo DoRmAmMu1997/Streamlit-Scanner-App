@@ -73,6 +73,51 @@ class CriterionResult(BaseModel):
     )
 
 
+class ForwardOutlook(BaseModel):
+    """Three-part structured forward outlook produced by the agent.
+
+    Each subsection corresponds to a specific data source so the UI can
+    render the analysis with clear provenance:
+
+    - `announcements_conclusion` is sourced from the recent corporate
+      Announcements (always available in the base payload).
+    - `concall_conclusion` is sourced from the most recent quarterly
+      Concall transcript and stays empty when the agent did not call the
+      `read_recent_concall_transcript` tool — the agent must NOT speculate
+      about transcript contents it never read.
+    - `overall_summary` is the agent's integrated view that ties both
+      signals plus broader sector knowledge into a forward projection.
+    """
+
+    announcements_conclusion: str = Field(
+        default="",
+        description=(
+            "One medium-length paragraph on what the recent corporate "
+            "Announcements signal about the company's direction. Cite "
+            "specific announcement items where useful. Empty only when the "
+            "`announcements` array in the source data is genuinely empty."
+        ),
+    )
+    concall_conclusion: str = Field(
+        default="",
+        description=(
+            "One medium-length paragraph on what the most recent quarterly "
+            "Concall transcript revealed about management commentary, "
+            "guidance, deal pipeline, capex plans, or sector outlook. Leave "
+            "empty if the read_recent_concall_transcript tool was not called "
+            "for this evaluation."
+        ),
+    )
+    overall_summary: str = Field(
+        default="",
+        description=(
+            "One medium-length paragraph giving the integrated forward view "
+            "for the next 1-4 quarters, combining the announcements signal, "
+            "the concall signal, and the agent's broader sector knowledge."
+        ),
+    )
+
+
 class Observation(BaseModel):
     """A fundamental dimension the agent chose to analyse beyond the seven criteria."""
 
@@ -148,16 +193,16 @@ class AgentVerdict(BaseModel):
         ),
     )
     summary_comments: str = Field(
-        description="3-6 sentence plain-English explanation of the rating."
+        description="One medium-length paragraph, in plain English, explaining the rating."
     )
-    forward_outlook: str = Field(
-        default="",
+    forward_outlook: ForwardOutlook = Field(
+        default_factory=ForwardOutlook,
         description=(
-            "5-10 sentence forward-looking view on where the company is headed "
-            "over the next 1-4 quarters. Informed by the most recent corporate "
-            "announcements and (if the read_recent_concall_transcript tool was "
-            "called) the latest concall transcript. Distinct from criterion (e) "
-            "which is a pass/fail; this is the standalone analyst opinion."
+            "Three-part forward-looking view: announcements_conclusion, "
+            "concall_conclusion, overall_summary. Empty subsections are "
+            "acceptable when the underlying source data is not available "
+            "(e.g. empty concall_conclusion when the transcript tool was "
+            "not invoked). Distinct from criterion (e) which is pass/fail."
         ),
     )
     data_freshness: str = Field(
@@ -184,6 +229,22 @@ class AgentVerdict(BaseModel):
             raise ValueError(
                 f"passed_criteria_count must be between 0 and 7 inclusive, got {value}"
             )
+        return value
+
+    @field_validator("forward_outlook", mode="before")
+    @classmethod
+    def _migrate_legacy_string_outlook(cls, value: Any) -> Any:
+        """Promote pre-Job-6 string verdicts into the new ForwardOutlook shape.
+
+        Before this revision, `forward_outlook` was a free-form string. Cached
+        verdicts on disk still carry that shape — if we changed the schema
+        without this shim, every old JSON file would fail validation and the
+        UI would discard the entire cached verdict. Putting the legacy string
+        into `overall_summary` keeps existing caches readable while the new
+        three-part shape becomes the default going forward.
+        """
+        if isinstance(value, str):
+            return {"overall_summary": value}
         return value
 
 
@@ -289,17 +350,34 @@ When asked to evaluate a stock:
    best-in-class compounders; 0-3 for businesses with serious red flags;
    4-6 for average; 7-8 for high-quality with minor concerns.
 
-5. Write a 3-6 sentence summary_comments field that explains the rating
-   in plain English. Mention both the strongest positives and the most
-   important concerns.
+5. Write a `summary_comments` field — one medium-length paragraph, in
+   plain English, that explains the rating. Mention both the strongest
+   positives and the most important concerns.
 
-6. Write a `forward_outlook` field of 5-10 sentences that integrates the
-   recent announcements (always available in the base payload) and, when
-   you fetched it, the concall transcript. This is your standalone view
-   on where the company is headed in the next 1-4 quarters. Reference
-   specific guidance, deal pipelines, capex plans, sector trends, or
-   regulatory shifts when they appear in the source material. Avoid
-   generic statements that could apply to any company in the sector.
+6. Write a STRUCTURED `forward_outlook` object with THREE string
+   subfields. Treat them as three short paragraphs that appear in this
+   exact order in the rendered verdict:
+
+   a. `announcements_conclusion` — one medium-length paragraph. What do
+      the recent corporate Announcements tell you about the company's
+      direction? Cite specific items where useful (e.g. "Won a $200M
+      cloud modernization deal in Apr 2026 — confirms enterprise demand
+      strength"). Leave empty only if the `announcements` array is
+      genuinely empty in the source data.
+
+   b. `concall_conclusion` — one medium-length paragraph. What did the
+      most recent quarterly concall transcript reveal? Management
+      guidance, deal pipeline, capex plans, sector commentary. If you
+      did NOT call the `read_recent_concall_transcript` tool, leave this
+      empty — never speculate about transcript contents you have not read.
+
+   c. `overall_summary` — one medium-length paragraph. Integrate both
+      subsections above plus your broader sector knowledge to project
+      the next 1-4 quarters. This is the standalone analyst view on
+      where the company is headed.
+
+   Each subsection should be SPECIFIC to this company. Avoid generic
+   sector commentary that could apply to any peer.
 
 When you are ready, return your answer as a single AgentVerdict object.
 Never write free-form text in your final answer — only the structured
@@ -332,7 +410,8 @@ What stays the same:
 - Steps 1, 3, 4, 5, 6 still apply. Fetch the data once, do 4-8
   additional observations (including the mandatory Valuation comparison),
   synthesize a holistic 0-10 rating from screener.in data alone, write
-  a 3-6 sentence summary, and produce the forward outlook.
+  a 3-6 sentence summary, and produce the three-part `forward_outlook`
+  object (announcements_conclusion, concall_conclusion, overall_summary).
 
 The rating is your standalone analyst judgment based on what the
 fundamentals look like — there is no checklist anchor. Mention in

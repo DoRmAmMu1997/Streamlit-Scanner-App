@@ -5,13 +5,14 @@ Public surface:
 - `FundamentalsCache` — on-disk JSON cache for fetched data and agent verdicts.
 - `FundamentalAgent` — LangChain agent that applies the user's seven criteria
   plus its own qualitative analysis and returns an `AgentVerdict`.
-- `AgentVerdict` / `CriterionResult` / `Observation` — Pydantic schemas used
-  by the agent's structured output.
+- `AgentVerdict` / `CriterionResult` / `Observation` / `ForwardOutlook` —
+  Pydantic schemas used by the agent's structured output.
 """
 
 from backend.fundamentals.fundamental_agent import (
     AgentVerdict,
     CriterionResult,
+    ForwardOutlook,
     FundamentalAgent,
     Observation,
 )
@@ -24,6 +25,7 @@ from backend.fundamentals.screener_in_client import (
 __all__ = [
     "AgentVerdict",
     "CriterionResult",
+    "ForwardOutlook",
     "FundamentalAgent",
     "FundamentalsCache",
     "Observation",
