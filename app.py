@@ -473,20 +473,37 @@ def _get_fundamental_agent(api_key: str, model: str) -> FundamentalAgent:
 def _render_fundamentals_panel(symbol: str | None) -> None:
     """Render the per-stock Check Fundamentals section under the chart.
 
-    Stays hidden when:
-      - no symbol is selected,
-      - the symbol is not in Hemant Super 45 ∪ Nifty 100, OR
-      - OPENROUTER_API_KEY is not configured (shows guidance text instead).
+    The button is now visible for ANY selected symbol — eligibility just
+    determines which mode the agent runs in:
+      - Hemant Super 45 ∪ Nifty 100 symbols → criteria mode (full 7-criteria
+        evaluation + observations + outlook + rating).
+      - Anything else → insights_only mode (skip the seven criteria,
+        produce observations + outlook + rating from screener.in data).
+
+    Stays hidden only when no symbol is selected. Shows an informational
+    notice instead of the button when OPENROUTER_API_KEY isn't configured.
     """
-    if not symbol or not _is_eligible_for_fundamentals(symbol):
+    if not symbol:
         return
+
+    # Mode is symbol-deterministic: HS45/N100 → criteria, everything else
+    # → insights_only. The button label and behavior adapt accordingly.
+    mode = "criteria" if _is_eligible_for_fundamentals(symbol) else "insights_only"
 
     st.divider()
     st.subheader("Fundamentals")
-    st.caption(
-        "AI agent applies the seven user-defined criteria, adds its own "
-        "expert observations, and produces a holistic 0–10 rating."
-    )
+    if mode == "criteria":
+        st.caption(
+            "AI agent applies the seven user-defined criteria, adds its own "
+            "expert observations, and produces a holistic 0–10 rating."
+        )
+    else:
+        st.caption(
+            f"**Insights-only mode** — `{symbol}` is outside Hemant Super 45 / "
+            "Nifty 100, so the seven user-defined criteria are not applied. "
+            "The agent still produces a holistic rating, observations, and "
+            "forward outlook from screener.in data."
+        )
 
     creds = get_openrouter_credentials(required=False)
     if creds is None:
@@ -497,7 +514,9 @@ def _render_fundamentals_panel(symbol: str | None) -> None:
         )
         return
 
-    session_key = f"fundamentals_verdict::{symbol}::{creds.model}"
+    # Session-state cache key is now mode-qualified so a criteria-mode and an
+    # insights-only verdict for the same symbol cannot collide.
+    session_key = f"fundamentals_verdict::{symbol}::{creds.model}::{mode}"
     cached_verdict_dict = st.session_state.get(session_key)
 
     button_col, rerun_col, _spacer = st.columns([2, 1, 2])
@@ -509,14 +528,14 @@ def _render_fundamentals_panel(symbol: str | None) -> None:
     run_now = button_col.button(
         primary_label,
         type="primary",
-        key=f"check_fund_btn::{symbol}::{creds.model}",
+        key=f"check_fund_btn::{symbol}::{creds.model}::{mode}",
         disabled=cached_verdict_dict is not None,
     )
     rerun_now = False
     if cached_verdict_dict is not None:
         rerun_now = rerun_col.button(
             "Re-run analysis",
-            key=f"rerun_fund_btn::{symbol}::{creds.model}",
+            key=f"rerun_fund_btn::{symbol}::{creds.model}::{mode}",
             help="Bypass the cache and re-fetch screener.in + re-query the LLM.",
         )
 
@@ -530,7 +549,7 @@ def _render_fundamentals_panel(symbol: str | None) -> None:
 
         with st.spinner(f"Senior analyst evaluating **{symbol}** — this can take 20–60s..."):
             try:
-                verdict = agent.check(symbol, force_refresh=rerun_now)
+                verdict = agent.check(symbol, force_refresh=rerun_now, mode=mode)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Fundamental agent failed for %s", symbol)
                 st.error(f"Fundamental check failed: {_redact_secrets(str(exc))}")
@@ -555,25 +574,47 @@ def _render_fundamentals_panel(symbol: str | None) -> None:
 
 
 def _render_verdict_block(verdict: AgentVerdict) -> None:
-    """Render the rating metric + criteria table + observations + summary."""
-    # Headline numbers
-    metric_cols = st.columns([1, 1, 2])
-    metric_cols[0].metric(
-        "Fundamental rating",
-        f"{verdict.rating}/10",
-        help="Holistic expert judgment — NOT a count of passed criteria.",
-    )
-    metric_cols[1].metric(
-        "Criteria passed",
-        f"{verdict.passed_criteria_count} / {verdict.total_criteria}",
-    )
-    metric_cols[2].metric(
-        "Model",
-        verdict.model_used.split("/")[-1] if "/" in verdict.model_used else verdict.model_used,
-    )
+    """Render the rating metric + criteria table + observations + summary.
 
-    # Criteria breakdown table
-    st.markdown("**Criteria breakdown**")
+    Behavior depends on the verdict's mode:
+    - "criteria" (HS45 ∪ N100): full output — rating, "criteria passed
+      X/Y", criteria-breakdown table, observations, forward outlook,
+      summary.
+    - "insights_only" (any other stock): rating + observations + forward
+      outlook + summary. The "criteria passed" metric and the breakdown
+      table are hidden because the seven criteria were not evaluated.
+    """
+    is_criteria_mode = getattr(verdict, "mode", "criteria") == "criteria"
+
+    # Headline numbers: the criteria-passed metric only appears in criteria mode.
+    if is_criteria_mode:
+        metric_cols = st.columns([1, 1, 2])
+        metric_cols[0].metric(
+            "Fundamental rating",
+            f"{verdict.rating}/10",
+            help="Holistic expert judgment — NOT a count of passed criteria.",
+        )
+        metric_cols[1].metric(
+            "Criteria passed",
+            f"{verdict.passed_criteria_count} / {verdict.total_criteria}",
+        )
+        metric_cols[2].metric(
+            "Model",
+            verdict.model_used.split("/")[-1] if "/" in verdict.model_used else verdict.model_used,
+        )
+    else:
+        metric_cols = st.columns([1, 2])
+        metric_cols[0].metric(
+            "Fundamental rating",
+            f"{verdict.rating}/10",
+            help="Insights-only mode: standalone analyst judgment, no criteria checklist.",
+        )
+        metric_cols[1].metric(
+            "Model",
+            verdict.model_used.split("/")[-1] if "/" in verdict.model_used else verdict.model_used,
+        )
+
+    # Criteria breakdown table (criteria mode only; hidden when empty)
     breakdown_rows = [
         {
             "Criterion": criterion.name,
@@ -584,7 +625,8 @@ def _render_verdict_block(verdict: AgentVerdict) -> None:
         }
         for criterion in verdict.criteria_breakdown
     ]
-    if breakdown_rows:
+    if is_criteria_mode and breakdown_rows:
+        st.markdown("**Criteria breakdown**")
         st.dataframe(
             pd.DataFrame(breakdown_rows),
             width="stretch",

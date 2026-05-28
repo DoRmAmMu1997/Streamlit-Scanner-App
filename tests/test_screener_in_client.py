@@ -498,3 +498,57 @@ def test_extract_concalls_caps_at_limit():
     soup = BeautifulSoup(html, "lxml")
     rows = _extract_concalls(soup, limit=8)
     assert len(rows) == 8
+
+
+# ---------------------------------------------------------------------------
+# Job 5: median P/E parsing
+# ---------------------------------------------------------------------------
+
+
+def test_find_median_pe_picks_explicit_label_from_top_ratios():
+    from bs4 import BeautifulSoup
+    from backend.fundamentals.screener_in_client import _find_median_pe
+
+    html = """
+    <html><body>
+      <ul id="top-ratios">
+        <li><span class="name">Stock P/E</span><span class="number">25.40</span></li>
+        <li><span class="name">Median P/E</span><span class="number">18.75</span></li>
+        <li><span class="name">Industry P/E</span><span class="number">22.10</span></li>
+      </ul>
+    </body></html>
+    """
+    soup = BeautifulSoup(html, "lxml")
+    assert _find_median_pe(soup) == pytest.approx(18.75)
+
+
+def test_find_median_pe_computes_median_from_ratios_table_when_top_label_missing():
+    """No explicit median-P/E label, but the ratios table has a 'Stock P/E' row.
+    The helper should compute the median of its yearly values."""
+    from bs4 import BeautifulSoup
+    from backend.fundamentals.screener_in_client import _find_median_pe
+
+    soup = BeautifulSoup("<html><body></body></html>", "lxml")
+    ratios_yearly = [
+        # First column is the label; remaining cells are yearly values.
+        {"0": "Stock P/E", "1": "10", "2": "15", "3": "20", "4": "25", "5": "30"},
+    ]
+    # Median of [10, 15, 20, 25, 30] is 20.
+    assert _find_median_pe(soup, ratios_yearly) == pytest.approx(20.0)
+
+
+def test_find_median_pe_returns_none_when_unavailable():
+    from bs4 import BeautifulSoup
+    from backend.fundamentals.screener_in_client import _find_median_pe
+
+    soup = BeautifulSoup("<html><body><p>No ratios here.</p></body></html>", "lxml")
+    assert _find_median_pe(soup) is None
+    assert _find_median_pe(soup, []) is None
+    # Ratios table without a P/E row → still None.
+    assert _find_median_pe(soup, [{"0": "ROCE", "1": "12", "2": "14"}]) is None
+
+
+def test_parse_company_page_payload_includes_median_pe_field():
+    """After Job 5 the parsed payload always includes a `median_pe` key (may be None)."""
+    payload = _parse_company_page(_DEMO_HTML, symbol="DEMO", source_url="http://test/demo")
+    assert "median_pe" in payload
