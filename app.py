@@ -651,10 +651,32 @@ def _render_verdict_block(verdict: AgentVerdict) -> None:
 
     # Forward outlook (analyst view). Distinct from the criterion-(e) pass/fail —
     # this is the agent's free-form view on the company's next 1–4 quarters,
-    # informed by recent announcements and (if requested) the concall transcript.
-    if getattr(verdict, "forward_outlook", "").strip():
+    # broken into three labelled subsections by source: announcements first,
+    # concall second, overall integrated summary third. Subsections that came
+    # back empty (e.g. no concall transcript was read) are hidden so the UI
+    # never shows an empty bullet.
+    outlook = getattr(verdict, "forward_outlook", None)
+    if outlook is not None and any(
+        section.strip()
+        for section in (
+            outlook.announcements_conclusion,
+            outlook.concall_conclusion,
+            outlook.overall_summary,
+        )
+    ):
         st.markdown("**Forward outlook (analyst view)**")
-        st.info(verdict.forward_outlook)
+        if outlook.announcements_conclusion.strip():
+            st.markdown(
+                f"- **Conclusion from Announcements:** {outlook.announcements_conclusion}"
+            )
+        if outlook.concall_conclusion.strip():
+            st.markdown(
+                f"- **Conclusion from the latest Concall:** {outlook.concall_conclusion}"
+            )
+        if outlook.overall_summary.strip():
+            st.markdown(
+                f"- **Overall summary:** {outlook.overall_summary}"
+            )
 
     # Summary callout
     st.markdown("**Summary**")

@@ -16,6 +16,7 @@ from langchain_core.messages import AIMessage
 from backend.fundamentals.fundamental_agent import (
     AgentVerdict,
     CriterionResult,
+    ForwardOutlook,
     FundamentalAgent,
     Observation,
 )
@@ -353,14 +354,59 @@ def test_fundamental_agent_normalize_verdict_fills_blank_fields(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_agent_verdict_schema_has_string_forward_outlook_field():
-    """The forward_outlook field is the Job 4 addition for the analyst opinion."""
+def test_agent_verdict_forward_outlook_is_a_nested_object():
+    """Job 6: forward_outlook is no longer a string — it's a ForwardOutlook
+    object with three string subfields. The JSON schema must reflect this
+    so structured-output models emit the right shape."""
     schema = AgentVerdict.model_json_schema()
-    assert "forward_outlook" in schema["properties"], (
-        "AgentVerdict must include the forward_outlook field added in Job 4."
-    )
+    assert "forward_outlook" in schema["properties"]
     field_schema = schema["properties"]["forward_outlook"]
-    assert field_schema["type"] == "string"
+    # Pydantic emits nested models either inline (type=object) or as a $ref
+    # into the schema's `$defs`. Both shapes are acceptable.
+    if "$ref" in field_schema:
+        ref_name = field_schema["$ref"].rsplit("/", 1)[-1]
+        defs = schema.get("$defs", {})
+        assert ref_name in defs, f"$ref target {ref_name} missing from schema $defs"
+        target = defs[ref_name]
+    else:
+        target = field_schema
+    assert target.get("type") == "object"
+    subfields = target.get("properties", {})
+    for required_subfield in (
+        "announcements_conclusion",
+        "concall_conclusion",
+        "overall_summary",
+    ):
+        assert required_subfield in subfields, (
+            f"ForwardOutlook missing subfield {required_subfield}"
+        )
+        assert subfields[required_subfield].get("type") == "string"
+
+
+def test_agent_verdict_accepts_legacy_string_forward_outlook():
+    """Pre-Job-6 cached verdicts had forward_outlook as a string. The
+    field validator must promote those into the new ForwardOutlook shape
+    by routing the string into overall_summary — otherwise existing JSON
+    caches on disk would all fail to load."""
+    legacy_payload = {
+        "symbol": "LEGACY",
+        "rating": 8,
+        "passed_criteria_count": 7,
+        "criteria_breakdown": [],
+        "additional_observations": [],
+        "summary_comments": "ok",
+        "forward_outlook": "Demand environment looks supportive over FY26.",
+        "data_freshness": "2026-01-01",
+        "model_used": "legacy-model",
+    }
+    verdict = AgentVerdict.model_validate(legacy_payload)
+    assert isinstance(verdict.forward_outlook, ForwardOutlook)
+    assert verdict.forward_outlook.overall_summary == (
+        "Demand environment looks supportive over FY26."
+    )
+    # Other subfields default to empty.
+    assert verdict.forward_outlook.announcements_conclusion == ""
+    assert verdict.forward_outlook.concall_conclusion == ""
 
 
 def test_fundamental_agent_binds_both_tools(tmp_path):
@@ -369,7 +415,13 @@ def test_fundamental_agent_binds_both_tools(tmp_path):
     cache.set_data("DEMO", _sample_screener_data())
 
     verdict = _sample_verdict().model_copy(
-        update={"forward_outlook": "Demand environment looks supportive over FY26."}
+        update={
+            "forward_outlook": ForwardOutlook(
+                announcements_conclusion="Recent contract wins point to strong enterprise demand.",
+                concall_conclusion="Management reaffirmed 12% FY26 revenue growth guidance.",
+                overall_summary="Demand environment looks supportive over the next 1-4 quarters.",
+            ),
+        }
     )
     fake_llm = _FakeLLM(verdict)
     agent = FundamentalAgent(
