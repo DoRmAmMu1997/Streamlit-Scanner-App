@@ -36,6 +36,18 @@ def test_safe_filename_replaces_unsafe_characters():
     assert "!" not in stem
 
 
+def test_safe_filename_digest_is_deterministic_hex():
+    # The collision-avoidance suffix must be a stable hashlib hex digest, NOT
+    # the builtin hash() (which is salted per-process and would silently break
+    # the on-disk PDF cache across restarts).
+    import re
+
+    url = "https://bse.example.com/concall/q1fy26.pdf?token=abc"
+    stem = pdf_reader._safe_filename(url)
+    assert re.search(r"_[0-9a-f]{10}$", stem), stem
+    assert pdf_reader._safe_filename(url) == stem
+
+
 # ---------------------------------------------------------------------------
 # download_pdf
 # ---------------------------------------------------------------------------
@@ -87,6 +99,19 @@ def test_download_pdf_returns_none_on_empty_body(tmp_path: Path):
         "https://example.com/empty.pdf", cache_dir=tmp_path, session=session
     )
     assert path is None
+
+
+def test_download_pdf_rejects_non_http_scheme(tmp_path: Path):
+    # file:// (and any non-http scheme) must be refused before any fetch,
+    # closing an SSRF / local-file-read avenue. Returns None, makes no GET,
+    # and writes nothing.
+    session = _FakeSession(status=200, body=b"should-not-be-read")
+    assert (
+        pdf_reader.download_pdf("file:///etc/passwd", cache_dir=tmp_path, session=session)
+        is None
+    )
+    assert session.calls == []
+    assert list(tmp_path.iterdir()) == []
 
 
 # ---------------------------------------------------------------------------

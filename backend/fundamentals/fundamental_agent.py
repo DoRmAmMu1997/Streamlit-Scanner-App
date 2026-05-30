@@ -1,44 +1,50 @@
 from __future__ import annotations
 
-"""LangChain agent for the per-stock Check Fundamentals button.
+"""Claude Agent SDK agent for the per-stock Check Fundamentals button.
 
 How it works:
 1. The Streamlit UI selects a row from any screener's results table and
    passes the symbol to `FundamentalAgent.check(symbol)`.
-2. The agent is wired with a single tool, `fetch_company_data`, that wraps
-   `backend.fundamentals.screener_in_client.fetch_company_data` (with cache).
-3. A senior-analyst system prompt instructs the LLM to:
+2. The agent runs on the **Claude Agent SDK** (`claude_agent_sdk`),
+   authenticated through your **Claude subscription** via the bundled Claude
+   CLI login. No API key is needed, and usage draws on your plan's monthly
+   Agent SDK credit instead of per-token API billing.
+
+   IMPORTANT: if `ANTHROPIC_API_KEY` is set in the environment, the SDK
+   authenticates with that key and bills your API account instead of your
+   subscription. Keep it unset for plan-based usage.
+3. The agent is wired with two in-process SDK tools:
+   - `fetch_company_data` — wraps
+     `backend.fundamentals.screener_in_client.fetch_company_data` (with cache),
+   - `read_recent_concall_transcript` — downloads + extracts the most recent
+     quarterly concall transcript text.
+4. A senior-analyst system prompt instructs the LLM to:
    - apply the seven user-defined criteria exactly,
    - add 4-8 additional fundamental observations of its choosing
      (margins, capital allocation, governance, etc.),
    - synthesize a HOLISTIC 0-10 rating (not a simple count),
-   - return the `AgentVerdict` Pydantic schema.
-4. The LLM runs a short tool-calling loop (max 3 turns: one fetch, one
-   reasoning pass, one final structured answer).
-5. The verdict is cached on disk per (symbol, model, data_date) so
-   re-clicks are free; the "Re-run analysis" button bypasses the cache.
+   - end the run by emitting a single `AgentVerdict` JSON object.
+5. We validate that final JSON against the `AgentVerdict` Pydantic schema and
+   cache the verdict on disk per (symbol, model, mode, data_date) so re-clicks
+   are free; the "Re-run analysis" button bypasses the cache.
 
-OpenRouter compatibility note:
-`ChatOpenAI(base_url="https://openrouter.ai/api/v1")` works because
-OpenRouter exposes the OpenAI-compatible chat completions surface. The
-default model (`anthropic/claude-sonnet-4.5`) supports OpenAI-style tool
-calls. If the user swaps to a model that does NOT support tool calling,
-the agent will raise — the system prompt comment below flags this.
+Testing seam:
+`FundamentalAgent` accepts an optional `runner=` callable so unit tests can
+drive the agentic loop without spawning the CLI or hitting the network. The
+real runner (`_default_run`) imports `claude_agent_sdk` lazily, so importing
+this module does NOT require the SDK to be installed.
 """
 
+import asyncio
+import concurrent.futures
 import json
 import logging
+import re
+import sys
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Awaitable, Callable, Literal
 
-from langchain_core.messages import (
-    AIMessage,
-    HumanMessage,
-    SystemMessage,
-    ToolMessage,
-)
-from langchain_core.tools import tool
-from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field, field_validator
 
 from backend.fundamentals.fundamentals_cache import FundamentalsCache
@@ -50,6 +56,82 @@ from backend.fundamentals.screener_in_client import (
 
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Errors surfaced to the UI
+# ---------------------------------------------------------------------------
+
+
+class FundamentalsAgentError(RuntimeError):
+    """Base class for Check Fundamentals failures meant to be shown to the user.
+
+    Using a dedicated type (instead of a bare RuntimeError) lets the Streamlit
+    layer tell *expected* conditions — like an exhausted plan limit — apart
+    from genuine bugs, and render the right message for each.
+    """
+
+    # Stable, machine-readable code so callers and logs can branch on the
+    # failure kind without parsing the human-readable message.
+    code = "agent_error"
+
+
+class FundamentalsUsageLimitError(FundamentalsAgentError):
+    """Raised when the Claude plan's usage limit / Agent SDK credit is exhausted.
+
+    This is an *expected* operational state, not a bug: the agent simply has to
+    wait until the user's plan limit resets. The UI shows it as a gentle notice
+    rather than a red error, and cached verdicts keep working in the meantime.
+    """
+
+    code = "usage_limit_reached"
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        resets_at: int | None = None,
+        rate_limit_type: str | None = None,
+    ) -> None:
+        # `resets_at` is the Unix timestamp the CLI reports for when the limit
+        # window reopens; `rate_limit_type` names the window (e.g. "five_hour").
+        self.resets_at = resets_at
+        self.rate_limit_type = rate_limit_type
+        super().__init__(message or _format_usage_limit_message(resets_at))
+
+
+# Substrings that mark a usage/limit failure in *unstructured* CLI error text.
+# The structured signals (RateLimitEvent / AssistantMessage.error) are checked
+# first; this list is only the fallback for raw process-error messages.
+_USAGE_LIMIT_MARKERS = (
+    "rate limit",
+    "usage limit",
+    "limit reached",
+    "out of credit",
+    "credit balance",
+    "quota",
+)
+
+
+def _mentions_usage_limit(*texts: str | None) -> bool:
+    """True if any of `texts` reads like a usage/credit-limit message."""
+    haystack = " ".join(text for text in texts if text).lower()
+    return any(marker in haystack for marker in _USAGE_LIMIT_MARKERS)
+
+
+def _format_usage_limit_message(resets_at: int | None) -> str:
+    """Build the user-facing message for an exhausted plan limit."""
+    message = (
+        "Your Claude plan's usage limit for the Agent SDK has been reached, so "
+        "the Check Fundamentals agent is paused."
+    )
+    if resets_at:
+        # Local time is friendlier than UTC for a desktop tool.
+        when = datetime.fromtimestamp(resets_at).strftime("%Y-%m-%d %H:%M")
+        message += f" It should work again after the limit resets (around {when})."
+    else:
+        message += " It will work again once your usage limit resets."
+    return message + " Cached verdicts are still available in the meantime."
 
 
 # ---------------------------------------------------------------------------
@@ -137,13 +219,13 @@ class AgentVerdict(BaseModel):
     """Structured verdict returned by the agent for one stock.
 
     Note on integer ranges:
-    Anthropic's structured-output API (which OpenRouter forwards to when the
-    user picks `anthropic/claude-*`) does NOT accept `minimum` / `maximum`
-    properties on `integer` JSON Schema types. So we deliberately avoid the
+    Claude's structured-output handling does NOT accept `minimum` / `maximum`
+    properties on `integer` JSON Schema types, and we also feed this schema's
+    field list to the model in the prompt. So we deliberately avoid the
     Pydantic `Field(ge=..., le=...)` shorthand for `rating` and
     `passed_criteria_count` — those would emit those properties into the
-    schema and trigger a 400. Instead, the `@field_validator` decorators
-    below run at parse time without polluting the JSON schema.
+    schema. Instead, the `@field_validator` decorators below run at parse time
+    without polluting the JSON schema.
 
     Note on `mode`:
     The agent runs in one of two modes depending on whether the stock is
@@ -214,8 +296,8 @@ class AgentVerdict(BaseModel):
     @classmethod
     def _validate_rating_range(cls, value: int) -> int:
         # Validation runs at parse time so a malformed LLM output still
-        # raises, but the JSON schema we send to Anthropic stays clean of
-        # `minimum` / `maximum` (which Anthropic rejects on integer types).
+        # raises, but the JSON schema we feed the model stays clean of
+        # `minimum` / `maximum` (which Claude rejects on integer types).
         if not 0 <= value <= 10:
             raise ValueError(
                 f"rating must be between 0 and 10 inclusive, got {value}"
@@ -383,9 +465,10 @@ When you are ready, return your answer as a single AgentVerdict object.
 Never write free-form text in your final answer — only the structured
 schema.
 
-Note on tool calls: this agent is configured for tool-calling models. The
-default OpenRouter model (anthropic/claude-sonnet-4.5) supports this. If
-you cannot call tools, abort and explain the constraint to the user."""
+Note on tool calls: you must use the two tools above to gather data — you
+cannot evaluate a stock from memory alone. Always call `fetch_company_data`
+first. If a tool returns an error payload, surface that limitation honestly
+in your reasoning rather than inventing numbers."""
 
 
 # Appended to the system prompt when the agent is invoked in insights-only
@@ -419,27 +502,63 @@ fundamentals look like — there is no checklist anchor. Mention in
 stock is outside the curated universe."""
 
 
+# Appended LAST to the system prompt. The Claude Agent SDK has no
+# `with_structured_output` equivalent, so we steer the model to emit a single
+# JSON object as its final message and validate it ourselves with Pydantic.
+_FINAL_OUTPUT_INSTRUCTION = """\
+
+============================================================
+FINAL OUTPUT FORMAT (STRICT)
+============================================================
+
+When your analysis is complete, your FINAL message must be a SINGLE JSON
+object and NOTHING else — no prose before or after it, and no markdown code
+fences. The object must contain exactly these keys:
+
+- "symbol": string
+- "mode": "criteria" or "insights_only"
+- "rating": integer 0-10
+- "passed_criteria_count": integer 0-7 (0 in insights_only mode)
+- "total_criteria": integer (normally 7)
+- "criteria_breakdown": array of objects, each with keys
+  "name", "passed" (boolean), "measured_value", "threshold", "reasoning".
+  Empty array [] in insights_only mode.
+- "additional_observations": array of objects, each with keys
+  "topic", "finding", "sentiment" ("positive"|"negative"|"neutral"),
+  "evidence".
+- "summary_comments": string
+- "forward_outlook": object with keys "announcements_conclusion",
+  "concall_conclusion", "overall_summary" (each a string; use "" when a
+  subsection does not apply)
+- "data_freshness": string (ISO timestamp from the screener.in fetched_at
+  field, if available)
+- "model_used": string
+
+Emit ONLY this JSON object as your final answer."""
+
+
 # ---------------------------------------------------------------------------
-# Agent
+# Runner contract
 # ---------------------------------------------------------------------------
 
 
-_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-_DEFAULT_HEADERS = {
-    # OpenRouter requests these headers for usage attribution.
-    "HTTP-Referer": "https://github.com/DoRmAmMu1997/Streamlit-Scanner-App",
-    "X-Title": "Hemant Scanner - Fundamental Check",
-}
+@dataclass
+class AgentRunResult:
+    """Result of one agentic run: the final text plus optional reported cost.
 
-# Cap the model's output tokens. Without an explicit value, OpenRouter
-# pre-authorizes credits for the model's FULL output capacity (64K tokens for
-# Claude Sonnet 4.5) before running the request — which 402s with
-# "requires more credits, or fewer max_tokens" once the key balance dips below
-# that worst-case reservation. A structured AgentVerdict is only ~2-3K output
-# tokens, so 16K is generous headroom while keeping the per-call reservation
-# (and cost) well within a modest key balance. This only caps OUTPUT; reading
-# concall transcripts is input and is unaffected.
-_MAX_OUTPUT_TOKENS = 16000
+    `text` is the model's final message, expected to contain the AgentVerdict
+    JSON. `cost_usd` is the SDK-reported `total_cost_usd` when available (used
+    only for logging / telemetry).
+    """
+
+    text: str
+    cost_usd: float | None = None
+
+
+# A runner drives one full agentic loop and returns the final message text.
+# The default runner (`FundamentalAgent._default_run`) uses the Claude Agent
+# SDK; tests inject a fake to avoid spawning the CLI.
+RunnerFn = Callable[..., Awaitable[AgentRunResult]]
 
 
 def _data_date_from_payload(data: dict[str, Any]) -> str:
@@ -453,147 +572,350 @@ def _data_date_from_payload(data: dict[str, Any]) -> str:
     return datetime.now(UTC).date().isoformat()
 
 
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    """Pull the AgentVerdict JSON object out of the model's final message.
+
+    The model is instructed to emit ONLY a JSON object, but real models
+    occasionally wrap it in a ```json fence or add a stray sentence. This
+    helper is tolerant: it first looks for a fenced block, then falls back to
+    the outermost {...} span. Returns None when nothing parses.
+    """
+    if not text:
+        return None
+
+    fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
+    if fenced:
+        candidate = fenced.group(1)
+    else:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end < start:
+            return None
+        candidate = text[start : end + 1]
+
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _build_user_prompt(symbol: str, mode: str, model: str) -> str:
+    """Build the per-stock kickoff message for the agent."""
+    return (
+        f"Evaluate the fundamentals of NSE stock '{symbol}'. "
+        f"You are running in mode='{mode}'. Call fetch_company_data once. "
+        "If the structured data and recent announcements are sufficient, "
+        "skip the concall transcript tool; otherwise call "
+        "read_recent_concall_transcript once to inform your forward outlook. "
+        f"Set model_used to '{model}'. Then output the final AgentVerdict JSON "
+        "exactly per the FINAL OUTPUT FORMAT instructions."
+    )
+
+
+def _usage_limit_from_message(message: Any) -> FundamentalsUsageLimitError | None:
+    """Detect an exhausted-plan signal in one Agent SDK stream message.
+
+    Duck-typed (no `isinstance`) so it needs no SDK imports and stays trivially
+    unit-testable. Two structured signals from the CLI mean the limit is hit:
+    - a `RateLimitEvent` carries `rate_limit_info` with `status == "rejected"`
+      (plus a `resets_at` timestamp),
+    - an `AssistantMessage` carries `error == "rate_limit"` / `"billing_error"`
+      when generation is refused for limit/billing reasons.
+    Returns a ready-to-raise error, or None if this message is unremarkable.
+    """
+    info = getattr(message, "rate_limit_info", None)
+    if info is not None and getattr(info, "status", None) == "rejected":
+        return FundamentalsUsageLimitError(
+            resets_at=getattr(info, "resets_at", None),
+            rate_limit_type=getattr(info, "rate_limit_type", None),
+        )
+    if getattr(message, "error", None) in ("rate_limit", "billing_error"):
+        return FundamentalsUsageLimitError()
+    return None
+
+
+def _describe_result_error(result: Any) -> str:
+    """Build a readable message from an errored `ResultMessage`.
+
+    Keeps the cause distinct from the "no parseable JSON" path so a genuine
+    server-side failure doesn't masquerade as a formatting problem.
+    """
+    errors = getattr(result, "errors", None)
+    if errors:
+        detail = "; ".join(str(error) for error in errors)
+    else:
+        detail = str(getattr(result, "result", "") or "")[:300]
+    subtype = getattr(result, "subtype", "") or "unknown"
+    status = getattr(result, "api_error_status", None)
+    status_part = f" (HTTP {status})" if status else ""
+    return f"The Check Fundamentals agent run failed [{subtype}]{status_part}. {detail}".strip()
+
+
+# ---------------------------------------------------------------------------
+# Agent
+# ---------------------------------------------------------------------------
+
+
 class FundamentalAgent:
-    """Per-stock LangChain agent backed by OpenRouter.
+    """Per-stock agent backed by the Claude Agent SDK + your Claude subscription.
 
     One instance can be reused across many `check(...)` calls in a session.
-    The agent is constructed lazily on first use so unit tests can pass a
-    mock LLM via the `llm` constructor argument.
+    The agentic loop is driven by an injectable `runner` so unit tests can
+    avoid spawning the CLI; production uses `_default_run`, which lazily
+    imports `claude_agent_sdk`.
     """
 
-    # Up to two tool calls (fetch + optional transcript) + reasoning + final
-    # structuring pass leaves enough headroom without letting the loop run
-    # away on a misbehaving model.
-    MAX_TURNS = 6
-    TEMPERATURE = 0.2
+    # Up to two tool calls (fetch + optional transcript) plus reasoning and a
+    # final structuring turn leaves enough headroom without letting a
+    # misbehaving model loop forever.
+    MAX_TURNS = 8
 
     def __init__(
         self,
-        api_key: str,
         model: str,
         cache: FundamentalsCache | None = None,
         *,
-        llm: ChatOpenAI | None = None,
+        runner: RunnerFn | None = None,
     ) -> None:
-        if not api_key:
-            raise ValueError("FundamentalAgent: api_key is required.")
-        self._api_key = api_key
+        if not model:
+            raise ValueError("FundamentalAgent: model is required.")
         self._model = model
         self._cache = cache or FundamentalsCache()
-        # The `llm` injection point lets tests supply a fake chat model
-        # (FakeListChatModel, etc.) without hitting OpenRouter.
-        self._llm = llm or ChatOpenAI(
-            model=model,
-            base_url=_OPENROUTER_BASE_URL,
-            api_key=api_key,
-            temperature=self.TEMPERATURE,
-            # See _MAX_OUTPUT_TOKENS: keeps OpenRouter's pre-flight credit
-            # reservation small so a modest key balance doesn't 402.
-            max_tokens=_MAX_OUTPUT_TOKENS,
-            default_headers=_DEFAULT_HEADERS,
-            timeout=60,
-            max_retries=2,
+        # `runner` injection lets tests drive the loop without the SDK/CLI.
+        self._runner = runner
+        # Per-instance mutable state. `force_refresh` is flipped per `check`
+        # call so the fetch tool knows whether to bypass the data cache.
+        self._mutable_state: dict[str, Any] = {"force_refresh": False}
+
+    # ------------------------------------------------------------------
+    # Tool implementations (plain, SDK-free, unit-testable)
+    #
+    # The real SDK tools (built in `_default_run`) are thin async wrappers
+    # around these. Keeping the logic here means tests can exercise the tool
+    # behaviour directly without importing claude_agent_sdk.
+    # ------------------------------------------------------------------
+
+    def _fetch_company_data_impl(self, symbol: str) -> str:
+        """Fetch a screener.in snapshot (cache-aware). Returns a JSON string."""
+        normalized = (symbol or "").strip().upper()
+        if not normalized:
+            return json.dumps({"error": "Empty symbol"})
+
+        if not self._mutable_state["force_refresh"]:
+            cached = self._cache.get_data(normalized)
+            if cached is not None:
+                return json.dumps(cached, default=str)
+
+        try:
+            fresh = fetch_company_data(normalized)
+        except ScreenerInFetchError as exc:
+            return json.dumps({"error": str(exc)})
+        self._cache.set_data(normalized, fresh)
+        return json.dumps(fresh, default=str)
+
+    def _read_concall_impl(self, symbol: str) -> str:
+        """Return the most recent concall transcript text for `symbol`, or "".
+
+        Reads the cached company data (set by the fetch tool) to find the
+        `concalls` metadata, then downloads + extracts the most recent
+        transcript. Returns an empty string when no transcript is available so
+        the model can fall back to announcements + structured data.
+        """
+        normalized = (symbol or "").strip().upper()
+        if not normalized:
+            return ""
+
+        data = self._cache.get_data(normalized)
+        if data is None:
+            # The model called the transcript tool before fetch_company_data —
+            # signal that so it knows to call fetch first.
+            return "[no company data cached yet; call fetch_company_data first]"
+
+        concalls = data.get("concalls") or []
+        try:
+            return read_recent_concall_text(concalls) or ""
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Concall transcript fetch failed for %s", normalized, exc_info=True
+            )
+            return ""
+
+    # ------------------------------------------------------------------
+    # Default runner (Claude Agent SDK)
+    # ------------------------------------------------------------------
+
+    async def _default_run(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str,
+        model: str,
+        max_turns: int,
+    ) -> AgentRunResult:
+        """Run one agentic loop on the Claude Agent SDK and return final text.
+
+        Imports `claude_agent_sdk` lazily so this module imports cleanly even
+        when the SDK is not installed (e.g. in CI running only the unit tests).
+        """
+        try:
+            from claude_agent_sdk import (  # type: ignore[import-not-found]
+                AssistantMessage,
+                ClaudeAgentOptions,
+                CLINotFoundError,
+                ProcessError,
+                ResultMessage,
+                create_sdk_mcp_server,
+                query,
+                tool,
+            )
+        except ImportError as exc:  # pragma: no cover - environment dependent
+            raise FundamentalsAgentError(
+                "claude-agent-sdk is not installed. Run "
+                "`pip install claude-agent-sdk` and sign in once with the "
+                "bundled Claude CLI (using your Claude subscription) to enable "
+                "the Check Fundamentals agent. Make sure ANTHROPIC_API_KEY is "
+                "NOT set, or the SDK will bill your API account instead of your "
+                "plan."
+            ) from exc
+
+        agent = self  # captured by the tool closures below
+
+        @tool(
+            "fetch_company_data",
+            "Fetch a screener.in snapshot (valuation ratios, ROCE/ROE, annual "
+            "and quarterly history, peer comparison, shareholding, recent "
+            "announcements, and concall metadata) for one NSE stock symbol. "
+            "Call exactly ONCE per analysis.",
+            {"symbol": str},
+        )
+        async def _fetch_tool(args: dict[str, Any]) -> dict[str, Any]:
+            text = await asyncio.to_thread(
+                agent._fetch_company_data_impl, args.get("symbol", "")
+            )
+            return {"content": [{"type": "text", "text": text}]}
+
+        @tool(
+            "read_recent_concall_transcript",
+            "Download and return the plain text of the most recent quarterly "
+            "concall transcript (~8-15K tokens) for one NSE stock. Use only "
+            "when you need management commentary for the forward outlook or "
+            "criterion (e). Returns an empty string if no transcript exists.",
+            {"symbol": str},
+        )
+        async def _concall_tool(args: dict[str, Any]) -> dict[str, Any]:
+            text = await asyncio.to_thread(
+                agent._read_concall_impl, args.get("symbol", "")
+            )
+            return {"content": [{"type": "text", "text": text}]}
+
+        server = create_sdk_mcp_server(
+            name="fundamentals",
+            version="1.0.0",
+            tools=[_fetch_tool, _concall_tool],
         )
 
+        options = ClaudeAgentOptions(
+            model=model,
+            system_prompt=system_prompt,
+            max_turns=max_turns,
+            mcp_servers={"fundamentals": server},
+            allowed_tools=[
+                "mcp__fundamentals__fetch_company_data",
+                "mcp__fundamentals__read_recent_concall_transcript",
+            ],
+            # "dontAsk" denies any tool that is NOT in allowed_tools, so the
+            # agent can only ever call our two screener.in tools — never the
+            # built-in filesystem/bash tools. This keeps a headless Streamlit
+            # run locked down.
+            permission_mode="dontAsk",
+            # Do not load the user's Claude Code project/user settings or any
+            # CLAUDE.md — this agent's behaviour comes entirely from our prompt.
+            setting_sources=[],
+        )
+
+        final_text = ""
+        cost_usd: float | None = None
+        usage_limit: FundamentalsUsageLimitError | None = None
+        result_message: ResultMessage | None = None
+        try:
+            async for message in query(prompt=prompt, options=options):
+                # First structured sign of an exhausted plan limit wins; we keep
+                # draining the stream so the run ends cleanly, then raise below.
+                if usage_limit is None:
+                    usage_limit = _usage_limit_from_message(message)
+                if isinstance(message, ResultMessage):
+                    result_message = message
+                    cost_usd = message.total_cost_usd
+                    if message.result:
+                        final_text = message.result
+                elif isinstance(message, AssistantMessage):
+                    # Fallback: keep the last assistant text block in case the
+                    # ResultMessage.result field comes back empty.
+                    for block in getattr(message, "content", None) or []:
+                        block_text = getattr(block, "text", None)
+                        if block_text:
+                            final_text = block_text
+        except CLINotFoundError as exc:
+            raise FundamentalsAgentError(
+                "The bundled Claude CLI could not be found. Reinstall with "
+                "`pip install --force-reinstall claude-agent-sdk`."
+            ) from exc
+        except ProcessError as exc:
+            # A non-zero CLI exit can also mean the plan limit was hit; the
+            # structured check above is preferred, this is the text fallback.
+            if _mentions_usage_limit(str(exc), getattr(exc, "stderr", None)):
+                raise FundamentalsUsageLimitError() from exc
+            raise
+
+        # Translate recognised conditions into typed errors the UI can react to.
+        if usage_limit is not None:
+            raise usage_limit
+        if result_message is not None and result_message.is_error:
+            if getattr(result_message, "api_error_status", None) == 429:
+                raise FundamentalsUsageLimitError()
+            raise FundamentalsAgentError(_describe_result_error(result_message))
+
+        return AgentRunResult(text=final_text, cost_usd=cost_usd)
+
     # ------------------------------------------------------------------
-    # Tool
+    # Sync bridge
     # ------------------------------------------------------------------
 
-    def _build_fetch_tool(self):
-        """Return the LangChain Tool that the agent will call.
+    @staticmethod
+    def _run_sync(coro: Awaitable[AgentRunResult]) -> AgentRunResult:
+        """Run an async coroutine to completion from sync (Streamlit) code.
 
-        Closes over `self._cache` so cache hits are transparent to the LLM.
-        The agent does not need to know about caching; it just calls the
-        tool and the helper decides whether to scrape or hit cache.
+        Runs in a dedicated worker thread with its OWN event loop so we never
+        collide with Streamlit/Tornado's running loop.
+
+        On Windows we must build a ProactorEventLoop explicitly. The Agent SDK
+        launches the Claude CLI as a subprocess, but Streamlit/Tornado installs
+        the SelectorEventLoop policy on Windows, and that loop raises
+        NotImplementedError for subprocesses. `asyncio.run()` would inherit
+        that selector policy, so we create the right loop ourselves instead.
         """
-        cache = self._cache
-        # Force-refresh state is per-check, not per-tool-instance. We use a
-        # mutable container so `check(force_refresh=True)` can flip it for
-        # the duration of one call without rebuilding the tool.
-        agent_state = self._state
 
-        @tool
-        def fetch_company_data_tool(symbol: str) -> str:
-            """Fetch a screener.in snapshot for one NSE stock symbol.
-
-            Returns a JSON string with valuation ratios, ROCE/ROE, the
-            full annual and quarterly tables, peer comparison, shareholding,
-            recent announcements, concall metadata, and a free-form text
-            dump (about, pros, cons). Call this tool exactly ONCE per
-            analysis.
-            """
-            normalized = (symbol or "").strip().upper()
-            if not normalized:
-                return json.dumps({"error": "Empty symbol"})
-
-            if not agent_state["force_refresh"]:
-                cached = cache.get_data(normalized)
-                if cached is not None:
-                    return json.dumps(cached, default=str)
-
+        def _runner() -> AgentRunResult:
+            if sys.platform == "win32":
+                # ProactorEventLoop supports subprocess transports on Windows;
+                # the default selector loop (installed by Tornado) does not.
+                loop = asyncio.ProactorEventLoop()
+            else:
+                loop = asyncio.new_event_loop()
             try:
-                fresh = fetch_company_data(normalized)
-            except ScreenerInFetchError as exc:
-                return json.dumps({"error": str(exc)})
-            cache.set_data(normalized, fresh)
-            return json.dumps(fresh, default=str)
+                asyncio.set_event_loop(loop)
+                return loop.run_until_complete(coro)
+            finally:
+                asyncio.set_event_loop(None)
+                loop.close()
 
-        return fetch_company_data_tool
-
-    def _build_transcript_tool(self):
-        """Return the LangChain Tool that downloads + reads the latest concall PDF.
-
-        The tool reads the cached company data (set by `fetch_company_data_tool`)
-        to find the `concalls` metadata, then downloads + extracts the most
-        recent transcript's text. Returns an empty string when no transcript
-        is available so the model can gracefully fall back to announcements
-        + structured data for its forward outlook.
-        """
-        cache = self._cache
-
-        @tool
-        def read_recent_concall_transcript(symbol: str) -> str:
-            """Fetch and return the plain text of the most recent quarterly
-            concall transcript for one NSE stock. Use this when forming your
-            forward outlook or when criterion (e) Future growth prospects is
-            unclear from the structured data alone. The transcript is large
-            (~8-15K tokens), so only call this when it will materially change
-            your judgment. Returns "" if no transcript is available."""
-            normalized = (symbol or "").strip().upper()
-            if not normalized:
-                return ""
-
-            data = cache.get_data(normalized)
-            if data is None:
-                # The model called the transcript tool before fetch_company_data —
-                # signal that with a short message so it knows to call fetch first.
-                return (
-                    "[no company data cached yet; call fetch_company_data first]"
-                )
-
-            concalls = data.get("concalls") or []
-            try:
-                return read_recent_concall_text(concalls) or ""
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "Concall transcript fetch failed for %s", normalized, exc_info=True
-                )
-                return ""
-
-        return read_recent_concall_transcript
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(_runner).result()
 
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
-
-    @property
-    def _state(self) -> dict[str, Any]:
-        """Lazily allocate the per-instance mutable state container."""
-        state = getattr(self, "_mutable_state", None)
-        if state is None:
-            state = {"force_refresh": False}
-            self._mutable_state = state
-        return state
 
     def check(
         self,
@@ -613,8 +935,8 @@ class FundamentalAgent:
             raise ValueError("FundamentalAgent.check: symbol must be a non-empty string")
         normalized = str(symbol).strip().upper()
 
-        # Toggle force_refresh BEFORE building the tool so it sees the flag.
-        self._state["force_refresh"] = bool(force_refresh)
+        # Toggle force_refresh BEFORE running so the fetch tool sees the flag.
+        self._mutable_state["force_refresh"] = bool(force_refresh)
         if force_refresh:
             self._cache.invalidate(normalized)
 
@@ -630,91 +952,33 @@ class FundamentalAgent:
                 if cached_verdict is not None:
                     return AgentVerdict.model_validate(cached_verdict)
 
-        # 2. Run the tool-calling loop with the LLM. Two tools are bound:
-        # the always-needed company-data fetch, and the optional concall
-        # transcript reader the model can invoke when it needs management
-        # commentary for the forward outlook.
-        fetch_tool = self._build_fetch_tool()
-        transcript_tool = self._build_transcript_tool()
-        tools_by_name = {
-            fetch_tool.name: fetch_tool,
-            transcript_tool.name: transcript_tool,
-        }
-        llm_with_tools = self._llm.bind_tools(list(tools_by_name.values()))
-        # The system prompt is mode-aware: insights_only appends an override
-        # that tells the agent to skip the seven-criteria checklist while
-        # still producing observations, rating, summary, and forward outlook.
+        # 2. Build the mode-aware system prompt and run the agentic loop.
         system_prompt = SYSTEM_PROMPT
         if mode == "insights_only":
-            system_prompt = SYSTEM_PROMPT + _INSIGHTS_ONLY_PROMPT_ADDENDUM
-        user_intent = (
-            f"Evaluate the fundamentals of NSE stock '{normalized}'. "
-            f"You are running in mode='{mode}'. Call fetch_company_data once. "
-            "If the structured data and recent announcements are sufficient, "
-            "skip the concall transcript tool; otherwise call it once to inform "
-            "your forward outlook. Then produce the AgentVerdict per the system "
-            "prompt."
+            system_prompt += _INSIGHTS_ONLY_PROMPT_ADDENDUM
+        system_prompt += _FINAL_OUTPUT_INSTRUCTION
+
+        prompt = _build_user_prompt(normalized, mode, self._model)
+        runner = self._runner or self._default_run
+
+        run_result = self._run_sync(
+            runner(
+                prompt,
+                system_prompt=system_prompt,
+                model=self._model,
+                max_turns=self.MAX_TURNS,
+            )
         )
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_intent),
-        ]
-
-        for turn in range(self.MAX_TURNS):
-            response = llm_with_tools.invoke(messages)
-            messages.append(response)
-            tool_calls = getattr(response, "tool_calls", None) or []
-            if not tool_calls:
-                # Model produced a final assistant message; break the loop
-                # and structure that message into AgentVerdict below.
-                break
-            for call in tool_calls:
-                # `call` shape from LangChain: {"name", "args", "id"}.
-                tool_name = call.get("name", fetch_tool.name)
-                target = tools_by_name.get(tool_name, fetch_tool)
-                try:
-                    tool_output = target.invoke(call["args"])
-                except Exception as exc:  # noqa: BLE001
-                    tool_output = json.dumps({"error": f"Tool {tool_name} failed: {exc}"})
-                messages.append(
-                    ToolMessage(
-                        content=str(tool_output),
-                        tool_call_id=call.get("id", ""),
-                    )
-                )
-        else:
-            logger.warning(
-                "FundamentalAgent reached MAX_TURNS (%s) without a final answer for %s",
-                self.MAX_TURNS,
+        if run_result.cost_usd is not None:
+            logger.info(
+                "FundamentalAgent run for %s (%s) cost ~$%.4f",
                 normalized,
+                mode,
+                run_result.cost_usd,
             )
 
-        # 3. Coerce the assistant's last narrative answer into the schema
-        #    via a second LLM pass with `with_structured_output`.
-        structuring_llm = self._llm.with_structured_output(AgentVerdict)
-        # Re-use the conversation context (system prompt + fetched data +
-        # the model's reasoning) so the structuring step has full evidence
-        # without paying for another tool call.
-        structuring_messages = messages + [
-            HumanMessage(
-                content=(
-                    "Now output the final AgentVerdict JSON. The symbol is "
-                    f"'{normalized}', the model is '{self._model}', and the "
-                    f"mode is '{mode}'. Populate data_freshness from the "
-                    "screener.in fetched_at field if available. "
-                    + (
-                        "In insights_only mode you MUST leave criteria_breakdown "
-                        "as [] and passed_criteria_count as 0."
-                        if mode == "insights_only"
-                        else "In criteria mode populate criteria_breakdown with "
-                        "all seven CriterionResult entries."
-                    )
-                )
-            )
-        ]
-        verdict_raw = structuring_llm.invoke(structuring_messages)
-
-        verdict = self._normalize_verdict(verdict_raw, symbol=normalized, mode=mode)
+        # 3. Validate the final JSON into AgentVerdict.
+        verdict = self._parse_verdict(run_result.text, symbol=normalized, mode=mode)
 
         # 4. Persist the verdict to the cache so the next click is instant.
         # Cache key includes the mode so criteria-mode and insights-only runs
@@ -733,6 +997,24 @@ class FundamentalAgent:
 
         return verdict
 
+    def _parse_verdict(
+        self,
+        text: str,
+        *,
+        symbol: str,
+        mode: Literal["criteria", "insights_only"] = "criteria",
+    ) -> AgentVerdict:
+        """Extract + validate the AgentVerdict JSON from the agent's final text."""
+        payload = _extract_json_object(text)
+        if payload is None:
+            preview = (text or "").strip()[:300] or "<empty response>"
+            raise FundamentalsAgentError(
+                "The agent did not return a parseable AgentVerdict JSON object. "
+                f"Final message was: {preview}"
+            )
+        verdict = AgentVerdict.model_validate(payload)
+        return self._normalize_verdict(verdict, symbol=symbol, mode=mode)
+
     def _normalize_verdict(
         self,
         raw: Any,
@@ -742,12 +1024,11 @@ class FundamentalAgent:
     ) -> AgentVerdict:
         """Ensure the model's structured output is a valid AgentVerdict.
 
-        `with_structured_output` typically returns the Pydantic instance
-        directly, but if a custom or older model returns a dict (or the
-        structuring failed), this helper coerces it sensibly. It also
-        enforces the mode invariants — insights_only verdicts always have
-        empty criteria + zero passed count, regardless of what the LLM
-        emitted, so a misbehaving model can't pollute the UI.
+        Coerces a dict into the Pydantic model if needed, then stamps any
+        blank bookkeeping fields and enforces the mode invariants —
+        insights_only verdicts always have empty criteria + zero passed count,
+        regardless of what the LLM emitted, so a misbehaving model can't
+        pollute the UI.
         """
         if isinstance(raw, AgentVerdict):
             verdict = raw

@@ -26,10 +26,12 @@ scanned PDF, a future revision can swap in a HuggingFace OCR pass (e.g.
 stays the same — callers see one ``str`` either way.
 """
 
+import hashlib
 import logging
 import re
 from pathlib import Path
 from typing import Any, Iterable
+from urllib.parse import urlparse
 
 import requests
 
@@ -58,9 +60,12 @@ def _safe_filename(url: str, *, fallback_prefix: str = "doc") -> str:
     tail = re.sub(r"\.pdf$", "", tail, flags=re.IGNORECASE)
     # Sanitize for the filesystem.
     safe_tail = re.sub(r"[^A-Za-z0-9._-]+", "_", tail)[:80] or fallback_prefix
-    # Tiny hash for collision avoidance across symbols.
-    digest = abs(hash(cleaned)) % (10**8)
-    return f"{safe_tail}_{digest:08d}"
+    # Short hash for collision avoidance across symbols. Uses hashlib (not the
+    # builtin hash(), which is salted per-process) so the same URL maps to the
+    # same filename across restarts — otherwise the on-disk PDF cache would
+    # silently miss every new session.
+    digest = hashlib.sha1(cleaned.encode("utf-8")).hexdigest()[:10]
+    return f"{safe_tail}_{digest}"
 
 
 def download_pdf(
@@ -74,6 +79,12 @@ def download_pdf(
     Cache hits return the existing path without re-fetching.
     """
     if not url:
+        return None
+    # Only fetch over HTTP(S). Rejecting other schemes (file://, ftp://, etc.)
+    # closes an SSRF / local-file-read avenue if a transcript_url is ever
+    # malformed or tampered with upstream on screener.in.
+    if urlparse(url).scheme.lower() not in ("http", "https"):
+        logger.warning("Refusing to fetch non-http(s) PDF URL: %s", url)
         return None
     cache_root = Path(cache_dir) if cache_dir else FUNDAMENTALS_PDF_DIR
     cache_root.mkdir(parents=True, exist_ok=True)

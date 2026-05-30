@@ -3,8 +3,8 @@
 Public surface:
 - `fetch_company_data(symbol, ...)` — scrape and parse one screener.in page.
 - `FundamentalsCache` — on-disk JSON cache for fetched data and agent verdicts.
-- `FundamentalAgent` — LangChain agent that applies the user's seven criteria
-  plus its own qualitative analysis and returns an `AgentVerdict`.
+- `FundamentalAgent` — Claude Agent SDK agent that applies the user's seven
+  criteria plus its own qualitative analysis and returns an `AgentVerdict`.
 - `AgentVerdict` / `CriterionResult` / `Observation` / `ForwardOutlook` —
   Pydantic schemas used by the agent's structured output.
 """
@@ -14,6 +14,8 @@ from backend.fundamentals.fundamental_agent import (
     CriterionResult,
     ForwardOutlook,
     FundamentalAgent,
+    FundamentalsAgentError,
+    FundamentalsUsageLimitError,
     Observation,
 )
 from backend.fundamentals.fundamentals_cache import FundamentalsCache
@@ -27,6 +29,8 @@ __all__ = [
     "CriterionResult",
     "ForwardOutlook",
     "FundamentalAgent",
+    "FundamentalsAgentError",
+    "FundamentalsUsageLimitError",
     "FundamentalsCache",
     "Observation",
     "ScreenerInFetchError",
