@@ -46,6 +46,11 @@ _PDF_USER_AGENT = (
     "hemant-scanner/1.0 (+personal use; "
     "https://github.com/DoRmAmMu1997/Streamlit-Scanner-App)"
 )
+# Concall PDFs are streamed to disk and the running byte total is checked
+# against this ceiling. transcript_url values are scraped from screener.in, so
+# an oversized or malicious URL must not be able to read an unbounded body into
+# memory (DoS). Mirrors the streamed byte cap in backend/universe_builder.py.
+_MAX_PDF_BYTES = 25 * 1024 * 1024  # 25 MiB
 
 
 def _safe_filename(url: str, *, fallback_prefix: str = "doc") -> str:
@@ -97,19 +102,36 @@ def download_pdf(
     owned_session = session is None
     sess = session or requests.Session()
     try:
-        response = sess.get(
+        # stream=True + a chunked read so an oversized response can never be
+        # pulled into memory all at once. The response is a context manager so
+        # an early return (bad status, oversized body) closes the connection on
+        # the way out — same idiom as the capped download in universe_builder.
+        with sess.get(
             url,
             headers={"User-Agent": _PDF_USER_AGENT, "Accept": "application/pdf,*/*"},
             timeout=_REQUEST_TIMEOUT_SECONDS,
             allow_redirects=True,
-        )
-        if response.status_code != 200:
-            logger.warning("PDF fetch %s returned HTTP %s", url, response.status_code)
-            return None
-        if not response.content:
-            return None
-        pdf_path.write_bytes(response.content)
-        return pdf_path
+            stream=True,
+        ) as response:
+            if response.status_code != 200:
+                logger.warning("PDF fetch %s returned HTTP %s", url, response.status_code)
+                return None
+            buffer = bytearray()
+            for chunk in response.iter_content(chunk_size=65536):  # 64 KiB
+                if not chunk:
+                    continue
+                buffer.extend(chunk)
+                if len(buffer) > _MAX_PDF_BYTES:
+                    logger.warning(
+                        "PDF fetch %s exceeded the %d-byte cap; aborting download",
+                        url,
+                        _MAX_PDF_BYTES,
+                    )
+                    return None
+            if not buffer:
+                return None
+            pdf_path.write_bytes(bytes(buffer))
+            return pdf_path
     except requests.RequestException:
         logger.warning("PDF fetch %s failed", url, exc_info=True)
         return None

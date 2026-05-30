@@ -53,8 +53,34 @@ def test_safe_filename_digest_is_deterministic_hex():
 # ---------------------------------------------------------------------------
 
 
+class _FakeResponse:
+    """Canned streamed HTTP response: a context manager whose body is read via
+    iter_content() in chunks, mirroring requests.Response under stream=True."""
+
+    def __init__(self, status: int, body: bytes):
+        self.status_code = status
+        self._body = body
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.closed = True
+        return False
+
+    def iter_content(self, chunk_size: int = 1):
+        step = chunk_size or 1
+        for start in range(0, len(self._body), step):
+            yield self._body[start : start + step]
+
+    def close(self):
+        self.closed = True
+
+
 class _FakeSession:
-    """Minimal stand-in for requests.Session — records GETs and returns canned bytes."""
+    """Minimal stand-in for requests.Session — records GETs and returns a canned
+    streamed response."""
 
     def __init__(self, status: int = 200, body: bytes = b"%PDF-fake"):
         self.status = status
@@ -63,7 +89,7 @@ class _FakeSession:
 
     def get(self, url, **kwargs):
         self.calls.append(url)
-        return SimpleNamespace(status_code=self.status, content=self.body)
+        return _FakeResponse(self.status, self.body)
 
     def close(self):
         pass
@@ -111,6 +137,24 @@ def test_download_pdf_rejects_non_http_scheme(tmp_path: Path):
         is None
     )
     assert session.calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_download_pdf_aborts_when_body_exceeds_cap(tmp_path: Path, monkeypatch):
+    # A response body larger than the cap must be refused: download_pdf streams
+    # the body in chunks and bails out (returns None, writes nothing) once the
+    # running total crosses _MAX_PDF_BYTES, so an oversized / malicious
+    # transcript_url cannot exhaust memory. The cap is patched small here to
+    # keep the test fast and memory-light.
+    monkeypatch.setattr(pdf_reader, "_MAX_PDF_BYTES", 128 * 1024)
+    oversized = b"\x00" * (pdf_reader._MAX_PDF_BYTES + 1)
+    session = _FakeSession(status=200, body=oversized)
+
+    path = pdf_reader.download_pdf(
+        "https://example.com/huge.pdf", cache_dir=tmp_path, session=session
+    )
+
+    assert path is None
     assert list(tmp_path.iterdir()) == []
 
 
