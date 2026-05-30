@@ -20,16 +20,14 @@ requests
 python-dotenv
 dhanhq
 
-# Fundamental analysis: screener.in scraper + LangChain agent over OpenRouter.
-# `langchain-openai` is used because OpenRouter exposes the OpenAI-compatible
-# /v1/chat/completions surface — the same client wrapper works.
+# Fundamental analysis: screener.in scraper + Claude Agent SDK agent.
+# `claude-agent-sdk` runs the Check Fundamentals agent on your Claude
+# subscription (bundled Claude CLI login — no API key, no Node required).
 # `pdfplumber` extracts text from downloaded concall transcript PDFs.
 beautifulsoup4
 lxml
 pdfplumber
-langchain
-langchain-core
-langchain-openai
+claude-agent-sdk
 
 # Test runner.
 pytest

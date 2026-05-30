@@ -17,7 +17,7 @@ Design choices:
   `None` with a `logger.warning`. The agent can reason about partial data;
   a parser crash would break the whole feature.
 - The fetcher is a single public function (`fetch_company_data`) so the
-  LangChain agent can wrap it as a Tool without touching the parser
+  Check Fundamentals agent can wrap it as a tool without touching the parser
   internals.
 """
 

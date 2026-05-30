@@ -46,9 +46,13 @@ from backend.config import (
     credential_status,
     ensure_project_dirs,
     get_dhan_credentials,
-    get_openrouter_credentials,
+    get_fundamentals_model,
 )
-from backend.fundamentals import AgentVerdict, FundamentalAgent
+from backend.fundamentals import (
+    AgentVerdict,
+    FundamentalAgent,
+    FundamentalsUsageLimitError,
+)
 from backend.daily_data_loader import DailyDataLoader
 from backend.dhan_client import DhanDataClient
 from backend.screener_registry import ScreenerDefinition, ScreenerRegistryError, discover_screeners
@@ -229,11 +233,11 @@ def _escape_cell(value: Any) -> Any:
 def _redact_secrets(text: str) -> str:
     """Strip any loaded credentials from an error message before display.
 
-    Currently masks the Dhan access token / client code AND the OpenRouter
-    API key. The Dhan SDK occasionally embeds request payloads (including
-    auth headers) in its exception messages, and the LangChain / OpenRouter
-    error path can leak the API key in tracebacks. We replace any of those
-    values with a fixed mask before passing text to `st.error(...)`.
+    Masks the Dhan access token / client code. The Dhan SDK occasionally
+    embeds request payloads (including auth headers) in its exception
+    messages, so we replace those values with a fixed mask before passing
+    text to `st.error(...)`. The Check Fundamentals agent authenticates via
+    your Claude subscription (no API key), so there is no LLM key to redact.
     """
     if not isinstance(text, str) or not text:
         return text
@@ -242,10 +246,6 @@ def _redact_secrets(text: str) -> str:
     dhan = get_dhan_credentials(required=False)
     if dhan is not None:
         secrets.extend(filter(None, [dhan.access_token, dhan.client_code]))
-
-    openrouter = get_openrouter_credentials(required=False)
-    if openrouter is not None and openrouter.api_key:
-        secrets.append(openrouter.api_key)
 
     if not secrets:
         return text
@@ -416,10 +416,10 @@ def _has_rating_column(results: pd.DataFrame) -> bool:
 # ---------------------------------------------------------------------------
 # Check Fundamentals — eligibility, agent caching, UI rendering
 #
-# The fundamental-analysis agent is gated to the Hemant Super 45 ∪ Nifty 100
-# universes per the user's spec. Two helpers below build that eligibility
-# set, and a third lazily instantiates the LangChain agent. None of the
-# OpenRouter / LangChain code runs unless the user actually clicks the
+# The fundamental-analysis agent runs for ANY shortlisted symbol; eligibility
+# only selects criteria vs insights-only mode. Two helpers below build that
+# eligibility set, and a third lazily instantiates the Claude Agent SDK agent.
+# None of the agent code runs unless the user actually clicks the
 # "Check Fundamentals" button.
 # ---------------------------------------------------------------------------
 
@@ -459,15 +459,14 @@ def _is_eligible_for_fundamentals(symbol: str | None) -> bool:
 
 
 @st.cache_resource(show_spinner=False)
-def _get_fundamental_agent(api_key: str, model: str) -> FundamentalAgent:
-    """Memoize one agent per (api_key, model) pair across reruns.
+def _get_fundamental_agent(model: str) -> FundamentalAgent:
+    """Memoize one agent per model across reruns.
 
-    Building a `ChatOpenAI` client is cheap, but caching the agent also
-    keeps the on-disk cache instance and bound tool consistent. Note that
-    `cache_resource` keys on the function arguments, so rotating the key
-    or model rebuilds the agent automatically.
+    The Claude Agent SDK authenticates via your Claude subscription, so there
+    is no API key argument. `cache_resource` keys on `model`, so switching the
+    model rebuilds the agent (and its on-disk cache handle) automatically.
     """
-    return FundamentalAgent(api_key=api_key, model=model)
+    return FundamentalAgent(model=model)
 
 
 def _render_fundamentals_panel(symbol: str | None) -> None:
@@ -480,8 +479,7 @@ def _render_fundamentals_panel(symbol: str | None) -> None:
       - Anything else → insights_only mode (skip the seven criteria,
         produce observations + outlook + rating from screener.in data).
 
-    Stays hidden only when no symbol is selected. Shows an informational
-    notice instead of the button when OPENROUTER_API_KEY isn't configured.
+    Stays hidden only when no symbol is selected.
     """
     if not symbol:
         return
@@ -505,18 +503,11 @@ def _render_fundamentals_panel(symbol: str | None) -> None:
             "forward outlook from screener.in data."
         )
 
-    creds = get_openrouter_credentials(required=False)
-    if creds is None:
-        st.info(
-            "Add `OPENROUTER_API_KEY` to `Dependencies/.env` (see "
-            "`Dependencies/.env.example`) to enable the Check Fundamentals "
-            "agent. The button stays hidden until the key is configured."
-        )
-        return
+    model = get_fundamentals_model()
 
     # Session-state cache key is now mode-qualified so a criteria-mode and an
     # insights-only verdict for the same symbol cannot collide.
-    session_key = f"fundamentals_verdict::{symbol}::{creds.model}::{mode}"
+    session_key = f"fundamentals_verdict::{symbol}::{model}::{mode}"
     cached_verdict_dict = st.session_state.get(session_key)
 
     button_col, rerun_col, _spacer = st.columns([2, 1, 2])
@@ -528,20 +519,20 @@ def _render_fundamentals_panel(symbol: str | None) -> None:
     run_now = button_col.button(
         primary_label,
         type="primary",
-        key=f"check_fund_btn::{symbol}::{creds.model}::{mode}",
+        key=f"check_fund_btn::{symbol}::{model}::{mode}",
         disabled=cached_verdict_dict is not None,
     )
     rerun_now = False
     if cached_verdict_dict is not None:
         rerun_now = rerun_col.button(
             "Re-run analysis",
-            key=f"rerun_fund_btn::{symbol}::{creds.model}::{mode}",
+            key=f"rerun_fund_btn::{symbol}::{model}::{mode}",
             help="Bypass the cache and re-fetch screener.in + re-query the LLM.",
         )
 
     if run_now or rerun_now:
         try:
-            agent = _get_fundamental_agent(creds.api_key, creds.model)
+            agent = _get_fundamental_agent(model)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Could not build FundamentalAgent")
             st.error(f"Could not build FundamentalAgent: {_redact_secrets(str(exc))}")
@@ -550,6 +541,12 @@ def _render_fundamentals_panel(symbol: str | None) -> None:
         with st.spinner(f"Senior analyst evaluating **{symbol}** — this can take 20–60s..."):
             try:
                 verdict = agent.check(symbol, force_refresh=rerun_now, mode=mode)
+            except FundamentalsUsageLimitError as exc:
+                # Expected operational state (plan limit hit) — show a gentle
+                # notice, not a red error, and keep cached verdicts usable.
+                logger.warning("Fundamentals usage limit reached for %s: %s", symbol, exc)
+                st.warning(f"⏳ {exc}")
+                return
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Fundamental agent failed for %s", symbol)
                 st.error(f"Fundamental check failed: {_redact_secrets(str(exc))}")

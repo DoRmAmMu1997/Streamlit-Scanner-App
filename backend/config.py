@@ -33,9 +33,10 @@ FUNDAMENTALS_CACHE_DIR = DATA_DIR / "cache" / "fundamentals"
 FUNDAMENTALS_PDF_DIR = FUNDAMENTALS_CACHE_DIR / "pdfs"
 SCREENERS_DIR = PROJECT_ROOT / "screeners"
 
-# Default model used by the Check Fundamentals agent when OPENROUTER_MODEL
-# is not set. Lives here so tests can import it without re-typing the string.
-DEFAULT_OPENROUTER_MODEL = "anthropic/claude-sonnet-4.5"
+# Default Claude model used by the Check Fundamentals agent (Claude Agent SDK)
+# when CLAUDE_AGENT_MODEL is not set. Lives here so tests/UI can import it
+# without re-typing the string.
+DEFAULT_FUNDAMENTALS_MODEL = "claude-sonnet-4-6"
 
 # Public URLs used to build stock universes. These do not require Dhan
 # credentials. Dhan credentials are only needed when fetching candle data.
@@ -59,14 +60,6 @@ class DhanCredentials:
 
     client_code: str
     access_token: str
-
-
-@dataclass(frozen=True)
-class OpenRouterCredentials:
-    """API key + model name needed to call the OpenRouter chat completions API."""
-
-    api_key: str
-    model: str
 
 
 def ensure_project_dirs() -> None:
@@ -130,28 +123,20 @@ def get_dhan_credentials(required: bool = False) -> DhanCredentials | None:
     return None
 
 
-def get_openrouter_credentials(required: bool = False) -> OpenRouterCredentials | None:
-    """Return OpenRouter credentials from Dependencies/.env or the process env.
+def get_fundamentals_model() -> str:
+    """Return the Claude model the Check Fundamentals agent should use.
 
-    Mirrors `get_dhan_credentials`. The Check Fundamentals agent is the only
-    consumer today. Returning `None` (instead of raising) when not required
-    lets the UI hide the button gracefully when the user has not set up the
-    key yet.
+    The Claude Agent SDK authenticates through your Claude subscription (the
+    bundled Claude CLI login), so there is no API key to read here — only the
+    model name. Override the default via the CLAUDE_AGENT_MODEL env var (in
+    Dependencies/.env or the process environment).
+
+    NOTE: keep ANTHROPIC_API_KEY UNSET for subscription-based billing. If it is
+    set, the Agent SDK uses that key and bills your API account instead of your
+    plan's monthly Agent SDK credit.
     """
     load_environment()
-    api_key = _clean_env_value(os.getenv("OPENROUTER_API_KEY"))
-    model = _clean_env_value(os.getenv("OPENROUTER_MODEL")) or DEFAULT_OPENROUTER_MODEL
-
-    if api_key:
-        return OpenRouterCredentials(api_key=api_key, model=model)
-
-    if required:
-        raise RuntimeError(
-            "Missing OPENROUTER_API_KEY. Add it to "
-            f"{ENV_PATH} (see Dependencies/.env.example) to use the "
-            "Check Fundamentals agent."
-        )
-    return None
+    return _clean_env_value(os.getenv("CLAUDE_AGENT_MODEL")) or DEFAULT_FUNDAMENTALS_MODEL
 
 
 def credential_status() -> dict[str, object]:
@@ -159,7 +144,6 @@ def credential_status() -> dict[str, object]:
     load_environment()
     client_code = _clean_env_value(os.getenv("DHAN_CLIENT_CODE"))
     access_token = _clean_env_value(os.getenv("DHAN_ACCESS_TOKEN"))
-    openrouter_key = _clean_env_value(os.getenv("OPENROUTER_API_KEY"))
     # Never return the actual access token to Streamlit. The UI only needs
     # booleans so it can show whether setup is complete.
     return {
@@ -167,7 +151,6 @@ def credential_status() -> dict[str, object]:
         "env_exists": ENV_PATH.exists(),
         "has_client_code": bool(client_code),
         "has_access_token": bool(access_token),
-        "has_openrouter_key": bool(openrouter_key),
         "ready": bool(client_code and access_token),
     }
 

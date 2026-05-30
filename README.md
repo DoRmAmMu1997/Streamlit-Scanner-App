@@ -8,9 +8,9 @@ historical price data from [DhanHQ](https://dhanhq.co/), runs technical-analysis
 It is designed to be easy to extend: a "screener" is just a small Python file
 dropped into the `screeners/` folder.
 
-Shortlisted stocks can also be sent to a built-in **LangChain "Check
-Fundamentals" agent** (powered by Anthropic's Claude Sonnet 4.5 via OpenRouter
-by default). The agent scrapes [screener.in](https://www.screener.in/) for the
+Shortlisted stocks can also be sent to a built-in **"Check Fundamentals"
+agent** (powered by the [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview)
+running on your Claude subscription). The agent scrapes [screener.in](https://www.screener.in/) for the
 selected stock and returns a structured fundamental analysis — pass/fail on
 seven user-defined criteria for the Hemant Super 45 / Nifty 100 universe, a
 0–10 holistic rating, peer / margin / governance observations, and a three-part
@@ -42,8 +42,8 @@ view).
     the 200-period exponential moving average.
 - **Per-stock Check Fundamentals AI agent** — see the
   [dedicated section below](#check-fundamentals-agent). One click on a
-  shortlisted row runs a LangChain agent that scrapes screener.in (peer table
-  via HTMX, recent announcements, the latest concall transcript via
+  shortlisted row runs a Claude Agent SDK agent that scrapes screener.in (peer
+  table via HTMX, recent announcements, the latest concall transcript via
   `pdfplumber`) and returns a structured verdict with a 0–10 rating, a
   Valuation observation comparing current vs median P/E, and a three-part
   forward outlook.
@@ -133,17 +133,25 @@ network work happens up front in the terminal.
    This walks you through the DhanHQ OAuth login and writes
    `DHAN_ACCESS_TOKEN` back into `Dependencies/.env` for you.
 
-5. **(Optional) Add your OpenRouter key** — required only if you want to use
-   the Check Fundamentals agent. Append these lines to `Dependencies/.env`:
+5. **(Optional) Enable the Check Fundamentals agent** — it runs on the
+   [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview) using
+   your Claude subscription (Pro/Max), not an API key:
 
-   ```env
-   OPENROUTER_API_KEY=sk-or-v1-...
-   OPENROUTER_MODEL=anthropic/claude-sonnet-4.5
+   ```bash
+   pip install claude-agent-sdk        # already in requirements.txt
    ```
 
-   `OPENROUTER_MODEL` is optional — anything OpenRouter exposes that supports
-   tool calling works. Without `OPENROUTER_API_KEY` the screeners still run
-   normally; the Check Fundamentals button just shows a setup prompt.
+   Then sign in once with the bundled Claude CLI (uses your Claude plan), and
+   make sure `ANTHROPIC_API_KEY` is **not** set in your environment — if it is,
+   the SDK bills your API account instead of your plan's monthly Agent SDK
+   credit. Optionally override the model in `Dependencies/.env`:
+
+   ```env
+   CLAUDE_AGENT_MODEL=claude-sonnet-4-6
+   ```
+
+   The screeners run fine without any of this; only the Check Fundamentals
+   button needs it.
 
 > `Dependencies/.env` is git-ignored — your credentials never leave your machine.
 
@@ -188,7 +196,7 @@ Streamlit Scanner App/
 │       ├── pdf_reader.py        # PDF download + text extraction
 │       │                        # (pdfplumber → pypdf fallback)
 │       ├── fundamentals_cache.py# On-disk JSON cache (data + verdict)
-│       └── fundamental_agent.py # LangChain agent + Pydantic schemas
+│       └── fundamental_agent.py # Claude Agent SDK agent + Pydantic schemas
 ├── screeners/                   # One file per screener (the strategy logic)
 │   ├── heikin_ashi_supertrend.py
 │   ├── bollinger_band_reversal.py
@@ -215,8 +223,8 @@ The boundary is deliberate: **strategy logic lives in `screeners/`**, and
 ## Check Fundamentals agent
 
 Below the chart for any shortlisted stock, the UI shows a **Check
-Fundamentals** button. Click it and a LangChain agent (Anthropic Claude
-Sonnet 4.5 via OpenRouter by default) scrapes the stock's
+Fundamentals** button. Click it and a Claude Agent SDK agent (running on your
+Claude subscription) scrapes the stock's
 [screener.in](https://www.screener.in/) page and returns a structured verdict.
 
 ### Two modes
@@ -283,13 +291,18 @@ that had `forward_outlook` as a plain string are automatically migrated into
 the new three-part shape on load (the legacy string becomes the
 `overall_summary` subfield).
 
-### Cost ballpark (Claude Sonnet 4.5)
+### Cost ballpark (Claude Sonnet, billed to your plan)
 
-- Typical criteria-mode check, no transcript read: ~$0.02.
+Usage draws on your Claude plan's monthly **Agent SDK credit** (Pro $20 /
+Max 5× $100 / Max 20× $200) rather than per-token API billing:
+
+- Typical criteria-mode check, no transcript read: ~$0.02 of credit.
 - Criteria-mode check that also reads the concall transcript: ~$0.08.
 
 Both are one-shot prices — the verdict cache covers subsequent clicks at zero
-cost until either the underlying data or the model changes.
+cost until either the underlying data or the model changes. When the monthly
+credit is exhausted, the agent pauses until it refreshes (or falls back to
+standard API rates if you've enabled API billing).
 
 ---
 

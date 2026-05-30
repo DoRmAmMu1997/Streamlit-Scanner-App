@@ -8,7 +8,7 @@ Two caches live under `data/cache/fundamentals/`:
    refresh quarterly at most, so a 30-day TTL is plenty. File name:
    ``<SYMBOL>_data.json``.
 
-2. **Verdict cache** — the LangChain agent's JSON verdict for that stock.
+2. **Verdict cache** — the Check Fundamentals agent's JSON verdict for that stock.
    Keyed by ``(symbol, model, data_fetch_date)`` so re-clicks for the same
    day and model are free, but a fresh data fetch (e.g. a new quarter
    landed) or model swap invalidates automatically. File name:

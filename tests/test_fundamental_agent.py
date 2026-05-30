@@ -1,25 +1,31 @@
 from __future__ import annotations
 
-"""Tests for the LangChain fundamental analysis agent.
+"""Tests for the Claude Agent SDK fundamental analysis agent.
 
-The LLM is replaced with a tiny in-process fake so no live OpenRouter call
-is made. The fake mimics just enough of ChatOpenAI's interface to drive the
-agent's two-phase loop (tool-call turn, final narrative turn, structured
-output coercion).
+The agentic loop is replaced with a tiny in-process fake `runner` so no live
+Claude call (and no CLI subprocess) is made. The fake returns a canned
+AgentVerdict JSON string — exactly what the real agent's final message would
+contain. The two screener.in tools are tested directly via their plain
+`_..._impl` methods, which carry the tool logic without the SDK wrappers.
 """
 
+import json
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage
 
 from backend.fundamentals.fundamental_agent import (
-    _MAX_OUTPUT_TOKENS,
+    AgentRunResult,
     AgentVerdict,
     CriterionResult,
     ForwardOutlook,
     FundamentalAgent,
+    FundamentalsAgentError,
+    FundamentalsUsageLimitError,
     Observation,
+    _mentions_usage_limit,
+    _usage_limit_from_message,
 )
 from backend.fundamentals.fundamentals_cache import FundamentalsCache
 
@@ -51,7 +57,7 @@ def _sample_screener_data() -> dict[str, Any]:
 
 
 def _sample_verdict() -> AgentVerdict:
-    """The verdict the fake LLM should return through structured output."""
+    """The verdict the fake runner should return as JSON."""
     return AgentVerdict(
         symbol="DEMO",
         rating=8,
@@ -91,74 +97,39 @@ def _sample_verdict() -> AgentVerdict:
     )
 
 
-class _FakeLLM:
-    """Tiny stand-in for `ChatOpenAI` used by FundamentalAgent tests.
+class _FakeRunner:
+    """Stand-in for the Claude Agent SDK runner used by FundamentalAgent.
 
-    Implements the methods FundamentalAgent actually calls:
-      - `bind_tools(tools)` → returns a wrapper with tool-call invoke
-      - `with_structured_output(schema)` → returns a wrapper that emits the
-        prepared AgentVerdict
-    The wrappers track which "turn" they are on so the first invoke yields
-    a tool call and the second yields a final assistant message.
+    `FundamentalAgent.check` awaits `runner(prompt, system_prompt=, model=,
+    max_turns=)` and parses the returned `AgentRunResult.text` as the final
+    AgentVerdict JSON. This fake records its invocations and the arguments it
+    was last called with, then returns the canned verdict as a JSON string.
     """
 
-    def __init__(self, verdict: AgentVerdict):
+    def __init__(self, verdict: AgentVerdict, *, cost_usd: float | None = 0.02):
         self.verdict = verdict
-        self.tool_call_turn: AIMessage | None = None
-        self.bound_tool = None
+        self.cost_usd = cost_usd
+        self.calls = 0
+        self.last_system_prompt: str | None = None
+        self.last_model: str | None = None
+        self.last_prompt: str | None = None
 
-    def bind_tools(self, tools):
-        # Just remember the bound tool; the wrapper does the heavy lifting.
-        bound = _BoundLLM(self, tools)
-        self.bound_tool = bound
-        return bound
-
-    def with_structured_output(self, schema):
-        return _StructuredLLM(self.verdict)
-
-
-class _BoundLLM:
-    def __init__(self, parent: _FakeLLM, tools):
-        self.parent = parent
-        self.tools = tools
-        self.invocations = 0
-
-    def invoke(self, messages):
-        self.invocations += 1
-        if self.invocations == 1:
-            # First call → request the fetch_company_data tool with a symbol.
-            # Find the company-data tool by name so this still works after
-            # Job 4 added a second tool (read_recent_concall_transcript).
-            fetch_tool_name = next(
-                tool.name
-                for tool in self.tools
-                if tool.name == "fetch_company_data_tool"
-            )
-            return AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "name": fetch_tool_name,
-                        "args": {"symbol": "DEMO"},
-                        "id": "tool-call-1",
-                    }
-                ],
-            )
-        # Second call → narrative analysis (text only, no further tool calls).
-        return AIMessage(
-            content=(
-                "I have all the data I need to evaluate Demo Industries. "
-                "Proceeding to the structured verdict."
-            ),
+    async def __call__(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str,
+        model: str,
+        max_turns: int,
+    ) -> AgentRunResult:
+        self.calls += 1
+        self.last_prompt = prompt
+        self.last_system_prompt = system_prompt
+        self.last_model = model
+        return AgentRunResult(
+            text=json.dumps(self.verdict.model_dump(mode="json")),
+            cost_usd=self.cost_usd,
         )
-
-
-class _StructuredLLM:
-    def __init__(self, verdict: AgentVerdict):
-        self.verdict = verdict
-
-    def invoke(self, messages):
-        return self.verdict
 
 
 # ---------------------------------------------------------------------------
@@ -191,21 +162,21 @@ def test_observation_sentiment_must_be_valid():
 
 
 def test_agent_verdict_json_schema_omits_min_max_on_integer_fields():
-    """Regression guard: Anthropic's structured-output API rejects
+    """Regression guard: Claude's structured-output handling rejects
     `minimum` / `maximum` on `integer` JSON Schema types. If a future
     change re-adds Pydantic `Field(ge=..., le=...)` on the integer fields,
-    this test catches it BEFORE a live call hits a 400 from Anthropic.
+    this test catches it BEFORE a live call hits a 400.
     """
     schema = AgentVerdict.model_json_schema()
 
     rating_props = schema["properties"]["rating"]
     assert rating_props["type"] == "integer"
     assert "minimum" not in rating_props, (
-        "rating field must not emit 'minimum' — Anthropic rejects it. "
+        "rating field must not emit 'minimum' — Claude rejects it. "
         "Use @field_validator instead of Field(ge=...)."
     )
     assert "maximum" not in rating_props, (
-        "rating field must not emit 'maximum' — Anthropic rejects it. "
+        "rating field must not emit 'maximum' — Claude rejects it. "
         "Use @field_validator instead of Field(le=...)."
     )
 
@@ -244,140 +215,10 @@ def test_agent_verdict_field_validator_still_rejects_out_of_range_rating():
         AgentVerdict.model_validate({**valid, "passed_criteria_count": -1})
 
 
-# ---------------------------------------------------------------------------
-# End-to-end agent loop with the fake LLM
-# ---------------------------------------------------------------------------
-
-
-def test_fundamental_agent_runs_through_tool_then_structured_output(tmp_path):
-    cache = FundamentalsCache(cache_dir=tmp_path)
-    # Pre-populate the data cache so the fetch tool returns synthetically
-    # without hitting screener.in.
-    cache.set_data("DEMO", _sample_screener_data())
-
-    fake_llm = _FakeLLM(_sample_verdict())
-    agent = FundamentalAgent(
-        api_key="test-key",
-        model="test-model",
-        cache=cache,
-        llm=fake_llm,  # type: ignore[arg-type]
-    )
-
-    verdict = agent.check("DEMO")
-
-    assert verdict.symbol == "DEMO"
-    assert verdict.rating == 8
-    assert verdict.passed_criteria_count == 6
-    # The bound LLM must have been invoked at least twice (tool-call turn + final).
-    assert fake_llm.bound_tool is not None
-    assert fake_llm.bound_tool.invocations >= 2
-
-
-def test_fundamental_agent_caches_verdict_per_symbol_model_date(tmp_path):
-    cache = FundamentalsCache(cache_dir=tmp_path)
-    cache.set_data("DEMO", _sample_screener_data())
-
-    fake_llm = _FakeLLM(_sample_verdict())
-    agent = FundamentalAgent(
-        api_key="test-key",
-        model="test-model",
-        cache=cache,
-        llm=fake_llm,  # type: ignore[arg-type]
-    )
-
-    # First call writes to disk
-    agent.check("DEMO")
-    cached = cache.get_verdict("DEMO", "test-model::criteria", "2026-05-27")
-    assert cached is not None
-    assert cached["rating"] == 8
-
-    # Second call should HIT the verdict cache and not invoke the LLM again.
-    fake_llm.bound_tool.invocations = 0  # reset counter
-    agent.check("DEMO")
-    assert fake_llm.bound_tool.invocations == 0, (
-        "Second check() should not re-invoke the LLM when the verdict cache is fresh"
-    )
-
-
-def test_fundamental_agent_force_refresh_invalidates_cache_and_reruns(tmp_path):
-    cache = FundamentalsCache(cache_dir=tmp_path)
-    cache.set_data("DEMO", _sample_screener_data())
-
-    fake_llm = _FakeLLM(_sample_verdict())
-    agent = FundamentalAgent(
-        api_key="test-key",
-        model="test-model",
-        cache=cache,
-        llm=fake_llm,  # type: ignore[arg-type]
-    )
-
-    # Seed the verdict cache so we can prove force_refresh wipes it.
-    agent.check("DEMO")
-    assert cache.get_verdict("DEMO", "test-model::criteria", "2026-05-27") is not None
-
-    # force_refresh should invalidate the data cache (which triggers a fetch
-    # attempt) — we monkey-patch the fetch by writing fresh data back into
-    # the cache via the fake tool path. For this unit test we only need to
-    # verify the LLM was re-invoked, which proves the verdict cache was bypassed.
-    fake_llm.bound_tool.invocations = 0
-    # Refill the data cache the tool would have produced.
-    cache.set_data("DEMO", _sample_screener_data())
-    agent.check("DEMO", force_refresh=True)
-    assert fake_llm.bound_tool.invocations >= 2
-
-
-def test_fundamental_agent_requires_api_key():
-    with pytest.raises(ValueError):
-        FundamentalAgent(api_key="", model="test-model")
-
-
-def test_fundamental_agent_caps_output_tokens(tmp_path):
-    """The real ChatOpenAI client must be built with a bounded max_tokens.
-
-    Without this cap OpenRouter pre-authorizes credits for the model's full
-    output capacity (64K for Claude Sonnet 4.5) and returns HTTP 402 once the
-    key balance dips below that worst-case reservation. Building the agent
-    WITHOUT an injected llm constructs the real client; we assert the cap is
-    wired through. (Construction makes no network call.)
-    """
-    assert _MAX_OUTPUT_TOKENS == 16000
-
-    agent = FundamentalAgent(
-        api_key="test-key",
-        model="anthropic/claude-sonnet-4.5",
-        cache=FundamentalsCache(cache_dir=tmp_path),
-    )
-    assert agent._llm.max_tokens == _MAX_OUTPUT_TOKENS
-
-
-def test_fundamental_agent_normalize_verdict_fills_blank_fields(tmp_path):
-    """If the LLM returns a verdict missing model/symbol, the agent should stamp them."""
-    cache = FundamentalsCache(cache_dir=tmp_path)
-    cache.set_data("DEMO", _sample_screener_data())
-
-    partial = _sample_verdict().model_copy(update={"symbol": "", "model_used": ""})
-    fake_llm = _FakeLLM(partial)
-    agent = FundamentalAgent(
-        api_key="test-key",
-        model="test-model",
-        cache=cache,
-        llm=fake_llm,  # type: ignore[arg-type]
-    )
-
-    verdict = agent.check("DEMO")
-    assert verdict.symbol == "DEMO"
-    assert verdict.model_used == "test-model"
-
-
-# ---------------------------------------------------------------------------
-# Job 4 schema + tool-binding tests
-# ---------------------------------------------------------------------------
-
-
 def test_agent_verdict_forward_outlook_is_a_nested_object():
-    """Job 6: forward_outlook is no longer a string — it's a ForwardOutlook
-    object with three string subfields. The JSON schema must reflect this
-    so structured-output models emit the right shape."""
+    """forward_outlook is a ForwardOutlook object with three string subfields.
+    The JSON schema must reflect this so structured-output models emit the
+    right shape."""
     schema = AgentVerdict.model_json_schema()
     assert "forward_outlook" in schema["properties"]
     field_schema = schema["properties"]["forward_outlook"]
@@ -404,10 +245,10 @@ def test_agent_verdict_forward_outlook_is_a_nested_object():
 
 
 def test_agent_verdict_accepts_legacy_string_forward_outlook():
-    """Pre-Job-6 cached verdicts had forward_outlook as a string. The
-    field validator must promote those into the new ForwardOutlook shape
-    by routing the string into overall_summary — otherwise existing JSON
-    caches on disk would all fail to load."""
+    """Older cached verdicts had forward_outlook as a string. The field
+    validator must promote those into the new ForwardOutlook shape by routing
+    the string into overall_summary — otherwise existing JSON caches on disk
+    would all fail to load."""
     legacy_payload = {
         "symbol": "LEGACY",
         "rating": 8,
@@ -429,89 +270,6 @@ def test_agent_verdict_accepts_legacy_string_forward_outlook():
     assert verdict.forward_outlook.concall_conclusion == ""
 
 
-def test_fundamental_agent_binds_both_tools(tmp_path):
-    """The agent should now bind two tools: fetch + concall transcript reader."""
-    cache = FundamentalsCache(cache_dir=tmp_path)
-    cache.set_data("DEMO", _sample_screener_data())
-
-    verdict = _sample_verdict().model_copy(
-        update={
-            "forward_outlook": ForwardOutlook(
-                announcements_conclusion="Recent contract wins point to strong enterprise demand.",
-                concall_conclusion="Management reaffirmed 12% FY26 revenue growth guidance.",
-                overall_summary="Demand environment looks supportive over the next 1-4 quarters.",
-            ),
-        }
-    )
-    fake_llm = _FakeLLM(verdict)
-    agent = FundamentalAgent(
-        api_key="test-key",
-        model="test-model",
-        cache=cache,
-        llm=fake_llm,  # type: ignore[arg-type]
-    )
-
-    agent.check("DEMO")
-
-    # The fake records the bound tools list for inspection.
-    assert fake_llm.bound_tool is not None
-    tool_names = {tool.name for tool in fake_llm.bound_tool.tools}
-    assert "fetch_company_data_tool" in tool_names
-    assert "read_recent_concall_transcript" in tool_names
-
-
-def test_concall_transcript_tool_uses_cached_concalls(tmp_path, monkeypatch):
-    """When invoked directly, the transcript tool reads concalls from cache + downloads."""
-    from backend.fundamentals import fundamental_agent as agent_module
-
-    cache = FundamentalsCache(cache_dir=tmp_path)
-    cache.set_data(
-        "DEMO",
-        {
-            **_sample_screener_data(),
-            "concalls": [
-                {"month": "Jan 2026", "transcript_url": "https://example.com/jan.pdf"},
-            ],
-        },
-    )
-
-    # Patch the orchestrator so we don't actually hit the network or open a PDF.
-    monkeypatch.setattr(
-        agent_module,
-        "read_recent_concall_text",
-        lambda concalls, **_kwargs: "Management called out 12% growth guidance for FY26.",
-    )
-
-    agent = FundamentalAgent(
-        api_key="test-key",
-        model="test-model",
-        cache=cache,
-        llm=_FakeLLM(_sample_verdict()),  # type: ignore[arg-type]
-    )
-    tool = agent._build_transcript_tool()
-    text = tool.invoke({"symbol": "DEMO"})
-    assert "12% growth guidance" in text
-
-
-def test_concall_transcript_tool_returns_message_when_no_cache(tmp_path):
-    """Calling the transcript tool without first calling fetch should return a clear hint."""
-    cache = FundamentalsCache(cache_dir=tmp_path)
-    agent = FundamentalAgent(
-        api_key="test-key",
-        model="test-model",
-        cache=cache,
-        llm=_FakeLLM(_sample_verdict()),  # type: ignore[arg-type]
-    )
-    tool = agent._build_transcript_tool()
-    text = tool.invoke({"symbol": "UNCACHED"})
-    assert "fetch_company_data" in text
-
-
-# ---------------------------------------------------------------------------
-# Job 5: insights-only mode + AgentVerdict.mode field
-# ---------------------------------------------------------------------------
-
-
 def test_agent_verdict_accepts_insights_only_mode_with_empty_criteria():
     """The schema must allow a verdict with mode='insights_only' and an empty
     criteria breakdown — that's the standard insights-only output shape."""
@@ -531,7 +289,7 @@ def test_agent_verdict_accepts_insights_only_mode_with_empty_criteria():
 
 
 def test_agent_verdict_default_mode_is_criteria_for_backward_compat():
-    """Pre-Job-5 verdicts (no `mode` in the dict) should validate to 'criteria'."""
+    """Verdicts without a `mode` in the dict should validate to 'criteria'."""
     verdict = AgentVerdict.model_validate(
         {
             "symbol": "LEGACY",
@@ -547,23 +305,188 @@ def test_agent_verdict_default_mode_is_criteria_for_backward_compat():
     assert verdict.mode == "criteria"
 
 
+# ---------------------------------------------------------------------------
+# End-to-end agent loop with the fake runner
+# ---------------------------------------------------------------------------
+
+
+def test_fundamental_agent_runs_through_runner_and_parses_verdict(tmp_path):
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    # Pre-populate the data cache so a real fetch tool would hit cache; the
+    # fake runner does not call tools, so this just mirrors a warm cache.
+    cache.set_data("DEMO", _sample_screener_data())
+
+    runner = _FakeRunner(_sample_verdict())
+    agent = FundamentalAgent(model="test-model", cache=cache, runner=runner)
+
+    verdict = agent.check("DEMO")
+
+    assert verdict.symbol == "DEMO"
+    assert verdict.rating == 8
+    assert verdict.passed_criteria_count == 6
+    assert runner.calls == 1
+    # The agent must build a system prompt carrying the strict JSON-output
+    # contract so the model knows to emit AgentVerdict JSON.
+    assert "FINAL OUTPUT FORMAT" in (runner.last_system_prompt or "")
+    assert runner.last_model == "test-model"
+
+
+def test_fundamental_agent_caches_verdict_per_symbol_model_date(tmp_path):
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("DEMO", _sample_screener_data())
+
+    runner = _FakeRunner(_sample_verdict())
+    agent = FundamentalAgent(model="test-model", cache=cache, runner=runner)
+
+    # First call writes to disk.
+    agent.check("DEMO")
+    cached = cache.get_verdict("DEMO", "test-model::criteria", "2026-05-27")
+    assert cached is not None
+    assert cached["rating"] == 8
+
+    # Second call should HIT the verdict cache and not invoke the runner again.
+    runner.calls = 0
+    agent.check("DEMO")
+    assert runner.calls == 0, (
+        "Second check() should not re-run the agent when the verdict cache is fresh"
+    )
+
+
+def test_fundamental_agent_force_refresh_invalidates_cache_and_reruns(tmp_path):
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("DEMO", _sample_screener_data())
+
+    runner = _FakeRunner(_sample_verdict())
+    agent = FundamentalAgent(model="test-model", cache=cache, runner=runner)
+
+    # Seed the verdict cache so we can prove force_refresh wipes it.
+    agent.check("DEMO")
+    assert cache.get_verdict("DEMO", "test-model::criteria", "2026-05-27") is not None
+
+    # force_refresh bypasses the verdict cache, so the runner runs again.
+    runner.calls = 0
+    agent.check("DEMO", force_refresh=True)
+    assert runner.calls == 1
+
+
+def test_fundamental_agent_requires_model():
+    with pytest.raises(ValueError):
+        FundamentalAgent(model="")
+
+
+def test_fundamental_agent_normalize_verdict_fills_blank_fields(tmp_path):
+    """If the agent returns a verdict missing model/symbol, stamp them."""
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("DEMO", _sample_screener_data())
+
+    partial = _sample_verdict().model_copy(update={"symbol": "", "model_used": ""})
+    runner = _FakeRunner(partial)
+    agent = FundamentalAgent(model="test-model", cache=cache, runner=runner)
+
+    verdict = agent.check("DEMO")
+    assert verdict.symbol == "DEMO"
+    assert verdict.model_used == "test-model"
+
+
+def test_fundamental_agent_parse_failure_raises_clear_error(tmp_path):
+    """A runner that returns non-JSON must raise a clear RuntimeError rather
+    than a cryptic validation error."""
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("DEMO", _sample_screener_data())
+
+    async def _bad_runner(prompt, *, system_prompt, model, max_turns):
+        return AgentRunResult(text="I could not complete the analysis, sorry.")
+
+    agent = FundamentalAgent(model="test-model", cache=cache, runner=_bad_runner)
+    with pytest.raises(RuntimeError, match="parseable AgentVerdict"):
+        agent.check("DEMO")
+
+
+def test_fundamental_agent_tolerates_json_in_markdown_fence(tmp_path):
+    """Models sometimes wrap the final JSON in a ```json fence — the agent
+    must still parse it."""
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("DEMO", _sample_screener_data())
+
+    verdict_json = json.dumps(_sample_verdict().model_dump(mode="json"))
+
+    async def _fenced_runner(prompt, *, system_prompt, model, max_turns):
+        return AgentRunResult(text=f"Here is the verdict:\n```json\n{verdict_json}\n```")
+
+    agent = FundamentalAgent(model="test-model", cache=cache, runner=_fenced_runner)
+    verdict = agent.check("DEMO")
+    assert verdict.symbol == "DEMO"
+    assert verdict.rating == 8
+
+
+# ---------------------------------------------------------------------------
+# Tool implementations (exercised directly, no SDK)
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_company_data_impl_uses_cached_data(tmp_path):
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("DEMO", _sample_screener_data())
+    agent = FundamentalAgent(model="test-model", cache=cache)
+
+    out = agent._fetch_company_data_impl("demo")  # lowercase on purpose
+    payload = json.loads(out)
+    assert payload["symbol"] == "DEMO"
+    assert payload["sector"] == "Banks"
+
+
+def test_concall_transcript_impl_uses_cached_concalls(tmp_path, monkeypatch):
+    """The transcript tool reads concalls from cache + extracts the text."""
+    from backend.fundamentals import fundamental_agent as agent_module
+
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data(
+        "DEMO",
+        {
+            **_sample_screener_data(),
+            "concalls": [
+                {"month": "Jan 2026", "transcript_url": "https://example.com/jan.pdf"},
+            ],
+        },
+    )
+
+    # Patch the extractor so we don't hit the network or open a PDF.
+    monkeypatch.setattr(
+        agent_module,
+        "read_recent_concall_text",
+        lambda concalls, **_kwargs: "Management called out 12% growth guidance for FY26.",
+    )
+
+    agent = FundamentalAgent(model="test-model", cache=cache)
+    text = agent._read_concall_impl("DEMO")
+    assert "12% growth guidance" in text
+
+
+def test_concall_transcript_impl_returns_message_when_no_cache(tmp_path):
+    """Calling the transcript tool without first fetching returns a clear hint."""
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    agent = FundamentalAgent(model="test-model", cache=cache)
+    text = agent._read_concall_impl("UNCACHED")
+    assert "fetch_company_data" in text
+
+
+# ---------------------------------------------------------------------------
+# insights-only mode + AgentVerdict.mode field
+# ---------------------------------------------------------------------------
+
+
 def test_fundamental_agent_check_insights_mode_enforces_invariants(tmp_path):
     """Running in insights_only mode produces a verdict with empty criteria
-    breakdown AND passed_criteria_count=0, even if the LLM returns otherwise."""
+    breakdown AND passed_criteria_count=0, even if the model returns otherwise."""
     cache = FundamentalsCache(cache_dir=tmp_path)
     cache.set_data("OUTSIDE", _sample_screener_data())
 
-    # The LLM returns a verdict that DOES include criteria — the agent's
+    # The runner returns a verdict that DOES include criteria — the agent's
     # _normalize_verdict must override it because the call is insights-only.
     polluted = _sample_verdict()  # has criteria_breakdown with 7 entries
-    fake_llm = _FakeLLM(polluted)
+    runner = _FakeRunner(polluted)
 
-    agent = FundamentalAgent(
-        api_key="test-key",
-        model="test-model",
-        cache=cache,
-        llm=fake_llm,  # type: ignore[arg-type]
-    )
+    agent = FundamentalAgent(model="test-model", cache=cache, runner=runner)
     verdict = agent.check("OUTSIDE", mode="insights_only")
 
     assert verdict.mode == "insights_only"
@@ -579,16 +502,11 @@ def test_fundamental_agent_verdict_cache_keys_by_mode(tmp_path):
     cache = FundamentalsCache(cache_dir=tmp_path)
     cache.set_data("BOTH", _sample_screener_data())
 
-    fake_llm = _FakeLLM(_sample_verdict())
-    agent = FundamentalAgent(
-        api_key="test-key",
-        model="test-model",
-        cache=cache,
-        llm=fake_llm,  # type: ignore[arg-type]
-    )
+    runner = _FakeRunner(_sample_verdict())
+    agent = FundamentalAgent(model="test-model", cache=cache, runner=runner)
 
-    criteria_verdict = agent.check("BOTH", mode="criteria")
-    insights_verdict = agent.check("BOTH", mode="insights_only")
+    agent.check("BOTH", mode="criteria")
+    agent.check("BOTH", mode="insights_only")
 
     # Two distinct cache files should exist for the same symbol + model + date.
     cached_criteria = cache.get_verdict("BOTH", "test-model::criteria", "2026-05-27")
@@ -598,3 +516,82 @@ def test_fundamental_agent_verdict_cache_keys_by_mode(tmp_path):
     assert cached_criteria["mode"] == "criteria"
     assert cached_insights["mode"] == "insights_only"
     assert cached_insights["criteria_breakdown"] == []
+
+
+# ---------------------------------------------------------------------------
+# Usage-limit detection + custom error code
+# ---------------------------------------------------------------------------
+
+
+def test_usage_limit_error_exposes_code_and_message():
+    err = FundamentalsUsageLimitError(resets_at=1_780_000_000, rate_limit_type="five_hour")
+    assert err.code == "usage_limit_reached"
+    assert err.resets_at == 1_780_000_000
+    assert err.rate_limit_type == "five_hour"
+    text = str(err)
+    assert "usage limit" in text.lower()
+    assert "Cached verdicts" in text
+    assert "resets" in text.lower()  # the reset timestamp is rendered in
+
+
+def test_usage_limit_error_without_reset_time():
+    err = FundamentalsUsageLimitError()
+    assert err.code == "usage_limit_reached"
+    assert "once your usage limit resets" in str(err)
+
+
+def test_base_agent_error_has_distinct_code():
+    assert FundamentalsAgentError.code == "agent_error"
+    assert issubclass(FundamentalsUsageLimitError, FundamentalsAgentError)
+
+
+def test_detect_usage_limit_from_rate_limit_event():
+    event = SimpleNamespace(
+        rate_limit_info=SimpleNamespace(
+            status="rejected", resets_at=1_780_000_000, rate_limit_type="seven_day"
+        )
+    )
+    err = _usage_limit_from_message(event)
+    assert isinstance(err, FundamentalsUsageLimitError)
+    assert err.resets_at == 1_780_000_000
+    assert err.rate_limit_type == "seven_day"
+
+
+def test_detect_usage_limit_ignores_allowed_warning():
+    # "allowed_warning" means approaching the limit, not hitting it.
+    event = SimpleNamespace(rate_limit_info=SimpleNamespace(status="allowed_warning"))
+    assert _usage_limit_from_message(event) is None
+
+
+@pytest.mark.parametrize("error_kind", ["rate_limit", "billing_error"])
+def test_detect_usage_limit_from_assistant_error(error_kind):
+    message = SimpleNamespace(error=error_kind)
+    assert isinstance(_usage_limit_from_message(message), FundamentalsUsageLimitError)
+
+
+def test_detect_usage_limit_ignores_normal_message():
+    assert _usage_limit_from_message(SimpleNamespace()) is None
+    assert _usage_limit_from_message(SimpleNamespace(error=None)) is None
+    assert _usage_limit_from_message(SimpleNamespace(error="server_error")) is None
+
+
+def test_mentions_usage_limit_text_fallback():
+    assert _mentions_usage_limit("Error: rate limit exceeded")
+    assert _mentions_usage_limit(None, "you are OUT OF CREDIT")
+    assert not _mentions_usage_limit("connection reset by peer")
+    assert not _mentions_usage_limit(None, None)
+
+
+def test_check_propagates_usage_limit_error(tmp_path):
+    """A usage-limit error raised inside the run must propagate unchanged so the
+    UI can catch FundamentalsUsageLimitError specifically, not a generic error."""
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("DEMO", _sample_screener_data())
+
+    async def _limit_runner(prompt, *, system_prompt, model, max_turns):
+        raise FundamentalsUsageLimitError(resets_at=1_780_000_000)
+
+    agent = FundamentalAgent(model="test-model", cache=cache, runner=_limit_runner)
+    with pytest.raises(FundamentalsUsageLimitError) as excinfo:
+        agent.check("DEMO")
+    assert excinfo.value.code == "usage_limit_reached"
