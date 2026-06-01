@@ -24,6 +24,8 @@ def test_discover_screeners_loads_stochastic_swing():
     assert screeners["week52_low_ceyhun"].universe == "hemant_super_45"
     # The green-candle screener scans the Hemant Super 45 + Good 45 union.
     assert screeners["green_candles_20pct_up"].universe == "hemant_super_good_union"
+    # The AI technical-analysis screener also scans that union.
+    assert screeners["technical_analysis"].universe == "hemant_super_good_union"
     # Every discovered screener exposes a chart builder.
     assert screeners["stochastic_swing"].build_chart is not None
     assert screeners["bollinger_lower_band"].build_chart is not None
@@ -31,6 +33,7 @@ def test_discover_screeners_loads_stochastic_swing():
     assert screeners["envelope_knoxville_buy"].build_chart is not None
     assert screeners["week52_low_ceyhun"].build_chart is not None
     assert screeners["green_candles_20pct_up"].build_chart is not None
+    assert screeners["technical_analysis"].build_chart is not None
     # The connection-test screener was removed.
     assert "connection_test" not in screeners
 
