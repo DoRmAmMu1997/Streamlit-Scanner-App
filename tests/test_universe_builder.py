@@ -277,6 +277,29 @@ def test_refresh_universe_files_writes_hemant_universe_from_csv_source(tmp_path)
     assert saved.loc[saved["symbol"].eq("HDFCBANK"), "mapping_status"].item() == "missing_security_id"
 
 
+def test_refresh_universe_files_builds_hemant_super_good_union(tmp_path):
+    # The composite universe reads BOTH member source lists, concatenates them,
+    # dedupes by symbol, and maps against the same Dhan master. Output goes to
+    # tmp_path so the checked-in source snapshots are never overwritten.
+    written = refresh_universe_files(
+        universe_keys=["hemant_super_good_union"],
+        universe_dir=tmp_path,
+        instrument_master=fake_instrument_master(),
+    )
+
+    assert written["hemant_super_good_union"].exists()
+    saved = pd.read_csv(written["hemant_super_good_union"], dtype=str).fillna("")
+    assert saved["universe"].unique().tolist() == ["hemant_super_good_union"]
+    assert saved["universe_name"].unique().tolist() == ["Hemant Super + Good 45"]
+    # The union is deduped: a symbol present in both member lists appears once.
+    assert saved["symbol"].is_unique
+    # TCS lives in the Hemant Super 45 source list and maps via the fake master.
+    assert saved.loc[saved["symbol"].eq("TCS"), "security_id"].item() == "11536"
+    # The union is at least as large as one member list (43) and no larger than
+    # both stacked (86) — i.e. real overlap was collapsed, nothing was dropped.
+    assert 43 <= len(saved) <= 86
+
+
 def test_load_instrument_master_writes_dated_snapshot(tmp_path, monkeypatch):
     # The startup path downloads Dhan's master once and writes a dated local CSV.
     # The test injects fake data so it never touches the network.

@@ -19,7 +19,7 @@ import math
 
 import pandas as pd
 
-from backend.indicators import bollinger_bands, build_heikin_ashi, stochastic, supertrend
+from backend.indicators import bollinger_bands, build_heikin_ashi, envelope, stochastic, supertrend
 
 
 # Pinned Lightweight Charts v5 version. Pinning an exact version keeps the
@@ -38,6 +38,10 @@ _COLORS = {
     "supertrend_down": "#ef5350",
     "bb_band": "#7e57c2",
     "bb_middle": "#9575cd",
+    # Envelope colours mirror the TradingView "Envelope" indicator defaults:
+    # an orange basis line with blue upper/lower bands.
+    "env_basis": "#ff6d00",
+    "env_band": "#2962ff",
     "volume_up": "rgba(38, 166, 154, 0.55)",
     "volume_down": "rgba(239, 83, 80, 0.55)",
     "stoch_k": "#42a5f5",
@@ -341,6 +345,25 @@ def add_bollinger_overlay(spec: dict, candles: pd.DataFrame, *,
     add_line_overlay(spec, times, bands["bb_lower"],
                      f"BB Lower ({period}, {std_multiplier:g})",
                      _COLORS["bb_band"], pane=0, dash="dot")
+
+
+def add_envelope_overlay(spec: dict, candles: pd.DataFrame, *,
+                         period: int, percent: float, exponential: bool = True) -> None:
+    """Append the Envelope basis + upper/lower bands to the price pane (pane 0)."""
+    frame = _normalize_candles(candles)
+    if frame.empty:
+        return
+    bands = envelope(frame["close"], period=period, percent=percent, exponential=exponential)
+    times = frame["timestamp"]
+    # Basis is the EMA/SMA line; the bands sit a fixed percent above/below it.
+    add_line_overlay(spec, times, bands["env_basis"],
+                     f"Envelope Basis ({period})", _COLORS["env_basis"], pane=0)
+    add_line_overlay(spec, times, bands["env_upper"],
+                     f"Envelope Upper (+{percent:g}%)",
+                     _COLORS["env_band"], pane=0, dash="dot")
+    add_line_overlay(spec, times, bands["env_lower"],
+                     f"Envelope Lower (-{percent:g}%)",
+                     _COLORS["env_band"], pane=0, dash="dot")
 
 
 def add_stochastic_overlay(spec: dict, candles: pd.DataFrame, *,

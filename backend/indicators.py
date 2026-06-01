@@ -367,6 +367,122 @@ def _bollinger_bands_fallback(
 
 
 # ---------------------------------------------------------------------------
+# Envelope bands: moving-average basis with fixed-percent bands
+# ---------------------------------------------------------------------------
+
+
+def envelope(
+    close: pd.Series,
+    period: int = 200,
+    percent: float = 14.0,
+    exponential: bool = True,
+) -> pd.DataFrame:
+    """
+    Envelope bands: a moving-average basis with fixed-percent bands around it.
+
+    Mirrors the TradingView "Envelope" indicator:
+        basis = EMA(close, period)   (or SMA when exponential is False)
+        upper = basis * (1 + percent / 100)
+        lower = basis * (1 - percent / 100)
+
+    Returns a DataFrame with `env_basis`, `env_upper`, `env_lower`.
+
+    The moving-average basis is delegated to the library-backed `ema` / `sma`
+    helpers, which route through TA-Lib when it is installed (pure-pandas
+    fallback otherwise). TA-Lib / pandas_ta have no standalone "envelope"
+    indicator, so only the fixed ±percent offset is computed here.
+    """
+    basis = ema(close, period) if exponential else sma(close, period)
+    fraction = float(percent) / 100.0
+    return pd.DataFrame(
+        {
+            "env_basis": basis,
+            "env_upper": basis * (1.0 + fraction),
+            "env_lower": basis * (1.0 - fraction),
+        },
+        index=close.index,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Knoxville Divergence (bullish): pivots + RSI/Momentum disagreement
+# ---------------------------------------------------------------------------
+
+
+def bullish_knoxville_divergence(
+    frame: pd.DataFrame,
+    *,
+    rsi_period: int = 14,
+    momentum_period: int = 20,
+    bars_back: int = 20,
+    recency: int = 10,
+    pivot_left: int = 2,
+    pivot_right: int = 2,
+    oversold: float = 30.0,
+) -> pd.Series | None:
+    """
+    Return the most recent confirmed *bullish* Knoxville Divergence bar, or None.
+
+    A bullish Knoxville Divergence is the classic "selling pressure is fading"
+    setup: price prints a LOWER pivot low while a momentum oscillator prints a
+    HIGHER low, with RSI in oversold territory at the latest pivot.
+
+    Parameter names follow the Rob Booker Knoxville indicator: `bars_back` is
+    how far back to look for the earlier pivot to compare against ("Bars Back"),
+    and `rsi_period` is the RSI length. RSI and Momentum come from the
+    TA-Lib-backed `rsi` / `momentum` helpers; confirmed pivots come from
+    `pivot_lows` (which has no TA-Lib / pandas_ta equivalent).
+
+    The returned pivot row carries `rsi`, `momentum`, and `timestamp` (when
+    present) so callers can report the divergence date and oscillator readings.
+    Pass a frame whose rows are ordered oldest→newest (e.g. the output of
+    `prepare_ohlc`); the index is reset internally so positional lookbacks work.
+    """
+    if frame is None or frame.empty:
+        return None
+
+    # Reset to a 0..n-1 index so `latest_index - bars_back` and `.loc[...]`
+    # behave positionally regardless of the caller's index.
+    enriched = frame.reset_index(drop=True).copy()
+    enriched["rsi"] = rsi(enriched["close"], period=rsi_period)
+    enriched["momentum"] = momentum(enriched["close"], period=momentum_period)
+
+    # `pivot_lows` returns True on confirmed pivot rows and False on the last
+    # `pivot_right` candles (no future bars to confirm against yet).
+    pivot_mask = pivot_lows(enriched["low"], left=pivot_left, right=pivot_right)
+    pivot_rows = enriched.loc[pivot_mask].dropna(subset=["low", "rsi", "momentum"])
+    if len(pivot_rows) < 2:
+        return None
+
+    # Use the most recent confirmed pivot low, not the latest candle. Pivot
+    # detection needs `pivot_right` future bars, so a valid divergence can
+    # naturally be a few candles old by the time the scanner runs.
+    latest_index = int(pivot_rows.index[-1])
+    if (len(enriched) - 1 - latest_index) > int(recency):
+        return None
+
+    latest = enriched.loc[latest_index]
+    if float(latest["rsi"]) > float(oversold):
+        return None
+
+    # Look back up to `bars_back` for an earlier pivot where price made a higher
+    # low than today but momentum made a lower low — the bullish disagreement.
+    earliest_index = max(0, latest_index - int(bars_back))
+    prior_pivots = pivot_rows.loc[
+        (pivot_rows.index >= earliest_index) & (pivot_rows.index < latest_index)
+    ]
+    # Iterate from the most recent prior pivot backward; the first match is the
+    # most relevant (closest-in-time) divergence pair.
+    for prior_index in reversed(prior_pivots.index.tolist()):
+        prior = enriched.loc[prior_index]
+        price_made_lower_low = float(latest["low"]) < float(prior["low"])
+        momentum_made_higher_low = float(latest["momentum"]) > float(prior["momentum"])
+        if price_made_lower_low and momentum_made_higher_low:
+            return latest
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Heikin Ashi candles: pandas_ta primary, pandas fallback
 # ---------------------------------------------------------------------------
 
