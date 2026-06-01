@@ -417,7 +417,7 @@ def _has_rating_column(results: pd.DataFrame) -> bool:
 # Check Fundamentals — eligibility, agent caching, UI rendering
 #
 # The fundamental-analysis agent runs for ANY shortlisted symbol; eligibility
-# only selects criteria vs insights-only mode. Two helpers below build that
+# only selects criteria (9) vs universal (7) mode. Two helpers below build that
 # eligibility set, and a third lazily instantiates the Claude Agent SDK agent.
 # None of the agent code runs unless the user actually clicks the
 # "Check Fundamentals" button.
@@ -473,40 +473,40 @@ def _render_fundamentals_panel(symbol: str | None) -> None:
     """Render the per-stock Check Fundamentals section under the chart.
 
     The button is now visible for ANY selected symbol — eligibility just
-    determines which mode the agent runs in:
-      - Hemant Super 45 ∪ Nifty 100 symbols → criteria mode (full 7-criteria
-        evaluation + observations + outlook + rating).
-      - Anything else → insights_only mode (skip the seven criteria,
-        produce observations + outlook + rating from screener.in data).
+    determines how many criteria the agent applies:
+      - Hemant Super 45 ∪ Nifty 100 symbols → criteria mode (all NINE criteria
+        + observations + outlook + rating).
+      - Anything else → universal mode (the SEVEN universal criteria, skipping
+        Business Age and Market Leader, + observations + outlook + rating).
 
     Stays hidden only when no symbol is selected.
     """
     if not symbol:
         return
 
-    # Mode is symbol-deterministic: HS45/N100 → criteria, everything else
-    # → insights_only. The button label and behavior adapt accordingly.
-    mode = "criteria" if _is_eligible_for_fundamentals(symbol) else "insights_only"
+    # Mode is symbol-deterministic: HS45/N100 → criteria (9), everything else
+    # → universal (7). The button label and behavior adapt accordingly.
+    mode = "criteria" if _is_eligible_for_fundamentals(symbol) else "universal"
 
     st.divider()
     st.subheader("Fundamentals")
     if mode == "criteria":
         st.caption(
-            "AI agent applies the seven user-defined criteria, adds its own "
+            "AI agent applies all nine user-defined criteria, adds its own "
             "expert observations, and produces a holistic 0–10 rating."
         )
     else:
         st.caption(
-            f"**Insights-only mode** — `{symbol}` is outside Hemant Super 45 / "
-            "Nifty 100, so the seven user-defined criteria are not applied. "
-            "The agent still produces a holistic rating, observations, and "
-            "forward outlook from screener.in data."
+            f"**Universal mode** — `{symbol}` is outside Hemant Super 45 / "
+            "Nifty 100, so the two context-heavy criteria (Business Age, Market "
+            "Leader) are skipped. The agent still applies the other seven "
+            "criteria plus a holistic rating, observations, and forward outlook."
         )
 
     model = get_fundamentals_model()
 
-    # Session-state cache key is now mode-qualified so a criteria-mode and an
-    # insights-only verdict for the same symbol cannot collide.
+    # Session-state cache key is now mode-qualified so a criteria-mode and a
+    # universal-mode verdict for the same symbol cannot collide.
     session_key = f"fundamentals_verdict::{symbol}::{model}::{mode}"
     cached_verdict_dict = st.session_state.get(session_key)
 
@@ -573,45 +573,29 @@ def _render_fundamentals_panel(symbol: str | None) -> None:
 def _render_verdict_block(verdict: AgentVerdict) -> None:
     """Render the rating metric + criteria table + observations + summary.
 
-    Behavior depends on the verdict's mode:
-    - "criteria" (HS45 ∪ N100): full output — rating, "criteria passed
-      X/Y", criteria-breakdown table, observations, forward outlook,
-      summary.
-    - "insights_only" (any other stock): rating + observations + forward
-      outlook + summary. The "criteria passed" metric and the breakdown
-      table are hidden because the seven criteria were not evaluated.
+    Both modes now run a criteria checklist, so the rating, the
+    "criteria passed X/Y" metric, and the breakdown table appear for every
+    stock. The only difference is the count: 9 criteria in 'criteria' mode
+    (curated universe) vs 7 in 'universal' mode (Business Age and Market
+    Leader skipped).
     """
-    is_criteria_mode = getattr(verdict, "mode", "criteria") == "criteria"
+    # Headline numbers: rating, criteria-passed (X / Y), and the model.
+    metric_cols = st.columns([1, 1, 2])
+    metric_cols[0].metric(
+        "Fundamental rating",
+        f"{verdict.rating}/10",
+        help="Holistic expert judgment — NOT a count of passed criteria.",
+    )
+    metric_cols[1].metric(
+        "Criteria passed",
+        f"{verdict.passed_criteria_count} / {verdict.total_criteria}",
+    )
+    metric_cols[2].metric(
+        "Model",
+        verdict.model_used.split("/")[-1] if "/" in verdict.model_used else verdict.model_used,
+    )
 
-    # Headline numbers: the criteria-passed metric only appears in criteria mode.
-    if is_criteria_mode:
-        metric_cols = st.columns([1, 1, 2])
-        metric_cols[0].metric(
-            "Fundamental rating",
-            f"{verdict.rating}/10",
-            help="Holistic expert judgment — NOT a count of passed criteria.",
-        )
-        metric_cols[1].metric(
-            "Criteria passed",
-            f"{verdict.passed_criteria_count} / {verdict.total_criteria}",
-        )
-        metric_cols[2].metric(
-            "Model",
-            verdict.model_used.split("/")[-1] if "/" in verdict.model_used else verdict.model_used,
-        )
-    else:
-        metric_cols = st.columns([1, 2])
-        metric_cols[0].metric(
-            "Fundamental rating",
-            f"{verdict.rating}/10",
-            help="Insights-only mode: standalone analyst judgment, no criteria checklist.",
-        )
-        metric_cols[1].metric(
-            "Model",
-            verdict.model_used.split("/")[-1] if "/" in verdict.model_used else verdict.model_used,
-        )
-
-    # Criteria breakdown table (criteria mode only; hidden when empty)
+    # Criteria breakdown table (shown whenever the agent returned rows).
     breakdown_rows = [
         {
             "Criterion": criterion.name,
@@ -622,7 +606,7 @@ def _render_verdict_block(verdict: AgentVerdict) -> None:
         }
         for criterion in verdict.criteria_breakdown
     ]
-    if is_criteria_mode and breakdown_rows:
+    if breakdown_rows:
         st.markdown("**Criteria breakdown**")
         st.dataframe(
             pd.DataFrame(breakdown_rows),
@@ -632,7 +616,7 @@ def _render_verdict_block(verdict: AgentVerdict) -> None:
 
     # Additional agent-chosen observations, grouped by sentiment
     if verdict.additional_observations:
-        st.markdown("**Additional observations (beyond the seven criteria)**")
+        st.markdown("**Additional observations (beyond the criteria)**")
         sentiment_order = {"positive": 0, "negative": 1, "neutral": 2}
         sentiment_icon = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}
         sorted_observations = sorted(

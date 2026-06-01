@@ -12,10 +12,10 @@ Shortlisted stocks can also be sent to a built-in **"Check Fundamentals"
 agent** (powered by the [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview)
 running on your Claude subscription). The agent scrapes [screener.in](https://www.screener.in/) for the
 selected stock and returns a structured fundamental analysis — pass/fail on
-seven user-defined criteria for the Hemant Super 45 / Nifty 100 universe, a
-0–10 holistic rating, peer / margin / governance observations, and a three-part
-forward outlook (announcements signal + concall transcript signal + integrated
-view).
+user-defined criteria (nine for the Hemant Super 45 / Nifty 100 universe, seven
+for every other stock), a 0–10 holistic rating, peer / margin / governance
+observations, and a three-part forward outlook (announcements signal + concall
+transcript signal + integrated view).
 
 > **Disclaimer:** This is an educational / personal research tool. Nothing here
 > is financial advice. Always do your own research before trading.
@@ -253,15 +253,19 @@ The agent runs in one of two modes depending on which universe the selected
 stock belongs to:
 
 - **Criteria mode** — when the symbol is in **Hemant Super 45 ∪ Nifty 100**.
-  The agent evaluates seven user-defined criteria (Net Debt/Equity < 0.2,
-  ROCE > 12% / 10% for banks, Sales+Profits+EPS near all-time highs,
-  latest Net Profit > ₹200 Cr, future growth prospects, business age ≥ 15
-  years, market leader by both market cap and profit) and also adds 4–8
-  additional fundamental observations of its own choosing (margins, capital
-  allocation, governance, moat, valuation vs peers, …).
-- **Insights-only mode** — for any other shortlisted stock. The agent skips
-  the seven-criteria checklist but still produces the same 0–10 rating,
-  observations, forward outlook, and summary from the same screener.in data.
+  The agent evaluates **nine** user-defined criteria: the seven universal ones
+  below **plus** business age ≥ 15 years and market leader by both market cap
+  and profit.
+- **Universal mode** — for any other shortlisted stock. The agent evaluates the
+  **seven universal criteria** (Net Debt/Equity < 0.2; ROCE > 12% / 10% for
+  banks; Sales+Profits+EPS near all-time highs; latest Net Profit > ₹200 Cr;
+  future growth prospects; public holding lower than promoter, FII, and DII;
+  promoter pledge < 5%), skipping only business age and market leader (which
+  need curated peer/longevity context).
+
+Both modes also add 4–8 additional fundamental observations of the agent's own
+choosing (margins, capital allocation, governance, moat, valuation vs peers, …)
+and produce the same 0–10 rating, forward outlook, and summary.
 
 The mode is determined automatically from the row's symbol; the UI shows a
 caption above the button that makes the active mode clear.
@@ -270,8 +274,8 @@ caption above the button that makes the active mode clear.
 
 - **Rating** — a holistic 0–10 score based on the agent's weighted judgment
   (NOT a count of passed criteria).
-- **Criteria breakdown** (criteria mode only) — one row per criterion with the
-  measured value, threshold, and reasoning.
+- **Criteria breakdown** — one row per criterion (nine in criteria mode, seven
+  in universal mode) with the measured value, threshold, and reasoning.
 - **Additional observations** — 4–8 agent-chosen observations grouped by
   positive/negative/neutral sentiment. One of these is always a **Valuation**
   observation that explicitly compares current P/E to the stock's own median
@@ -303,7 +307,7 @@ Two on-disk caches under `data/cache/fundamentals/` keep repeated clicks free:
 - **Data cache** — one JSON file per stock with a 30-day TTL (configurable via
   `SCANNER_FUNDAMENTALS_TTL_DAYS`).
 - **Verdict cache** — keyed by `(symbol, model, mode, data_fetch_date)`. The
-  same stock evaluated in criteria mode and insights-only mode gets two
+  same stock evaluated in criteria mode and universal mode gets two
   distinct cache entries.
 
 The verdict cache is also resilient to schema changes — pre-Job-6 verdicts

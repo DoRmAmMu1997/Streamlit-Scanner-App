@@ -61,17 +61,17 @@ def _sample_verdict() -> AgentVerdict:
     return AgentVerdict(
         symbol="DEMO",
         rating=8,
-        passed_criteria_count=6,
-        total_criteria=7,
+        passed_criteria_count=7,
+        total_criteria=9,
         criteria_breakdown=[
             CriterionResult(
                 name=f"Criterion {i}",
-                passed=(i < 6),
+                passed=(i < 7),
                 measured_value="value",
                 threshold="threshold",
                 reasoning="because",
             )
-            for i in range(7)
+            for i in range(9)
         ],
         additional_observations=[
             Observation(
@@ -208,9 +208,11 @@ def test_agent_verdict_field_validator_still_rejects_out_of_range_rating():
     with pytest.raises(Exception):
         AgentVerdict.model_validate({**valid, "rating": -1})
 
+    # passed_criteria_count now allows up to 9 (the curated nine-criteria set).
+    AgentVerdict.model_validate({**valid, "passed_criteria_count": 9, "total_criteria": 9})
     # Out-of-range passed_criteria_count raises.
     with pytest.raises(Exception):
-        AgentVerdict.model_validate({**valid, "passed_criteria_count": 8})
+        AgentVerdict.model_validate({**valid, "passed_criteria_count": 10})
     with pytest.raises(Exception):
         AgentVerdict.model_validate({**valid, "passed_criteria_count": -1})
 
@@ -270,22 +272,35 @@ def test_agent_verdict_accepts_legacy_string_forward_outlook():
     assert verdict.forward_outlook.concall_conclusion == ""
 
 
-def test_agent_verdict_accepts_insights_only_mode_with_empty_criteria():
-    """The schema must allow a verdict with mode='insights_only' and an empty
-    criteria breakdown — that's the standard insights-only output shape."""
+def test_agent_verdict_accepts_universal_mode_with_seven_criteria():
+    """The schema must allow a verdict with mode='universal' carrying the
+    seven universal criteria (total_criteria=7) — the standard shape for a
+    stock outside the curated universe."""
     verdict = AgentVerdict(
         symbol="OUTSIDE",
-        mode="insights_only",
+        mode="universal",
         rating=7,
-        # Defaults: passed_criteria_count=0, criteria_breakdown=[].
+        passed_criteria_count=5,
+        total_criteria=7,
+        criteria_breakdown=[
+            CriterionResult(
+                name=f"Criterion {i}",
+                passed=(i < 5),
+                measured_value="value",
+                threshold="threshold",
+                reasoning="because",
+            )
+            for i in range(7)
+        ],
         additional_observations=[],
-        summary_comments="Strong fundamentals; insights-only assessment.",
+        summary_comments="Solid; Business Age and Market Leader not assessed.",
         data_freshness="2026-05-27T00:00:00+00:00",
         model_used="test-model",
     )
-    assert verdict.mode == "insights_only"
-    assert verdict.criteria_breakdown == []
-    assert verdict.passed_criteria_count == 0
+    assert verdict.mode == "universal"
+    assert len(verdict.criteria_breakdown) == 7
+    assert verdict.total_criteria == 7
+    assert verdict.passed_criteria_count == 5
 
 
 def test_agent_verdict_default_mode_is_criteria_for_backward_compat():
@@ -323,7 +338,7 @@ def test_fundamental_agent_runs_through_runner_and_parses_verdict(tmp_path):
 
     assert verdict.symbol == "DEMO"
     assert verdict.rating == 8
-    assert verdict.passed_criteria_count == 6
+    assert verdict.passed_criteria_count == 7
     assert runner.calls == 1
     # The agent must build a system prompt carrying the strict JSON-output
     # contract so the model knows to emit AgentVerdict JSON.
@@ -471,33 +486,46 @@ def test_concall_transcript_impl_returns_message_when_no_cache(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# insights-only mode + AgentVerdict.mode field
+# universal mode + AgentVerdict.mode field
 # ---------------------------------------------------------------------------
 
 
-def test_fundamental_agent_check_insights_mode_enforces_invariants(tmp_path):
-    """Running in insights_only mode produces a verdict with empty criteria
-    breakdown AND passed_criteria_count=0, even if the model returns otherwise."""
+def test_fundamental_agent_check_universal_mode_forces_seven_criteria(tmp_path):
+    """Running in universal mode forces total_criteria=7, regardless of what
+    the model emitted (the curated nine-criteria sample has total_criteria=9)."""
     cache = FundamentalsCache(cache_dir=tmp_path)
     cache.set_data("OUTSIDE", _sample_screener_data())
 
-    # The runner returns a verdict that DOES include criteria — the agent's
-    # _normalize_verdict must override it because the call is insights-only.
-    polluted = _sample_verdict()  # has criteria_breakdown with 7 entries
+    # The runner returns the curated sample (total_criteria=9); the agent's
+    # _normalize_verdict must stamp total_criteria=7 because the call is universal.
+    polluted = _sample_verdict()  # total_criteria=9
     runner = _FakeRunner(polluted)
 
     agent = FundamentalAgent(model="test-model", cache=cache, runner=runner)
-    verdict = agent.check("OUTSIDE", mode="insights_only")
+    verdict = agent.check("OUTSIDE", mode="universal")
 
-    assert verdict.mode == "insights_only"
-    assert verdict.criteria_breakdown == []
-    assert verdict.passed_criteria_count == 0
-    # Rating and observations survive — they're independent of the mode override.
+    assert verdict.mode == "universal"
+    assert verdict.total_criteria == 7
+    # Rating and the breakdown survive — only the count denominator is enforced.
     assert verdict.rating == polluted.rating
+    assert verdict.criteria_breakdown == polluted.criteria_breakdown
+
+
+def test_fundamental_agent_check_criteria_mode_forces_nine_criteria(tmp_path):
+    """Running in criteria mode stamps total_criteria=9 for the curated universe."""
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("DEMO", _sample_screener_data())
+
+    runner = _FakeRunner(_sample_verdict())
+    agent = FundamentalAgent(model="test-model", cache=cache, runner=runner)
+    verdict = agent.check("DEMO", mode="criteria")
+
+    assert verdict.mode == "criteria"
+    assert verdict.total_criteria == 9
 
 
 def test_fundamental_agent_verdict_cache_keys_by_mode(tmp_path):
-    """Criteria-mode and insights-only verdicts for the same symbol must NOT
+    """Criteria-mode and universal-mode verdicts for the same symbol must NOT
     overwrite each other in the cache."""
     cache = FundamentalsCache(cache_dir=tmp_path)
     cache.set_data("BOTH", _sample_screener_data())
@@ -506,16 +534,17 @@ def test_fundamental_agent_verdict_cache_keys_by_mode(tmp_path):
     agent = FundamentalAgent(model="test-model", cache=cache, runner=runner)
 
     agent.check("BOTH", mode="criteria")
-    agent.check("BOTH", mode="insights_only")
+    agent.check("BOTH", mode="universal")
 
     # Two distinct cache files should exist for the same symbol + model + date.
     cached_criteria = cache.get_verdict("BOTH", "test-model::criteria", "2026-05-27")
-    cached_insights = cache.get_verdict("BOTH", "test-model::insights_only", "2026-05-27")
+    cached_universal = cache.get_verdict("BOTH", "test-model::universal", "2026-05-27")
     assert cached_criteria is not None
-    assert cached_insights is not None
+    assert cached_universal is not None
     assert cached_criteria["mode"] == "criteria"
-    assert cached_insights["mode"] == "insights_only"
-    assert cached_insights["criteria_breakdown"] == []
+    assert cached_universal["mode"] == "universal"
+    assert cached_criteria["total_criteria"] == 9
+    assert cached_universal["total_criteria"] == 7
 
 
 # ---------------------------------------------------------------------------
