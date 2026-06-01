@@ -501,51 +501,121 @@ def test_extract_concalls_caps_at_limit():
 
 
 # ---------------------------------------------------------------------------
-# Job 5: median P/E parsing
+# Median P/E — fetched from the chart endpoint and computed locally
+#
+# screener.in renders the "Median PE" chart line in JavaScript; it is NOT in
+# the page HTML. The data comes from /api/company/<id>/chart/?q=Price+to+Earning
+# as a {"datasets": [{"values": [[date, pe], ...]}]} payload, and the median is
+# computed client-side. These tests exercise that fetch+compute path with a
+# monkeypatched _fetch_html (no live network), mirroring the peers-table tests.
 # ---------------------------------------------------------------------------
 
 
-def test_find_median_pe_picks_explicit_label_from_top_ratios():
+# A trimmed chart payload: [date, pe] pairs with nulls on non-trading days.
+# Median of the non-null values [10, 20, 30, 40] is 25.0.
+_PE_CHART_JSON = (
+    '{"datasets": [{"metric": "Price to Earning", "label": "PE", "values": '
+    '[["2021-06-04", 10], ["2021-06-11", null], ["2021-06-18", 20], '
+    '["2021-06-25", 30], ["2021-07-02", 40]], "meta": {}}]}'
+)
+
+# A page that embeds the numeric company id in an /api/company/<id>/ URL, the
+# way the live site does (watchlist add link, chart/peers endpoints, …).
+_HTML_WITH_COMPANY_ID = """
+<html><body>
+  <button hx-post="/api/company/3365/add/">Follow</button>
+</body></html>
+"""
+
+
+def test_extract_company_id_finds_numeric_id():
     from bs4 import BeautifulSoup
-    from backend.fundamentals.screener_in_client import _find_median_pe
+    from backend.fundamentals.screener_in_client import _extract_company_id
 
-    html = """
-    <html><body>
-      <ul id="top-ratios">
-        <li><span class="name">Stock P/E</span><span class="number">25.40</span></li>
-        <li><span class="name">Median P/E</span><span class="number">18.75</span></li>
-        <li><span class="name">Industry P/E</span><span class="number">22.10</span></li>
-      </ul>
-    </body></html>
-    """
-    soup = BeautifulSoup(html, "lxml")
-    assert _find_median_pe(soup) == pytest.approx(18.75)
+    soup = BeautifulSoup(_HTML_WITH_COMPANY_ID, "lxml")
+    assert _extract_company_id(soup) == "3365"
 
 
-def test_find_median_pe_computes_median_from_ratios_table_when_top_label_missing():
-    """No explicit median-P/E label, but the ratios table has a 'Stock P/E' row.
-    The helper should compute the median of its yearly values."""
+def test_extract_company_id_returns_none_when_absent():
     from bs4 import BeautifulSoup
-    from backend.fundamentals.screener_in_client import _find_median_pe
+    from backend.fundamentals.screener_in_client import _extract_company_id
 
-    soup = BeautifulSoup("<html><body></body></html>", "lxml")
-    ratios_yearly = [
-        # First column is the label; remaining cells are yearly values.
-        {"0": "Stock P/E", "1": "10", "2": "15", "3": "20", "4": "25", "5": "30"},
-    ]
-    # Median of [10, 15, 20, 25, 30] is 20.
-    assert _find_median_pe(soup, ratios_yearly) == pytest.approx(20.0)
+    soup = BeautifulSoup("<html><body><p>no api urls here</p></body></html>", "lxml")
+    assert _extract_company_id(soup) is None
 
 
-def test_find_median_pe_returns_none_when_unavailable():
+def test_median_of_pe_series_ignores_nulls():
+    from backend.fundamentals.screener_in_client import _median_of_pe_series
+
+    payload = {"datasets": [{"values": [["d1", 10], ["d2", None], ["d3", 20], ["d4", 30], ["d5", 40]]}]}
+    # Median of [10, 20, 30, 40] = 25.0.
+    assert _median_of_pe_series(payload) == pytest.approx(25.0)
+
+
+def test_median_of_pe_series_returns_none_on_empty_or_malformed():
+    from backend.fundamentals.screener_in_client import _median_of_pe_series
+
+    assert _median_of_pe_series({}) is None
+    assert _median_of_pe_series({"datasets": []}) is None
+    assert _median_of_pe_series({"datasets": [{"values": []}]}) is None
+    assert _median_of_pe_series({"datasets": [{"values": [["d1", None]]}]}) is None
+
+
+def test_fetch_median_pe_computes_median_from_chart_endpoint(monkeypatch):
     from bs4 import BeautifulSoup
-    from backend.fundamentals.screener_in_client import _find_median_pe
+    from backend.fundamentals import screener_in_client as module
 
-    soup = BeautifulSoup("<html><body><p>No ratios here.</p></body></html>", "lxml")
-    assert _find_median_pe(soup) is None
-    assert _find_median_pe(soup, []) is None
-    # Ratios table without a P/E row → still None.
-    assert _find_median_pe(soup, [{"0": "ROCE", "1": "12", "2": "14"}]) is None
+    monkeypatch.setattr(module, "_fetch_html", lambda url, session: _PE_CHART_JSON)
+
+    soup = BeautifulSoup(_HTML_WITH_COMPANY_ID, "lxml")
+    median = module._fetch_median_pe(
+        soup,
+        base_url="https://www.screener.in/company/DEMO/consolidated/",
+        session=None,  # type: ignore[arg-type]  # _fetch_html is monkey-patched
+    )
+    # Median of [10, 20, 30, 40] (the null is skipped) = 25.0.
+    assert median == pytest.approx(25.0)
+
+
+def test_fetch_median_pe_soft_fails_when_company_id_missing(monkeypatch):
+    from bs4 import BeautifulSoup
+    from backend.fundamentals import screener_in_client as module
+
+    # No company id on the page → _fetch_html must not be called.
+    monkeypatch.setattr(
+        module,
+        "_fetch_html",
+        lambda url, session: pytest.fail("_fetch_html should not be called"),
+    )
+    soup = BeautifulSoup("<html><body><p>nothing</p></body></html>", "lxml")
+    assert module._fetch_median_pe(
+        soup, base_url="https://www.screener.in/company/DEMO/", session=None  # type: ignore[arg-type]
+    ) is None
+
+
+def test_fetch_median_pe_soft_fails_on_fetch_error(monkeypatch):
+    from bs4 import BeautifulSoup
+    from backend.fundamentals import screener_in_client as module
+
+    def boom(url, session):
+        raise ScreenerInFetchError("boom")
+
+    monkeypatch.setattr(module, "_fetch_html", boom)
+    soup = BeautifulSoup(_HTML_WITH_COMPANY_ID, "lxml")
+    assert module._fetch_median_pe(
+        soup, base_url="https://www.screener.in/company/DEMO/", session=None  # type: ignore[arg-type]
+    ) is None
+
+
+def test_fetch_median_pe_soft_fails_on_non_json(monkeypatch):
+    from bs4 import BeautifulSoup
+    from backend.fundamentals import screener_in_client as module
+
+    monkeypatch.setattr(module, "_fetch_html", lambda url, session: "<html>not json</html>")
+    soup = BeautifulSoup(_HTML_WITH_COMPANY_ID, "lxml")
+    assert module._fetch_median_pe(
+        soup, base_url="https://www.screener.in/company/DEMO/", session=None  # type: ignore[arg-type]
+    ) is None
 
 
 def test_parse_company_page_payload_includes_median_pe_field():

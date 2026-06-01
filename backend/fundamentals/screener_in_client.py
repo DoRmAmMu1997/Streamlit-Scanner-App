@@ -21,9 +21,11 @@ Design choices:
   internals.
 """
 
+import json
 import logging
 import os
 import re
+import statistics
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -171,50 +173,96 @@ def _find_top_ratio(soup: BeautifulSoup, label: str) -> float | None:
     return None
 
 
-def _find_median_pe(soup: BeautifulSoup, ratios_yearly: list[dict[str, str]] | None = None) -> float | None:
-    """Return the stock's own median P/E from screener.in, or None if unavailable.
+# screener.in renders the "Median PE" line on the Price-to-Earning chart in
+# JavaScript — it is NOT in the page HTML. The chart's data, however, comes from
+# a JSON endpoint (the same `/api/company/<id>/...` family the peers table uses).
+# We match the numeric company id from any such URL on the page, then fetch the
+# PE time series and compute the median ourselves — exactly what the chart does.
+_COMPANY_ID_REGEX = re.compile(r"/api/company/(\d+)/")
+
+# 5 years, to match screener.in's default "5Yr" chart view (the one that shows
+# the "Median PE" legend). 1825 days ≈ 5 * 365.
+_MEDIAN_PE_WINDOW_DAYS = 1825
+
+
+def _extract_company_id(soup: BeautifulSoup) -> str | None:
+    """Return screener.in's numeric company id from the page, or None.
+
+    The id appears in the `/api/company/<id>/...` URLs the page embeds (e.g.
+    the watchlist "add" link and the chart/peers endpoints). We only need the
+    number to build the chart-data URL.
+    """
+    match = _COMPANY_ID_REGEX.search(str(soup))
+    return match.group(1) if match else None
+
+
+def _median_of_pe_series(payload: dict[str, Any]) -> float | None:
+    """Compute the median of the PE series in a screener.in chart JSON payload.
+
+    The payload shape is ``{"datasets": [{"metric", "label", "values", ...}]}``
+    where ``values`` is a list of ``[date_string, pe_or_null]`` pairs. We take
+    the median of the non-null PE numbers — the same calculation screener.in's
+    chart shows as "Median PE". Returns None when the series is empty/malformed.
+    """
+    datasets = payload.get("datasets") if isinstance(payload, dict) else None
+    if not datasets:
+        return None
+    values = datasets[0].get("values") if isinstance(datasets[0], dict) else None
+    if not values:
+        return None
+    numbers: list[float] = []
+    for point in values:
+        # Each point is [date, value]; value is null on non-trading days.
+        if isinstance(point, (list, tuple)) and len(point) >= 2 and point[1] is not None:
+            try:
+                numbers.append(float(point[1]))
+            except (TypeError, ValueError):
+                continue
+    if not numbers:
+        return None
+    return round(statistics.median(numbers), 2)
+
+
+def _fetch_median_pe(
+    soup: BeautifulSoup,
+    *,
+    base_url: str,
+    session: requests.Session,
+) -> float | None:
+    """Fetch the PE time series from screener.in's chart endpoint and return its median.
 
     The agent uses this as the preferred reference for valuation observations
-    (current P/E vs the stock's own historical median). When this returns
-    None the agent falls back to industry_pe.
+    (current P/E vs the stock's own historical median). Soft-fails to None on
+    any error so the agent falls back to industry_pe — a missing median must
+    never break the whole fetch.
 
-    screener.in exposes median P/E in two common shapes — we try both:
-      1. A row in the top-ratios card labelled with a `median` variant
-         (e.g., "Median P/E", "Stock P/E (Median)", "5Y Median P/E"). The
-         existing `_find_top_ratio` helper handles label matching.
-      2. A row inside the yearly `ratios` table whose first column is
-         "Stock P/E" / "PE" / "P/E". When the explicit median row is
-         absent, take the median of the non-NaN numeric cells from that
-         row — that mirrors what the on-page chart would show.
+    Mirrors `_fetch_peer_table`: find the numeric company id on the page, build
+    the JSON URL, fetch it with the shared HTTP helper, and parse defensively.
     """
-    # Strategy 1: explicit median-P/E label in the top-ratios card.
-    for label in ("Median P/E", "Median PE", "Stock P/E (Median)", "5Y Median P/E", "PE Median"):
-        value = _find_top_ratio(soup, label)
-        if value is not None:
-            return value
+    company_id = _extract_company_id(soup)
+    if not company_id:
+        logger.info("No screener.in company id found on page %s", base_url)
+        return None
 
-    # Strategy 2: median of the P/E row in the yearly ratios table.
-    if ratios_yearly:
-        for label in ("Stock P/E", "P/E", "PE"):
-            row = _find_row_by_label(ratios_yearly, label)
-            if not row:
-                continue
-            values: list[float] = []
-            for index, cell in enumerate(row.values()):
-                if index == 0:
-                    # First cell is the row label, not a value.
-                    continue
-                parsed = _to_number(cell)
-                if parsed is not None:
-                    values.append(parsed)
-            if values:
-                values.sort()
-                middle = len(values) // 2
-                if len(values) % 2 == 1:
-                    return values[middle]
-                return (values[middle - 1] + values[middle]) / 2.0
+    # The chart endpoint returns the daily P/E series the on-page chart plots.
+    chart_url = urljoin(
+        base_url,
+        f"/api/company/{company_id}/chart/?q=Price+to+Earning&days={_MEDIAN_PE_WINDOW_DAYS}",
+    )
+    try:
+        body = _fetch_html(chart_url, session)
+    except ScreenerInFetchError:
+        logger.warning("Median-P/E chart fetch failed for %s", chart_url, exc_info=True)
+        return None
+    if not body:
+        return None
 
-    return None
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        logger.warning("Median-P/E chart returned non-JSON for %s", chart_url, exc_info=True)
+        return None
+    return _median_of_pe_series(payload)
 
 
 def _find_pros_cons(soup: BeautifulSoup) -> dict[str, list[str]]:
@@ -630,6 +678,14 @@ def _parse_company_page(
         peers = _fetch_peer_table(soup, base_url=source_url, session=session)
     else:
         peers = []
+    # Median P/E also comes from a JSON chart endpoint (the on-page "Median PE"
+    # line is computed in JS, not present in the HTML). Same session guard as
+    # peers: without a session (unit tests) it stays None and the agent falls
+    # back to industry_pe.
+    if session is not None:
+        median_pe = _fetch_median_pe(soup, base_url=source_url, session=session)
+    else:
+        median_pe = None
     # Announcements + concalls live in the static HTML, no extra fetch needed.
     announcements = _extract_announcements(soup)
     concalls = _extract_concalls(soup)
@@ -675,10 +731,11 @@ def _parse_company_page(
         "roe_ttm": _find_top_ratio(soup, "ROE"),
         "face_value": _find_top_ratio(soup, "Face Value"),
         "industry_pe": _find_top_ratio(soup, "Industry P/E"),
-        # The stock's own median P/E (preferred valuation anchor). Falls back
-        # to None when screener.in doesn't expose it cleanly; the agent then
-        # uses industry_pe as a fallback in its valuation observation.
-        "median_pe": _find_median_pe(soup, ratios_yearly),
+        # The stock's own median P/E (preferred valuation anchor), computed from
+        # the chart endpoint's PE series. Falls back to None when the endpoint
+        # is unavailable; the agent then uses industry_pe in its valuation
+        # observation.
+        "median_pe": median_pe,
         "promoter_holding_latest": _find_top_ratio(soup, "Promoter holding"),
         # Latest annual values (used by deterministic criteria + agent reasoning)
         "latest_revenue": _latest(revenue_history),
