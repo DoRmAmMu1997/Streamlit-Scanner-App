@@ -83,6 +83,15 @@ UNIVERSE_CONFIG = {
         "display_name": "Hemant Good 200",
         "source_file": str(HEMANT_SOURCE_FILES["hemant_good_200"]),
     },
+    # A composite universe: the union (deduped by symbol) of two other Hemant
+    # lists. `union_of` is handled by a dedicated branch in
+    # `refresh_universe_files`; the members are read from their own source
+    # lists, concatenated, and mapped against the same Dhan master snapshot.
+    "hemant_super_good_union": {
+        "file_name": "hemant_super_good_union.csv",
+        "display_name": "Hemant Super + Good 45",
+        "union_of": ["hemant_super_45", "hemant_good_45"],
+    },
 }
 
 FNO_SYMBOL_PATTERN = re.compile(
@@ -566,6 +575,21 @@ def refresh_universe_files(
             # F&O comes entirely from Dhan's instrument master because it is a
             # derivatives universe rather than a NIFTY constituent CSV.
             universe_df = build_fno_universe(master, equity_lookup)
+        elif "union_of" in UNIVERSE_CONFIG[key]:
+            # Composite universe: concatenate the member lists' source symbols
+            # and let `build_symbol_list_universe` dedupe (by normalized symbol)
+            # and map them against the same Dhan snapshot as everyone else.
+            member_symbols: list[str] = []
+            for member_key in UNIVERSE_CONFIG[key]["union_of"]:
+                member_source = UNIVERSE_CONFIG[member_key].get("source_file")
+                if member_source:
+                    member_symbols.extend(load_symbol_list_csv(member_source))
+            universe_df = build_symbol_list_universe(
+                universe_key=key,
+                raw_symbols=member_symbols,
+                equity_lookup=equity_lookup,
+                source=" + ".join(UNIVERSE_CONFIG[key]["union_of"]),
+            )
         elif "source_file" in UNIVERSE_CONFIG[key]:
             # Hemant-style custom universes come from local CSVs instead of a
             # remote download. They are then mapped against the same Dhan master

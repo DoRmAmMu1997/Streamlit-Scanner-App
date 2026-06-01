@@ -24,22 +24,30 @@ view).
 
 ## Features
 
-- **Six built-in screeners**, all built on a common `BaseScanner` abstract
+- **Eight built-in screeners**, all built on a common `BaseScanner` abstract
   base class so adding new ones is a single-file change.
   - **Heikin Ashi SuperTrend** — F&O stocks where the daily Heikin Ashi close
     crosses the SuperTrend line.
   - **Bollinger Band Reversal** — F&O stocks printing a daily Bollinger Band
     rejection candle.
-  - **Bollinger Knoxville Buy** — Hemant Super 45 stocks near the lower
-    Bollinger Band(200, 2.5) with a recent bullish Knoxville Divergence.
+  - **Bollinger Lower Band** — Hemant Super 45 stocks whose latest close is at,
+    below, or within a small buffer of the lower Bollinger Band(200, 2.5).
+    (Distinct from *Bollinger Band Reversal* above, which scans F&O stocks for
+    outer-band rejection candles.)
+  - **Envelope** — Hemant Super 45 stocks whose latest close is at or below the
+    lower Envelope band (200-EMA basis, 14% bands) — i.e. ≥14% below the 200 EMA.
+  - **Envelope + Knoxville** — Hemant Super 45 stocks near the lower Envelope
+    band (200-EMA basis, 14% bands) with a recent bullish Knoxville Divergence
+    (Bars Back 20, RSI 14).
   - **Stochastic Swing** — NIFTY 500 stocks with a fresh Stochastic swing entry
     (a `%K`/`%D` cross out of the oversold/overbought zone, confirmed by the
     200 SMA trend and a recent 5 EMA / 200 SMA crossover).
   - **52 Week High/Low (Ceyhun)** — Hemant Super 45 stocks whose close came
     within a tolerance (default 2%) of the trailing 252-day low on any of the
     last 10 trading days.
-  - **14% Below 200 EMA** — Hemant Super 45 stocks trading at least 14% below
-    the 200-period exponential moving average.
+  - **20% Up Green Candles (Lovevanshi)** — Hemant Super 45 ∪ Good 45 stocks
+    whose latest candle caps a run of consecutive green candles (up to 20) that
+    moved more than 20% from the run's lowest low to its highest high.
 - **Per-stock Check Fundamentals AI agent** — see the
   [dedicated section below](#check-fundamentals-agent). One click on a
   shortlisted row runs a LangChain agent that scrapes screener.in (peer table
@@ -51,8 +59,9 @@ view).
   stock universes and ~10 years of daily candles, *then* opens the UI, so the
   app never blocks on downloads.
 - **Reusable scanner universes** — built-in universe keys include `nifty_100`,
-  `nifty_500`, `fno`, `hemant_super_45`, `hemant_good_45`, and
-  `hemant_good_200`.
+  `nifty_500`, `fno`, `hemant_super_45`, `hemant_good_45`,
+  `hemant_good_200`, and the composite `hemant_super_good_union`
+  (Hemant Super 45 ∪ Good 45, deduped).
 - **Interactive TradingView Lightweight Charts** — click any shortlisted stock
   to see a candlestick chart (with a drag-to-scale price axis) showing the
   screener's own indicator overlaid (Heikin Ashi candles for HA-based screeners;
@@ -192,10 +201,12 @@ Streamlit Scanner App/
 ├── screeners/                   # One file per screener (the strategy logic)
 │   ├── heikin_ashi_supertrend.py
 │   ├── bollinger_band_reversal.py
-│   ├── bollinger_knoxville_buy.py
+│   ├── bollinger_lower_band.py
+│   ├── envelope.py
+│   ├── envelope_knoxville_buy.py
 │   ├── stochastic_swing.py
 │   ├── week52_low_ceyhun.py
-│   └── ema200_14percent_below.py
+│   └── green_candles_20pct_up.py
 ├── Dependencies/
 │   ├── .env.example             # Credential template (copy to .env)
 │   └── dhan_token_setup.py      # One-time OAuth token helper
@@ -329,8 +340,8 @@ needs to change. `BaseScanner` provides the common helpers (`prepare_candles`,
 exception capture), plus enforces a common result-schema prefix
 (`symbol, rating, signal_date, close, reason`) that every screener returns.
 
-Use `screeners/ema200_14percent_below.py` as the simplest template, or
-`screeners/bollinger_knoxville_buy.py` for a more involved example with
+Use `screeners/envelope.py` as the simplest template, or
+`screeners/envelope_knoxville_buy.py` for a more involved example with
 multiple indicators and pivot detection.
 
 For backward compatibility the registry also accepts the legacy
@@ -338,9 +349,11 @@ module-level contract (`SCREENER` dict + `run(...)` function) if you prefer
 to write a screener as plain module functions.
 
 Supported universe keys are `nifty_100`, `nifty_500`, `fno`,
-`hemant_super_45`, `hemant_good_45`, and `hemant_good_200`. The Hemant lists
-live in `data/universes/` alongside the other universe CSVs and are mapped to
-Dhan cash-equity IDs when universe files are refreshed.
+`hemant_super_45`, `hemant_good_45`, `hemant_good_200`, and the composite
+`hemant_super_good_union` (the deduped union of Hemant Super 45 and Good 45).
+The Hemant lists live in `data/universes/` alongside the other universe CSVs
+and are mapped to Dhan cash-equity IDs when universe files are refreshed; the
+union is assembled from those same source lists at refresh time.
 
 ---
 

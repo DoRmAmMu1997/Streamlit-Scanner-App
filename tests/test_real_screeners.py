@@ -7,8 +7,10 @@ import pandas as pd
 
 from screeners import (
     bollinger_band_reversal,
-    bollinger_knoxville_buy,
-    ema200_14percent_below,
+    bollinger_lower_band,
+    envelope,
+    envelope_knoxville_buy,
+    green_candles_20pct_up,
     heikin_ashi_supertrend,
     stochastic_swing,
     week52_low_ceyhun,
@@ -81,77 +83,70 @@ def _bollinger_candles(open_values, high_values, low_values, close_values) -> pd
     )
 
 
-def _knoxville_candles(*, with_divergence: bool = True, near_lower_band: bool = True) -> pd.DataFrame:
-    """Build compact candles for the BUY-only Bollinger + Knoxville screener."""
-    # These values are intentionally tiny compared with the real 200-bar setup.
-    # `_knoxville_params()` below shrinks the indicator periods so this fixture
-    # can test the same logic without hundreds of repetitive candles.
-    close_values = [
-        100.0,
-        100.0,
-        100.0,
-        100.0,
-        100.0,
-        92.0,
-        96.0,
-        100.0 if with_divergence else 92.0,
-        99.0,
-        100.0,
-        90.0,
-        94.0,
-        91.0,
-        88.0,
-        88.0,
-        88.0,
-        88.0,
-        88.0,
-        88.0,
-    ]
-    if not with_divergence:
-        # A flat close path keeps RSI/Momentum from forming the lower-low /
-        # higher-momentum-low disagreement needed for Knoxville.
-        close_values = [88.0] * len(close_values)
-    if not near_lower_band:
-        # Lift the final closes far away from the lower Bollinger Band while
-        # preserving the earlier divergence pivots. That isolates the BB filter.
-        close_values[-5:] = [88.0, 110.0, 110.0, 110.0, 110.0]
+def _bb_frame(close_values: list[float]) -> pd.DataFrame:
+    """OHLC frame for the Bollinger-Band screener (candle colour is irrelevant)."""
+    return _bollinger_candles(
+        open_values=close_values,
+        high_values=[value + 1.0 for value in close_values],
+        low_values=[value - 1.0 for value in close_values],
+        close_values=close_values,
+    )
 
-    low_values = [value - 0.5 for value in close_values]
-    if with_divergence:
-        # Force clear pivot lows. The latest pivot is lower in price but has a
-        # higher momentum reading than the earlier pivot when with_divergence=True.
-        low_values[10] = 89.0
-        low_values[13] = 87.0
 
+def _bollinger_lower_band_params() -> dict:
+    params = dict(bollinger_lower_band.SCREENER["default_params"])
+    params.update(
+        {
+            "start_date": date(2026, 1, 1),
+            "end_date": date(2026, 1, 19),
+            # Short period keeps the synthetic candles easy to reason about.
+            "bb_period": 5,
+            "bb_std": 2.5,
+            "bb_proximity_pct": 0.01,
+        }
+    )
+    return params
+
+
+def _env_knox_candles(close_values: list[float]) -> pd.DataFrame:
+    """Compact candles for the Envelope + Knoxville screener.
+
+    `low = close - 0.5` so the pivot-low arithmetic in the fixtures below is easy
+    to follow; open/high are unused by the envelope or Knoxville logic.
+    """
     return pd.DataFrame(
         {
             "timestamp": pd.date_range("2026-01-01", periods=len(close_values), freq="D"),
-            "open": [value + 0.25 for value in close_values],
+            "open": [value - 0.25 for value in close_values],
             "high": [value + 1.0 for value in close_values],
-            "low": low_values,
+            "low": [value - 0.5 for value in close_values],
             "close": close_values,
             "volume": [1000.0] * len(close_values),
         }
     )
 
 
-def _knoxville_params() -> dict:
-    params = dict(bollinger_knoxville_buy.SCREENER["default_params"])
+def _env_knox_params() -> dict:
+    params = dict(envelope_knoxville_buy.SCREENER["default_params"])
     params.update(
         {
             "start_date": date(2026, 1, 1),
-            "end_date": date(2026, 1, 19),
-            # Short periods make the synthetic candles easy to reason about.
-            # The production defaults remain BB200, RSI21, Momentum20.
-            "bb_period": 5,
-            "bb_std": 2.5,
+            "end_date": date(2026, 1, 13),
+            # Short periods + SMA basis make the synthetic candles easy to reason
+            # about. The production defaults remain EMA200, 14% bands, RSI14.
+            "ema_period": 5,
+            "percent": 10.0,
+            "exponential": False,
+            "env_proximity_pct": 0.01,
             "rsi_period": 3,
             "momentum_period": 3,
             "divergence_bars_back": 10,
             "signal_recency_bars": 10,
             "pivot_left": 1,
             "pivot_right": 1,
-            "oversold": 30.0,
+            # RSI gate loosened so the test isolates the price/momentum
+            # divergence and envelope filters, not the exact RSI(3) value.
+            "oversold": 95.0,
         }
     )
     return params
@@ -293,37 +288,78 @@ def test_bollinger_band_reversal_screener_tolerates_empty_and_short_frames():
     assert list(result.columns) == bollinger_band_reversal.RESULT_COLUMNS
 
 
-def test_bollinger_knoxville_buy_screener_returns_buy_only_when_both_filters_pass():
-    # BUY passes both filters. NO_KD is near the lower band but lacks Knoxville.
-    # NO_BB has Knoxville but is no longer near the lower band. The screener
-    # should only return the stock where both conditions are true.
+def test_bollinger_lower_band_screener_returns_buy_only_near_lower_band():
+    # NEAR ends on a flat low run, so its latest close sits on the lower band.
+    # FAR is steadily rising, so its latest close is well above the lower band.
     frames = {
-        "BUY": _knoxville_candles(with_divergence=True, near_lower_band=True),
-        "NO_KD": _knoxville_candles(with_divergence=False, near_lower_band=True),
-        "NO_BB": _knoxville_candles(with_divergence=True, near_lower_band=False),
+        "NEAR": _bb_frame([100.0, 96.0, 92.0, 90.0, 88.0, 88.0, 88.0, 88.0, 88.0, 88.0]),
+        "FAR": _bb_frame([80.0, 82.0, 84.0, 86.0, 88.0, 90.0, 92.0, 94.0, 96.0, 98.0]),
     }
 
-    result = bollinger_knoxville_buy.run(_universe(), FakeDataLoader(frames), _knoxville_params())
+    result = bollinger_lower_band.run(
+        _universe(), FakeDataLoader(frames), _bollinger_lower_band_params()
+    )
+
+    assert result["symbol"].tolist() == ["NEAR"]
+    row = result.iloc[0]
+    assert row["rating"] == "BUY"
+    assert row["close"] <= row["bb_lower"] * 1.01
+    assert {"bb_lower", "bb_middle", "bb_upper"}.issubset(result.columns)
+
+
+def test_bollinger_lower_band_screener_tolerates_empty_and_short_frames():
+    frames = {
+        "EMPTY": pd.DataFrame(),
+        "SHORT": _bb_frame([10.0, 10.0, 10.0]),  # 3 candles < bb_period (5)
+    }
+
+    result = bollinger_lower_band.run(
+        _universe(), FakeDataLoader(frames), _bollinger_lower_band_params()
+    )
+
+    assert result.empty
+    assert list(result.columns) == bollinger_lower_band.RESULT_COLUMNS
+
+
+def test_envelope_knoxville_buy_returns_buy_only_when_both_filters_pass():
+    # BUY: latest close is below the lower Envelope band AND a recent pivot shows
+    # a bullish Knoxville divergence (lower price low, higher momentum low).
+    # NO_KD: below the band but no divergence. NO_ENV: has the divergence but the
+    # latest close recovered above the band. Only BUY passes both filters.
+    frames = {
+        "BUY": _env_knox_candles(
+            # Last close 78 sits clearly below the lower Envelope band (no reliance
+            # on the 1% proximity buffer); the earlier 92->100 then 90 dip is the
+            # bullish divergence the Knoxville filter needs.
+            [100.0, 100.0, 100.0, 100.0, 96.0, 92.0, 96.0, 100.0, 95.0, 90.0, 93.0, 85.0, 78.0]
+        ),
+        "NO_KD": _env_knox_candles(
+            [100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 90.0, 80.0]
+        ),
+        "NO_ENV": _env_knox_candles(
+            [100.0, 100.0, 100.0, 100.0, 96.0, 92.0, 96.0, 100.0, 95.0, 90.0, 93.0, 97.0, 100.0]
+        ),
+    }
+
+    result = envelope_knoxville_buy.run(_universe(), FakeDataLoader(frames), _env_knox_params())
 
     assert result["symbol"].tolist() == ["BUY"]
     row = result.iloc[0]
     assert row["rating"] == "BUY"
-    assert row["close"] <= row["bb_lower"] * 1.01
-    assert row["rsi"] <= 30.0
-    assert row["momentum"] > -10.0
+    assert row["close"] <= row["env_lower"] * 1.01
     assert "Knoxville" in row["reason"]
 
 
-def test_bollinger_knoxville_buy_screener_tolerates_empty_and_short_frames():
+def test_envelope_knoxville_buy_tolerates_empty_and_short_frames():
     frames = {
         "EMPTY": pd.DataFrame(),
-        "SHORT": _knoxville_candles().head(4),
+        "SHORT": _env_knox_candles([100.0, 99.0, 98.0]),  # 3 candles < ema_period (5)
     }
 
-    result = bollinger_knoxville_buy.run(_universe(), FakeDataLoader(frames), _knoxville_params())
+    result = envelope_knoxville_buy.run(_universe(), FakeDataLoader(frames), _env_knox_params())
 
     assert result.empty
-    assert list(result.columns) == bollinger_knoxville_buy.RESULT_COLUMNS
+    assert list(result.columns) == envelope_knoxville_buy.RESULT_COLUMNS
 
 
 def _synthetic_daily(periods: int) -> pd.DataFrame:
@@ -459,16 +495,22 @@ def test_week52_low_ceyhun_tolerates_empty_and_short_frames():
 
 
 # ---------------------------------------------------------------------------
-# 14% Below 200 EMA
+# Envelope (lower band)
 # ---------------------------------------------------------------------------
 
 
-def _ema200_params(**overrides):
-    """Smaller EMA period keeps the synthetic dataset short."""
-    params = dict(ema200_14percent_below.SCREENER["default_params"])
+def _envelope_params(**overrides):
+    """Compact params: a 5-period SMA basis keeps the synthetic dataset short.
+
+    `exponential=False` uses an SMA basis, whose value is just the mean of the
+    last 5 closes — easy to verify by hand. The production default is a 200-EMA
+    basis with 14% bands.
+    """
+    params = dict(envelope.SCREENER["default_params"])
     params.update({
         "ema_period": 5,
-        "discount_pct": 0.14,
+        "percent": 14.0,
+        "exponential": False,
         "start_date": date(2026, 1, 1),
         "end_date": date(2026, 1, 31),
     })
@@ -476,9 +518,9 @@ def _ema200_params(**overrides):
     return params
 
 
-def test_ema200_14percent_below_fires_when_close_is_well_below_ema():
-    # Steady at 100 for several candles to build an EMA near 100, then a sharp
-    # drop to 80. 80 vs an EMA still near 95 is comfortably more than 14%.
+def test_envelope_fires_when_close_is_below_lower_band():
+    # Steady at 100 (SMA basis ~ 96 after the drop), then a fall to 80. The lower
+    # band is 0.86 * 96 = 82.56, so a close of 80 sits below it -> BUY.
     closes = [100.0] * 10 + [80.0]
     frames = {
         "DISCOUNT": _bollinger_candles(
@@ -489,17 +531,18 @@ def test_ema200_14percent_below_fires_when_close_is_well_below_ema():
         ),
     }
 
-    result = ema200_14percent_below.run(_universe(), FakeDataLoader(frames), _ema200_params())
+    result = envelope.run(_universe(), FakeDataLoader(frames), _envelope_params())
 
     assert result["symbol"].tolist() == ["DISCOUNT"]
     row = result.iloc[0]
     assert row["rating"] == "BUY"
-    # The realized discount must be at least the configured threshold.
-    assert row["actual_discount_pct"] >= 0.14
+    assert row["close"] <= row["env_lower"]
+    # With 14% bands, being at/below the lower band means >= 14% below the basis.
+    assert row["pct_below_basis"] >= 0.14
 
 
-def test_ema200_14percent_below_skips_when_close_is_close_to_ema():
-    # A 3% dip is below the 14% threshold; no signal should appear.
+def test_envelope_skips_when_close_is_near_the_basis():
+    # A 3% dip stays well inside the lower band (0.86 * basis), so no signal.
     closes = [100.0] * 10 + [97.0]
     frames = {
         "MILD": _bollinger_candles(
@@ -510,19 +553,99 @@ def test_ema200_14percent_below_skips_when_close_is_close_to_ema():
         ),
     }
 
-    result = ema200_14percent_below.run(_universe(), FakeDataLoader(frames), _ema200_params())
+    result = envelope.run(_universe(), FakeDataLoader(frames), _envelope_params())
 
     assert result.empty
-    assert list(result.columns) == ema200_14percent_below.RESULT_COLUMNS
+    assert list(result.columns) == envelope.RESULT_COLUMNS
 
 
-def test_ema200_14percent_below_tolerates_empty_and_short_frames():
+def test_envelope_tolerates_empty_and_short_frames():
     frames = {
         "EMPTY": pd.DataFrame(),
-        "SHORT": _bollinger_candles([10.0], [11.0], [9.0], [10.0]),
+        "SHORT": _bollinger_candles([10.0], [11.0], [9.0], [10.0]),  # 1 candle < ema_period (5)
     }
 
-    result = ema200_14percent_below.run(_universe(), FakeDataLoader(frames), _ema200_params())
+    result = envelope.run(_universe(), FakeDataLoader(frames), _envelope_params())
 
     assert result.empty
-    assert list(result.columns) == ema200_14percent_below.RESULT_COLUMNS
+    assert list(result.columns) == envelope.RESULT_COLUMNS
+
+
+# ---------------------------------------------------------------------------
+# 20% Up Green Candles (Lovevanshi)
+# ---------------------------------------------------------------------------
+
+
+def _green_params(**overrides):
+    params = dict(green_candles_20pct_up.SCREENER["default_params"])
+    params.update({
+        "start_date": date(2026, 1, 1),
+        "end_date": date(2026, 1, 31),
+    })
+    params.update(overrides)
+    return params
+
+
+def _green_run_candles(opens, highs, lows, closes) -> pd.DataFrame:
+    """OHLC frame where candle colour (close vs open) is meaningful."""
+    return _bollinger_candles(opens, highs, lows, closes)
+
+
+def test_green_candles_fires_on_a_20pct_all_green_run():
+    # Six consecutive green candles (close > open each), rising from a low of 99
+    # to a high of 130: (130 - 99) / 99 = 31% > 20% -> BUY.
+    opens = [100.0, 105.0, 110.0, 115.0, 120.0, 125.0]
+    closes = [104.0, 109.0, 114.0, 119.0, 124.0, 129.0]
+    highs = [105.0, 110.0, 115.0, 120.0, 125.0, 130.0]
+    lows = [99.0, 104.0, 109.0, 114.0, 119.0, 124.0]
+    frames = {"RUNNER": _green_run_candles(opens, highs, lows, closes)}
+
+    result = green_candles_20pct_up.run(_universe(), FakeDataLoader(frames), _green_params())
+
+    assert result["symbol"].tolist() == ["RUNNER"]
+    row = result.iloc[0]
+    assert row["rating"] == "BUY"
+    assert row["run_length"] == 6
+    assert row["run_gain_pct"] > 0.20
+
+
+def test_green_candles_skips_when_latest_candle_is_red():
+    # The run must be in progress on the most recent bar. A red final candle
+    # (close < open) breaks the run, so nothing is shortlisted.
+    opens = [100.0, 105.0, 110.0]
+    closes = [104.0, 109.0, 108.0]  # last close < last open -> red
+    highs = [105.0, 110.0, 111.0]
+    lows = [99.0, 104.0, 107.0]
+    frames = {"REDLAST": _green_run_candles(opens, highs, lows, closes)}
+
+    result = green_candles_20pct_up.run(_universe(), FakeDataLoader(frames), _green_params())
+
+    assert result.empty
+    assert list(result.columns) == green_candles_20pct_up.RESULT_COLUMNS
+
+
+def test_green_candles_skips_when_run_gain_is_too_small():
+    # An all-green but tight run: high 103 vs low 99.5 is only ~3.5%, below 20%.
+    opens = [100.0, 101.0, 102.0]
+    closes = [100.5, 101.5, 102.5]
+    highs = [101.0, 102.0, 103.0]
+    lows = [99.5, 100.5, 101.5]
+    frames = {"TIGHT": _green_run_candles(opens, highs, lows, closes)}
+
+    result = green_candles_20pct_up.run(_universe(), FakeDataLoader(frames), _green_params())
+
+    assert result.empty
+    assert list(result.columns) == green_candles_20pct_up.RESULT_COLUMNS
+
+
+def test_green_candles_tolerates_empty_and_short_frames():
+    frames = {
+        "EMPTY": pd.DataFrame(),
+        # A single green candle whose own range is < 20% must not raise or fire.
+        "ONE": _green_run_candles([100.0], [101.0], [99.0], [100.5]),
+    }
+
+    result = green_candles_20pct_up.run(_universe(), FakeDataLoader(frames), _green_params())
+
+    assert result.empty
+    assert list(result.columns) == green_candles_20pct_up.RESULT_COLUMNS

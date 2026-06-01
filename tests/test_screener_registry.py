@@ -16,18 +16,21 @@ def test_discover_screeners_loads_stochastic_swing():
 
     assert "stochastic_swing" in screeners
     assert screeners["stochastic_swing"].universe == "nifty_500"
-    assert "bollinger_knoxville_buy" in screeners
-    assert screeners["bollinger_knoxville_buy"].universe == "hemant_super_45"
-    # The two new Hemant Super 45 screeners must also be discovered.
-    assert "week52_low_ceyhun" in screeners
+    # The split Bollinger / Envelope / Envelope+Knoxville screeners (formerly the
+    # combined "Bollinger Knoxville Buy" + "14% Below 200 EMA") are Hemant Super 45.
+    assert screeners["bollinger_lower_band"].universe == "hemant_super_45"
+    assert screeners["envelope"].universe == "hemant_super_45"
+    assert screeners["envelope_knoxville_buy"].universe == "hemant_super_45"
     assert screeners["week52_low_ceyhun"].universe == "hemant_super_45"
-    assert "ema200_14percent_below" in screeners
-    assert screeners["ema200_14percent_below"].universe == "hemant_super_45"
+    # The green-candle screener scans the Hemant Super 45 + Good 45 union.
+    assert screeners["green_candles_20pct_up"].universe == "hemant_super_good_union"
     # Every discovered screener exposes a chart builder.
     assert screeners["stochastic_swing"].build_chart is not None
-    assert screeners["bollinger_knoxville_buy"].build_chart is not None
+    assert screeners["bollinger_lower_band"].build_chart is not None
+    assert screeners["envelope"].build_chart is not None
+    assert screeners["envelope_knoxville_buy"].build_chart is not None
     assert screeners["week52_low_ceyhun"].build_chart is not None
-    assert screeners["ema200_14percent_below"].build_chart is not None
+    assert screeners["green_candles_20pct_up"].build_chart is not None
     # The connection-test screener was removed.
     assert "connection_test" not in screeners
 
