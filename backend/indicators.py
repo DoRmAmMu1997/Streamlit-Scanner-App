@@ -123,6 +123,126 @@ def pivot_lows(low: pd.Series, left: int, right: int) -> pd.Series:
     return mask.fillna(False).astype(bool)
 
 
+def pivot_highs(high: pd.Series, left: int, right: int) -> pd.Series:
+    """Return a boolean Series marking confirmed pivot highs.
+
+    The mirror image of `pivot_lows`: a pivot high is a candle whose `high` is
+    strictly GREATER than every high in the previous `left` candles AND every
+    high in the next `right` candles. As with pivot lows, confirmation needs
+    `right` future candles, so the last `right` rows are always `False`.
+
+    Used by `major_levels` to find resistance pivots (where price repeatedly
+    failed to push higher) alongside the support pivots from `pivot_lows`.
+    """
+    left = max(1, int(left))
+    right = max(1, int(right))
+    series = pd.to_numeric(high, errors="coerce")
+
+    # Rolling maximum of the `left` candles BEFORE today.
+    left_max = series.rolling(window=left, min_periods=left).max().shift(1)
+    # Rolling maximum of the `right` candles AFTER today (reverse-roll trick).
+    reversed_series = series.iloc[::-1]
+    right_max = (
+        reversed_series.rolling(window=right, min_periods=right).max().shift(1).iloc[::-1]
+    )
+
+    mask = series.notna() & (series > left_max) & (series > right_max)
+    return mask.fillna(False).astype(bool)
+
+
+def major_levels(
+    frame: pd.DataFrame,
+    *,
+    left: int = 5,
+    right: int = 5,
+    cluster_pct: float = 2.0,
+    min_touches: int = 3,
+) -> list[dict[str, float | int | str]]:
+    """Return major support/resistance levels clustered from confirmed pivots.
+
+    "Major" means *multi-touch over the whole history*: a price zone that the
+    market has respected repeatedly across all the candles in `frame` (the app
+    feeds ~10 years), not a one-off swing. The steps:
+
+    1. Collect every confirmed pivot low (support pivot) and pivot high
+       (resistance pivot) across the entire frame via `pivot_lows`/`pivot_highs`.
+    2. Sort those pivot prices and walk them in ascending order, grouping
+       consecutive prices that sit within `cluster_pct` percent of the running
+       cluster's first price into one cluster (a price "zone").
+    3. Keep only clusters touched at least `min_touches` times. Each surviving
+       cluster becomes one level whose `price` is the mean of its pivots and
+       whose `kind` is "support", "resistance", or "both" depending on which
+       pivot types fell into it.
+
+    Returns a list of `{"price": float, "touches": int, "kind": str}` sorted by
+    price ascending. Empty when the frame is too short to confirm pivots.
+
+    The result feeds two consumers: the Technical Analysis screener's cheap gate
+    (is the latest close near a support, or breaking above a resistance?) and
+    the LLM agent's numeric context (so it reasons from real levels, not the raw
+    candle dump alone).
+    """
+    if frame is None or frame.empty or "low" not in frame or "high" not in frame:
+        return []
+
+    work = frame.reset_index(drop=True)
+    low_mask = pivot_lows(work["low"], left=left, right=right)
+    high_mask = pivot_highs(work["high"], left=left, right=right)
+
+    # Each pivot contributes one (price, kind) "touch". Supports come from pivot
+    # lows, resistances from pivot highs.
+    pivots: list[tuple[float, str]] = []
+    for price in work.loc[low_mask, "low"]:
+        if pd.notna(price):
+            pivots.append((float(price), "support"))
+    for price in work.loc[high_mask, "high"]:
+        if pd.notna(price):
+            pivots.append((float(price), "resistance"))
+    if not pivots:
+        return []
+
+    pivots.sort(key=lambda item: item[0])
+    fraction = max(0.0, float(cluster_pct) / 100.0)
+    min_touches = max(1, int(min_touches))
+
+    levels: list[dict[str, float | int | str]] = []
+    # Greedy left-to-right clustering: a pivot joins the current cluster while it
+    # stays within `cluster_pct` of the cluster's anchor (its lowest price);
+    # otherwise it starts a new cluster.
+    cluster_prices: list[float] = [pivots[0][0]]
+    cluster_kinds: set[str] = {pivots[0][1]}
+    anchor = pivots[0][0]
+
+    def _flush() -> None:
+        if len(cluster_prices) < min_touches:
+            return
+        kind = (
+            "both"
+            if {"support", "resistance"}.issubset(cluster_kinds)
+            else next(iter(cluster_kinds))
+        )
+        levels.append(
+            {
+                "price": sum(cluster_prices) / len(cluster_prices),
+                "touches": len(cluster_prices),
+                "kind": kind,
+            }
+        )
+
+    for price, kind in pivots[1:]:
+        if anchor > 0 and (price - anchor) / anchor <= fraction:
+            cluster_prices.append(price)
+            cluster_kinds.add(kind)
+        else:
+            _flush()
+            cluster_prices = [price]
+            cluster_kinds = {kind}
+            anchor = price
+    _flush()
+
+    return levels
+
+
 # ---------------------------------------------------------------------------
 # Moving averages (EMA / SMA): TA-Lib primary, pandas fallback
 # ---------------------------------------------------------------------------

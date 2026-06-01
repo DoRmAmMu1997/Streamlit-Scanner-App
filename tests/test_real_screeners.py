@@ -13,8 +13,10 @@ from screeners import (
     green_candles_20pct_up,
     heikin_ashi_supertrend,
     stochastic_swing,
+    technical_analysis,
     week52_low_ceyhun,
 )
+from backend.technical.technical_agent import TechnicalVerdict
 
 
 class FakeDataLoader:
@@ -649,3 +651,161 @@ def test_green_candles_tolerates_empty_and_short_frames():
 
     assert result.empty
     assert list(result.columns) == green_candles_20pct_up.RESULT_COLUMNS
+
+
+# ---------------------------------------------------------------------------
+# Technical Analysis (AI) — the cheap pivot gate (no live LLM)
+# ---------------------------------------------------------------------------
+
+
+class _StubTechnicalAgent:
+    """Stand-in for TechnicalAnalysisAgent: records calls, returns a fixed verdict."""
+
+    def __init__(self, verdict: TechnicalVerdict):
+        self.verdict = verdict
+        self.calls = 0
+
+    def analyze(self, symbol, candles, levels, *, force_refresh=False):
+        self.calls += 1
+        return self.verdict.model_copy(update={"symbol": str(symbol).upper()})
+
+
+def _ta_candles(lows: list[float]) -> pd.DataFrame:
+    """OHLC frame from a low path: high = low + 2, open = close = low + 1.
+
+    Candle colour is irrelevant to the TA gate, which only reads the high/low
+    pivots and the latest close.
+    """
+    closes = [lo + 1.0 for lo in lows]
+    return pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2020-01-01", periods=len(lows), freq="D"),
+            "open": closes,
+            "high": [lo + 2.0 for lo in lows],
+            "low": lows,
+            "close": closes,
+            "volume": [1000.0] * len(lows),
+        }
+    )
+
+
+def _ta_params(**overrides) -> dict:
+    """Compact pivot windows so a short synthetic frame still confirms levels."""
+    params = dict(technical_analysis.SCREENER["default_params"])
+    params.update(
+        {
+            "pivot_left": 2,
+            "pivot_right": 2,
+            "cluster_pct": 3.0,
+            "min_touches": 3,
+            "support_tolerance_pct": 2.0,
+            "breakout_lookback_bars": 5,
+            "start_date": date(2020, 1, 1),
+            "end_date": date(2020, 3, 1),
+        }
+    )
+    params.update(overrides)
+    return params
+
+
+# Three clean dips to ~90 (a major support after min_touches=3), then a final
+# close that settles right at that support zone.
+_AT_SUPPORT_LOWS = [
+    98.0, 96.0, 90.0, 96.0, 98.0,   # pivot low @90 (idx 2)
+    100.0, 96.0, 90.0, 96.0, 98.0,  # pivot low @90 (idx 7)
+    100.0, 96.0, 90.0, 96.0, 98.0,  # pivot low @90 (idx 12)
+    96.0, 89.5,                     # latest close = 90.5, at the ~90 support
+]
+
+# Same support history, but the tail declines into a mid-range level far above
+# support with no upward breakout — the gate should reject it before any LLM.
+_MIDRANGE_LOWS = [
+    98.0, 96.0, 90.0, 96.0, 98.0,
+    100.0, 96.0, 90.0, 96.0, 98.0,
+    100.0, 96.0, 90.0, 96.0, 98.0,
+    106.0, 104.0, 102.0, 100.0, 99.0,  # declining into ~100, well above 90
+]
+
+
+def _ta_verdict(**overrides) -> TechnicalVerdict:
+    base = dict(
+        symbol="BUY",
+        pattern="at_support",
+        confirmed=True,
+        key_levels=[90.0],
+        confidence=6,
+        reasoning="Price is basing at the 90 major support.",
+        signal_date="2020-01-17",
+        model_used="test-model",
+    )
+    base.update(overrides)
+    return TechnicalVerdict(**base)
+
+
+def test_technical_analysis_gate_admits_at_support_and_calls_agent(monkeypatch):
+    # The stub agent replaces the real one, so no SDK or network is touched.
+    stub = _StubTechnicalAgent(_ta_verdict())
+    monkeypatch.setattr(technical_analysis, "_get_agent", lambda: stub)
+
+    frames = {"BUY": _ta_candles(_AT_SUPPORT_LOWS)}
+    result = technical_analysis.run(_universe(), FakeDataLoader(frames), _ta_params())
+
+    assert result["symbol"].tolist() == ["BUY"]
+    row = result.iloc[0]
+    assert row["rating"] == "BUY"
+    assert row["pattern"] == "at_support"
+    # The candidate reached the agent exactly once.
+    assert stub.calls == 1
+    assert {"pattern", "confirmed", "confidence", "nearest_level"}.issubset(result.columns)
+
+
+def test_technical_analysis_gate_rejects_midrange_without_calling_agent(monkeypatch):
+    stub = _StubTechnicalAgent(_ta_verdict())
+    monkeypatch.setattr(technical_analysis, "_get_agent", lambda: stub)
+
+    frames = {"BUY": _ta_candles(_MIDRANGE_LOWS)}
+    result = technical_analysis.run(_universe(), FakeDataLoader(frames), _ta_params())
+
+    assert result.empty
+    # The gate dropped the stock BEFORE any LLM call.
+    assert stub.calls == 0
+    assert list(result.columns) == technical_analysis.RESULT_COLUMNS
+
+
+def test_technical_analysis_degrades_when_agent_unavailable(monkeypatch):
+    # Agent raises (e.g. Claude Agent SDK not installed / plan limit) → the
+    # screener still surfaces a gate-only at-support candidate.
+    from backend.fundamentals.fundamental_agent import FundamentalsAgentError
+
+    def _raising_agent():
+        class _Boom:
+            def analyze(self, *a, **k):
+                raise FundamentalsAgentError("claude-agent-sdk is not installed.")
+
+        return _Boom()
+
+    monkeypatch.setattr(technical_analysis, "_get_agent", _raising_agent)
+
+    frames = {"BUY": _ta_candles(_AT_SUPPORT_LOWS)}
+    result = technical_analysis.run(_universe(), FakeDataLoader(frames), _ta_params())
+
+    assert result["symbol"].tolist() == ["BUY"]
+    row = result.iloc[0]
+    assert row["pattern"] == "at_support"
+    assert bool(row["confirmed"]) is False
+    assert "unavailable" in row["reason"].lower()
+
+
+def test_technical_analysis_tolerates_empty_and_short_frames(monkeypatch):
+    stub = _StubTechnicalAgent(_ta_verdict())
+    monkeypatch.setattr(technical_analysis, "_get_agent", lambda: stub)
+
+    frames = {
+        "EMPTY": pd.DataFrame(),
+        "SHORT": _ta_candles([100.0, 99.0, 98.0]),  # too short to confirm pivots
+    }
+    result = technical_analysis.run(_universe(), FakeDataLoader(frames), _ta_params())
+
+    assert result.empty
+    assert stub.calls == 0
+    assert list(result.columns) == technical_analysis.RESULT_COLUMNS

@@ -24,7 +24,7 @@ view).
 
 ## Features
 
-- **Eight built-in screeners**, all built on a common `BaseScanner` abstract
+- **Nine built-in screeners**, all built on a common `BaseScanner` abstract
   base class so adding new ones is a single-file change.
   - **Heikin Ashi SuperTrend** — F&O stocks where the daily Heikin Ashi close
     crosses the SuperTrend line.
@@ -48,6 +48,12 @@ view).
   - **20% Up Green Candles (Lovevanshi)** — Hemant Super 45 ∪ Good 45 stocks
     whose latest candle caps a run of consecutive green candles (up to 20) that
     moved more than 20% from the run's lowest low to its highest high.
+  - **Technical Analysis (AI)** — Hemant Super 45 ∪ Good 45 stocks with a
+    breakout-confirmed cup-and-handle or inverse head-and-shoulders, or sitting
+    at a major (multi-touch, full-history) support level. A cheap pivot-based
+    gate prefilters candidates, then a **Claude Agent SDK** agent (same
+    subscription-based auth as Check Fundamentals) confirms the pattern from the
+    OHLC data. Degrades to gate-only "near support" when the SDK is unavailable.
 - **Per-stock Check Fundamentals AI agent** — see the
   [dedicated section below](#check-fundamentals-agent). One click on a
   shortlisted row runs a Claude Agent SDK agent that scrapes screener.in (peer
@@ -199,13 +205,15 @@ Streamlit Scanner App/
 │   ├── scanner_base.py          # BaseScanner ABC every screener subclasses
 │   ├── indicators.py            # Indicators (TA-Lib/pandas_ta + fallbacks)
 │   ├── charts.py                # Lightweight Charts chart-spec builders
-│   └── fundamentals/            # Check Fundamentals subsystem
-│       ├── screener_in_client.py# requests + BS4 scraper (peers via HTMX,
-│       │                        # announcements, concall metadata)
-│       ├── pdf_reader.py        # PDF download + text extraction
-│       │                        # (pdfplumber → pypdf fallback)
-│       ├── fundamentals_cache.py# On-disk JSON cache (data + verdict)
-│       └── fundamental_agent.py # Claude Agent SDK agent + Pydantic schemas
+│   ├── fundamentals/            # Check Fundamentals subsystem
+│   │   ├── screener_in_client.py# requests + BS4 scraper (peers via HTMX,
+│   │   │                        # announcements, concall metadata)
+│   │   ├── pdf_reader.py        # PDF download + text extraction
+│   │   │                        # (pdfplumber → pypdf fallback)
+│   │   ├── fundamentals_cache.py# On-disk JSON cache (data + verdict)
+│   │   └── fundamental_agent.py # Claude Agent SDK agent + Pydantic schemas
+│   └── technical/               # Technical Analysis (AI) subsystem
+│       └── technical_agent.py  # Claude Agent SDK agent + TechnicalVerdict
 ├── screeners/                   # One file per screener (the strategy logic)
 │   ├── heikin_ashi_supertrend.py
 │   ├── bollinger_band_reversal.py
@@ -214,7 +222,8 @@ Streamlit Scanner App/
 │   ├── envelope_knoxville_buy.py
 │   ├── stochastic_swing.py
 │   ├── week52_low_ceyhun.py
-│   └── green_candles_20pct_up.py
+│   ├── green_candles_20pct_up.py
+│   └── technical_analysis.py    # AI screener: pivot gate + technical agent
 ├── Dependencies/
 │   ├── .env.example             # Credential template (copy to .env)
 │   └── dhan_token_setup.py      # One-time OAuth token helper

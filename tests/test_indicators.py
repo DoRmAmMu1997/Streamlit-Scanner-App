@@ -23,10 +23,10 @@ from backend.indicators import (
     _supertrend_fallback,
     bollinger_bands,
     build_heikin_ashi,
-    bullish_knoxville_divergence,
     ema,
-    envelope,
+    major_levels,
     momentum,
+    pivot_highs,
     pivot_lows,
     prepare_ohlc,
     rsi,
@@ -274,3 +274,82 @@ def test_pivot_lows_handles_nan_inputs_without_raising():
     assert mask.iloc[0] is False or bool(mask.iloc[0]) is False
     # The interior candle at index 2 has lower neighbors on both sides.
     assert bool(mask.iloc[2]) is True
+
+
+# ---------------------------------------------------------------------------
+# pivot_highs — mirror image of pivot_lows
+# ---------------------------------------------------------------------------
+
+
+def test_pivot_highs_flags_only_confirmed_highs():
+    # An inverted-V peak at index 3 should be detected as a pivot high.
+    highs = pd.Series([1.0, 2.0, 3.0, 5.0, 3.5, 2.5, 1.5])
+    mask = pivot_highs(highs, left=2, right=2)
+    # Index 3 is higher than both its 2-bar neighbors on each side.
+    assert mask.tolist() == [False, False, False, True, False, False, False]
+
+
+def test_pivot_highs_does_not_mark_last_right_candles():
+    # The last `right` candles cannot be confirmed (no future bars), even the
+    # global maximum at the very end.
+    highs = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0])
+    mask = pivot_highs(highs, left=1, right=1)
+    assert bool(mask.iloc[-1]) is False
+
+
+def test_pivot_highs_handles_nan_inputs_without_raising():
+    highs = pd.Series([float("nan"), 1.0, 3.0, 1.0, float("nan")])
+    mask = pivot_highs(highs, left=1, right=1)
+    assert bool(mask.iloc[0]) is False
+    # Interior peak at index 2 sits above both neighbors → confirmed.
+    assert bool(mask.iloc[2]) is True
+
+
+# ---------------------------------------------------------------------------
+# major_levels — clustered multi-touch support/resistance
+# ---------------------------------------------------------------------------
+
+
+def _level_frame(lows: list[float], highs: list[float]) -> pd.DataFrame:
+    """Build an OHLC frame from explicit low/high paths (open/close = midpoint)."""
+    mid = [(lo + hi) / 2.0 for lo, hi in zip(lows, highs)]
+    return pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2020-01-01", periods=len(lows), freq="D"),
+            "open": mid,
+            "high": highs,
+            "low": lows,
+            "close": mid,
+            "volume": [1000.0] * len(lows),
+        }
+    )
+
+
+def test_major_levels_clusters_repeated_touches_and_drops_one_offs():
+    # Three V-dips at ~50 (a repeated support zone) plus a single isolated dip
+    # at 80. With min_touches=3, only the ~50 cluster should survive.
+    lows = [
+        60.0, 55.0, 50.0, 55.0, 60.0,   # support pivot at idx 2 (~50)
+        65.0, 55.0, 50.5, 55.0, 65.0,   # support pivot at idx 7 (~50.5)
+        70.0, 60.0, 49.5, 60.0, 70.0,   # support pivot at idx 12 (~49.5)
+        85.0, 80.0, 90.0,               # one-off dip at idx 16 (~80)
+    ]
+    highs = [v + 5.0 for v in lows]
+    frame = _level_frame(lows, highs)
+
+    levels = major_levels(frame, left=2, right=2, cluster_pct=3.0, min_touches=3)
+
+    support_levels = [lvl for lvl in levels if lvl["kind"] in ("support", "both")]
+    assert len(support_levels) == 1
+    level = support_levels[0]
+    # The surviving level sits in the ~50 zone and counts all three touches.
+    assert 49.0 <= level["price"] <= 51.0
+    assert level["touches"] == 3
+    # The isolated 80 dip never reached min_touches, so it is absent.
+    assert all(not (78.0 <= lvl["price"] <= 82.0) for lvl in levels)
+
+
+def test_major_levels_returns_empty_when_too_short_to_confirm():
+    # Three candles cannot confirm a left=2/right=2 pivot, so there are no levels.
+    frame = _level_frame([10.0, 9.0, 10.0], [12.0, 11.0, 12.0])
+    assert major_levels(frame, left=2, right=2, cluster_pct=2.0, min_touches=2) == []

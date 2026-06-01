@@ -21,6 +21,7 @@ from screeners import (
     green_candles_20pct_up,
     heikin_ashi_supertrend,
     stochastic_swing,
+    technical_analysis,
 )
 
 
@@ -165,6 +166,7 @@ def test_each_screener_build_chart_returns_serializable_spec():
         (envelope, 2),
         (envelope_knoxville_buy, 2),
         (green_candles_20pct_up, 2),
+        (technical_analysis, 2),
         (stochastic_swing, 3),
     ]
     for module, expected_panes in expectations:
