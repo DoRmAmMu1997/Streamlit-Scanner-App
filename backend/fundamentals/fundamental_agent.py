@@ -291,9 +291,20 @@ class AgentVerdict(BaseModel):
         ),
     )
     data_freshness: str = Field(
-        description="ISO timestamp of when the underlying screener.in data was fetched."
+        default="",
+        description=(
+            "ISO timestamp of when the underlying screener.in data was fetched. "
+            "Optional in the model's output — `_normalize_verdict` backfills it "
+            "when the model omits it, so validation must not require it."
+        ),
     )
-    model_used: str = Field(description="Which LLM produced this verdict.")
+    model_used: str = Field(
+        default="",
+        description=(
+            "Which LLM produced this verdict. Optional in the model's output — "
+            "`_normalize_verdict` backfills it from the configured model."
+        ),
+    )
 
     @field_validator("rating")
     @classmethod

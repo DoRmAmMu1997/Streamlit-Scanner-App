@@ -346,6 +346,62 @@ def test_fundamental_agent_runs_through_runner_and_parses_verdict(tmp_path):
     assert runner.last_model == "test-model"
 
 
+class _RawJSONRunner:
+    """Runner that returns a caller-supplied raw JSON string verbatim.
+
+    Unlike `_FakeRunner` (which serializes a fully-formed AgentVerdict), this
+    lets a test emit exactly the JSON a real model produced — including JSON
+    that OMITS optional bookkeeping fields.
+    """
+
+    def __init__(self, raw_text: str):
+        self.raw_text = raw_text
+        self.calls = 0
+
+    async def __call__(self, prompt, *, system_prompt, model, max_turns):
+        self.calls += 1
+        return AgentRunResult(text=self.raw_text, cost_usd=None)
+
+
+def test_check_backfills_when_model_omits_data_freshness_and_model_used(tmp_path):
+    """Regression: the live agent crashed on RELAXO because the model's final
+    JSON omitted `data_freshness` and `model_used`. Validation ran before
+    `_normalize_verdict` could stamp them, so model_validate raised. The agent
+    must tolerate their absence and backfill both."""
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("RELAXO", _sample_screener_data())
+
+    # A minimal valid verdict body that deliberately leaves OUT data_freshness
+    # and model_used — exactly the shape that triggered the crash.
+    raw = json.dumps(
+        {
+            "symbol": "RELAXO",
+            "mode": "criteria",
+            "rating": 6,
+            "passed_criteria_count": 5,
+            "total_criteria": 9,
+            "criteria_breakdown": [],
+            "additional_observations": [],
+            "summary_comments": "Decent franchise but valuation limits a premium rating.",
+            "forward_outlook": {
+                "announcements_conclusion": "",
+                "concall_conclusion": "",
+                "overall_summary": "Steady volume growth expected.",
+            },
+        }
+    )
+    runner = _RawJSONRunner(raw)
+    agent = FundamentalAgent(model="test-model", cache=cache, runner=runner)
+
+    verdict = agent.check("RELAXO")
+
+    assert verdict.symbol == "RELAXO"
+    assert verdict.rating == 6
+    # Both omitted fields are backfilled by _normalize_verdict.
+    assert verdict.model_used == "test-model"
+    assert verdict.data_freshness  # non-empty ISO timestamp
+
+
 def test_fundamental_agent_caches_verdict_per_symbol_model_date(tmp_path):
     cache = FundamentalsCache(cache_dir=tmp_path)
     cache.set_data("DEMO", _sample_screener_data())

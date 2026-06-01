@@ -103,7 +103,6 @@ class TechnicalAnalysis(BaseScanner):
         "confirmed",
         "confidence",
         "nearest_level",
-        "reasoning",
     ]
 
     # ------------------------------------------------------------------
