@@ -754,9 +754,20 @@ def test_technical_analysis_gate_admits_at_support_and_calls_agent(monkeypatch):
     row = result.iloc[0]
     assert row["rating"] == "BUY"
     assert row["pattern"] == "at_support"
+    assert row["reason"] == "Price is basing at the 90 major support."
     # The candidate reached the agent exactly once.
     assert stub.calls == 1
-    assert {"pattern", "confirmed", "confidence", "nearest_level"}.issubset(result.columns)
+    assert list(result.columns) == [
+        "symbol",
+        "rating",
+        "signal_date",
+        "close",
+        "reason",
+        "pattern",
+        "confirmed",
+        "confidence",
+        "nearest_level",
+    ]
 
 
 def test_technical_analysis_gate_rejects_midrange_without_calling_agent(monkeypatch):
@@ -794,6 +805,17 @@ def test_technical_analysis_degrades_when_agent_unavailable(monkeypatch):
     assert row["pattern"] == "at_support"
     assert bool(row["confirmed"]) is False
     assert "unavailable" in row["reason"].lower()
+    assert list(result.columns) == [
+        "symbol",
+        "rating",
+        "signal_date",
+        "close",
+        "reason",
+        "pattern",
+        "confirmed",
+        "confidence",
+        "nearest_level",
+    ]
 
 
 def test_technical_analysis_tolerates_empty_and_short_frames(monkeypatch):

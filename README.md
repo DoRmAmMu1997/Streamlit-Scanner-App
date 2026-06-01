@@ -232,7 +232,7 @@ Streamlit Scanner App/
 │   ├── cache/fundamentals/      # Cached screener.in data + agent verdicts
 │   │   └── pdfs/                # Downloaded concall transcripts + .txt
 │   └── universes/               # Universe CSVs, including tracked Hemant lists
-└── tests/                       # pytest suite (152 tests)
+└── tests/                       # pytest suite
 ```
 
 The boundary is deliberate: **strategy logic lives in `screeners/`**, and
