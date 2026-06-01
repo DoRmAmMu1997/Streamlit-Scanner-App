@@ -19,7 +19,8 @@ How it works:
    - `read_recent_concall_transcript` — downloads + extracts the most recent
      quarterly concall transcript text.
 4. A senior-analyst system prompt instructs the LLM to:
-   - apply the seven user-defined criteria exactly,
+   - apply the user-defined criteria exactly (9 for the curated universe,
+     7 for every other stock),
    - add 4-8 additional fundamental observations of its choosing
      (margins, capital allocation, governance, etc.),
    - synthesize a HOLISTIC 0-10 rating (not a simple count),
@@ -201,7 +202,7 @@ class ForwardOutlook(BaseModel):
 
 
 class Observation(BaseModel):
-    """A fundamental dimension the agent chose to analyse beyond the seven criteria."""
+    """A fundamental dimension the agent chose to analyse beyond the criteria."""
 
     topic: str = Field(
         description="What is being observed, e.g. 'Margin trend', 'Promoter pledging'."
@@ -228,23 +229,25 @@ class AgentVerdict(BaseModel):
     without polluting the JSON schema.
 
     Note on `mode`:
-    The agent runs in one of two modes depending on whether the stock is
-    in the user's curated universe:
-    - `criteria` (Hemant Super 45 ∪ Nifty 100): apply the seven user-defined
-      criteria + observations + forward outlook + holistic rating.
-    - `insights_only` (every other stock): skip the criteria checklist,
-      leave `criteria_breakdown` empty and `passed_criteria_count=0`. Still
-      produce additional observations, forward outlook, summary, and the
-      same 0-10 holistic rating.
+    The agent always runs a criteria checklist; the mode only changes how many
+    criteria apply:
+    - `criteria` (Hemant Super 45 ∪ Nifty 100): all NINE criteria — the seven
+      universal ones plus (f) Business Age and (g) Market Leader. So
+      `total_criteria=9`.
+    - `universal` (every other stock): the SEVEN universal criteria only,
+      skipping Business Age and Market Leader (which need curated peer /
+      longevity context). So `total_criteria=7`.
+    Both modes produce observations, forward outlook, summary, and the same
+    holistic 0-10 rating.
     """
 
     symbol: str
-    mode: Literal["criteria", "insights_only"] = Field(
+    mode: Literal["criteria", "universal"] = Field(
         default="criteria",
         description=(
-            "Which evaluation mode was used. 'criteria' fills the criteria "
-            "breakdown; 'insights_only' leaves it empty because the stock is "
-            "outside the user's curated universe."
+            "Which evaluation mode was used. 'criteria' applies all nine "
+            "criteria (curated universe); 'universal' applies the seven that "
+            "do not need Business Age / Market Leader context."
         ),
     )
     rating: int = Field(
@@ -256,16 +259,16 @@ class AgentVerdict(BaseModel):
     passed_criteria_count: int = Field(
         default=0,
         description=(
-            "How many of the seven user-defined criteria the stock passes. "
-            "Always 0 in insights_only mode (the criteria are not evaluated)."
+            "How many of the applied criteria the stock passes (out of "
+            "`total_criteria`: 9 in 'criteria' mode, 7 in 'universal' mode)."
         ),
     )
-    total_criteria: int = Field(default=7)
+    total_criteria: int = Field(default=9)
     criteria_breakdown: list[CriterionResult] = Field(
         default_factory=list,
         description=(
-            "One CriterionResult per user-defined criterion in 'criteria' "
-            "mode. Empty list in 'insights_only' mode."
+            "One CriterionResult per applied criterion: nine in 'criteria' "
+            "mode, seven in 'universal' mode."
         ),
     )
     additional_observations: list[Observation] = Field(
@@ -307,9 +310,10 @@ class AgentVerdict(BaseModel):
     @field_validator("passed_criteria_count")
     @classmethod
     def _validate_passed_criteria_count(cls, value: int) -> int:
-        if not 0 <= value <= 7:
+        # Up to 9 now: the curated universe applies all nine criteria.
+        if not 0 <= value <= 9:
             raise ValueError(
-                f"passed_criteria_count must be between 0 and 7 inclusive, got {value}"
+                f"passed_criteria_count must be between 0 and 9 inclusive, got {value}"
             )
         return value
 
@@ -362,9 +366,10 @@ When asked to evaluate a stock:
    obtain a screener.in snapshot. Do not call the tool more than once for
    the same symbol — re-reading the same data wastes tokens and time.
 
-2. Apply these SEVEN user-defined criteria EXACTLY. For each, return one
-   CriterionResult with the actual measured value, the threshold, a clear
-   pass/fail, and your reasoning:
+2. Apply these user-defined criteria EXACTLY (nine in 'criteria' mode; seven
+   in 'universal' mode — see the SCOPE note after the list). For each criterion
+   you apply, return one CriterionResult with the actual measured value, the
+   threshold, a clear pass/fail, and your reasoning:
 
    a. Net Debt to Equity ratio < 0.2.
       Formula: (latest_debt - latest_cash_equivalents) /
@@ -393,7 +398,21 @@ When asked to evaluate a stock:
       `peers` table. The stock must be in the top 1-3 of its peer set by
       both market cap and net profit.
 
-3. BEYOND the seven criteria, identify 4-8 ADDITIONAL fundamental
+   h. Public shareholding is LOWER than EACH of Promoter, FII, AND DII
+      holding — i.e. the public/retail category is the smallest of the four.
+      Use the `shareholding` table / `shareholding_notes`. The criterion
+      passes only when public < promoter AND public < FII AND public < DII.
+
+   i. Promoter pledge < 5% of promoter holding. Use the pledge figure in the
+      shareholding section / notes. If no pledge is reported, treat it as 0%
+      (pass).
+
+   SCOPE OF THE CRITERIA: criteria (a)-(e), (h), and (i) are UNIVERSAL — apply
+   them to EVERY stock. Criteria (f) Business Age and (g) Market Leader apply
+   ONLY in 'criteria' mode (the curated universe); in 'universal' mode you skip
+   those two (see the MODE OVERRIDE section if present).
+
+3. BEYOND the criteria, identify 4-8 ADDITIONAL fundamental
    dimensions you consider most relevant for THIS specific company.
 
    ONE of these observations MUST be a Valuation observation. When
@@ -409,7 +428,7 @@ When asked to evaluate a stock:
    limitation.
 
    Examples for the OTHER additional observations (pick what fits —
-   don't be exhaustive, and don't repeat the seven):
+   don't be exhaustive, and don't repeat the lettered criteria):
    - Margin trend (operating / net) over 3-5 years
    - Capital allocation: dividend payout, buybacks, capex intensity
    - Working-capital quality: receivables, inventory days
@@ -424,9 +443,9 @@ When asked to evaluate a stock:
 
 4. Synthesize ONE holistic rating from 0-10 reflecting how strong this
    business is FUNDAMENTALLY. This rating is your weighted expert
-   judgment, NOT a count of passed criteria. A company passing 7/7
-   criteria but with deteriorating margins and pledged promoter shares
-   may still rate 5/10. A company failing 2/7 (perhaps net debt slightly
+   judgment, NOT a count of passed criteria. A company passing every
+   criterion but with deteriorating margins and pledged promoter shares
+   may still rate 5/10. A company failing a couple (perhaps net debt slightly
    above 0.2) but with a dominant moat, clean governance, and strong
    capital allocation may rate 8/10. Reserve 9-10 for genuinely
    best-in-class compounders; 0-3 for businesses with serious red flags;
@@ -471,35 +490,39 @@ first. If a tool returns an error payload, surface that limitation honestly
 in your reasoning rather than inventing numbers."""
 
 
-# Appended to the system prompt when the agent is invoked in insights-only
-# mode. The base prompt above tells the agent to apply the seven criteria;
-# this addendum overrides step 2 and adjusts the AgentVerdict requirements
-# so an insights-only stock never gets a misleading 0/7 criteria score.
-_INSIGHTS_ONLY_PROMPT_ADDENDUM = """\
+# Appended to the system prompt when the agent is invoked in 'universal' mode
+# (any stock outside the curated Hemant Super 45 + Nifty 100 universe). The
+# base prompt lists nine criteria; this addendum drops the two that need
+# curated context (Business Age, Market Leader), leaving the seven universal
+# ones so EVERY stock still gets a real criteria checklist.
+_UNIVERSAL_PROMPT_ADDENDUM = """\
 
 ============================================================
-MODE OVERRIDE: insights_only
+MODE OVERRIDE: universal
 ============================================================
 
 This stock is OUTSIDE the user's curated universe (Hemant Super 45 +
-Nifty 100), so the seven user-defined criteria DO NOT apply.
+Nifty 100). The two context-heavy criteria do NOT apply here, but the rest
+still do.
 
 What changes:
-- SKIP step 2 entirely. Do not evaluate any of the seven criteria.
-- In your AgentVerdict, set `mode = "insights_only"`,
-  `criteria_breakdown = []` (empty list), and `passed_criteria_count = 0`.
+- In step 2, SKIP criterion (f) Business Age and criterion (g) Market Leader.
+  Apply the other SEVEN criteria — (a) Net Debt/Equity, (b) ROCE,
+  (c) Sales/Profit/EPS near all-time high, (d) Net Profit > Rs. 200 cr,
+  (e) Future growth prospects, (h) Public < Promoter/FII/DII, and
+  (i) Promoter pledge < 5% — exactly as written.
+- In your AgentVerdict, set `mode = "universal"`, `total_criteria = 7`, and
+  return exactly SEVEN CriterionResult entries (a, b, c, d, e, h, i).
+  `passed_criteria_count` is how many of those seven passed.
 
 What stays the same:
-- Steps 1, 3, 4, 5, 6 still apply. Fetch the data once, do 4-8
-  additional observations (including the mandatory Valuation comparison),
-  synthesize a holistic 0-10 rating from screener.in data alone, write
-  a 3-6 sentence summary, and produce the three-part `forward_outlook`
-  object (announcements_conclusion, concall_conclusion, overall_summary).
+- Steps 1, 3, 4, 5, 6 still apply. Fetch the data once, do 4-8 additional
+  observations (including the mandatory Valuation comparison), synthesize a
+  holistic 0-10 rating, write the summary, and produce the three-part
+  `forward_outlook` object.
 
-The rating is your standalone analyst judgment based on what the
-fundamentals look like — there is no checklist anchor. Mention in
-`summary_comments` that this is an insights-only assessment because the
-stock is outside the curated universe."""
+Mention in `summary_comments` that Business Age and Market Leader were not
+assessed because the stock is outside the curated universe."""
 
 
 # Appended LAST to the system prompt. The Claude Agent SDK has no
@@ -516,13 +539,13 @@ object and NOTHING else — no prose before or after it, and no markdown code
 fences. The object must contain exactly these keys:
 
 - "symbol": string
-- "mode": "criteria" or "insights_only"
+- "mode": "criteria" or "universal"
 - "rating": integer 0-10
-- "passed_criteria_count": integer 0-7 (0 in insights_only mode)
-- "total_criteria": integer (normally 7)
+- "passed_criteria_count": integer (how many applied criteria passed)
+- "total_criteria": integer (9 in 'criteria' mode, 7 in 'universal' mode)
 - "criteria_breakdown": array of objects, each with keys
   "name", "passed" (boolean), "measured_value", "threshold", "reasoning".
-  Empty array [] in insights_only mode.
+  Nine entries in 'criteria' mode, seven in 'universal' mode.
 - "additional_observations": array of objects, each with keys
   "topic", "finding", "sentiment" ("positive"|"negative"|"neutral"),
   "evidence".
@@ -922,14 +945,14 @@ class FundamentalAgent:
         symbol: str,
         *,
         force_refresh: bool = False,
-        mode: Literal["criteria", "insights_only"] = "criteria",
+        mode: Literal["criteria", "universal"] = "criteria",
     ) -> AgentVerdict:
         """Run the agent and return a verdict, hitting the cache when possible.
 
-        Pass `mode="insights_only"` for stocks outside the user's curated
-        universe (Hemant Super 45 ∪ Nifty 100). In that mode the agent
-        skips the 7-criteria checklist and produces observations + forward
-        outlook + holistic rating only.
+        Pass `mode="universal"` for stocks outside the user's curated universe
+        (Hemant Super 45 ∪ Nifty 100). In that mode the agent applies the seven
+        universal criteria (skipping Business Age and Market Leader) instead of
+        all nine, plus observations + forward outlook + holistic rating.
         """
         if not symbol or not str(symbol).strip():
             raise ValueError("FundamentalAgent.check: symbol must be a non-empty string")
@@ -942,7 +965,7 @@ class FundamentalAgent:
 
         # 1. Try the verdict cache first (free re-clicks on the same day).
         # The cache key includes the mode so a criteria-mode cached verdict
-        # never gets returned for an insights-only request (and vice versa).
+        # never gets returned for a universal-mode request (and vice versa).
         if not force_refresh:
             data_for_key = self._cache.get_data(normalized)
             if data_for_key is not None:
@@ -954,8 +977,8 @@ class FundamentalAgent:
 
         # 2. Build the mode-aware system prompt and run the agentic loop.
         system_prompt = SYSTEM_PROMPT
-        if mode == "insights_only":
-            system_prompt += _INSIGHTS_ONLY_PROMPT_ADDENDUM
+        if mode == "universal":
+            system_prompt += _UNIVERSAL_PROMPT_ADDENDUM
         system_prompt += _FINAL_OUTPUT_INSTRUCTION
 
         prompt = _build_user_prompt(normalized, mode, self._model)
@@ -981,7 +1004,7 @@ class FundamentalAgent:
         verdict = self._parse_verdict(run_result.text, symbol=normalized, mode=mode)
 
         # 4. Persist the verdict to the cache so the next click is instant.
-        # Cache key includes the mode so criteria-mode and insights-only runs
+        # Cache key includes the mode so criteria-mode and universal-mode runs
         # for the same symbol do not collide.
         data_payload = self._cache.get_data(normalized)
         data_date = _data_date_from_payload(data_payload or {})
@@ -1002,7 +1025,7 @@ class FundamentalAgent:
         text: str,
         *,
         symbol: str,
-        mode: Literal["criteria", "insights_only"] = "criteria",
+        mode: Literal["criteria", "universal"] = "criteria",
     ) -> AgentVerdict:
         """Extract + validate the AgentVerdict JSON from the agent's final text."""
         payload = _extract_json_object(text)
@@ -1020,15 +1043,15 @@ class FundamentalAgent:
         raw: Any,
         *,
         symbol: str,
-        mode: Literal["criteria", "insights_only"] = "criteria",
+        mode: Literal["criteria", "universal"] = "criteria",
     ) -> AgentVerdict:
         """Ensure the model's structured output is a valid AgentVerdict.
 
         Coerces a dict into the Pydantic model if needed, then stamps any
-        blank bookkeeping fields and enforces the mode invariants —
-        insights_only verdicts always have empty criteria + zero passed count,
-        regardless of what the LLM emitted, so a misbehaving model can't
-        pollute the UI.
+        blank bookkeeping fields and enforces the mode's criteria count —
+        'universal' verdicts always carry total_criteria=7 and 'criteria'
+        verdicts total_criteria=9, regardless of what the LLM emitted, so a
+        miscount can't mislead the UI's "X / Y passed" metric.
         """
         if isinstance(raw, AgentVerdict):
             verdict = raw
@@ -1047,9 +1070,8 @@ class FundamentalAgent:
             updates["model_used"] = self._model
         if not verdict.data_freshness:
             updates["data_freshness"] = datetime.now(UTC).isoformat()
-        # Enforce mode invariants: insights_only never carries criteria data.
-        if mode == "insights_only":
-            updates["criteria_breakdown"] = []
-            updates["passed_criteria_count"] = 0
+        # Enforce the mode's criteria count so the "X / Y passed" metric is
+        # always right: 7 universal criteria, or 9 in the curated universe.
+        updates["total_criteria"] = 7 if mode == "universal" else 9
         verdict = verdict.model_copy(update=updates)
         return verdict
