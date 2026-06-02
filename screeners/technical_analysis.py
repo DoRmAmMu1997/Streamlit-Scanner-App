@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import threading
 
 import pandas as pd
 
@@ -55,6 +56,7 @@ logger = logging.getLogger(__name__)
 # subscription, so there is no API key — only the model name and fast-mode flag
 # key the cache (so a toggled SCANNER_AGENT_FAST_MODE rebuilds the agent).
 _AGENT_CACHE: dict[tuple[str, bool], TechnicalAnalysisAgent] = {}
+_AGENT_CACHE_LOCK = threading.Lock()
 
 
 def _get_agent() -> TechnicalAnalysisAgent:
@@ -62,11 +64,15 @@ def _get_agent() -> TechnicalAnalysisAgent:
     model = get_fundamentals_model()
     fast_mode = get_agent_fast_mode()
     key = (model, fast_mode)
-    agent = _AGENT_CACHE.get(key)
-    if agent is None:
-        agent = TechnicalAnalysisAgent(model=model, fast_mode=fast_mode)
-        _AGENT_CACHE[key] = agent
-    return agent
+    # PR #23 parallelized candidate confirmations, so worker threads can ask for
+    # the shared agent at the same time. The lock keeps construction one-at-a-
+    # time while all callers still reuse the same cached agent afterward.
+    with _AGENT_CACHE_LOCK:
+        agent = _AGENT_CACHE.get(key)
+        if agent is None:
+            agent = TechnicalAnalysisAgent(model=model, fast_mode=fast_mode)
+            _AGENT_CACHE[key] = agent
+        return agent
 
 
 class TechnicalAnalysis(BaseScanner):
@@ -209,7 +215,7 @@ class TechnicalAnalysis(BaseScanner):
             "nearest_level": float(nearest_support["price"]) if nearest_support else float("nan"),
         }
 
-    def _confirm_candidate(self, candidate: dict) -> dict | None:
+    def _confirm_candidate(self, candidate: dict, *, force_refresh: bool = False) -> dict | None:
         """Run the AI confirmation for one gate-passing candidate → result row.
 
         Calls the Claude Agent SDK agent and maps its verdict to a result row.
@@ -222,8 +228,13 @@ class TechnicalAnalysis(BaseScanner):
         signal_date = candidate["signal_date"]
         nearest_level = candidate["nearest_level"]
         try:
+            # A user-triggered refresh should bypass both layers of cache:
+            # candles in the loader and AI verdicts inside the agent.
             verdict: TechnicalVerdict = _get_agent().analyze(
-                symbol, candidate["frame"], candidate["levels"]
+                symbol,
+                candidate["frame"],
+                candidate["levels"],
+                force_refresh=force_refresh,
             )
         except (FundamentalsAgentError, FundamentalsUsageLimitError) as exc:
             logger.warning("Technical agent unavailable for %s: %s", symbol, exc)
@@ -293,7 +304,10 @@ class TechnicalAnalysis(BaseScanner):
             )
             return None
         params["_technical_ai_calls_used"] = ai_calls_used + 1
-        return self._confirm_candidate(candidate)
+        return self._confirm_candidate(
+            candidate,
+            force_refresh=bool(params.get("force_refresh", False)),
+        )
 
     def run(self, universe_df: pd.DataFrame, data_loader, params: dict) -> pd.DataFrame:
         """Fetch candles, then gate sequentially and confirm candidates in parallel.
@@ -316,6 +330,7 @@ class TechnicalAnalysis(BaseScanner):
 
         # 1. Sequential gate pass (cheap, no LLM). Respect the candidate budget.
         max_ai_candidates = int(params.get("max_ai_candidates") or 0)
+        force_refresh = bool(params.get("force_refresh", False))
         candidates: list[dict] = []
         compute_failure_callback = params.get("compute_failure_callback")
         for symbol, candles in batch.frames.items():
@@ -340,7 +355,11 @@ class TechnicalAnalysis(BaseScanner):
             max_workers = min(len(candidates), 4)
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_to_symbol = {
-                    executor.submit(self._confirm_candidate, candidate): candidate["symbol"]
+                    executor.submit(
+                        self._confirm_candidate,
+                        candidate,
+                        force_refresh=force_refresh,
+                    ): candidate["symbol"]
                     for candidate in candidates
                 }
                 for future in concurrent.futures.as_completed(future_to_symbol):

@@ -743,6 +743,18 @@ class FundamentalAgent:
         # Fast mode disables extended thinking on the SDK call for lower latency.
         self._fast_mode = bool(fast_mode)
 
+    def _cache_model_key(self, mode: Literal["criteria", "universal"]) -> str:
+        """Return the verdict-cache namespace for this model, mode, and speed.
+
+        The default/thorough key intentionally keeps the historical shape
+        (`model::criteria` or `model::universal`) so existing thorough cached
+        verdicts still work after this refinement. Fast mode adds a suffix
+        because a lower-latency run may produce a different judgment and should
+        never be shown later as a thorough-mode result.
+        """
+        key = f"{self._model}::{mode}"
+        return f"{key}::fast" if self._fast_mode else key
+
     # ------------------------------------------------------------------
     # Tool implementations (plain, SDK-free, unit-testable)
     #
@@ -845,13 +857,13 @@ class FundamentalAgent:
         when the SDK is not installed (e.g. in CI running only the unit tests).
         """
         try:
+            import claude_agent_sdk as claude_sdk  # type: ignore[import-not-found]
             from claude_agent_sdk import (  # type: ignore[import-not-found]
                 AssistantMessage,
                 ClaudeAgentOptions,
                 CLINotFoundError,
                 ProcessError,
                 ResultMessage,
-                ThinkingConfigDisabled,
                 create_sdk_mcp_server,
                 query,
                 tool,
@@ -865,6 +877,7 @@ class FundamentalAgent:
                 "NOT set, or the SDK will bill your API account instead of your "
                 "plan."
             ) from exc
+        ThinkingConfigDisabled = getattr(claude_sdk, "ThinkingConfigDisabled", None)
 
         agent = self  # captured by the tool closures below
 
@@ -902,12 +915,12 @@ class FundamentalAgent:
             tools=[_fetch_tool, _concall_tool],
         )
 
-        options = ClaudeAgentOptions(
-            model=model,
-            system_prompt=system_prompt,
-            max_turns=max_turns,
-            mcp_servers={"fundamentals": server},
-            allowed_tools=[
+        options_kwargs: dict[str, Any] = {
+            "model": model,
+            "system_prompt": system_prompt,
+            "max_turns": max_turns,
+            "mcp_servers": {"fundamentals": server},
+            "allowed_tools": [
                 "mcp__fundamentals__fetch_company_data",
                 "mcp__fundamentals__read_recent_concall_transcript",
             ],
@@ -915,14 +928,25 @@ class FundamentalAgent:
             # agent can only ever call our two screener.in tools — never the
             # built-in filesystem/bash tools. This keeps a headless Streamlit
             # run locked down.
-            permission_mode="dontAsk",
+            "permission_mode": "dontAsk",
             # Do not load the user's Claude Code project/user settings or any
             # CLAUDE.md — this agent's behaviour comes entirely from our prompt.
-            setting_sources=[],
-            # Fast mode disables extended thinking for lower latency; the
-            # fundamental checklist is well-bounded, so the depth is optional.
-            thinking=ThinkingConfigDisabled() if self._fast_mode else None,
-        )
+            "setting_sources": [],
+        }
+        if self._fast_mode:
+            if ThinkingConfigDisabled is None:
+                # Older Agent SDK builds may not expose the thinking toggle yet.
+                # Fast mode is an optimization, not a correctness requirement,
+                # so keep the analysis usable and leave a clear diagnostic.
+                logger.warning(
+                    "Agent fast mode was requested, but claude-agent-sdk does not "
+                    "expose ThinkingConfigDisabled; using default thinking behavior."
+                )
+            else:
+                # Fast mode disables extended thinking for lower latency; the
+                # fundamental checklist is well-bounded, so the depth is optional.
+                options_kwargs["thinking"] = ThinkingConfigDisabled()
+        options = ClaudeAgentOptions(**options_kwargs)
 
         final_text = ""
         cost_usd: float | None = None
@@ -1036,13 +1060,13 @@ class FundamentalAgent:
 
         try:
             # 1. Try the verdict cache first (free re-clicks on the same day).
-            # The cache key includes the mode so a criteria-mode cached verdict
-            # never gets returned for a universal-mode request (and vice versa).
+            # The cache key includes the criteria mode and the fast-mode state
+            # so different analysis settings never reuse each other's verdicts.
             if not force_refresh:
                 data_for_key = self._cache.get_data(normalized)
                 if data_for_key is not None:
                     data_date = _data_date_from_payload(data_for_key)
-                    cache_key_model = f"{self._model}::{mode}"
+                    cache_key_model = self._cache_model_key(mode)
                     cached_verdict = self._cache.get_verdict(normalized, cache_key_model, data_date)
                     if cached_verdict is not None:
                         return AgentVerdict.model_validate(cached_verdict)
@@ -1079,14 +1103,14 @@ class FundamentalAgent:
         verdict = self._parse_verdict(run_result.text, symbol=normalized, mode=mode)
 
         # 4. Persist the verdict to the cache so the next click is instant.
-        # Cache key includes the mode so criteria-mode and universal-mode runs
-        # for the same symbol do not collide.
+        # Cache key includes mode plus fast-mode state so each setting reuses
+        # only verdicts produced under the same reasoning budget.
         data_payload = self._cache.get_data(normalized)
         data_date = _data_date_from_payload(data_payload or {})
         try:
             self._cache.set_verdict(
                 normalized,
-                f"{self._model}::{mode}",
+                self._cache_model_key(mode),
                 data_date,
                 verdict.model_dump(mode="json"),
             )

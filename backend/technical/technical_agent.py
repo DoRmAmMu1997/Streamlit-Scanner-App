@@ -315,9 +315,12 @@ class TechnicalAnalysisAgent:
 
         The date still lives in the cache filename via `data_date`; this model
         key adds a digest of the chart context so changed support/resistance
-        levels cannot reuse an older verdict from the same candle date.
+        levels cannot reuse an older verdict from the same candle date. Thorough
+        mode keeps the historical key shape for cache continuity; fast mode adds
+        a suffix so lower-latency verdicts never masquerade as thorough ones.
         """
-        return f"{self._model}::technical::{_technical_context_hash(candles, levels)}"
+        speed_part = "::fast" if self._fast_mode else ""
+        return f"{self._model}::technical{speed_part}::{_technical_context_hash(candles, levels)}"
 
     # ------------------------------------------------------------------
     # Prompt construction
@@ -383,13 +386,13 @@ class TechnicalAnalysisAgent:
         No tools are registered — the price data is already in `prompt`.
         """
         try:
+            import claude_agent_sdk as claude_sdk  # type: ignore[import-not-found]
             from claude_agent_sdk import (  # type: ignore[import-not-found]
                 AssistantMessage,
                 ClaudeAgentOptions,
                 CLINotFoundError,
                 ProcessError,
                 ResultMessage,
-                ThinkingConfigDisabled,
                 query,
             )
         except ImportError as exc:  # pragma: no cover - environment dependent
@@ -401,19 +404,31 @@ class TechnicalAnalysisAgent:
                 "NOT set, or the SDK will bill your API account instead of your "
                 "plan."
             ) from exc
+        ThinkingConfigDisabled = getattr(claude_sdk, "ThinkingConfigDisabled", None)
 
-        options = ClaudeAgentOptions(
-            model=model,
-            system_prompt=system_prompt,
-            max_turns=max_turns,
+        options_kwargs: dict[str, Any] = {
+            "model": model,
+            "system_prompt": system_prompt,
+            "max_turns": max_turns,
             # No tools: deny everything so the agent can never reach the built-in
             # filesystem/bash tools in a headless Streamlit run.
-            permission_mode="dontAsk",
-            setting_sources=[],
-            # Fast mode disables extended thinking for lower latency; pattern
-            # detection from the OHLC window is a single bounded pass.
-            thinking=ThinkingConfigDisabled() if self._fast_mode else None,
-        )
+            "permission_mode": "dontAsk",
+            "setting_sources": [],
+        }
+        if self._fast_mode:
+            if ThinkingConfigDisabled is None:
+                # Older Agent SDK builds may not expose the thinking toggle yet.
+                # Fast mode only improves latency, so the safe fallback is to
+                # run with the SDK's default thinking behavior and log why.
+                logger.warning(
+                    "Agent fast mode was requested, but claude-agent-sdk does not "
+                    "expose ThinkingConfigDisabled; using default thinking behavior."
+                )
+            else:
+                # Fast mode disables extended thinking for lower latency; pattern
+                # detection from the OHLC window is a single bounded pass.
+                options_kwargs["thinking"] = ThinkingConfigDisabled()
+        options = ClaudeAgentOptions(**options_kwargs)
 
         final_text = ""
         cost_usd: float | None = None
