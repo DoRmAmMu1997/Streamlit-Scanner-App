@@ -45,6 +45,7 @@ from backend.config import (
     DAILY_CACHE_DIR,
     credential_status,
     ensure_project_dirs,
+    get_agent_fast_mode,
     get_dhan_credentials,
     get_fundamentals_model,
 )
@@ -459,14 +460,15 @@ def _is_eligible_for_fundamentals(symbol: str | None) -> bool:
 
 
 @st.cache_resource(show_spinner=False)
-def _get_fundamental_agent(model: str) -> FundamentalAgent:
-    """Memoize one agent per model across reruns.
+def _get_fundamental_agent(model: str, fast_mode: bool) -> FundamentalAgent:
+    """Memoize one agent per (model, fast_mode) across reruns.
 
     The Claude Agent SDK authenticates via your Claude subscription, so there
-    is no API key argument. `cache_resource` keys on `model`, so switching the
-    model rebuilds the agent (and its on-disk cache handle) automatically.
+    is no API key argument. `cache_resource` keys on the arguments, so switching
+    the model OR toggling fast mode rebuilds the agent (and its on-disk cache
+    handle) automatically.
     """
-    return FundamentalAgent(model=model)
+    return FundamentalAgent(model=model, fast_mode=fast_mode)
 
 
 def _render_fundamentals_panel(symbol: str | None) -> None:
@@ -532,7 +534,7 @@ def _render_fundamentals_panel(symbol: str | None) -> None:
 
     if run_now or rerun_now:
         try:
-            agent = _get_fundamental_agent(model)
+            agent = _get_fundamental_agent(model, get_agent_fast_mode())
         except Exception as exc:  # noqa: BLE001
             logger.exception("Could not build FundamentalAgent")
             st.error(f"Could not build FundamentalAgent: {_redact_secrets(str(exc))}")

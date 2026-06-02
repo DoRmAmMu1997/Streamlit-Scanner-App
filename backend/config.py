@@ -140,6 +140,20 @@ def get_fundamentals_model() -> str:
     return _clean_env_value(os.getenv("CLAUDE_AGENT_MODEL")) or DEFAULT_FUNDAMENTALS_MODEL
 
 
+def get_agent_fast_mode() -> bool:
+    """Return True when the AI agents should run in "fast mode".
+
+    Fast mode disables the model's extended thinking on the Claude Agent SDK
+    calls (Check Fundamentals + Technical Analysis), trading a little reasoning
+    depth for noticeably lower latency on these tightly-structured tasks. It is
+    OFF by default; set SCANNER_AGENT_FAST_MODE to a truthy value
+    (1/true/yes/on) in Dependencies/.env or the process environment to enable it.
+    """
+    load_environment()
+    raw = _clean_env_value(os.getenv("SCANNER_AGENT_FAST_MODE")).lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def credential_status() -> dict[str, object]:
     """Return a UI-friendly credential summary without exposing secrets."""
     load_environment()
