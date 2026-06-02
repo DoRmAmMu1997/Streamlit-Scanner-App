@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Technical indicator helpers for screeners.
 
 How this module is structured (beginner note):
@@ -13,6 +11,10 @@ How this module is structured (beginner note):
 The libraries are imported inside `try/except` blocks so a missing install
 never crashes the app at import time.
 """
+
+from __future__ import annotations
+
+import logging
 
 import numpy as np
 import pandas as pd
@@ -30,6 +32,25 @@ try:
     import pandas_ta
 except ImportError:  # pragma: no cover - exercised only when pandas_ta is absent
     pandas_ta = None
+
+
+logger = logging.getLogger(__name__)
+
+
+def _log_optional_backend_fallback(backend: str, indicator: str) -> None:
+    """Explain why an optional indicator library was skipped for one call.
+
+    TA-Lib and pandas_ta are acceleration packages, not required runtime
+    dependencies. When one of them raises on unusual input, the app deliberately
+    falls back to the pure-pandas implementation below. This tiny helper keeps
+    that fallback visible in debug logs without interrupting the scan.
+    """
+    logger.debug(
+        "%s failed while calculating %s; using the pure-pandas fallback.",
+        backend,
+        indicator,
+        exc_info=True,
+    )
 
 
 def _require_columns(frame: pd.DataFrame, required_columns: list[str]) -> None:
@@ -259,7 +280,7 @@ def ema(series: pd.Series, period: int) -> pd.Series:
             return pd.Series(values, index=series.index, name=getattr(series, "name", None))
         except Exception:
             # Any library hiccup (bad dtype, etc.) drops to the pandas fallback.
-            pass
+            _log_optional_backend_fallback("TA-Lib", "EMA")
     return _ema_fallback(series, period)
 
 
@@ -278,7 +299,7 @@ def sma(series: pd.Series, period: int) -> pd.Series:
             values = talib.SMA(np.asarray(series, dtype="float64"), timeperiod=int(period))
             return pd.Series(values, index=series.index, name=getattr(series, "name", None))
         except Exception:
-            pass
+            _log_optional_backend_fallback("TA-Lib", "SMA")
     return _sma_fallback(series, period)
 
 
@@ -303,7 +324,7 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
         except Exception:
             # A bad dtype or unexpected library issue should not break the app;
             # the pandas fallback below keeps the screener usable.
-            pass
+            _log_optional_backend_fallback("TA-Lib", "RSI")
     return _rsi_fallback(series, period)
 
 
@@ -340,7 +361,7 @@ def momentum(series: pd.Series, period: int = 20) -> pd.Series:
             values = talib.MOM(np.asarray(series, dtype="float64"), timeperiod=period)
             return pd.Series(values, index=series.index, name=getattr(series, "name", None))
         except Exception:
-            pass
+            _log_optional_backend_fallback("TA-Lib", "Momentum")
     return _momentum_fallback(series, period)
 
 
@@ -397,7 +418,7 @@ def stochastic(
                 index=close.index,
             )
         except Exception:
-            pass
+            _log_optional_backend_fallback("TA-Lib", "Stochastic")
     return _stochastic_fallback(high, low, close, k_period, k_smoothing, d_smoothing)
 
 
@@ -457,7 +478,7 @@ def bollinger_bands(close: pd.Series, period: int = 20, std_multiplier: float = 
                 index=close.index,
             )
         except Exception:
-            pass
+            _log_optional_backend_fallback("TA-Lib", "Bollinger Bands")
     return _bollinger_bands_fallback(close, period, std_multiplier)
 
 
@@ -623,7 +644,7 @@ def build_heikin_ashi(ohlc: pd.DataFrame) -> pd.DataFrame:
         try:
             return _build_heikin_ashi_pandas_ta(ohlc)
         except Exception:
-            pass
+            _log_optional_backend_fallback("pandas_ta", "Heikin Ashi")
     return _build_heikin_ashi_fallback(ohlc)
 
 
@@ -725,7 +746,7 @@ def supertrend(ohlc: pd.DataFrame, atr_period: int = 10, multiplier: float = 2.0
         try:
             return _supertrend_pandas_ta(ohlc, atr_period, multiplier)
         except Exception:
-            pass
+            _log_optional_backend_fallback("pandas_ta", "SuperTrend")
     return _supertrend_fallback(ohlc, atr_period, multiplier)
 
 

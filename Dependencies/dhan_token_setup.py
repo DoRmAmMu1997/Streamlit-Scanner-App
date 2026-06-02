@@ -343,7 +343,9 @@ def main() -> None:
 
     # Same defensive parsing as in Step 1 -- handle multiple possible
     # response shapes (string, flat dict, nested dict).
-    access_token = ""
+    # This placeholder starts empty because the real credential is parsed from
+    # Dhan's response immediately below; it is not a hard-coded token value.
+    access_token = ""  # nosec B105
     if isinstance(access_response, str):
         access_token = access_response.strip()
     elif isinstance(access_response, dict):

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Tests for the screener.in scraper / parser.
 
 No live HTTP is involved. The parser is exercised against a small synthetic
@@ -7,6 +5,8 @@ HTML fixture below that mirrors the structure of a real screener.in
 company page (top-ratios card, peers/quarters/profit-loss/balance-sheet
 tables, pros/cons block).
 """
+
+from __future__ import annotations
 
 import pytest
 
@@ -354,6 +354,65 @@ def test_fetch_peer_table_soft_fails_on_fetch_error(monkeypatch):
         limit=7,
     )
     assert rows == []
+
+
+def test_fetch_peer_table_rejects_absolute_private_peer_url(monkeypatch):
+    """HTMX peer URLs must stay on screener.in.
+
+    The peers URL is copied out of third-party HTML. If that HTML ever points at
+    localhost or a LAN host, the parser should fail closed and skip the peers
+    section instead of fetching attacker-chosen infrastructure.
+    """
+    from bs4 import BeautifulSoup
+    from backend.fundamentals import screener_in_client as module
+
+    html = """
+    <html><body>
+      <div id="peers" hx-get="http://127.0.0.1:8080/private/peers"></div>
+    </body></html>
+    """
+    monkeypatch.setattr(
+        module,
+        "_fetch_html",
+        lambda url, session: pytest.fail(f"unsafe URL was fetched: {url}"),
+    )
+
+    rows = module._fetch_peer_table(
+        BeautifulSoup(html, "lxml"),
+        base_url="https://www.screener.in/company/DEMO/",
+        session=None,  # type: ignore[arg-type]
+    )
+
+    assert rows == []
+
+
+def test_fetch_html_rejects_response_larger_than_cap(monkeypatch):
+    """The raw HTML helper should stream with a byte cap instead of reading .text.
+
+    Screener pages and JSON fragments are small. A hostile endpoint returning a
+    giant body should raise before the full response is materialized in memory.
+    """
+    from backend.fundamentals import screener_in_client as module
+
+    class _LargeResponse:
+        status_code = 200
+        url = "https://www.screener.in/company/DEMO/"
+        headers = {"Content-Type": "text/html"}
+
+        def iter_content(self, chunk_size=1):
+            yield b"A" * 20
+
+        def close(self):
+            pass
+
+    class _LargeSession:
+        def get(self, url, **kwargs):
+            return _LargeResponse()
+
+    monkeypatch.setattr(module, "_MAX_HTML_BYTES", 10, raising=False)
+
+    with pytest.raises(ScreenerInFetchError, match="exceeded"):
+        module._fetch_html("https://www.screener.in/company/DEMO/", _LargeSession())
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """DhanHQ client wrapper and response normalization helpers.
 
 The rest of the app should not need to know Dhan's exact API response shape.
@@ -7,6 +5,8 @@ This module converts broker responses into ordinary pandas DataFrames with the
 same six columns every screener expects:
 timestamp, open, high, low, close, volume.
 """
+
+from __future__ import annotations
 
 from datetime import date, datetime
 from typing import Any

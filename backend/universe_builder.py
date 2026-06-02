@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Build scanner universe CSVs.
 
 A "universe" is the stock list a screener is allowed to scan. For example, one
@@ -7,6 +5,8 @@ screener might scan NIFTY 100 while another scans F&O stocks. The final CSVs
 must contain Dhan `security_id` values, because Dhan history calls need those
 IDs rather than just human-readable stock symbols.
 """
+
+from __future__ import annotations
 
 from datetime import date, datetime
 import io
@@ -163,15 +163,16 @@ def download_csv(
         advertised_length = response.headers.get("Content-Length")
         if advertised_length is not None:
             try:
-                if int(advertised_length) > max_bytes:
-                    raise ValueError(
-                        f"Refusing to download {url}: advertised size "
-                        f"{advertised_length} bytes exceeds cap of {max_bytes} bytes."
-                    )
+                advertised_size = int(advertised_length)
             except (TypeError, ValueError):
                 # An unparsable Content-Length is treated as "unknown"; the byte
                 # counter below still enforces the cap.
-                pass
+                advertised_size = None
+            if advertised_size is not None and advertised_size > max_bytes:
+                raise ValueError(
+                    f"Refusing to download {url}: advertised size "
+                    f"{advertised_length} bytes exceeds cap of {max_bytes} bytes."
+                )
 
         # Read the body in chunks while counting bytes. Aborting mid-stream is
         # safe because the `with` block closes the connection on the way out.

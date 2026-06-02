@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Tests for the Claude Agent SDK fundamental analysis agent.
 
 The agentic loop is replaced with a tiny in-process fake `runner` so no live
@@ -8,6 +6,8 @@ AgentVerdict JSON string — exactly what the real agent's final message would
 contain. The two screener.in tools are tested directly via their plain
 `_..._impl` methods, which carry the tool logic without the SDK wrappers.
 """
+
+from __future__ import annotations
 
 import json
 from types import SimpleNamespace
@@ -506,6 +506,60 @@ def test_fetch_company_data_impl_uses_cached_data(tmp_path):
     assert payload["sector"] == "Banks"
 
 
+def test_fetch_company_data_impl_rejects_model_supplied_different_symbol(tmp_path, monkeypatch):
+    """Tool calls are bound to the symbol the user actually requested.
+
+    Scraped text is untrusted input to the model. If that text tries to steer
+    the model into calling `fetch_company_data(symbol="OTHER")`, the tool layer
+    should reject it before cache lookup or network fetch.
+    """
+    from backend.fundamentals import fundamental_agent as agent_module
+
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("DEMO", _sample_screener_data())
+    agent = FundamentalAgent(model="test-model", cache=cache)
+    monkeypatch.setattr(
+        agent_module,
+        "fetch_company_data",
+        lambda symbol: pytest.fail(f"unexpected fetch for {symbol}"),
+    )
+
+    out = agent._fetch_company_data_impl("OTHER", requested_symbol="DEMO")
+    payload = json.loads(out)
+
+    assert "error" in payload
+    assert "DEMO" in payload["error"]
+
+
+def test_fetch_company_data_impl_force_refresh_is_local_to_call(tmp_path, monkeypatch):
+    """A force refresh should bypass cache for that call only.
+
+    Streamlit caches the `FundamentalAgent` object. Keeping refresh state on the
+    instance can leak one user's rerun choice into the next user's ordinary
+    cache lookup, so the tool method accepts the decision as an explicit value.
+    """
+    from backend.fundamentals import fundamental_agent as agent_module
+
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("DEMO", _sample_screener_data())
+    fresh = {**_sample_screener_data(), "sector": "Fresh Banks"}
+    calls: list[str] = []
+
+    def fake_fetch(symbol: str):
+        calls.append(symbol)
+        return fresh
+
+    monkeypatch.setattr(agent_module, "fetch_company_data", fake_fetch)
+    agent = FundamentalAgent(model="test-model", cache=cache)
+
+    refreshed = json.loads(agent._fetch_company_data_impl("DEMO", force_refresh=True))
+    cached_again = json.loads(agent._fetch_company_data_impl("DEMO"))
+
+    assert calls == ["DEMO"]
+    assert refreshed["sector"] == "Fresh Banks"
+    assert cached_again["sector"] == "Fresh Banks"
+
+
 def test_concall_transcript_impl_uses_cached_concalls(tmp_path, monkeypatch):
     """The transcript tool reads concalls from cache + extracts the text."""
     from backend.fundamentals import fundamental_agent as agent_module
@@ -531,6 +585,49 @@ def test_concall_transcript_impl_uses_cached_concalls(tmp_path, monkeypatch):
     agent = FundamentalAgent(model="test-model", cache=cache)
     text = agent._read_concall_impl("DEMO")
     assert "12% growth guidance" in text
+
+
+def test_concall_transcript_impl_uses_requested_symbol_when_model_args_differ(
+    tmp_path,
+    monkeypatch,
+):
+    """The transcript tool should read the requested symbol's cached concalls.
+
+    The model's `symbol` argument is not trusted because transcript text can
+    contain prompt-injection attempts. The requested symbol from `check(...)`
+    remains the source of truth.
+    """
+    from backend.fundamentals import fundamental_agent as agent_module
+
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data(
+        "DEMO",
+        {
+            **_sample_screener_data(),
+            "concalls": [{"month": "Jan 2026", "transcript_url": "https://demo/jan.pdf"}],
+        },
+    )
+    cache.set_data(
+        "OTHER",
+        {
+            **_sample_screener_data(),
+            "symbol": "OTHER",
+            "concalls": [{"month": "Jan 2026", "transcript_url": "https://other/jan.pdf"}],
+        },
+    )
+    seen: list[list[dict[str, Any]]] = []
+
+    def fake_read(concalls, **_kwargs):
+        seen.append(list(concalls))
+        return "DEMO transcript"
+
+    monkeypatch.setattr(agent_module, "read_recent_concall_text", fake_read)
+    agent = FundamentalAgent(model="test-model", cache=cache)
+
+    text = agent._read_concall_impl("OTHER", requested_symbol="DEMO")
+
+    assert text == "DEMO transcript"
+    assert seen[0][0]["transcript_url"] == "https://demo/jan.pdf"
 
 
 def test_concall_transcript_impl_returns_message_when_no_cache(tmp_path):

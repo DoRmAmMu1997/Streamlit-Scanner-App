@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Discover and validate screener modules.
 
 The registry is what turns Python files in `screeners/` into dropdown options
@@ -21,6 +19,8 @@ Both paths produce the same `ScreenerDefinition` dataclass, so the rest of
 the app (Streamlit UI, tests) does not need to care which style a screener
 used.
 """
+
+from __future__ import annotations
 
 import importlib
 import inspect
@@ -72,7 +72,7 @@ def _find_scanner_class(module: ModuleType) -> type[BaseScanner] | None:
     should not make it a screener. We only count classes whose `__module__`
     matches the file we are inspecting.
     """
-    for attribute_name, attribute in vars(module).items():
+    for attribute in vars(module).values():
         if (
             inspect.isclass(attribute)
             and issubclass(attribute, BaseScanner)

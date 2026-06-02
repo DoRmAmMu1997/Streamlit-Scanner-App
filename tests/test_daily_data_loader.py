@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Tests for the daily candle cache/failure layer."""
+
+from __future__ import annotations
 
 from datetime import date
 
@@ -21,12 +21,12 @@ class FakeDhanClient:
         self.calls += 1
         return pd.DataFrame(
             {
-                "timestamp": pd.to_datetime(["2026-05-10", "2026-05-11"]),
-                "open": [100.0, 101.0],
-                "high": [110.0, 111.0],
-                "low": [95.0, 96.0],
-                "close": [108.0, 109.0],
-                "volume": [1000.0, 1200.0],
+                "timestamp": pd.to_datetime(["2026-05-01", "2026-05-10", "2026-05-11"]),
+                "open": [99.0, 100.0, 101.0],
+                "high": [109.0, 110.0, 111.0],
+                "low": [94.0, 95.0, 96.0],
+                "close": [107.0, 108.0, 109.0],
+                "volume": [900.0, 1000.0, 1200.0],
             }
         )
 
@@ -122,6 +122,59 @@ def test_cache_hit_does_not_sleep_or_call_dhan_again(tmp_path):
 
     assert sleeps == []
     assert client.calls == 1
+
+
+def test_cache_hit_refetches_when_requested_range_starts_before_cached_data(tmp_path):
+    """A parquet must cover both ends of the requested range to count as a hit.
+
+    Long-lookback screeners can ask for years of data. If an existing cache only
+    contains recent candles, returning a sliced recent frame silently weakens
+    the strategy. The loader should fetch the requested range instead.
+    """
+
+    class FullRangeClient:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def fetch_daily_candles(self, **kwargs):
+            self.calls.append(kwargs)
+            return pd.DataFrame(
+                {
+                    "timestamp": pd.to_datetime(
+                        ["2026-05-01", "2026-05-02", "2026-05-03", "2026-05-04"]
+                    ),
+                    "open": [100.0, 101.0, 102.0, 103.0],
+                    "high": [110.0, 111.0, 112.0, 113.0],
+                    "low": [95.0, 96.0, 97.0, 98.0],
+                    "close": [108.0, 109.0, 110.0, 111.0],
+                    "volume": [1000.0, 1200.0, 1300.0, 1400.0],
+                }
+            )
+
+    client = FullRangeClient()
+    loader = DailyDataLoader(client, cache_dir=tmp_path, request_delay_seconds=0.0)
+    instrument = mapped_universe().iloc[0].to_dict()
+    pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2026-05-03", "2026-05-04"]),
+            "open": [102.0, 103.0],
+            "high": [112.0, 113.0],
+            "low": [97.0, 98.0],
+            "close": [110.0, 111.0],
+            "volume": [1300.0, 1400.0],
+        }
+    ).to_parquet(tmp_path / "RELIANCE_2885.parquet", index=False)
+
+    frame, from_cache = loader.get_daily_history(
+        instrument,
+        date(2026, 5, 1),
+        date(2026, 5, 4),
+    )
+
+    assert not from_cache
+    assert len(client.calls) == 1
+    assert client.calls[0]["from_date"] == date(2026, 5, 1)
+    assert frame["timestamp"].dt.date.min() == date(2026, 5, 1)
 
 
 def test_cache_miss_sleeps_before_api_call(tmp_path):
@@ -274,12 +327,12 @@ def test_ensure_daily_history_fresh_skips_api_when_cache_is_current(tmp_path):
     # Pre-seed a parquet so `today` is already covered.
     seeded = pd.DataFrame(
         {
-            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03"]),
-            "open": [100.0, 101.0],
-            "high": [110.0, 111.0],
-            "low": [95.0, 96.0],
-            "close": [108.0, 109.0],
-            "volume": [1000.0, 1200.0],
+            "timestamp": pd.to_datetime(["2014-01-03", "2024-01-02", "2024-01-03"]),
+            "open": [50.0, 100.0, 101.0],
+            "high": [55.0, 110.0, 111.0],
+            "low": [45.0, 95.0, 96.0],
+            "close": [52.0, 108.0, 109.0],
+            "volume": [500.0, 1000.0, 1200.0],
         }
     )
     seeded.to_parquet(tmp_path / "RELIANCE_2885.parquet", index=False)
@@ -287,6 +340,54 @@ def test_ensure_daily_history_fresh_skips_api_when_cache_is_current(tmp_path):
     _, status = loader.ensure_daily_history(instrument, years_back=10, today=date(2024, 1, 3))
     assert status == "fresh"
     assert loader.client.calls == 0
+
+
+def test_ensure_daily_history_backfills_when_cache_starts_after_requested_start(tmp_path):
+    """A current last candle is not enough when the historical front is missing."""
+
+    class BackfillClient:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def fetch_daily_candles(self, **kwargs):
+            self.calls.append(kwargs)
+            return pd.DataFrame(
+                {
+                    "timestamp": pd.to_datetime(["2014-01-03", "2024-01-03"]),
+                    "open": [50.0, 100.0],
+                    "high": [55.0, 110.0],
+                    "low": [45.0, 95.0],
+                    "close": [52.0, 108.0],
+                    "volume": [500.0, 1000.0],
+                }
+            )
+
+    client = BackfillClient()
+    loader = DailyDataLoader(client, cache_dir=tmp_path, request_delay_seconds=0.0)
+    instrument = {
+        "symbol": "RELIANCE",
+        "security_id": "2885",
+        "exchange_segment": "NSE_EQ",
+        "instrument_type": "EQUITY",
+    }
+    pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2014-01-05", "2024-01-02", "2024-01-03"]),
+            "open": [50.0, 100.0, 101.0],
+            "high": [55.0, 110.0, 111.0],
+            "low": [45.0, 95.0, 96.0],
+            "close": [52.0, 108.0, 109.0],
+            "volume": [500.0, 1000.0, 1200.0],
+        }
+    ).to_parquet(tmp_path / "RELIANCE_2885.parquet", index=False)
+
+    frame, status = loader.ensure_daily_history(instrument, years_back=10, today=date(2024, 1, 3))
+
+    assert status == "backfilled"
+    assert len(client.calls) == 1
+    assert client.calls[0]["from_date"] == date(2014, 1, 3)
+    assert client.calls[0]["to_date"] == date(2024, 1, 3)
+    assert frame["timestamp"].dt.date.min() == date(2014, 1, 3)
 
 
 def test_ensure_daily_history_appends_incrementally(tmp_path):
@@ -320,12 +421,12 @@ def test_ensure_daily_history_appends_incrementally(tmp_path):
     # Cache ends on 2024-01-03; today is 2024-01-05.
     seeded = pd.DataFrame(
         {
-            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03"]),
-            "open": [100.0, 101.0],
-            "high": [110.0, 111.0],
-            "low": [95.0, 96.0],
-            "close": [108.0, 109.0],
-            "volume": [1000.0, 1200.0],
+            "timestamp": pd.to_datetime(["2014-01-05", "2024-01-02", "2024-01-03"]),
+            "open": [50.0, 100.0, 101.0],
+            "high": [55.0, 110.0, 111.0],
+            "low": [45.0, 95.0, 96.0],
+            "close": [52.0, 108.0, 109.0],
+            "volume": [500.0, 1000.0, 1200.0],
         }
     )
     seeded.to_parquet(tmp_path / "RELIANCE_2885.parquet", index=False)
@@ -337,8 +438,46 @@ def test_ensure_daily_history_appends_incrementally(tmp_path):
     # Incremental fetch starts the day after the last cached timestamp.
     assert client.calls[0]["from_date"] == date(2024, 1, 4)
     assert client.calls[0]["to_date"] == date(2024, 1, 5)
-    # Merged frame should contain all four candle days, deduped.
-    assert len(frame) == 4
+    # Merged frame should contain cached history plus the two new candle days.
+    assert len(frame) == 5
+
+
+def test_empty_incremental_fetch_writes_checked_marker_to_avoid_retries(tmp_path):
+    """Weekends/holidays should not trigger the same empty API fetch repeatedly."""
+
+    class EmptyIncrementalClient:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def fetch_daily_candles(self, **kwargs):
+            self.calls.append(kwargs)
+            return pd.DataFrame()
+
+    client = EmptyIncrementalClient()
+    loader = DailyDataLoader(client, cache_dir=tmp_path, request_delay_seconds=0.0)
+    instrument = {
+        "symbol": "RELIANCE",
+        "security_id": "2885",
+        "exchange_segment": "NSE_EQ",
+        "instrument_type": "EQUITY",
+    }
+    pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2014-01-05", "2024-01-03"]),
+            "open": [50.0, 101.0],
+            "high": [55.0, 111.0],
+            "low": [45.0, 96.0],
+            "close": [52.0, 109.0],
+            "volume": [500.0, 1200.0],
+        }
+    ).to_parquet(tmp_path / "RELIANCE_2885.parquet", index=False)
+
+    _, first_status = loader.ensure_daily_history(instrument, years_back=10, today=date(2024, 1, 5))
+    _, second_status = loader.ensure_daily_history(instrument, years_back=10, today=date(2024, 1, 5))
+
+    assert first_status == "fresh"
+    assert second_status == "fresh"
+    assert len(client.calls) == 1
 
 
 def test_read_cached_history_returns_empty_when_missing(tmp_path):

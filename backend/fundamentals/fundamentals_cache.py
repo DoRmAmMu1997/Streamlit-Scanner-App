@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """On-disk JSON cache for the Check Fundamentals feature.
 
 Two caches live under `data/cache/fundamentals/`:
@@ -8,15 +6,17 @@ Two caches live under `data/cache/fundamentals/`:
    refresh quarterly at most, so a 30-day TTL is plenty. File name:
    ``<SYMBOL>_data.json``.
 
-2. **Verdict cache** — the Check Fundamentals agent's JSON verdict for that stock.
-   Keyed by ``(symbol, model, data_fetch_date)`` so re-clicks for the same
-   day and model are free, but a fresh data fetch (e.g. a new quarter
-   landed) or model swap invalidates automatically. File name:
+2. **Verdict cache** — an agent JSON verdict for that stock. The model string
+   is intentionally namespaced by the caller (for example `model::criteria`,
+   `model::universal`, or `model::technical::<input-hash>`) so different
+   agent modes never collide. File name:
    ``<SYMBOL>_verdict_<MODEL_HASH>_<DATA_DATE>.json``.
 
 Both files store JSON with an ISO timestamp; loading old or expired files
 returns ``None`` so the caller fetches afresh.
 """
+
+from __future__ import annotations
 
 import hashlib
 import json
@@ -47,9 +47,11 @@ def _hash_model(model: str) -> str:
     """Stable 8-char tag for a model string (used in the verdict filename).
 
     Keeps filenames short and predictable while still being deterministic
-    for the same model name.
+    for the same model name. SHA-256 is used here even though this is only a
+    cache filename tag, because modern hash choices keep security tooling quiet
+    and avoid teaching beginners to reach for SHA-1 by habit.
     """
-    return hashlib.sha1(model.encode("utf-8")).hexdigest()[:8]
+    return hashlib.sha256(model.encode("utf-8")).hexdigest()[:8]
 
 
 def _default_ttl_days() -> int:

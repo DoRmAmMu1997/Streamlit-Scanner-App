@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Tests for the pluggable screener discovery contract."""
+
+from __future__ import annotations
 
 from types import ModuleType
 

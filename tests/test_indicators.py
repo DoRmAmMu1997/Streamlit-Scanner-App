@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Tests for the technical-indicator helpers.
 
 Two layers are tested:
@@ -10,6 +8,8 @@ Two layers are tested:
    agreement check that the library-backed path matches the fallback where the
    maths is expected to be identical (Bollinger Bands).
 """
+
+from __future__ import annotations
 
 import numpy as np
 import pandas as pd

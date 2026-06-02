@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Hemant Super 45 Envelope + Knoxville BUY screener.
 
 Flow in plain English:
@@ -20,6 +18,8 @@ Beginner glossary:
   higher low. The price says "down", momentum says "not as down as last time"
   — a classic signal that selling pressure may be fading.
 """
+
+from __future__ import annotations
 
 import pandas as pd
 

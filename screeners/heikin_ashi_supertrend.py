@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """F&O daily Heikin Ashi SuperTrend crossover screener.
 
 Flow in plain English:
@@ -8,6 +6,8 @@ Flow in plain English:
 3. Calculate SuperTrend on the Heikin Ashi OHLC values, not the normal OHLC.
 4. Shortlist only the latest candle when HA close crosses the SuperTrend line.
 """
+
+from __future__ import annotations
 
 import pandas as pd
 

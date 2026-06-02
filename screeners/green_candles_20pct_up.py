@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Hemant Super 45 ∪ Good 45 — "20% up with continuous green candles" screener.
 
 Port of Lovevanshi's "20% up with all continuously green candle" TradingView
@@ -22,6 +20,8 @@ The original indicator plots a marker on the qualifying bar; this screener is
 the "is the run qualifying *right now*?" shortlist, so it only evaluates the
 most recent candle.
 """
+
+from __future__ import annotations
 
 import pandas as pd
 

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Claude Agent SDK agent for the Technical Analysis (AI) screener.
 
 Mirrors `backend.fundamentals.fundamental_agent` in every structural respect —
@@ -30,8 +28,11 @@ Subscription billing note: keep `ANTHROPIC_API_KEY` UNSET so the SDK draws on
 your Claude plan's Agent SDK credit instead of per-token API billing.
 """
 
+from __future__ import annotations
+
 import asyncio
 import concurrent.futures
+import hashlib
 import json
 import logging
 import re
@@ -65,6 +66,31 @@ _OHLC_WINDOW_BARS = 250
 # Agent SDK; tests inject a fake to avoid spawning the CLI. The signature
 # matches the fundamentals runner so the same `AgentRunResult` shape is reused.
 RunnerFn = Callable[..., Awaitable[AgentRunResult]]
+
+
+def _technical_context_hash(candles: pd.DataFrame, levels: list[dict[str, Any]]) -> str:
+    """Return a stable hash for the chart facts given to the model.
+
+    Cache safety depends on the prompt inputs, not only the latest candle date.
+    User-tuned pivot settings can produce different major levels on the same
+    day, so those levels and the prompt OHLC window both feed this digest.
+    """
+    window = candles.tail(_OHLC_WINDOW_BARS).copy() if not candles.empty else candles
+    candle_records: list[dict[str, Any]] = []
+    for row in window.to_dict("records"):
+        candle_records.append(
+            {
+                key: (value.isoformat() if hasattr(value, "isoformat") else value)
+                for key, value in row.items()
+                if key in {"timestamp", "open", "high", "low", "close", "volume"}
+            }
+        )
+    payload = {
+        "candles": candle_records,
+        "levels": levels,
+    }
+    raw = json.dumps(payload, default=str, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +307,15 @@ class TechnicalAnalysisAgent:
         # `runner` injection lets tests drive the loop without the SDK/CLI.
         self._runner = runner
 
+    def _cache_model_key(self, candles: pd.DataFrame, levels: list[dict[str, Any]]) -> str:
+        """Build the cache namespace for one technical-analysis prompt.
+
+        The date still lives in the cache filename via `data_date`; this model
+        key adds a digest of the chart context so changed support/resistance
+        levels cannot reuse an older verdict from the same candle date.
+        """
+        return f"{self._model}::technical::{_technical_context_hash(candles, levels)}"
+
     # ------------------------------------------------------------------
     # Prompt construction
     # ------------------------------------------------------------------
@@ -473,7 +508,7 @@ class TechnicalAnalysisAgent:
         if not candles.empty and "timestamp" in candles.columns:
             signal_date = str(candles.iloc[-1]["timestamp"])[:10]
         data_date = signal_date or datetime.now(UTC).date().isoformat()
-        cache_key_model = f"{self._model}::technical"
+        cache_key_model = self._cache_model_key(candles, levels)
 
         # 1. Verdict cache: free re-runs on the same candle date.
         if not force_refresh:

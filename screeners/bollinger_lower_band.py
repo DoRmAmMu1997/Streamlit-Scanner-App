@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Hemant Super 45 Bollinger lower-band BUY screener.
 
 Flow in plain English:
@@ -19,6 +17,8 @@ outer-band rejection candles.
 This is a screener, not a trade manager. It answers "which stocks should I look
 at today?" and intentionally returns no SELL/HOLD rows.
 """
+
+from __future__ import annotations
 
 import pandas as pd
 

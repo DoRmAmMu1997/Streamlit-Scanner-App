@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Central configuration for paths, public data sources, and credentials.
 
 Beginner note:
@@ -7,6 +5,8 @@ This app reads secrets from one local file only: `Dependencies/.env`.
 Keeping secrets out of Python files is important because Python files often get
 committed or shared. The `.env` file stays local and is ignored by git.
 """
+
+from __future__ import annotations
 
 import os
 from dataclasses import dataclass
@@ -33,9 +33,9 @@ FUNDAMENTALS_CACHE_DIR = DATA_DIR / "cache" / "fundamentals"
 FUNDAMENTALS_PDF_DIR = FUNDAMENTALS_CACHE_DIR / "pdfs"
 SCREENERS_DIR = PROJECT_ROOT / "screeners"
 
-# Default Claude model used by the Check Fundamentals agent (Claude Agent SDK)
-# when CLAUDE_AGENT_MODEL is not set. Lives here so tests/UI can import it
-# without re-typing the string.
+# Default Claude model used by the Claude Agent SDK features (Check
+# Fundamentals and Technical Analysis AI) when CLAUDE_AGENT_MODEL is not set.
+# Lives here so tests/UI can import it without re-typing the string.
 DEFAULT_FUNDAMENTALS_MODEL = "claude-sonnet-4-6"
 
 # Public URLs used to build stock universes. These do not require Dhan
@@ -124,12 +124,13 @@ def get_dhan_credentials(required: bool = False) -> DhanCredentials | None:
 
 
 def get_fundamentals_model() -> str:
-    """Return the Claude model the Check Fundamentals agent should use.
+    """Return the Claude model used by this app's Claude Agent SDK features.
 
     The Claude Agent SDK authenticates through your Claude subscription (the
     bundled Claude CLI login), so there is no API key to read here — only the
-    model name. Override the default via the CLAUDE_AGENT_MODEL env var (in
-    Dependencies/.env or the process environment).
+    model name. Check Fundamentals and Technical Analysis AI both call this
+    helper so one env var changes both agents. Override the default via the
+    CLAUDE_AGENT_MODEL env var (in Dependencies/.env or the process environment).
 
     NOTE: keep ANTHROPIC_API_KEY UNSET for subscription-based billing. If it is
     set, the Agent SDK uses that key and bills your API account instead of your

@@ -1,11 +1,11 @@
-from __future__ import annotations
-
 """Tests for the Lightweight Charts chart-spec builders and HTML renderer.
 
 These verify the pure-Python layer: the spec dictionaries each `build_chart`
 produces and the HTML that `render_chart_html` emits. They do not exercise a
 browser — the actual chart drawing is the (trusted) Lightweight Charts library.
 """
+
+from __future__ import annotations
 
 import json
 

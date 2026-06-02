@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Tests for the Claude Agent SDK technical-analysis agent.
 
 The agentic loop is replaced with a tiny in-process fake `runner` so no live
@@ -7,6 +5,8 @@ Claude call (and no CLI subprocess) is made. The fake returns a canned
 TechnicalVerdict JSON string — exactly what the real agent's final message
 would contain. This mirrors `tests/test_fundamental_agent.py`.
 """
+
+from __future__ import annotations
 
 import json
 
@@ -144,14 +144,38 @@ def test_agent_caches_verdict_per_symbol_model_candle_date(tmp_path):
     candles = _sample_candles()
 
     # First call writes to disk under the "::technical" key + latest candle date.
-    agent.analyze("DEMO", candles, _sample_levels())
+    levels = _sample_levels()
+    agent.analyze("DEMO", candles, levels)
     latest_date = str(candles.iloc[-1]["timestamp"])[:10]
-    assert cache.get_verdict("DEMO", "test-model::technical", latest_date) is not None
+    assert cache.get_verdict("DEMO", agent._cache_model_key(candles, levels), latest_date) is not None
 
     # Second call on the same candle date must hit the cache, not the runner.
     runner.calls = 0
-    agent.analyze("DEMO", candles, _sample_levels())
+    agent.analyze("DEMO", candles, levels)
     assert runner.calls == 0
+
+
+def test_agent_cache_changes_when_levels_change_on_same_candle_date(tmp_path):
+    """Same symbol/date but different technical context must not reuse a verdict.
+
+    Major levels are controlled by user-tunable parameters. If those levels
+    change, the old AI verdict can describe a different chart setup, so the
+    cache key needs a stable hash of the prompt inputs.
+    """
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    runner = _FakeRunner(_sample_verdict())
+    agent = TechnicalAnalysisAgent(model="test-model", cache=cache, runner=runner)
+    candles = _sample_candles()
+
+    agent.analyze("DEMO", candles, _sample_levels())
+    runner.calls = 0
+    changed_levels = [
+        {"price": 101.0, "touches": 6, "kind": "support"},
+        {"price": 155.0, "touches": 4, "kind": "resistance"},
+    ]
+    agent.analyze("DEMO", candles, changed_levels)
+
+    assert runner.calls == 1
 
 
 def test_agent_force_refresh_bypasses_cache(tmp_path):

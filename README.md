@@ -103,12 +103,13 @@ network work happens up front in the terminal.
 ## Requirements
 
 - **Python 3.11+**
-- The packages in [`requirements.txt`](requirements.txt) (`pip install -r requirements.txt`)
+- The core packages in [`requirements.txt`](requirements.txt) (`pip install -r requirements.txt`)
 - A **DhanHQ account** with API access — needed to download candle data.
-- **TA-Lib** (optional): the `TA-Lib` Python package needs its underlying C
-  library installed first (see [ta-lib.org](https://ta-lib.org/)). If it (or
-  `pandas_ta`) is missing, the app automatically falls back to pure-pandas
-  indicator maths — it just runs a little slower.
+- Optional indicator accelerators in
+  [`requirements-optional.txt`](requirements-optional.txt). `TA-Lib` needs its
+  native C library installed first (see [ta-lib.org](https://ta-lib.org/)).
+  If `TA-Lib` or `pandas_ta` is missing, the app automatically falls back to
+  pure-pandas indicator maths; it just runs a little slower.
 
 ---
 
@@ -125,6 +126,12 @@ network work happens up front in the terminal.
 
    ```bash
    pip install -r requirements.txt
+   ```
+
+   Optional, only after installing any native prerequisites you need:
+
+   ```bash
+   pip install -r requirements-optional.txt
    ```
 
 3. **Add your DhanHQ credentials**
@@ -165,8 +172,8 @@ network work happens up front in the terminal.
    CLAUDE_AGENT_MODEL=claude-sonnet-4-6
    ```
 
-   The screeners run fine without any of this; only the Check Fundamentals
-   button needs it.
+   Most screeners run fine without any of this; the Check Fundamentals panel
+   and the Technical Analysis (AI) confirmation step need it.
 
 > `Dependencies/.env` is git-ignored — your credentials never leave your machine.
 
@@ -195,6 +202,8 @@ uses whatever data is already cached locally (no prefetch).
 Streamlit Scanner App/
 ├── app.py                       # Streamlit entry point + CLI prefetch
 ├── requirements.txt
+├── requirements-optional.txt    # Optional TA-Lib/pandas_ta accelerators
+├── requirements-dev.txt         # Local verification tools
 ├── backend/                     # Data + infrastructure (no strategy logic)
 │   ├── config.py                # Paths, credentials, tuning knobs
 │   ├── dhan_client.py           # DhanHQ API wrapper
@@ -204,6 +213,7 @@ Streamlit Scanner App/
 │   ├── screener_registry.py     # Discovers + validates screeners
 │   ├── scanner_base.py          # BaseScanner ABC every screener subclasses
 │   ├── indicators.py            # Indicators (TA-Lib/pandas_ta + fallbacks)
+│   ├── url_safety.py            # Shared guardrails for server-side fetches
 │   ├── charts.py                # Lightweight Charts chart-spec builders
 │   ├── fundamentals/            # Check Fundamentals subsystem
 │   │   ├── screener_in_client.py# requests + BS4 scraper (peers via HTMX,

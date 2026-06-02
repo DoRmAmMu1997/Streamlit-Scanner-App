@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Tests for environment-backed scanner configuration helpers."""
+
+from __future__ import annotations
 
 from backend.config import dhan_rate_limit_retry_delays, dhan_request_delay_seconds
 

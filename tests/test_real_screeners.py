@@ -770,6 +770,25 @@ def test_technical_analysis_gate_admits_at_support_and_calls_agent(monkeypatch):
     ]
 
 
+def test_technical_analysis_honors_max_ai_candidates(monkeypatch):
+    """Cap expensive AI confirmations after the deterministic gate admits symbols."""
+    stub = _StubTechnicalAgent(_ta_verdict())
+    monkeypatch.setattr(technical_analysis, "_get_agent", lambda: stub)
+
+    frames = {
+        "BUY": _ta_candles(_AT_SUPPORT_LOWS),
+        "SELL": _ta_candles(_AT_SUPPORT_LOWS),
+    }
+    result = technical_analysis.run(
+        _universe(),
+        FakeDataLoader(frames),
+        _ta_params(max_ai_candidates=1),
+    )
+
+    assert result["symbol"].tolist() == ["BUY"]
+    assert stub.calls == 1
+
+
 def test_technical_analysis_gate_rejects_midrange_without_calling_agent(monkeypatch):
     stub = _StubTechnicalAgent(_ta_verdict())
     monkeypatch.setattr(technical_analysis, "_get_agent", lambda: stub)
