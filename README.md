@@ -103,7 +103,9 @@ network work happens up front in the terminal.
 ## Requirements
 
 - **Python 3.11+**
-- The core packages in [`requirements.txt`](requirements.txt) (`pip install -r requirements.txt`)
+- The core packages in [`requirements.txt`](requirements.txt), installed with
+  the verified direct pins in [`constraints.txt`](constraints.txt):
+  `pip install -r requirements.txt -c constraints.txt`
 - A **DhanHQ account** with API access — needed to download candle data.
 - Optional indicator accelerators in
   [`requirements-optional.txt`](requirements-optional.txt). `TA-Lib` needs its
@@ -125,7 +127,7 @@ network work happens up front in the terminal.
 2. **Install dependencies**
 
    ```bash
-   pip install -r requirements.txt
+   pip install -r requirements.txt -c constraints.txt
    ```
 
    Optional, only after installing any native prerequisites you need:
@@ -204,6 +206,7 @@ Streamlit Scanner App/
 ├── requirements.txt
 ├── requirements-optional.txt    # Optional TA-Lib/pandas_ta accelerators
 ├── requirements-dev.txt         # Local verification tools
+├── constraints.txt              # Verified direct dependency pins
 ├── backend/                     # Data + infrastructure (no strategy logic)
 │   ├── config.py                # Paths, credentials, tuning knobs
 │   ├── dhan_client.py           # DhanHQ API wrapper
@@ -393,11 +396,33 @@ union is assembled from those same source lists at refresh time.
 
 ---
 
-## Tests
+## Tests And Security Checks
+
+For normal app use, install only the runtime dependencies:
+
+```bash
+pip install -r requirements.txt -c constraints.txt
+```
+
+For development or PR review, install the verification tools too:
+
+```bash
+pip install -r requirements-dev.txt -c constraints.txt
+```
+
+Run the full local verification set before publishing changes:
 
 ```bash
 python -m pytest -q
+python -m compileall -q app.py backend screeners tests
+python -m ruff check app.py backend screeners Dependencies tests
+python -m bandit -r app.py backend screeners Dependencies -q
+python -m pip_audit -r requirements.txt
 ```
+
+Beginner note: `requirements-optional.txt` is intentionally separate. Those
+packages speed up some indicators when their native prerequisites are already
+available, but the app falls back to pure-pandas math without them.
 
 ---
 

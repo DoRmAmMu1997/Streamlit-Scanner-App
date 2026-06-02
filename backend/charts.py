@@ -29,6 +29,13 @@ _LWC_CDN_URL = (
     f"https://unpkg.com/lightweight-charts@{_LWC_VERSION}"
     "/dist/lightweight-charts.standalone.production.js"
 )
+# Browser-side supply-chain guard for the pinned CDN asset above.
+#
+# Beginner note: Subresource Integrity (SRI) asks the browser to hash the
+# downloaded JavaScript and compare it to this value before executing it. If the
+# CDN serves different bytes for the pinned version, the chart library will not
+# run instead of silently executing unexpected code.
+_LWC_CDN_INTEGRITY = "sha384-q1KYLSKHgBnW5tWYGGR8+6YV4/iPy31dILoF2I1OD7XiVUvHEp/TaxIQVmB0j3R2"
 
 # Single source of truth for chart colors. Editing this dict re-themes the app.
 _COLORS = {
@@ -410,7 +417,7 @@ _CHART_HTML_TEMPLATE = """<!doctype html>
 <body>
 <div class="chart-title">__TITLE__</div>
 <div id="chart"></div>
-<script src="__CDN__"></script>
+<script src="__CDN__" integrity="__CDN_INTEGRITY__" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 <script>
 const SPEC = __SPEC_JSON__;
 (function () {
@@ -480,6 +487,7 @@ def render_chart_html(spec: dict) -> str:
     return (
         _CHART_HTML_TEMPLATE
         .replace("__CDN__", _LWC_CDN_URL)
+        .replace("__CDN_INTEGRITY__", _LWC_CDN_INTEGRITY)
         .replace("__TITLE__", title)
         .replace("__SPEC_JSON__", payload)
     )
