@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import date
+import os
+import time
+from datetime import date, datetime
 
 import pandas as pd
 
@@ -56,6 +58,22 @@ def mapped_universe() -> pd.DataFrame:
                 "instrument_type": "EQUITY",
                 "mapping_status": "mapped",
             }
+        ]
+    )
+
+
+def mapped_universe_many(symbols: list[str]) -> pd.DataFrame:
+    """Return mapped universe rows with stable fake security IDs."""
+    return pd.DataFrame(
+        [
+            {
+                "symbol": symbol,
+                "security_id": str(index),
+                "exchange_segment": "NSE_EQ",
+                "instrument_type": "EQUITY",
+                "mapping_status": "mapped",
+            }
+            for index, symbol in enumerate(symbols, start=1)
         ]
     )
 
@@ -257,6 +275,67 @@ def test_load_universe_history_records_failures_without_crashing(tmp_path):
     assert result.frames == {}
     assert result.failures[0]["symbol"] == "RELIANCE"
     assert "boom" in result.failures[0]["message"]
+
+
+def test_circuit_breaker_skips_remaining_symbols_after_failure_limit(tmp_path):
+    """Repeated Dhan failures should stop the batch from hammering the API."""
+
+    class AlwaysFailingClient:
+        def __init__(self):
+            self.calls = 0
+
+        def fetch_daily_candles(self, *args, **kwargs):
+            self.calls += 1
+            raise RuntimeError("broker down")
+
+    client = AlwaysFailingClient()
+    loader = DailyDataLoader(
+        client,
+        cache_dir=tmp_path,
+        request_delay_seconds=0.0,
+        max_consecutive_failures=1,
+    )
+
+    result = loader.load_universe_history(
+        mapped_universe_many(["AAA", "BBB", "CCC"]),
+        date(2026, 5, 1),
+        date(2026, 5, 11),
+    )
+
+    assert client.calls == 1
+    assert [failure["symbol"] for failure in result.failures] == ["AAA", "BBB", "CCC"]
+    assert any("circuit breaker" in str(failure["message"]).lower() for failure in result.failures[1:])
+
+
+def test_fetch_timeout_records_failure_without_waiting_for_slow_client(tmp_path):
+    """A stuck Dhan call should fail the symbol promptly instead of blocking."""
+
+    class SlowClient:
+        def __init__(self):
+            self.calls = 0
+
+        def fetch_daily_candles(self, *args, **kwargs):
+            self.calls += 1
+            time.sleep(0.25)
+            return candle_frame()
+
+    loader = DailyDataLoader(
+        SlowClient(),
+        cache_dir=tmp_path,
+        request_delay_seconds=0.0,
+        fetch_timeout_seconds=0.01,
+    )
+    started = time.monotonic()
+
+    result = loader.load_universe_history(
+        mapped_universe(),
+        date(2026, 5, 1),
+        date(2026, 5, 11),
+    )
+
+    assert time.monotonic() - started < 0.20
+    assert result.frames == {}
+    assert "timed out" in str(result.failures[0]["message"]).lower()
 
 
 def test_cache_path_is_date_independent(tmp_path):
@@ -500,3 +579,32 @@ def test_cleanup_legacy_cache_files_removes_only_date_suffixed_files(tmp_path):
     assert not (tmp_path / "RELIANCE_2885_20150101_20250101.parquet").exists()
     assert (tmp_path / "RELIANCE_2885.parquet").exists()
     assert (tmp_path / "20MICRONS_12345.parquet").exists()
+
+
+def test_cleanup_stale_cache_files_removes_old_parquets_and_orphan_markers(tmp_path):
+    """Cache cleanup should remove old files and checked markers without owners."""
+    old_parquet = tmp_path / "OLD_1.parquet"
+    old_checked = tmp_path / "OLD_1.checked"
+    recent_parquet = tmp_path / "RECENT_2.parquet"
+    orphan_checked = tmp_path / "ORPHAN_3.checked"
+    for path in (old_parquet, old_checked, recent_parquet, orphan_checked):
+        path.write_bytes(b"x")
+
+    old_time = datetime(2026, 1, 1).timestamp()
+    recent_time = datetime(2026, 6, 1).timestamp()
+    os.utime(old_parquet, (old_time, old_time))
+    os.utime(old_checked, (old_time, old_time))
+    os.utime(recent_parquet, (recent_time, recent_time))
+    os.utime(orphan_checked, (recent_time, recent_time))
+
+    loader = DailyDataLoader(FakeDhanClient(), cache_dir=tmp_path, request_delay_seconds=0.0)
+    removed = loader.cleanup_stale_cache_files(
+        max_age_days=30,
+        now=datetime(2026, 6, 2),
+    )
+
+    assert removed == 3
+    assert not old_parquet.exists()
+    assert not old_checked.exists()
+    assert not orphan_checked.exists()
+    assert recent_parquet.exists()
