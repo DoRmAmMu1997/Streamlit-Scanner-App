@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import concurrent.futures
+import time
 from datetime import date
 from types import SimpleNamespace
 
@@ -664,9 +666,11 @@ class _StubTechnicalAgent:
     def __init__(self, verdict: TechnicalVerdict):
         self.verdict = verdict
         self.calls = 0
+        self.force_refreshes: list[bool] = []
 
     def analyze(self, symbol, candles, levels, *, force_refresh=False):
         self.calls += 1
+        self.force_refreshes.append(bool(force_refresh))
         return self.verdict.model_copy(update={"symbol": str(symbol).upper()})
 
 
@@ -789,6 +793,22 @@ def test_technical_analysis_honors_max_ai_candidates(monkeypatch):
     assert stub.calls == 1
 
 
+def test_technical_analysis_forwards_force_refresh_to_agent(monkeypatch):
+    """A UI refresh should bypass the AI verdict cache, not only candle cache."""
+    stub = _StubTechnicalAgent(_ta_verdict())
+    monkeypatch.setattr(technical_analysis, "_get_agent", lambda: stub)
+
+    frames = {"BUY": _ta_candles(_AT_SUPPORT_LOWS)}
+    result = technical_analysis.run(
+        _universe(),
+        FakeDataLoader(frames),
+        _ta_params(force_refresh=True),
+    )
+
+    assert result["symbol"].tolist() == ["BUY"]
+    assert stub.force_refreshes == [True]
+
+
 def test_technical_analysis_gate_rejects_midrange_without_calling_agent(monkeypatch):
     stub = _StubTechnicalAgent(_ta_verdict())
     monkeypatch.setattr(technical_analysis, "_get_agent", lambda: stub)
@@ -881,3 +901,31 @@ def test_technical_analysis_confirms_multiple_candidates_in_universe_order(monke
     # regardless of which thread finished first.
     assert result["symbol"].tolist() == ["AAA", "BBB", "CCC"]
     assert stub.calls == 3
+
+
+def test_technical_analysis_agent_cache_is_thread_safe(monkeypatch):
+    """Parallel confirmations should not race while building the shared agent.
+
+    PR #23 made `_get_agent()` reachable from worker threads. This test slows
+    construction just enough that an unlocked cache tends to build several
+    agents for the same `(model, fast_mode)` key.
+    """
+    created_agents: list[object] = []
+
+    class _SlowAgent:
+        def __init__(self, *, model, fast_mode):
+            time.sleep(0.05)
+            self.model = model
+            self.fast_mode = fast_mode
+            created_agents.append(self)
+
+    monkeypatch.setattr(technical_analysis, "get_fundamentals_model", lambda: "test-model")
+    monkeypatch.setattr(technical_analysis, "get_agent_fast_mode", lambda: True)
+    monkeypatch.setattr(technical_analysis, "TechnicalAnalysisAgent", _SlowAgent)
+    technical_analysis._AGENT_CACHE.clear()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        agents = list(executor.map(lambda _: technical_analysis._get_agent(), range(8)))
+
+    assert len(created_agents) == 1
+    assert len({id(agent) for agent in agents}) == 1

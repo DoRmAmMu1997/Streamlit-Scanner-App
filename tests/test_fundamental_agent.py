@@ -423,6 +423,42 @@ def test_fundamental_agent_caches_verdict_per_symbol_model_date(tmp_path):
     )
 
 
+def test_fundamental_agent_keeps_fast_and_thorough_verdict_caches_separate(tmp_path):
+    """Fast mode and thorough mode may produce different judgments.
+
+    A fast-mode click must not silently reuse a thorough cached verdict, and a
+    later thorough click must not reuse a fast cached verdict. The public
+    constructor stays the same; the distinction belongs inside the cache key.
+    """
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("DEMO", _sample_screener_data())
+
+    thorough_runner = _FakeRunner(_sample_verdict())
+    thorough_agent = FundamentalAgent(
+        model="test-model",
+        cache=cache,
+        runner=thorough_runner,
+        fast_mode=False,
+    )
+    assert thorough_agent.check("DEMO").rating == 8
+
+    fast_verdict = _sample_verdict().model_copy(update={"rating": 3})
+    fast_runner = _FakeRunner(fast_verdict)
+    fast_agent = FundamentalAgent(
+        model="test-model",
+        cache=cache,
+        runner=fast_runner,
+        fast_mode=True,
+    )
+
+    assert fast_agent.check("DEMO").rating == 3
+    assert fast_runner.calls == 1
+
+    thorough_runner.calls = 0
+    assert thorough_agent.check("DEMO").rating == 8
+    assert thorough_runner.calls == 0
+
+
 def test_fundamental_agent_force_refresh_invalidates_cache_and_reruns(tmp_path):
     cache = FundamentalsCache(cache_dir=tmp_path)
     cache.set_data("DEMO", _sample_screener_data())

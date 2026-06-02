@@ -178,6 +178,41 @@ def test_agent_cache_changes_when_levels_change_on_same_candle_date(tmp_path):
     assert runner.calls == 1
 
 
+def test_agent_cache_changes_between_fast_and_thorough_modes(tmp_path):
+    """Fast and thorough technical verdicts should not share one cache entry.
+
+    Both modes analyze the same chart facts, but fast mode changes the model's
+    reasoning budget. Keeping the cache namespace separate prevents an opt-in
+    fast verdict from being shown later as a thorough verdict.
+    """
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    candles = _sample_candles()
+    levels = _sample_levels()
+
+    thorough_runner = _FakeRunner(_sample_verdict(confidence=9))
+    thorough_agent = TechnicalAnalysisAgent(
+        model="test-model",
+        cache=cache,
+        runner=thorough_runner,
+        fast_mode=False,
+    )
+    assert thorough_agent.analyze("DEMO", candles, levels).confidence == 9
+
+    fast_runner = _FakeRunner(_sample_verdict(confidence=3))
+    fast_agent = TechnicalAnalysisAgent(
+        model="test-model",
+        cache=cache,
+        runner=fast_runner,
+        fast_mode=True,
+    )
+    assert fast_agent.analyze("DEMO", candles, levels).confidence == 3
+    assert fast_runner.calls == 1
+
+    thorough_runner.calls = 0
+    assert thorough_agent.analyze("DEMO", candles, levels).confidence == 9
+    assert thorough_runner.calls == 0
+
+
 def test_agent_force_refresh_bypasses_cache(tmp_path):
     cache = FundamentalsCache(cache_dir=tmp_path)
     runner = _FakeRunner(_sample_verdict())
@@ -262,7 +297,7 @@ def test_agent_requires_model():
 # ---------------------------------------------------------------------------
 
 
-def _install_fake_sdk(monkeypatch):
+def _install_fake_sdk(monkeypatch, *, include_thinking: bool = True):
     """Install a fake `claude_agent_sdk` that records ClaudeAgentOptions kwargs.
 
     `_default_run` imports the SDK lazily and immediately runs `query(...)`. The
@@ -304,7 +339,8 @@ def _install_fake_sdk(monkeypatch):
 
     fake = types.ModuleType("claude_agent_sdk")
     fake.ClaudeAgentOptions = ClaudeAgentOptions
-    fake.ThinkingConfigDisabled = ThinkingConfigDisabled
+    if include_thinking:
+        fake.ThinkingConfigDisabled = ThinkingConfigDisabled
     fake.ResultMessage = ResultMessage
     fake.AssistantMessage = AssistantMessage
     fake.CLINotFoundError = CLINotFoundError
@@ -330,3 +366,25 @@ def test_default_run_sets_thinking_only_in_fast_mode(monkeypatch, tmp_path):
     agent_off = TechnicalAnalysisAgent(model="test-model", cache=cache, fast_mode=False)
     agent_off.analyze("DEMO", _sample_candles(), _sample_levels(), force_refresh=True)
     assert captured["options"].get("thinking") is None
+
+
+def test_default_run_tolerates_sdk_without_thinking_config(monkeypatch, tmp_path, caplog):
+    """Older Claude Agent SDK builds may not expose ThinkingConfigDisabled.
+
+    Non-fast mode should still run normally. Fast mode should degrade to the SDK
+    default thinking behavior with a clear log message instead of failing at
+    import time.
+    """
+    captured, _ = _install_fake_sdk(monkeypatch, include_thinking=False)
+    cache = FundamentalsCache(cache_dir=tmp_path)
+
+    agent = TechnicalAnalysisAgent(model="test-model", cache=cache, fast_mode=False)
+    assert agent.analyze("DEMO", _sample_candles(), _sample_levels(), force_refresh=True).symbol == "DEMO"
+    assert captured["options"].get("thinking") is None
+
+    captured.clear()
+    fast_agent = TechnicalAnalysisAgent(model="test-model", cache=cache, fast_mode=True)
+    fast_agent.analyze("DEMO", _sample_candles(), _sample_levels(), force_refresh=True)
+
+    assert captured["options"].get("thinking") is None
+    assert "fast mode" in caplog.text.lower()
