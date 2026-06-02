@@ -22,6 +22,23 @@ transcript signal + integrated view).
 
 ---
 
+## Changes Codex did
+
+- Added the `67 Ka Funda (AI)` screener: a deterministic 67% drawdown and
+  100% upside-to-ATH shortlister runs first, then a Claude Agent SDK verifier
+  approves only BUY rows backed by web and Screener.in evidence.
+- Added `backend/sixty_seven/` with the OHLC shortlister, SerpAPI Google search
+  client, and Claude verifier that treats all external text as untrusted
+  evidence.
+- Added the `hemant_super_good_200_union` universe and generated
+  `data/universes/hemant_super_good_200_union.csv`.
+- Added tests for the shortlister, SerpAPI client, Claude verifier, screener
+  flow, universe generation, and secret redaction.
+- Co-authored by: DoRmAmMu1997 <hemantdhamija@gmail.com> and Codex
+  <codex@openai.com>.
+
+---
+
 ## Features
 
 - **Nine built-in screeners**, all built on a common `BaseScanner` abstract
@@ -174,8 +191,8 @@ network work happens up front in the terminal.
    CLAUDE_AGENT_MODEL=claude-sonnet-4-6
    ```
 
-   Most screeners run fine without any of this; the Check Fundamentals panel
-   and the Technical Analysis (AI) confirmation step need it.
+   Most screeners run fine without any of this; only the Check Fundamentals
+   panel and Technical Analysis (AI) confirmation step need it.
 
 > `Dependencies/.env` is git-ignored — your credentials never leave your machine.
 
@@ -340,8 +357,6 @@ Both are one-shot prices — the verdict cache covers subsequent clicks at zero
 cost until either the underlying data or the model changes. When the monthly
 credit is exhausted, the agent pauses until it refreshes (or falls back to
 standard API rates if you've enabled API billing).
-
----
 
 ## Adding your own screener
 

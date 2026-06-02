@@ -92,6 +92,11 @@ UNIVERSE_CONFIG = {
         "display_name": "Hemant Super + Good 45",
         "union_of": ["hemant_super_45", "hemant_good_45"],
     },
+    "hemant_super_good_200_union": {
+        "file_name": "hemant_super_good_200_union.csv",
+        "display_name": "Hemant Super + Good 45 + Good 200",
+        "union_of": ["hemant_super_45", "hemant_good_45", "hemant_good_200"],
+    },
 }
 
 FNO_SYMBOL_PATTERN = re.compile(

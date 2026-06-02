@@ -1,0 +1,294 @@
+universe,universe_name,symbol,security_id,exchange_segment,instrument_type,company_name,series,source,mapping_status,source_symbol
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,HDFCBANK,1333,NSE_EQ,EQUITY,HDFC Bank,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,HDFCBANK
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ICICIBANK,4963,NSE_EQ,EQUITY,ICICI Bank,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ICICIBANK
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,AXISBANK,5900,NSE_EQ,EQUITY,Axis Bank,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,AXISBANK
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,KOTAKBANK,1922,NSE_EQ,EQUITY,Kotak Bank,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,KOTAKBANK
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,BAJFINANCE,317,NSE_EQ,EQUITY,Bajaj Finance,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,BAJFINANCE
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ICICIGI,21770,NSE_EQ,EQUITY,ICICI Lombard General Insurance,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ICICIGI
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,HDFCLIFE,467,NSE_EQ,EQUITY,HDFC Life Insurance,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,HDFCLIFE
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,BAJAJFINSV,16675,NSE_EQ,EQUITY,Bajaj Finserv,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,BAJAJFINSV
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ICICIPRULI,18652,NSE_EQ,EQUITY,ICICI Prudential Life Insurance,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ICICIPRULI
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,HDFCAMC,4244,NSE_EQ,EQUITY,HDFC AMC,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,HDFCAMC
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,NAM-INDIA,357,NSE_EQ,EQUITY,Nippon Life India AMC,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,NAM_INDIA
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,PGHH,2535,NSE_EQ,EQUITY,P&G Hygiene and Health Care,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,PGHH
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,MARICO,4067,NSE_EQ,EQUITY,Marico,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,MARICO
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,COLPAL,15141,NSE_EQ,EQUITY,Colgate Palmolive,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,COLPAL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,HINDUNILVR,1394,NSE_EQ,EQUITY,Hindustan Unilever,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,HINDUNILVR
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,BAJAJHLDNG,305,NSE_EQ,EQUITY,Bajaj Holdings & Investments,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,BAJAJHLDNG
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,DABUR,772,NSE_EQ,EQUITY,Dabur India,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,DABUR
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,NESTLEIND,17963,NSE_EQ,EQUITY,Nestle,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,NESTLEIND
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ITC,1660,NSE_EQ,EQUITY,ITC,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ITC
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ASIANPAINT,236,NSE_EQ,EQUITY,Asian Paints,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ASIANPAINT
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,BERGEPAINT,404,NSE_EQ,EQUITY,Berger Paints,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,BERGEPAINT
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,KANSAINER,1196,NSE_EQ,EQUITY,Kansai Nerolac Paints,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,KANSAINER
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,AKZOINDIA,,,,,,hemant_super_45 + hemant_good_45 + hemant_good_200,missing_security_id,AKZOINDIA
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,TITAN,3506,NSE_EQ,EQUITY,Titan,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,TITAN
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,BATAINDIA,371,NSE_EQ,EQUITY,Bata,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,BATAINDIA
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,PAGEIND,14413,NSE_EQ,EQUITY,Page Industries,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,PAGEIND
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,WHIRLPOOL,18011,NSE_EQ,EQUITY,Whirlpool,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,WHIRLPOOL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,HAVELLS,9819,NSE_EQ,EQUITY,Havells,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,HAVELLS
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,TCS,11536,NSE_EQ,EQUITY,Tata Consultancy Services,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,TCS
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,INFY,1594,NSE_EQ,EQUITY,Infosys,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,INFY
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,HCLTECH,7229,NSE_EQ,EQUITY,HCL Technologies,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,HCLTECH
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,WIPRO,3787,NSE_EQ,EQUITY,Wipro,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,WIPRO
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ABBOTINDIA,17903,NSE_EQ,EQUITY,Abbott,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ABBOTINDIA
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,GLAXO,1153,NSE_EQ,EQUITY,GlaxoSmithKline Pharmaceuticals,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,GLAXO
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,SANOFI,1442,NSE_EQ,EQUITY,Sanofi,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,SANOFI
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,PFIZER,2643,NSE_EQ,EQUITY,Pfizer,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,PFIZER
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,PIDILITIND,2664,NSE_EQ,EQUITY,Pidilite Industries,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,PIDILITIND
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,GILLETTE,1576,NSE_EQ,EQUITY,Gillette,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,GILLETTE
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,NIFTYBEES,10576,NSE_EQ,EQUITY,Nippon Nifty 50 ETF (NIFTYBEES),EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,NIFTYBEES
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,BANKBEES,11439,NSE_EQ,EQUITY,Nippon Nifty Bank ETF (BANKBEES),EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,BANKBEES
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,BAJAJ-AUTO,16669,NSE_EQ,EQUITY,Bajaj Auto,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,BAJAJ_AUTO
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ULTRACEMCO,11532,NSE_EQ,EQUITY,UltraTech Cement,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,UTLTRACEMCO
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,AMBUJACEM,1270,NSE_EQ,EQUITY,Ambuja Cements,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,AMBUJACEM
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,3MINDIA,474,NSE_EQ,EQUITY,3M India,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,3MINDIA
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,PGHL,940,NSE_EQ,EQUITY,Procter & Gamble Health,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,PGHL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ASTRAZEN,5610,NSE_EQ,EQUITY,AstraZeneca Pharma,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ASTRAZEN
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,AVANTIFEED,7936,NSE_EQ,EQUITY,Avanti Feeds,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,AVANTIFEED
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,BAYERCROP,17927,NSE_EQ,EQUITY,Bayer Crop Science,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,BAYERCROP
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,BOSCHLTD,2181,NSE_EQ,EQUITY,Bosch,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,BOSCHLTD
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,CAPLIPOINT,3906,NSE_EQ,EQUITY,Caplin Point Laboratories,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,CAPLIPOINT
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,KAJARIACER,1808,NSE_EQ,EQUITY,Kajaria Ceramics,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,KAJARIACER
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,CERA,15039,NSE_EQ,EQUITY,Cera Sanitaryware,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,CERA
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,DIXON,21690,NSE_EQ,EQUITY,Dixon Technologies,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,DIXON
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,TVSMOTOR,8479,NSE_EQ,EQUITY,TVS Motors,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,TVSMOTOR
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,HEROMOTOCO,1348,NSE_EQ,EQUITY,Hero Motocorp,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,HEROMOTOCO
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,EICHERMOT,910,NSE_EQ,EQUITY,Eicher Motors,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,EICHERMOT
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,EQUITAS,,,,,,hemant_super_45 + hemant_good_45 + hemant_good_200,missing_security_id,EQUITAS
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ERIS,21154,NSE_EQ,EQUITY,Eris Lifesciences,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ERIS
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,KEI,13310,NSE_EQ,EQUITY,KEI Industries,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,KEI
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,FINCABLES,1038,NSE_EQ,EQUITY,Finolex Cables,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,FINCABLES
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,FINEORG,3744,NSE_EQ,EQUITY,Fine Organic Industries,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,FINEORG
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,GODREJCP,10099,NSE_EQ,EQUITY,Godrej Consumer Products,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,GODREJCP
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,HONAUT,3417,NSE_EQ,EQUITY,Honeywell Automation,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,HONAUT
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ISEC,,,,,,hemant_super_45 + hemant_good_45 + hemant_good_200,missing_security_id,ISEC
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,JCHAC,,,,,,hemant_super_45 + hemant_good_45 + hemant_good_200,missing_security_id,JCHAC
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,LALPATHLAB,11654,NSE_EQ,EQUITY,Dr. Lal Path Labs,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,LALPATHLAB
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,UNITDSPR,10447,NSE_EQ,EQUITY,United Spirits,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,MCDOWELL_N
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,MCX,31181,NSE_EQ,EQUITY,MCX,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,MCX
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,MOTILALOFS,14947,NSE_EQ,EQUITY,Motilal Oswal Financial Services,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,MOTILALOFS
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,OFSS,10738,NSE_EQ,EQUITY,Oracle Financial Services Software,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,OFSS
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,POLYCAB,9590,NSE_EQ,EQUITY,Polycab,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,POLYCAB
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,RADICO,10990,NSE_EQ,EQUITY,Radico Khaitan,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,RADICO
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,RAJESHEXPO,760461,NSE_EQ,EQUITY,Rajesh Exports,BZ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,RAJESHEXPO
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,RELAXO,24225,NSE_EQ,EQUITY,Relaxo Footwears,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,RELAXO
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,SFL,19184,NSE_EQ,EQUITY,Sheela Foam,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,SFL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,SIS,21501,NSE_EQ,EQUITY,SIS,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,SIS
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,SUNTV,13404,NSE_EQ,EQUITY,Sun TV Network,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,SUNTV
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,SYMPHONY,24190,NSE_EQ,EQUITY,Symphony,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,SYMPHONY
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,TASTYBITE,20092,NSE_EQ,EQUITY,Tasty Bite Eatables,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,TASTYBITE
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,TEAMLEASE,12716,NSE_EQ,EQUITY,Teamlease Services,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,TEAMLEASE
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,TTKPRESTIG,3546,NSE_EQ,EQUITY,TTK Prestige,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,TTKPRESTIG
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,UJJIVANSFB,15228,NSE_EQ,EQUITY,Ujjivan Small Finance Bank,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,UJJIVANSFB
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,VGUARD,15362,NSE_EQ,EQUITY,V-Guard Industries,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,VGUARD
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,VINATIORGA,17364,NSE_EQ,EQUITY,Vinati Organics,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,VINATIORGA
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,VIPIND,3703,NSE_EQ,EQUITY,VIP Industries,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,VIPIND
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,RRKABEL,18566,NSE_EQ,EQUITY,RR Kabel,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,RRKABEL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,CLEAN,5049,NSE_EQ,EQUITY,Clean Science & Technology,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,CLEAN
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,BEML,395,NSE_EQ,EQUITY,BEML,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,BEML
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,INGERRAND,1597,NSE_EQ,EQUITY,Ingersoll Rand,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,INGERRAND
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,VESUVIUS,3676,NSE_EQ,EQUITY,Vesuvius,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,VESUVIUS
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,HAPPYFORGE,20854,NSE_EQ,EQUITY,Happy Forgings,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,HAPPYFORGE
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,KPIGREEN,5108,NSE_EQ,EQUITY,KPI Green Energy,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,KPIGREEN
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,INTELLECT,5926,NSE_EQ,EQUITY,Intellect Design Arena,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,INTELLECT
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,FDC,4898,NSE_EQ,EQUITY,FDC,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,FDC
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,LGBBROSLTD,18321,NSE_EQ,EQUITY,LG Balakrishnan & Bros,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,LGBBROSLTD
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,SUVENPHAR,,,,,,hemant_super_45 + hemant_good_45 + hemant_good_200,missing_security_id,SUVENPHAR
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,RAILTEL,2431,NSE_EQ,EQUITY,Railtel Corporation of India,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,RAILTEL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,BIKAJI,11966,NSE_EQ,EQUITY,Bikaji Foods International,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,BIKAJI
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,DHANUKA,24409,NSE_EQ,EQUITY,Dhanuka Agritech,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,DHANUKA
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,TITAGARH,15414,NSE_EQ,EQUITY,Titagarh Rail Systems,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,TITAGARH
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,SATIN,10453,NSE_EQ,EQUITY,Satin Creditcare,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,SATIN
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,NEWGEN,1164,NSE_EQ,EQUITY,Newgen Software Technologies,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,NEWGEN
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,MASFIN,199,NSE_EQ,EQUITY,MAS Financial Services,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,MASFIN
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,MUTHOOTMF,20831,NSE_EQ,EQUITY,Muthoot Microfin,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,MUTHOOTMF
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ANANDRATHI,7145,NSE_EQ,EQUITY,Anand Rathi Wealth,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ANANDRATHI
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,KSCL,14972,NSE_EQ,EQUITY,Kaveri Seed Company,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,KSCL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,GALAXYSURF,1315,NSE_EQ,EQUITY,Galaxy Surfactants,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,GALAXYSURF
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,JYOTICNC,21334,NSE_EQ,EQUITY,Jyoti CNC Automation,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,JYOTICNC
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,GAEL,8828,NSE_EQ,EQUITY,Gujarat Ambuja Exports,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,GAEL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,POLYMED,25718,NSE_EQ,EQUITY,Poly Medicure,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,POLYMED
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,SHARDAMOTR,10530,NSE_EQ,EQUITY,Sharda Motor,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,SHARDAMOTR
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,TECHNOE,6445,NSE_EQ,EQUITY,Techno Electric & Engineering,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,TECHNOE
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,KFINTECH,13359,NSE_EQ,EQUITY,KFin Technologies,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,KFINTECH
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,VOLTAMP,13577,NSE_EQ,EQUITY,Voltamp Transformers,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,VOLTAMP
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,SURYAROSNI,3375,NSE_EQ,EQUITY,Surya Roshni,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,SURYAROSNI
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,CONCORDBIO,18060,NSE_EQ,EQUITY,Concord Biotech,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,CONCORDBIO
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,HBLENGINE,13966,NSE_EQ,EQUITY,HBL Engineering,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,HBLENGINE
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,TRITURBINE,25584,NSE_EQ,EQUITY,Triveni Turbines,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,TRITURBINE
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,CELLO,19795,NSE_EQ,EQUITY,Cello World,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,CELLO
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ROUTE,128,NSE_EQ,EQUITY,Route Mobile,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ROUTE
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,NORTHARC,25426,NSE_EQ,EQUITY,Northern Arc Capital,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,NORTHARC
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,MOIL,20830,NSE_EQ,EQUITY,MOIL,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,MOIL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,HOMEFIRST,2056,NSE_EQ,EQUITY,Home First Finance Company,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,HOMEFIRST
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,AFFLE,11343,NSE_EQ,EQUITY,Affle 3i,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,AFFLE
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,CMSINFO,7603,NSE_EQ,EQUITY,CMS Info Systems,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,CMSINFO
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,MARKSANS,10579,NSE_EQ,EQUITY,Marksans Pharma,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,MARKSANS
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,GRINDWELL,13560,NSE_EQ,EQUITY,Grindwell Norton,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,GRINDWELL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,JYOTHYLAB,15146,NSE_EQ,EQUITY,Jyothy Laboratories,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,JYOTHYLAB
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ELECON,13643,NSE_EQ,EQUITY,Elecon Engineering Company,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ELECON
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,RITES,3761,NSE_EQ,EQUITY,RITES,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,RITES
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,JWL,20224,NSE_EQ,EQUITY,Jupiter Wagons,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,JWL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,WSTCSTPAPR,3799,NSE_EQ,EQUITY,West Coast Paper Mills,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,WSTCSTPAPR
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,SHAKTIPUMP,25574,NSE_EQ,EQUITY,Shakti Pumps,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,SHAKTIPUMP
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ACE,13587,NSE_EQ,EQUITY,Action Construction Equipment,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ACE
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,GPPL,19731,NSE_EQ,EQUITY,Gujarat Pipavav Port,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,GPPL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,NESCO,15409,NSE_EQ,EQUITY,Nesco,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,NESCO
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,GRSE,5475,NSE_EQ,EQUITY,Garden Reach Shipbuilders,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,GRSE
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,IMFA,19235,NSE_EQ,EQUITY,Indian Metals & Ferro Alloys,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,IMFA
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,IEX,220,NSE_EQ,EQUITY,Indian Energy Exchange,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,IEX
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,TIMKEN,14198,NSE_EQ,EQUITY,Timken,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,TIMKEN
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,HINDCOPPER,17939,NSE_EQ,EQUITY,Hindustan Copper,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,HINDCOPPER
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,TCI,10580,NSE_EQ,EQUITY,Transport Corporation of India,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,TCI
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,USHAMART,8840,NSE_EQ,EQUITY,Usha Martin,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,USHAMART
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,SPLPETRO,9617,NSE_EQ,EQUITY,Supreme Petrochem,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,SPLPETRO
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ENGINERSIN,4907,NSE_EQ,EQUITY,Engineers India,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ENGINERSIN
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,SHAREINDIA,104,NSE_EQ,EQUITY,Share India Securities,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,SHAREINDIA
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,MAHAPEXLTD,5239,NSE_EQ,EQUITY,Maha Rashtra Apex Corporation,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,MAHAPEXLTD
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,CAMS,342,NSE_EQ,EQUITY,CAMS,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,CAMS
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,LINDEINDIA,1627,NSE_EQ,EQUITY,Linde,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,LINDEINDIA
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ZFCVINDIA,16915,NSE_EQ,EQUITY,ZF Commercial,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ZFCVINDIA
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,KIRLOSBROS,18581,NSE_EQ,EQUITY,Kirloskar Brothers,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,KIRLOSBROS
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,KRBL,10577,NSE_EQ,EQUITY,KRBL,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,KRBL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,IGIL,28378,NSE_EQ,EQUITY,International Gemological Institute,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,IGIL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,DBCORP,17881,NSE_EQ,EQUITY,DB Corp,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,DBCORP
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ALIVUS,5265,NSE_EQ,EQUITY,Alivus Life Sciences,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ALIVUS
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,CARBORUNIV,595,NSE_EQ,EQUITY,Carborundum Universal,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,CARBORUNIV
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,SANDUMA,18359,NSE_EQ,EQUITY,Sandur Manganese & Iron Ores,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,SANDUMA
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,INDIAMART,10726,NSE_EQ,EQUITY,IndiaMART InterMesh,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,INDIAMART
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,SHRIPISTON,17186,NSE_EQ,EQUITY,Shriram Pistons & Rings,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,SHRIPISTON
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,GVT&D,16783,NSE_EQ,EQUITY,GE Vernova T&D,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,GVT&D
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,FORCEMOT,11573,NSE_EQ,EQUITY,Force Motors,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,FORCEMOT
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,MEDANTA,11956,NSE_EQ,EQUITY,Global Health,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,MEDANTA
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,SUMICHEM,17105,NSE_EQ,EQUITY,Sumitomo Chemical,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,SUMICHEM
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,HSCL,14334,NSE_EQ,EQUITY,Himadri Speciality Chemical,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,HSCL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ECLERX,15179,NSE_EQ,EQUITY,eClerx Services,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ECLERX
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,CROMPTON,17094,NSE_EQ,EQUITY,Crompton Greaves,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,CROMPTON
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,TANLA,13976,NSE_EQ,EQUITY,Tanla Platforms,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,TANLA
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ASTRAL,14418,NSE_EQ,EQUITY,Astral,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ASTRAL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,RATNAMANI,13451,NSE_EQ,EQUITY,Ratnamani Metals & Tubes,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,RATNAMANI
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,SKFINDIA,3186,NSE_EQ,EQUITY,SKF India,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,SKFINDIA
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,GANESHHOUC,,,,,,hemant_super_45 + hemant_good_45 + hemant_good_200,missing_security_id,GANESHHOUC
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,BLUESTARCO,8311,NSE_EQ,EQUITY,Blue Star,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,BLUESTARCO
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,SUNDRMFAST,3345,NSE_EQ,EQUITY,Sundram Fasteners,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,SUNDRMFAST
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,CSBBANK,14966,NSE_EQ,EQUITY,CSB Bank,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,CSBBANK
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,BDL,2144,NSE_EQ,EQUITY,Bharat Dynamics,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,BDL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,NBCC,31415,NSE_EQ,EQUITY,NBCC,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,NBCC
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,BSOFT,6994,NSE_EQ,EQUITY,Birlasoft,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,BSOFT
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,SONACOMS,4684,NSE_EQ,EQUITY,Sona BLW Precision Forgings,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,SONACOMS
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,GHCL,1127,NSE_EQ,EQUITY,GHCL,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,GHCL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,BASF,368,NSE_EQ,EQUITY,BASF,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,BASF
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,MSUMI,8596,NSE_EQ,EQUITY,Motherson Sumi Wiring,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,MSUMI
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,CYIENT,5748,NSE_EQ,EQUITY,Cyient,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,CYIENT
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,JBCHEPHARM,1726,NSE_EQ,EQUITY,J B Chemicals and Pharmaceuticals,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,JBCHEPHARM
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,TATATECH,20293,NSE_EQ,EQUITY,Tata Technologies,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,TATATECH
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ZENSARTECH,1076,NSE_EQ,EQUITY,Zensar Technologies,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ZENSARTECH
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,CRISIL,757,NSE_EQ,EQUITY,CRISIL,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,CRISIL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,DEEPAKNTR,19943,NSE_EQ,EQUITY,Deepak Nitrite,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,DEEPAKNTR
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,JSFB,22663,NSE_EQ,EQUITY,Jana Small Finance Bank,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,JSFB
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,EIHOTEL,919,NSE_EQ,EQUITY,EIH Hotels,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,EIHOTEL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,APTUS,5435,NSE_EQ,EQUITY,Aptus Value Housing Finance,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,APTUS
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,MAHSEAMLES,2088,NSE_EQ,EQUITY,Maharashtra Seamless,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,MAHSEAMLES
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,BSE,19585,NSE_EQ,EQUITY,BSE,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,BSE
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,KPITTECH,9683,NSE_EQ,EQUITY,KPIT Technologies,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,KPITTECH
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,COFORGE,11543,NSE_EQ,EQUITY,Coforge,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,COFORGE
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,EMAMILTD,13517,NSE_EQ,EQUITY,Emami,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,EMAMILTD
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,STARHEALTH,7083,NSE_EQ,EQUITY,Star Health Insurance,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,STARHEALTH
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ENDURANCE,18822,NSE_EQ,EQUITY,Endurance Technologies,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ENDURANCE
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,UTIAMC,527,NSE_EQ,EQUITY,UTI AMC,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,UTIAMC
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,APARINDS,11491,NSE_EQ,EQUITY,Apar Industries,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,APARINDS
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,GPIL,13409,NSE_EQ,EQUITY,Godawari Power & Ispat,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,GPIL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,TATAELXSI,3411,NSE_EQ,EQUITY,Tata Elxsi,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,TATAELXSI
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,533095,,,,,,hemant_super_45 + hemant_good_45 + hemant_good_200,missing_security_id,533095
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,EIDPARRY,916,NSE_EQ,EQUITY,EID Parry,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,EIDPARRY
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,TIINDIA,312,NSE_EQ,EQUITY,Tube Investment,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,TIINDIA
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,COCHINSHIP,21508,NSE_EQ,EQUITY,Cochin Shipyard,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,COCHINSHIP
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,KPRMILL,14912,NSE_EQ,EQUITY,KPR Mill,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,KPRMILL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,CIEINDIA,14937,NSE_EQ,EQUITY,CIE Automotive,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,CIEINDIA
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,CANFINHOME,583,NSE_EQ,EQUITY,Can Fin Homes,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,CANFINHOME
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,AADHARHFC,23729,NSE_EQ,EQUITY,Aadhar Housing Finance,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,AADHARHFC
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,CREDITACC,4421,NSE_EQ,EQUITY,Credit Access Grameen,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,CREDITACC
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,AJANTPHARM,8124,NSE_EQ,EQUITY,Ajanta Pharma,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,AJANTPHARM
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ABSLAMC,6018,NSE_EQ,EQUITY,Aditya Birla Sun Life AMC,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ABSLAMC
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,CASTROLIND,1250,NSE_EQ,EQUITY,Castrol,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,CASTROLIND
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,CGPOWER,760,NSE_EQ,EQUITY,CG Power & Industrial Solutions,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,CGPOWER
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ARE&M,100,NSE_EQ,EQUITY,Amara Raja Energy & Mobility,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ARE&M
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,SCHAEFFLER,1011,NSE_EQ,EQUITY,Schaeffler India,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,SCHAEFFLER
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,WAAREEENER,25907,NSE_EQ,EQUITY,Waaree Energies,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,WAAREEENER
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,SUPREMEIND,3363,NSE_EQ,EQUITY,Supreme Industries,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,SUPREMEIND
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,FIVESTAR,12032,NSE_EQ,EQUITY,Five Star Business Finance,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,FIVESTAR
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,AIAENG,13086,NSE_EQ,EQUITY,AIA Engineering,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,AIAENG
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,GODFRYPHLP,1181,NSE_EQ,EQUITY,Godfrey Phillips,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,GODFRYPHLP
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,MGL,17534,NSE_EQ,EQUITY,Mahanagar Gas,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,MGL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,MAXHEALTH,22377,NSE_EQ,EQUITY,Max Healthcare Institute,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,MAXHEALTH
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,NAVA,4014,NSE_EQ,EQUITY,Nava,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,NAVA
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,IIFL,11809,NSE_EQ,EQUITY,IIFL Finance,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,IIFL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,360ONE,13061,NSE_EQ,EQUITY,360 One WAM,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,360ONE
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,TVSHLTD,29008,NSE_EQ,EQUITY,TVS Holdings,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,TVSHLTD
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ESCORTS,958,NSE_EQ,EQUITY,Escorts Kubota,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ESCORTS
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,HEXT,29666,NSE_EQ,EQUITY,Hexaware Technologies,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,HEXT
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,REDINGTON,14255,NSE_EQ,EQUITY,Redington,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,REDINGTON
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,GUJGASLTD,10599,NSE_EQ,EQUITY,Gujarat Gas,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,GUJGASLTD
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,IRCTC,13611,NSE_EQ,EQUITY,IRCTC,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,IRCTC
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,LTTS,18564,NSE_EQ,EQUITY,L&T Technology Services,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,LTTS
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,PERSISTENT,18365,NSE_EQ,EQUITY,Persistent Systems,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,PERSISTENT
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,GSPL,,,,,,hemant_super_45 + hemant_good_45 + hemant_good_200,missing_security_id,GSPL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,IGL,11262,NSE_EQ,EQUITY,Indraprastha Gas,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,IGL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,LLOYDSME,17313,NSE_EQ,EQUITY,Lloyds Metals & Energy,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,LLOYDSME
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,CHAMBLFERT,637,NSE_EQ,EQUITY,Chambal Fertilisers & Chemicals,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,CHAMBLFERT
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,COROMANDEL,739,NSE_EQ,EQUITY,Coromandel International,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,COROMANDEL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,MPHASIS,4503,NSE_EQ,EQUITY,Mphasis,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,MPHASIS
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,IREDA,20261,NSE_EQ,EQUITY,IREDA,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,IREDA
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,PIIND,24184,NSE_EQ,EQUITY,PI Industries,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,PIIND
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,MRF,2277,NSE_EQ,EQUITY,MRF,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,MRF
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,NATCOPHARM,3918,NSE_EQ,EQUITY,Natco Pharma,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,NATCOPHARM
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ABB,13,NSE_EQ,EQUITY,ABB,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ABB
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,KARURVYSYA,1838,NSE_EQ,EQUITY,Karur Vysya Bank,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,KARURVYSYA
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,MANKIND,15380,NSE_EQ,EQUITY,Mankind Pharma,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,MANKIND
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,CUMMINSIND,1901,NSE_EQ,EQUITY,Cummins,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,CUMMINSIND
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,BAJAJHFL,25270,NSE_EQ,EQUITY,Bajaj Housing Finance,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,BAJAJHFL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,MANAPPURAM,19061,NSE_EQ,EQUITY,Manappuram Finance,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,MANAPPURAM
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,SBICARD,17971,NSE_EQ,EQUITY,SBI Cards,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,SBICARD
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,DIVISLAB,10940,NSE_EQ,EQUITY,Divis Laboratories,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,DIVISLAB
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,CHOLAHLDNG,21740,NSE_EQ,EQUITY,Cholamandalam Financial Holdings,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,CHOLAHLDNG
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,J&KBANK,5633,NSE_EQ,EQUITY,Jammu & Kashmir Bank,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,J&KBANK
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ALKEM,11703,NSE_EQ,EQUITY,Alkem Laboratories,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ALKEM
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,SIEMENS,3150,NSE_EQ,EQUITY,Siemens,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,SIEMENS
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,GESHIP,13776,NSE_EQ,EQUITY,Great Eastern Shipping Company,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,GESHIP
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ACC,22,NSE_EQ,EQUITY,ACC,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ACC
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,OBEROIRLTY,20242,NSE_EQ,EQUITY,Oberoi Realty,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,OBEROIRLTY
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,VBL,18921,NSE_EQ,EQUITY,Varun Beverages,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,VBL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,DMART,19913,NSE_EQ,EQUITY,Avenue Supermarts DMart,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,DMART
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,MAZDOCK,509,NSE_EQ,EQUITY,Mazagon Dock Shipbuilders,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,MAZDOCK
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,LUPIN,10440,NSE_EQ,EQUITY,Lupin,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,LUPIN
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,PETRONET,11351,NSE_EQ,EQUITY,Petronet LNG,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,PETRONET
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,NATIONALUM,6364,NSE_EQ,EQUITY,NALCO,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,NATIONALUM
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,AIIL,23553,NSE_EQ,EQUITY,Authum Inv & Infr,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,AIIL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,CHOLAFIN,685,NSE_EQ,EQUITY,Cholamandalam Investment,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,CHOLAFIN
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,ZYDUSLIFE,7929,NSE_EQ,EQUITY,Zydus Life Science,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,ZYDUSLIFE
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,LTIM,,,,,,hemant_super_45 + hemant_good_45 + hemant_good_200,missing_security_id,LTIM
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,MUTHOOTFIN,23650,NSE_EQ,EQUITY,Muthoot Finance,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,MUTHOOTFIN
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,CIPLA,694,NSE_EQ,EQUITY,Cipla,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,CIPLA
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,BEL,383,NSE_EQ,EQUITY,Bharat Electronics,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,BEL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,LICHSGFIN,1997,NSE_EQ,EQUITY,LIC Housing Finance,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,LICHSGFIN
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,MAHABANK,11377,NSE_EQ,EQUITY,Bank of Maharashtra,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,MAHABANK
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,DRREDDY,881,NSE_EQ,EQUITY,Dr Reddys Laboratories,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,DRREDDY
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,HYUNDAI,25844,NSE_EQ,EQUITY,Hyundai Motor India,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,HYUNDAI
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,NMDC,15332,NSE_EQ,EQUITY,NMDC,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,NMDC
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,INDUSINDBK,5258,NSE_EQ,EQUITY,Indusind Bank,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,INDUSINDBK
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,GICRE,277,NSE_EQ,EQUITY,GIC of India,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,GICRE
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,SHRIRAMFIN,4306,NSE_EQ,EQUITY,Shriram Finance,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,SHRIRAMFIN
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,HAL,2303,NSE_EQ,EQUITY,Hindustan Aeronautics,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,HAL
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,INDIANB,14309,NSE_EQ,EQUITY,Indian Bank,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,INDIANB
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,SUNPHARMA,3351,NSE_EQ,EQUITY,Sun Pharmaceutical,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,SUNPHARMA
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,MARUTI,10999,NSE_EQ,EQUITY,Maruti Suzuki,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,MARUTI
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,RECLTD,15355,NSE_EQ,EQUITY,REC,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,RECLTD
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,UNIONBANK,10753,NSE_EQ,EQUITY,Union Bank of India,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,UNIONBANK
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,CANBK,10794,NSE_EQ,EQUITY,Canara Bank,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,CANBK
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,BANKBARODA,4668,NSE_EQ,EQUITY,Bank of Baroda,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,BANKBARODA
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,PFC,14299,NSE_EQ,EQUITY,Power Finance Corporation,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,PFC
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,COALINDIA,20374,NSE_EQ,EQUITY,Coal India,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,COALINDIA
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,LICI,9480,NSE_EQ,EQUITY,LIC of India,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,LICI
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,SBIN,3045,NSE_EQ,EQUITY,State Bank of India,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,SBIN
+hemant_super_good_200_union,Hemant Super + Good 45 + Good 200,BLS,17279,NSE_EQ,EQUITY,BLS International Services,EQ,hemant_super_45 + hemant_good_45 + hemant_good_200,mapped,BLS

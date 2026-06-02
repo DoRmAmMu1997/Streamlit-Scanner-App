@@ -301,6 +301,22 @@ def test_refresh_universe_files_builds_hemant_super_good_union(tmp_path):
     assert 43 <= len(saved) <= 86
 
 
+def test_refresh_universe_files_builds_hemant_super_good_200_union(tmp_path):
+    written = refresh_universe_files(
+        universe_keys=["hemant_super_good_200_union"],
+        universe_dir=tmp_path,
+        instrument_master=fake_instrument_master(),
+    )
+
+    assert written["hemant_super_good_200_union"].exists()
+    saved = pd.read_csv(written["hemant_super_good_200_union"], dtype=str).fillna("")
+    assert saved["universe"].unique().tolist() == ["hemant_super_good_200_union"]
+    assert saved["universe_name"].unique().tolist() == ["Hemant Super + Good 45 + Good 200"]
+    assert saved["symbol"].is_unique
+    assert saved.loc[saved["symbol"].eq("TCS"), "security_id"].item() == "11536"
+    assert len(saved) >= 43
+
+
 def test_load_instrument_master_writes_dated_snapshot(tmp_path, monkeypatch):
     # The startup path downloads Dhan's master once and writes a dated local CSV.
     # The test injects fake data so it never touches the network.

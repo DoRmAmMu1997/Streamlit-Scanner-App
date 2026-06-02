@@ -237,11 +237,10 @@ def _escape_cell(value: Any) -> Any:
 def _redact_secrets(text: str) -> str:
     """Strip any loaded credentials from an error message before display.
 
-    Masks the Dhan access token / client code. The Dhan SDK occasionally
-    embeds request payloads (including auth headers) in its exception
-    messages, so we replace those values with a fixed mask before passing
-    text to `st.error(...)`. The Check Fundamentals agent authenticates via
-    your Claude subscription (no API key), so there is no LLM key to redact.
+    Masks the Dhan access token / client code plus optional web-search or LLM
+    provider keys that may be present in the environment. SDKs occasionally
+    embed request payloads in exception messages, so we replace those values
+    with a fixed mask before passing text to `st.error(...)`.
     """
     if not isinstance(text, str) or not text:
         return text
@@ -250,6 +249,15 @@ def _redact_secrets(text: str) -> str:
     dhan = get_dhan_credentials(required=False)
     if dhan is not None:
         secrets.extend(filter(None, [dhan.access_token, dhan.client_code]))
+    for env_name in (
+        "SERPAPI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "CLAUDE_API_KEY",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    ):
+        value = os.getenv(env_name)
+        if value:
+            secrets.append(value)
 
     if not secrets:
         return text
