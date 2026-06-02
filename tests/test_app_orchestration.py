@@ -7,6 +7,8 @@ browser, opening a Dhan connection, or rendering real UI widgets.
 
 from __future__ import annotations
 
+import os
+import time
 from datetime import date as real_date
 from datetime import timedelta
 from types import SimpleNamespace
@@ -43,6 +45,16 @@ class _FakeEmpty:
 
     def empty(self):
         pass
+
+
+class _FakeExpander:
+    """Context manager fake for Streamlit expanders used in app tests."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc_info):
+        return False
 
 
 class _FakeDataLoader:
@@ -103,3 +115,92 @@ def test_execute_screener_uses_selected_lookback_days(monkeypatch):
     assert cache is not None
     assert captured_params["end_date"] == real_date(2026, 6, 2)
     assert captured_params["start_date"] == real_date(2026, 6, 2) - timedelta(days=30)
+
+
+def test_universe_table_defers_status_loading_until_user_opts_in(monkeypatch):
+    """Collapsed universe details should not scan every universe on each rerun."""
+
+    def fail_if_loaded():
+        raise AssertionError("universe statuses should load only after opt-in")
+
+    monkeypatch.setattr(app, "all_universe_statuses", fail_if_loaded)
+    monkeypatch.setattr(
+        app,
+        "st",
+        SimpleNamespace(
+            expander=lambda *_args, **_kwargs: _FakeExpander(),
+            toggle=lambda *_args, **_kwargs: False,
+            dataframe=lambda *_args, **_kwargs: None,
+        ),
+    )
+
+    app.render_universe_table()
+
+
+def test_chart_payload_cache_reuses_html_until_cache_file_changes(monkeypatch, tmp_path):
+    """Chart reruns should reuse HTML while candles, params, and screener stay stable."""
+    chart_file = tmp_path / "DEMO_1.parquet"
+    chart_file.write_bytes(b"first")
+
+    class FakeLoader:
+        def __init__(self):
+            self.read_calls = 0
+
+        def cache_path(self, symbol, security_id):
+            return chart_file
+
+        def read_cached_history(self, symbol, security_id):
+            self.read_calls += 1
+            return pd.DataFrame(
+                {
+                    "timestamp": [pd.Timestamp("2026-01-01")],
+                    "open": [10.0],
+                    "high": [11.0],
+                    "low": [9.0],
+                    "close": [10.5],
+                }
+            )
+
+    build_calls = 0
+
+    def build_chart(candles, params):
+        nonlocal build_calls
+        build_calls += 1
+        return {"title": f"demo-{params['period']}", "height": 321, "panes": []}
+
+    selected = ScreenerDefinition(
+        key="demo",
+        name="Demo",
+        description="Test-only screener",
+        universe="demo_universe",
+        timeframe="daily",
+        lookback_days=30,
+        default_params={"period": 20},
+        module_name="screeners.demo",
+        run=lambda *_args, **_kwargs: pd.DataFrame(),
+        build_chart=build_chart,
+    )
+    loader = FakeLoader()
+    monkeypatch.setattr(app, "st", SimpleNamespace(session_state={}))
+    monkeypatch.setattr(app, "render_chart_html", lambda spec: f"<html>{spec['title']}</html>")
+
+    first = app._get_or_build_chart_payload(selected, "DEMO", "1", loader, {"period": 20})
+    second = app._get_or_build_chart_payload(selected, "DEMO", "1", loader, {"period": 20})
+
+    assert first is not None
+    assert second is not None
+    assert first.html == second.html
+    assert second.from_cache is True
+    assert loader.read_calls == 1
+    assert build_calls == 1
+
+    # A changed parquet mtime means the underlying candles may have changed, so
+    # the chart cache must miss and rebuild.
+    newer = time.time() + 5
+    os.utime(chart_file, (newer, newer))
+    third = app._get_or_build_chart_payload(selected, "DEMO", "1", loader, {"period": 20})
+
+    assert third is not None
+    assert third.from_cache is False
+    assert loader.read_calls == 2
+    assert build_calls == 2

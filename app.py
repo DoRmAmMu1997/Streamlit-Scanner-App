@@ -28,9 +28,12 @@ from __future__ import annotations
 # `st.write(...)` content, which would push the page title below it. Keep
 # module documentation in `#` comments here.
 
+import hashlib
+import json
 import logging
 import os
 import sys
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -291,8 +294,15 @@ def _inject_css() -> None:
     st.markdown(_CUSTOM_CSS, unsafe_allow_html=True)
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def cache_summary(cache_dir: Path = DAILY_CACHE_DIR) -> dict[str, object]:
-    """Count cached candle files so the UI can show whether caching is active."""
+    """Count cached candle files so the UI can show whether caching is active.
+
+    The cache directory can contain hundreds of Parquet files. Streamlit reruns
+    the script for ordinary widget interactions, so caching this small summary
+    for 30 seconds keeps row clicks and dropdown changes from repeatedly
+    walking the filesystem.
+    """
     if not cache_dir.exists():
         return {"files": 0, "size_mb": 0.0}
 
@@ -303,8 +313,14 @@ def cache_summary(cache_dir: Path = DAILY_CACHE_DIR) -> dict[str, object]:
     return {"files": len(files), "size_mb": round(size / (1024 * 1024), 2)}
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def _universe_mtime(universe_key: str) -> str:
-    """Return a human-readable last-modified timestamp for a universe CSV."""
+    """Return a human-readable last-modified timestamp for a universe CSV.
+
+    This is cached briefly for the same reason as `cache_summary`: the value is
+    display-only, and a 30-second delay is a good trade-off for a smoother app
+    while a user is interacting with scan results.
+    """
     path = universe_file_path(universe_key)
     if not path.exists():
         return "never"
@@ -312,10 +328,27 @@ def _universe_mtime(universe_key: str) -> str:
     return modified.strftime("%Y-%m-%d %H:%M")
 
 
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_universe_status(universe_key: str) -> dict[str, object]:
+    """Return one universe status with a short rerun-friendly cache.
+
+    `universe_status(...)` touches the CSV on disk. Caching the result keeps the
+    status strip responsive when a table selection or chart dropdown causes a
+    Streamlit rerun.
+    """
+    return universe_status(universe_key)
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_all_universe_statuses() -> tuple[dict[str, object], ...]:
+    """Return all universe statuses only when the details table is requested."""
+    return tuple(all_universe_statuses())
+
+
 def show_status_panel(selected: ScreenerDefinition) -> None:
     """Render the health checks a user needs before pressing Run."""
     creds = credential_status()
-    universe = universe_status(selected.universe)
+    universe = _cached_universe_status(selected.universe)
     cache = cache_summary()
 
     universe_display = UNIVERSE_CONFIG.get(selected.universe, {}).get(
@@ -371,8 +404,18 @@ def show_status_panel(selected: ScreenerDefinition) -> None:
 def render_universe_table() -> None:
     """Show detailed universe-file status without taking over the main screen."""
     with st.expander("Universe file status", expanded=False):
-        statuses = all_universe_statuses()
-        st.dataframe(pd.DataFrame(statuses), width="stretch", hide_index=True)
+        show_details = st.toggle(
+            "Show details",
+            value=False,
+            key="show_universe_file_status",
+        )
+        if not show_details:
+            # A collapsed expander still executes in Streamlit. This toggle
+            # keeps the expensive "read every universe CSV" step lazy until the
+            # user asks for the detailed table.
+            return
+        statuses = _cached_all_universe_statuses()
+        st.dataframe(pd.DataFrame(list(statuses)), width="stretch", hide_index=True)
 
 
 # BUY/SELL gets a colored emoji badge. We render a plain DataFrame (not a
@@ -1031,6 +1074,167 @@ def _render_scan_output(selected: ScreenerDefinition, cache: dict[str, Any]) -> 
             st.dataframe(compute_df, width="stretch", hide_index=True)
 
 
+_CHART_HTML_CACHE_STATE_KEY = "chart_html_cache"
+_CHART_HTML_CACHE_LIMIT = 16
+
+
+@dataclass(frozen=True)
+class _ChartRenderPayload:
+    """Rendered chart HTML plus metadata needed by Streamlit's embed call."""
+
+    html: str
+    height: int
+    from_cache: bool = False
+
+
+def _json_cache_default(value: Any) -> str:
+    """Serialize non-JSON values in chart parameters for cache-key hashing."""
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    return str(value)
+
+
+def _chart_params_digest(params_for_chart: dict[str, Any]) -> str:
+    """Return a stable digest for chart-affecting screener parameters.
+
+    Beginner note: a chart cache key cannot store a raw dict directly because
+    dict ordering and date objects can vary across reruns. We convert the dict
+    into sorted JSON, then hash that string into a compact key fragment.
+    """
+    payload = json.dumps(
+        params_for_chart,
+        sort_keys=True,
+        default=_json_cache_default,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _chart_file_token(data_loader, symbol: str, security_id: str) -> tuple[str, int | None]:
+    """Return the candle cache path and mtime used to invalidate chart HTML.
+
+    If a fresh prefetch updates the Parquet file, `st_mtime_ns` changes and the
+    chart cache key changes with it. That gives us a cheap invalidation signal
+    without reading the candle DataFrame on every rerun.
+    """
+    cache_path = getattr(data_loader, "cache_path", None)
+    if not callable(cache_path):
+        return ("no-cache-path", None)
+    path = Path(cache_path(symbol, security_id))
+    try:
+        return (str(path), path.stat().st_mtime_ns if path.exists() else None)
+    except OSError:
+        logger.warning("Could not stat chart cache path %s", path)
+        return (str(path), None)
+
+
+def _chart_html_cache_key(
+    selected: ScreenerDefinition,
+    chart_symbol: str,
+    security_id: str,
+    data_loader,
+    params_for_chart: dict[str, Any],
+) -> str:
+    """Build the session-state key for one rendered chart payload."""
+    path_text, mtime_ns = _chart_file_token(data_loader, chart_symbol, security_id)
+    raw_key = json.dumps(
+        {
+            "screener": selected.key,
+            "symbol": chart_symbol,
+            "security_id": security_id,
+            "path": path_text,
+            "mtime_ns": mtime_ns,
+            "params": _chart_params_digest(params_for_chart),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "chart-html::" + hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+
+def _chart_payload_store() -> dict[str, dict[str, Any]]:
+    """Return the bounded per-session chart HTML cache.
+
+    This lives in `st.session_state`, not `st.cache_data`, because the payload
+    depends on the selected screener's Python callable. Session-state caching is
+    simpler and avoids asking Streamlit to hash function objects.
+    """
+    store = st.session_state.setdefault(_CHART_HTML_CACHE_STATE_KEY, {})
+    if not isinstance(store, dict):
+        store = {}
+        st.session_state[_CHART_HTML_CACHE_STATE_KEY] = store
+    return store
+
+
+def _remember_chart_payload(
+    store: dict[str, dict[str, Any]],
+    cache_key: str,
+    payload: _ChartRenderPayload,
+) -> None:
+    """Save one chart payload while keeping session memory bounded."""
+    if cache_key not in store and len(store) >= _CHART_HTML_CACHE_LIMIT:
+        # Dicts preserve insertion order, so popping the first key discards the
+        # oldest chart this session cached. That prevents a long browsing
+        # session from accumulating unbounded HTML strings.
+        oldest_key = next(iter(store))
+        store.pop(oldest_key, None)
+    store[cache_key] = {"html": payload.html, "height": payload.height}
+
+
+def _get_or_build_chart_payload(
+    selected: ScreenerDefinition,
+    chart_symbol: str,
+    security_id: str,
+    data_loader,
+    params_for_chart: dict[str, Any],
+) -> _ChartRenderPayload | None:
+    """Return rendered chart HTML, reusing a session cache when possible.
+
+    A table row click or dropdown change causes Streamlit to rerun this file.
+    Without this helper, the app re-read candles, rebuilt indicators, serialized
+    the chart spec, and regenerated HTML every time the same row stayed
+    selected. The key includes the candle cache file mtime and chart params, so
+    a real data or parameter change still rebuilds.
+    """
+    if selected.build_chart is None:
+        return None
+
+    cache_key = _chart_html_cache_key(
+        selected,
+        chart_symbol,
+        security_id,
+        data_loader,
+        params_for_chart,
+    )
+    store = _chart_payload_store()
+    cached = store.get(cache_key)
+    if cached is not None:
+        try:
+            return _ChartRenderPayload(
+                html=str(cached["html"]),
+                height=int(cached["height"]),
+                from_cache=True,
+            )
+        except (KeyError, TypeError, ValueError):
+            # A malformed session-state value should not break the chart pane;
+            # drop it and rebuild from disk below.
+            store.pop(cache_key, None)
+
+    candles = data_loader.read_cached_history(chart_symbol, security_id)
+    if candles.empty:
+        return None
+
+    spec = selected.build_chart(candles, params_for_chart)
+    payload = _ChartRenderPayload(
+        html=render_chart_html(spec),
+        height=int(spec.get("height", 640)),
+    )
+    _remember_chart_payload(store, cache_key, payload)
+    return payload
+
+
 def _render_results_with_chart(
     selected: ScreenerDefinition,
     results: pd.DataFrame,
@@ -1120,27 +1324,29 @@ def _render_results_with_chart(
         return chart_symbol
 
     data_loader: DailyDataLoader = cache["data_loader"]
-    candles = data_loader.read_cached_history(chart_symbol, security_id)
-    if candles.empty:
+    try:
+        chart_payload = _get_or_build_chart_payload(
+            selected,
+            chart_symbol,
+            security_id,
+            data_loader,
+            cache["params_for_chart"],
+        )
+    except Exception as exc:
+        logger.exception("build_chart failed for %s on %s", selected.key, chart_symbol)
+        st.error(f"Could not build chart: {_redact_secrets(str(exc))}")
+        return chart_symbol
+
+    if chart_payload is None:
         st.info(
             f"No cached candles for `{chart_symbol}`. Run `python app.py` to "
             "backfill the local cache for every stock in the union."
         )
         return chart_symbol
 
-    try:
-        # The screener returns a chart "spec" (plain dict); `render_chart_html`
-        # turns it into a TradingView Lightweight Charts widget.
-        spec = selected.build_chart(candles, cache["params_for_chart"])
-        chart_html = render_chart_html(spec)
-    except Exception as exc:
-        logger.exception("build_chart failed for %s on %s", selected.key, chart_symbol)
-        st.error(f"Could not build chart: {_redact_secrets(str(exc))}")
-        return chart_symbol
-
     # The chart is an embedded Lightweight Charts widget. Its price scale is
     # natively drag-to-scale — exactly the TradingView-style Y-axis zoom.
-    components.html(chart_html, height=int(spec.get("height", 640)), scrolling=False)
+    components.html(chart_payload.html, height=chart_payload.height, scrolling=False)
     st.caption(
         "Chart controls: drag the price scale (right edge) to scale the Y-axis · "
         "drag the chart to pan · scroll to zoom · double-click to reset."
