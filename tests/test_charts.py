@@ -100,6 +100,15 @@ def test_render_chart_html_embeds_cdn_and_spec():
     assert "Title" in html
 
 
+def test_render_chart_html_uses_subresource_integrity_for_cdn_asset():
+    """The browser should verify the pinned chart asset before executing it."""
+    html = charts.render_chart_html(charts.candlestick_with_volume(_candles(), "Title"))
+
+    assert 'integrity="sha384-' in html
+    assert 'crossorigin="anonymous"' in html
+    assert 'referrerpolicy="no-referrer"' in html
+
+
 def test_render_chart_html_neutralizes_script_breakout():
     # A title containing "</script>" must not be able to close the embedded
     # <script> block. The template itself has exactly two </script> tags (the

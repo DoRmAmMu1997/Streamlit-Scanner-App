@@ -82,6 +82,34 @@ class _FakeLoader:
                                cache_hits=0, cache_misses=len(selected))
 
 
+class _StreamingLoader:
+    """Fake loader that exposes the streaming iterator but no batch method."""
+
+    def __init__(self, frames, events):
+        self.frames = frames
+        self.events = events
+        self.last_failures = []
+        self.last_cache_hits = 0
+        self.last_cache_misses = 0
+        self.last_api_attempts = 0
+        self.last_rate_limit_retries = 0
+
+    def load_universe_history(self, *args, **kwargs):
+        raise AssertionError("BaseScanner.run should prefer iter_universe_history")
+
+    def iter_universe_history(self, universe_df, start_date, end_date,
+                              max_symbols=None, force_refresh=False, progress_callback=None):
+        selected = dict(self.frames)
+        if max_symbols is not None:
+            selected = dict(list(selected.items())[: int(max_symbols)])
+        total = len(selected)
+        for index, (symbol, candles) in enumerate(selected.items(), start=1):
+            self.events.append(("yield", symbol))
+            if progress_callback is not None:
+                progress_callback(index, total, symbol)
+            yield SimpleNamespace(symbol=symbol, candles=candles, from_cache=True, failure=None)
+
+
 def _candles(closes):
     return pd.DataFrame({
         "timestamp": pd.date_range("2026-01-01", periods=len(closes), freq="D"),
@@ -256,6 +284,30 @@ def test_run_reports_compute_failures_through_callback():
             "message": "intentional failure on A",
         }
     ]
+
+
+def test_run_uses_streaming_loader_when_available():
+    """BaseScanner should compute rows as frames stream in, not after a full batch."""
+    events = []
+
+    class _RecordingScanner(_SimpleScanner):
+        def compute_signal(self, symbol, candles, params):
+            events.append(("compute", symbol))
+            return super().compute_signal(symbol, candles, params)
+
+    frames = {
+        "A": _candles([10.0, 10.0]),
+        "B": _candles([10.0, 10.0]),
+    }
+
+    result = _RecordingScanner().run(
+        pd.DataFrame(),
+        _StreamingLoader(frames, events),
+        _params(),
+    )
+
+    assert result["symbol"].tolist() == ["A", "B"]
+    assert events == [("yield", "A"), ("compute", "A"), ("yield", "B"), ("compute", "B")]
 
 
 # ---------------------------------------------------------------------------
