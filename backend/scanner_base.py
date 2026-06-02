@@ -148,6 +148,43 @@ class BaseScanner(ABC):
         """
         raise NotImplementedError
 
+    def _compute_signal_safely(
+        self,
+        symbol: str,
+        candles: pd.DataFrame,
+        params: dict,
+        compute_failure_callback,
+    ) -> dict | None:
+        """Run one symbol while keeping the wider scan alive.
+
+        Beginner note: screeners scan many symbols. If indicator math fails for
+        one malformed candle frame, the user still deserves results for every
+        other symbol. The streaming path uses this helper to match the legacy
+        batch fallback's "log, report, continue" behavior.
+        """
+        try:
+            return self.compute_signal(symbol, candles, params)
+        except Exception as exc:  # noqa: BLE001 - scan resiliency is intentional here
+            logger.warning(
+                "%s.compute_signal failed for %s: %s",
+                type(self).__name__,
+                symbol,
+                exc,
+            )
+            if callable(compute_failure_callback):
+                # The UI can show this concise row in "Run details" while the
+                # logger keeps the traceback for developers. This turns "empty
+                # shortlist because every compute failed" into an explainable
+                # run instead of a mystery.
+                compute_failure_callback(
+                    {
+                        "symbol": symbol,
+                        "scanner": type(self).__name__,
+                        "message": str(exc),
+                    }
+                )
+            return None
+
     # ------------------------------------------------------------------
     # Template method: this is what the Streamlit UI calls
     # ------------------------------------------------------------------
@@ -164,6 +201,38 @@ class BaseScanner(ABC):
         BUY/SELL signal, empty DataFrame when no symbol matches) is fixed
         so the UI does not need per-screener special cases.
         """
+        rows: list[dict] = []
+        compute_failure_callback = params.get("compute_failure_callback")
+
+        iter_history = getattr(data_loader, "iter_universe_history", None)
+        if callable(iter_history):
+            # Streaming is the preferred path for large universes: the loader
+            # yields one symbol at a time, and the screener computes the result
+            # immediately instead of first building a huge `{symbol: candles}`
+            # dictionary. Older loaders still use the batch fallback below.
+            for item in iter_history(
+                universe_df=universe_df,
+                start_date=params["start_date"],
+                end_date=params["end_date"],
+                max_symbols=params.get("max_symbols"),
+                force_refresh=bool(params.get("force_refresh", False)),
+                progress_callback=params.get("progress_callback"),
+            ):
+                if getattr(item, "failure", None) is not None:
+                    # Loader failures are already stored on the loader for the
+                    # Streamlit status panel. The scanner skips failed symbols
+                    # and keeps working through the rest of the stream.
+                    continue
+                signal = self._compute_signal_safely(
+                    getattr(item, "symbol", "UNKNOWN"),
+                    getattr(item, "candles", pd.DataFrame()),
+                    params,
+                    compute_failure_callback,
+                )
+                if signal is not None:
+                    rows.append(signal)
+            return pd.DataFrame(rows, columns=self.result_columns)
+
         # Centralized data fetching: every screener uses the same loader
         # contract. The loader handles caching, rate limits, and failures.
         batch = data_loader.load_universe_history(
@@ -175,8 +244,6 @@ class BaseScanner(ABC):
             progress_callback=params.get("progress_callback"),
         )
 
-        rows: list[dict] = []
-        compute_failure_callback = params.get("compute_failure_callback")
         for symbol, candles in batch.frames.items():
             try:
                 signal = self.compute_signal(symbol, candles, params)

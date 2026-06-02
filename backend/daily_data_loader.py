@@ -7,6 +7,7 @@ handling. This module centralizes that work so screeners can stay small.
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import re
 import time
@@ -87,6 +88,22 @@ class BatchLoadResult:
     rate_limit_retries: int = 0
 
 
+@dataclass
+class HistoryLoadItem:
+    """One streamed loader event for a single symbol.
+
+    `load_universe_history(...)` still returns a batch object for old callers.
+    New streaming callers can consume these items one at a time, compute the
+    screener result immediately, and avoid holding every candle frame in a big
+    dictionary before strategy work starts.
+    """
+
+    symbol: str
+    candles: pd.DataFrame = field(default_factory=pd.DataFrame)
+    from_cache: bool = False
+    failure: dict[str, object] | None = None
+
+
 class DailyDataLoader:
     """
     Fetch daily candles through DhanDataClient and cache them as local Parquet.
@@ -102,6 +119,8 @@ class DailyDataLoader:
         cache_dir: Path | str = DAILY_CACHE_DIR,
         request_delay_seconds: float | None = None,
         rate_limit_retry_delays: list[float] | None = None,
+        fetch_timeout_seconds: float | None = None,
+        max_consecutive_failures: int | None = None,
         sleep_func: Callable[[float], None] = time.sleep,
     ):
         # The Dhan client is optional so cache-only callers (the legacy-file
@@ -121,6 +140,12 @@ class DailyDataLoader:
             if rate_limit_retry_delays is None
             else [max(0.0, float(delay)) for delay in rate_limit_retry_delays]
         )
+        self.fetch_timeout_seconds = (
+            None
+            if fetch_timeout_seconds is None or float(fetch_timeout_seconds) <= 0
+            else float(fetch_timeout_seconds)
+        )
+        self.max_consecutive_failures = max(0, int(max_consecutive_failures or 0))
         self.sleep_func = sleep_func
         # These fields remember the last run for Streamlit status text. They are
         # not used for trading decisions.
@@ -422,7 +447,7 @@ class DailyDataLoader:
             try:
                 self._api_attempts += 1
                 self.last_api_attempts = self._api_attempts
-                return self.client.fetch_daily_candles(
+                return self._call_client_fetch(
                     security_id=security_id,
                     exchange_segment=exchange_segment,
                     instrument_type=instrument_type,
@@ -437,6 +462,142 @@ class DailyDataLoader:
                 self._rate_limit_retries += 1
                 self.last_rate_limit_retries = self._rate_limit_retries
                 self._sleep(delay)
+
+    def _call_client_fetch(
+        self,
+        *,
+        security_id: str,
+        exchange_segment: str,
+        instrument_type: str,
+        from_date: date | datetime | str,
+        to_date: date | datetime | str,
+    ) -> pd.DataFrame:
+        """Call Dhan with an optional wall-clock timeout.
+
+        The Dhan SDK does not expose a documented timeout knob here, so the app
+        wraps the blocking call in a tiny worker thread when a timeout is set.
+        Python cannot forcibly kill a running SDK call, but `shutdown(wait=False)`
+        lets the scanner move on instead of blocking the Streamlit run forever.
+        """
+        if self.fetch_timeout_seconds is None:
+            return self.client.fetch_daily_candles(
+                security_id=security_id,
+                exchange_segment=exchange_segment,
+                instrument_type=instrument_type,
+                from_date=from_date,
+                to_date=to_date,
+            )
+
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(
+            self.client.fetch_daily_candles,
+            security_id=security_id,
+            exchange_segment=exchange_segment,
+            instrument_type=instrument_type,
+            from_date=from_date,
+            to_date=to_date,
+        )
+        try:
+            return future.result(timeout=self.fetch_timeout_seconds)
+        except concurrent.futures.TimeoutError as exc:
+            future.cancel()
+            raise TimeoutError(
+                f"Dhan daily fetch timed out after {self.fetch_timeout_seconds:.2f}s"
+            ) from exc
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def _work_rows(self, universe_df: pd.DataFrame, max_symbols: int | None) -> list[dict]:
+        """Return mapped universe rows that this loader can actually fetch."""
+        if universe_df.empty:
+            return []
+        work = universe_df.copy()
+        if "mapping_status" in work.columns:
+            # Only mapped rows have a Dhan security_id. Missing mappings are
+            # kept in the CSV for visibility, but cannot be fetched.
+            work = work.loc[work["mapping_status"].astype(str).str.lower().eq("mapped")].copy()
+        if max_symbols is not None and int(max_symbols) > 0:
+            # Tests and CLI callers may still cap the batch; the UI does not.
+            work = work.head(int(max_symbols)).copy()
+        return work.to_dict("records")
+
+    def iter_universe_history(
+        self,
+        universe_df: pd.DataFrame,
+        start_date: date | datetime | str,
+        end_date: date | datetime | str,
+        max_symbols: int | None = None,
+        force_refresh: bool = False,
+        progress_callback: ProgressCallback | None = None,
+    ):
+        """Yield one symbol's candle frame at a time.
+
+        This is the scalable path for screeners: a strategy can compute as soon
+        as the first symbol is loaded instead of waiting for the entire universe
+        to be stored in memory. The batch API below is preserved for older
+        callers and simply consumes this iterator into a dictionary.
+        """
+        self._api_attempts = 0
+        self._rate_limit_retries = 0
+        self.last_api_attempts = 0
+        self.last_rate_limit_retries = 0
+
+        result = BatchLoadResult()
+        rows = self._work_rows(universe_df, max_symbols)
+        total = len(rows)
+        consecutive_failures = 0
+
+        for index, row in enumerate(rows, start=1):
+            symbol = str(row.get("symbol", "")).strip().upper() or "UNKNOWN"
+            if self.max_consecutive_failures and consecutive_failures >= self.max_consecutive_failures:
+                # The circuit breaker protects the user and Dhan after repeated
+                # broker/API failures. We still yield a failure item per skipped
+                # symbol so progress and diagnostics stay complete.
+                failure = {
+                    "symbol": symbol,
+                    "security_id": row.get("security_id", ""),
+                    "message": (
+                        "Dhan circuit breaker is open after "
+                        f"{consecutive_failures} consecutive failure(s)."
+                    ),
+                }
+                result.failures.append(failure)
+                item = HistoryLoadItem(symbol=symbol, failure=failure)
+            else:
+                try:
+                    candles, from_cache = self.get_daily_history(
+                        row,
+                        start_date=start_date,
+                        end_date=end_date,
+                        force_refresh=force_refresh,
+                    )
+                    consecutive_failures = 0
+                    if from_cache:
+                        result.cache_hits += 1
+                    else:
+                        result.cache_misses += 1
+                    item = HistoryLoadItem(symbol=symbol, candles=candles, from_cache=from_cache)
+                except Exception as exc:
+                    consecutive_failures += 1
+                    logger.exception("Failed to load history for %s", symbol)
+                    failure = {
+                        "symbol": symbol,
+                        "security_id": row.get("security_id", ""),
+                        "message": str(exc),
+                    }
+                    result.failures.append(failure)
+                    item = HistoryLoadItem(symbol=symbol, failure=failure)
+
+            if progress_callback is not None:
+                try:
+                    progress_callback(index, total, symbol)
+                except Exception:
+                    logger.exception("Progress callback raised for %s", symbol)
+            yield item
+
+        result.api_attempts = self._api_attempts
+        result.rate_limit_retries = self._rate_limit_retries
+        self._remember(result)
 
     def load_universe_history(
         self,
@@ -457,64 +618,23 @@ class DailyDataLoader:
         with `(completed_count, total_count, current_symbol)`. The Streamlit UI
         uses that to drive a live progress bar; tests pass `None`.
         """
-        self._api_attempts = 0
-        self._rate_limit_retries = 0
-        self.last_api_attempts = 0
-        self.last_rate_limit_retries = 0
-
-        if universe_df.empty:
-            result = BatchLoadResult()
-            self._remember(result)
-            return result
-
-        work = universe_df.copy()
-        if "mapping_status" in work.columns:
-            # Only mapped rows have a Dhan security_id. Missing mappings are
-            # kept in the CSV for visibility, but cannot be fetched.
-            work = work.loc[work["mapping_status"].astype(str).str.lower().eq("mapped")].copy()
-        if max_symbols is not None and int(max_symbols) > 0:
-            # Tests and CLI callers may still cap the batch; the UI does not.
-            work = work.head(int(max_symbols)).copy()
-
-        total = len(work)
         result = BatchLoadResult()
-        for index, row in enumerate(work.to_dict("records"), start=1):
-            symbol = str(row.get("symbol", "")).strip().upper() or "UNKNOWN"
-            try:
-                candles, from_cache = self.get_daily_history(
-                    row,
-                    start_date=start_date,
-                    end_date=end_date,
-                    force_refresh=force_refresh,
-                )
-                if from_cache:
-                    result.cache_hits += 1
-                else:
-                    result.cache_misses += 1
-                result.frames[symbol] = candles
-            except Exception as exc:
-                # One bad symbol should not kill the whole scan. The screener
-                # can still work with the symbols that fetched successfully.
-                # We log with `exception(...)` so the full traceback reaches the
-                # terminal, but the UI only shows a short message.
-                logger.exception("Failed to load history for %s", symbol)
-                result.failures.append(
-                    {
-                        "symbol": symbol,
-                        "security_id": row.get("security_id", ""),
-                        "message": str(exc),
-                    }
-                )
-
-            if progress_callback is not None:
-                # The callback runs after each symbol, regardless of cache hit /
-                # miss / failure, so the UI bar always advances monotonically.
-                try:
-                    progress_callback(index, total, symbol)
-                except Exception:
-                    # A broken UI callback must never crash the batch. Log and
-                    # carry on so the screener still receives its frames.
-                    logger.exception("Progress callback raised for %s", symbol)
+        for item in self.iter_universe_history(
+            universe_df,
+            start_date,
+            end_date,
+            max_symbols=max_symbols,
+            force_refresh=force_refresh,
+            progress_callback=progress_callback,
+        ):
+            if item.failure is not None:
+                result.failures.append(item.failure)
+                continue
+            if item.from_cache:
+                result.cache_hits += 1
+            else:
+                result.cache_misses += 1
+            result.frames[item.symbol] = item.candles
 
         result.api_attempts = self._api_attempts
         result.rate_limit_retries = self._rate_limit_retries
@@ -553,4 +673,46 @@ class DailyDataLoader:
                     deleted += 1
                 except OSError:
                     logger.exception("Could not delete legacy cache file %s", path)
+        return deleted
+
+    def cleanup_stale_cache_files(
+        self,
+        *,
+        max_age_days: int,
+        now: datetime | None = None,
+    ) -> int:
+        """Remove old parquet cache files and orphan `.checked` markers.
+
+        Daily cache files can grow stale when symbols leave a universe or a
+        security ID changes. This helper is intentionally explicit: callers
+        choose the age threshold, and only daily parquet files plus their
+        sidecar markers are touched.
+        """
+        if not self.cache_dir.exists():
+            return 0
+        now = now or datetime.now()
+        cutoff = now - timedelta(days=max(1, int(max_age_days)))
+        targets: set[Path] = set()
+
+        for parquet in self.cache_dir.glob("*.parquet"):
+            modified = datetime.fromtimestamp(parquet.stat().st_mtime)
+            if modified < cutoff:
+                targets.add(parquet)
+                checked = parquet.with_suffix(".checked")
+                if checked.exists():
+                    targets.add(checked)
+
+        for checked in self.cache_dir.glob("*.checked"):
+            # A checked marker without a parquet owner can never be used again,
+            # so remove it regardless of age.
+            if not checked.with_suffix(".parquet").exists():
+                targets.add(checked)
+
+        deleted = 0
+        for path in sorted(targets):
+            try:
+                path.unlink()
+                deleted += 1
+            except OSError:
+                logger.exception("Could not delete stale cache file %s", path)
         return deleted
