@@ -1,0 +1,26 @@
+# Direct dependency pins used by local verification and GitHub Actions.
+#
+# Beginner note: `requirements.txt` says which packages the app needs.
+# `constraints.txt` says which exact direct versions we have verified together.
+# Install with `pip install -r requirements.txt -c constraints.txt` so routine
+# setup is repeatable, then refresh these pins deliberately during dependency
+# maintenance PRs.
+
+# Runtime application dependencies.
+streamlit==1.55.0
+pandas==2.3.3
+numpy==2.2.6
+pyarrow==23.0.1
+requests==2.33.1
+python-dotenv==1.2.1
+dhanhq==2.2.0
+beautifulsoup4==4.14.3
+lxml==5.3.0
+pdfplumber==0.11.9
+claude-agent-sdk==0.2.87
+
+# Developer and CI verification tools.
+pytest==9.0.2
+ruff==0.15.1
+bandit==1.9.4
+pip-audit==2.10.0

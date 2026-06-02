@@ -1,0 +1,54 @@
+name: Quality and security
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  verify:
+    name: Python quality and supply-chain checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install pinned direct dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # `requirements.txt` lists what to install; `constraints.txt` pins
+          # the direct versions this repo has verified together. Keeping the
+          # two concepts separate makes dependency updates deliberate.
+          python -m pip install -r requirements.txt -r requirements-dev.txt -c constraints.txt
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Compile importable Python files
+        run: python -m compileall -q app.py backend screeners tests
+
+      - name: Run Ruff static checks
+        run: python -m ruff check app.py backend screeners Dependencies tests
+
+      - name: Run Bandit security checks
+        run: |
+          # Bandit catches common Python security footguns, such as unsafe
+          # subprocess calls or insecure temp-file patterns, before they reach
+          # a branch reviewers have to reason through manually.
+          python -m bandit -r app.py backend screeners Dependencies -q
+
+      - name: Audit runtime dependency advisories
+        run: |
+          # pip-audit checks the runtime requirements against known PyPI
+          # advisories. Optional native accelerators stay outside this check
+          # because they are not required for the app to run.
+          python -m pip_audit -r requirements.txt
