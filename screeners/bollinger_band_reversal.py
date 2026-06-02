@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """F&O daily Bollinger Band reversal screener.
 
 Flow in plain English:
@@ -9,6 +7,8 @@ Flow in plain English:
 4. Shortlist a BUY/SELL when the candle rejects the outer band and closes with
    the required color.
 """
+
+from __future__ import annotations
 
 import pandas as pd
 

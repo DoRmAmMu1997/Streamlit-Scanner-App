@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Tests for translating Dhan responses into app-friendly candle tables."""
+
+from __future__ import annotations
 
 import pandas as pd
 import pytest

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Polite, label-driven scraper for one screener.in company page.
 
 Why this module exists:
@@ -21,6 +19,8 @@ Design choices:
   internals.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import os
@@ -29,10 +29,12 @@ import statistics
 import time
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
+
+from backend.url_safety import is_safe_http_url
 
 
 logger = logging.getLogger(__name__)
@@ -52,6 +54,8 @@ _DEFAULT_USER_AGENT = (
 
 _REQUEST_TIMEOUT_SECONDS = 20
 _RETRY_DELAYS_SECONDS = (2.0, 5.0, 10.0)
+_MAX_HTML_BYTES = 2 * 1024 * 1024
+_SCREENER_ALLOWED_HOSTS = {"www.screener.in", "screener.in"}
 
 
 class ScreenerInFetchError(RuntimeError):
@@ -86,12 +90,40 @@ def _build_headers() -> dict[str, str]:
     }
 
 
+def _read_capped_response_text(response: requests.Response, url: str) -> str:
+    """Read a small screener.in response while enforcing a byte cap.
+
+    `requests.Response.text` materializes the entire body before the caller can
+    count bytes. Screener pages and JSON fragments are modest, so streaming and
+    rejecting anything above `_MAX_HTML_BYTES` is both safer and still simple.
+    """
+    final_url = getattr(response, "url", url) or url
+    if not is_safe_http_url(final_url, allowed_hosts=_SCREENER_ALLOWED_HOSTS):
+        raise ScreenerInFetchError(
+            f"screener.in redirected {url} to unsafe URL {final_url}"
+        )
+
+    body = bytearray()
+    for chunk in response.iter_content(chunk_size=64 * 1024):
+        if not chunk:
+            continue
+        body.extend(chunk)
+        if len(body) > _MAX_HTML_BYTES:
+            raise ScreenerInFetchError(
+                f"screener.in response for {url} exceeded {_MAX_HTML_BYTES} bytes"
+            )
+    encoding = getattr(response, "encoding", None) or "utf-8"
+    return bytes(body).decode(encoding, errors="replace")
+
+
 def _fetch_html(url: str, session: requests.Session) -> str | None:
     """Fetch one screener.in URL with backoff on HTTP 429.
 
     Returns the raw HTML text on success, or `None` if the page does not
     exist (404). Raises `ScreenerInFetchError` on terminal failure.
     """
+    if not is_safe_http_url(url, allowed_hosts=_SCREENER_ALLOWED_HOSTS):
+        raise ScreenerInFetchError(f"Refusing unsafe screener.in URL: {url}")
     for attempt, delay in enumerate((0.0, *_RETRY_DELAYS_SECONDS)):
         if delay:
             # Sleep BEFORE the retry, not after the previous attempt, so the
@@ -99,27 +131,39 @@ def _fetch_html(url: str, session: requests.Session) -> str | None:
             logger.warning("screener.in rate-limited; sleeping %.1fs before retry", delay)
             time.sleep(delay)
         try:
-            response = session.get(url, headers=_build_headers(), timeout=_REQUEST_TIMEOUT_SECONDS)
+            response = session.get(
+                url,
+                headers=_build_headers(),
+                timeout=_REQUEST_TIMEOUT_SECONDS,
+                stream=True,
+            )
         except requests.RequestException as exc:
             if attempt == len(_RETRY_DELAYS_SECONDS):
                 raise ScreenerInFetchError(f"Network error fetching {url}: {exc}") from exc
             continue
 
-        if response.status_code == 404:
-            # 404 is a normal outcome — caller will retry with the
-            # standalone URL.
-            return None
-        if response.status_code == 429:
-            # Retry per backoff schedule
-            continue
-        if 500 <= response.status_code < 600:
-            # Treat 5xx as retryable.
-            continue
-        if response.status_code != 200:
-            raise ScreenerInFetchError(
-                f"screener.in returned HTTP {response.status_code} for {url}"
-            )
-        return response.text
+        try:
+            # The response body is streamed, so every branch must close the
+            # response. Keeping status handling inside this `try/finally` avoids
+            # connection leaks on 404s, retries, and successful reads alike.
+            if response.status_code == 404:
+                # 404 is a normal outcome; caller retries with standalone URL.
+                return None
+            if response.status_code == 429:
+                # Retry per backoff schedule.
+                continue
+            if 500 <= response.status_code < 600:
+                # Treat 5xx as retryable.
+                continue
+            if response.status_code != 200:
+                raise ScreenerInFetchError(
+                    f"screener.in returned HTTP {response.status_code} for {url}"
+                )
+            return _read_capped_response_text(response, url)
+        finally:
+            close = getattr(response, "close", None)
+            if callable(close):
+                close()
 
     raise ScreenerInFetchError(f"screener.in did not respond successfully for {url}")
 
@@ -129,7 +173,6 @@ def _fetch_html(url: str, session: requests.Session) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-_PERCENT_PATTERN = re.compile(r"-?\d+(?:\.\d+)?")
 _NUMBER_PATTERN = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
 
 
@@ -464,6 +507,14 @@ def _fetch_peer_table(
         return []
 
     absolute = urljoin(base_url, relative)
+    base_host = (urlparse(base_url).hostname or "").lower()
+    absolute_host = (urlparse(absolute).hostname or "").lower()
+    if absolute_host != base_host or not is_safe_http_url(
+        absolute,
+        allowed_hosts=_SCREENER_ALLOWED_HOSTS,
+    ):
+        logger.warning("Refusing unsafe peer-table URL %s from page %s", absolute, base_url)
+        return []
     try:
         fragment = _fetch_html(absolute, session)
     except ScreenerInFetchError:
@@ -652,7 +703,10 @@ def _parse_company_page(
         if about is not None:
             about_text = about.get_text(" ", strip=True)[:1500]
     except Exception:  # noqa: BLE001
-        pass
+        # The "about" block is useful context, not a required numeric field.
+        # Logging at debug level keeps the parser transparent without turning a
+        # minor layout surprise into a failed fundamentals run.
+        logger.debug("Could not parse company about text for %s", symbol, exc_info=True)
 
     sector = ""
     try:
@@ -661,7 +715,9 @@ def _parse_company_page(
         if sector_link is not None:
             sector = sector_link.get_text(" ", strip=True)
     except Exception:  # noqa: BLE001
-        pass
+        # Sector is advisory metadata. If screener.in changes this link, keep
+        # the rest of the financial parse usable and leave a debug breadcrumb.
+        logger.debug("Could not parse company sector for %s", symbol, exc_info=True)
 
     # Tables across the page. Each is a list[dict] of {column: cell}.
     quarters = _parse_table(soup, "quarters")

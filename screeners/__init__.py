@@ -1,7 +1,7 @@
 """Pluggable screener modules.
 
-Each screener module exposes:
-- SCREENER: metadata used by the Streamlit dropdown.
-- run(universe_df, data_loader, params): returns a pandas DataFrame.
+Preferred screeners expose a `BaseScanner` subclass; legacy module-level
+`SCREENER`, `run(...)`, and `build_chart(...)` aliases remain supported by the
+registry for backwards compatibility.
 """
 

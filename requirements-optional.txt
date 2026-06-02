@@ -1,0 +1,12 @@
+# Optional accelerated technical-indicator backends.
+#
+# The app works without these packages: backend/indicators.py falls back to
+# pure-pandas math when an optional backend is missing or fails to import.
+# Install this file only when you want faster/library-backed indicators.
+#
+# TA-Lib also needs its native C library installed first; see:
+# https://ta-lib.org/install/
+TA-Lib
+
+# pandas_ta is optional too. Use a release compatible with your local numpy.
+pandas_ta

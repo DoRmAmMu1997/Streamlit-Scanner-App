@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Hemant Super 45 — Envelope (lower band) BUY screener.
 
 Flow in plain English:
@@ -16,6 +14,8 @@ EMA" screener captured, now expressed (and charted) as a full envelope.
 This is a *shortlist*, not a buy signal on its own: a quality large-cap that
 has fallen to the bottom of its envelope is a candidate for further analysis.
 """
+
+from __future__ import annotations
 
 import pandas as pd
 

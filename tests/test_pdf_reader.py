@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Tests for the concall transcript PDF downloader / extractor.
 
 No live HTTP is involved. `requests.Session.get` is monkey-patched, and
@@ -7,12 +5,12 @@ No live HTTP is involved. `requests.Session.get` is monkey-patched, and
 not depend on having a real PDF on disk.
 """
 
+from __future__ import annotations
+
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Iterable
-
-import pytest
 
 from backend.fundamentals import pdf_reader
 
@@ -57,9 +55,18 @@ class _FakeResponse:
     """Canned streamed HTTP response: a context manager whose body is read via
     iter_content() in chunks, mirroring requests.Response under stream=True."""
 
-    def __init__(self, status: int, body: bytes):
+    def __init__(
+        self,
+        status: int,
+        body: bytes,
+        *,
+        url: str = "https://example.com/file.pdf",
+        headers: dict[str, str] | None = None,
+    ):
         self.status_code = status
         self._body = body
+        self.url = url
+        self.headers = headers or {"Content-Type": "application/pdf"}
         self.closed = False
 
     def __enter__(self):
@@ -82,14 +89,28 @@ class _FakeSession:
     """Minimal stand-in for requests.Session — records GETs and returns a canned
     streamed response."""
 
-    def __init__(self, status: int = 200, body: bytes = b"%PDF-fake"):
+    def __init__(
+        self,
+        status: int = 200,
+        body: bytes = b"%PDF-fake",
+        *,
+        response_url: str = "https://example.com/file.pdf",
+        headers: dict[str, str] | None = None,
+    ):
         self.status = status
         self.body = body
+        self.response_url = response_url
+        self.headers = headers
         self.calls: list[str] = []
 
     def get(self, url, **kwargs):
         self.calls.append(url)
-        return _FakeResponse(self.status, self.body)
+        return _FakeResponse(
+            self.status,
+            self.body,
+            url=self.response_url,
+            headers=self.headers,
+        )
 
     def close(self):
         pass
@@ -137,6 +158,56 @@ def test_download_pdf_rejects_non_http_scheme(tmp_path: Path):
         is None
     )
     assert session.calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_download_pdf_rejects_private_network_hosts(tmp_path: Path):
+    """Reject localhost/LAN hosts before making any request.
+
+    Transcript links are scraped from third-party HTML. If those links are ever
+    poisoned, the app must not fetch internal services from the Streamlit host.
+    """
+    session = _FakeSession(status=200, body=b"%PDF-1.4 should-not-be-read")
+
+    path = pdf_reader.download_pdf(
+        "http://127.0.0.1:8080/admin.pdf", cache_dir=tmp_path, session=session
+    )
+
+    assert path is None
+    assert session.calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_download_pdf_rejects_unsafe_redirect_targets(tmp_path: Path):
+    """Validate the final response URL, not only the initial URL."""
+    session = _FakeSession(
+        status=200,
+        body=b"%PDF-1.4 should-not-be-written",
+        response_url="http://169.254.169.254/latest/meta-data/report.pdf",
+    )
+
+    path = pdf_reader.download_pdf(
+        "https://example.com/safe-looking.pdf", cache_dir=tmp_path, session=session
+    )
+
+    assert path is None
+    assert session.calls == ["https://example.com/safe-looking.pdf"]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_download_pdf_requires_pdf_content_type_and_magic(tmp_path: Path):
+    """Do not cache HTML error pages as transcript PDFs."""
+    session = _FakeSession(
+        status=200,
+        body=b"<html><body>not a pdf</body></html>",
+        headers={"Content-Type": "text/html"},
+    )
+
+    path = pdf_reader.download_pdf(
+        "https://example.com/not-really.pdf", cache_dir=tmp_path, session=session
+    )
+
+    assert path is None
     assert list(tmp_path.iterdir()) == []
 
 
@@ -225,6 +296,24 @@ def test_extract_text_caches_alongside_pdf(tmp_path: Path, monkeypatch):
     assert text1 == text2
 
 
+def test_extract_text_respects_page_and_character_limits(tmp_path: Path, monkeypatch):
+    """Stop extraction once the caller has enough text.
+
+    `read_recent_concall_text` only sends the front of a transcript to the
+    model. Limiting during extraction is safer than parsing every PDF page and
+    truncating afterward, because small malicious PDFs can still be expensive
+    to process.
+    """
+    pdf_path = tmp_path / "limited.pdf"
+    pdf_path.write_bytes(b"%PDF-fake")
+
+    with _patched_pdfplumber(monkeypatch, ["page one text", "page two text", "page three text"]):
+        text = pdf_reader.extract_text(pdf_path, max_chars=18, max_pages=2)
+
+    assert text == "page one text\n\npag"
+    assert "page three" not in text
+
+
 def test_extract_text_returns_empty_on_total_failure(tmp_path: Path, monkeypatch):
     pdf_path = tmp_path / "broken.pdf"
     pdf_path.write_bytes(b"%PDF-fake")
@@ -280,7 +369,7 @@ def test_read_recent_concall_text_skips_rows_without_transcript_url(monkeypatch,
         path.write_bytes(b"%PDF-fake")
         return path
 
-    def fake_extract(_path):
+    def fake_extract(_path, **_kwargs):
         return "Management commentary text..."
 
     monkeypatch.setattr(pdf_reader, "download_pdf", fake_download)
@@ -320,7 +409,7 @@ def test_read_recent_concall_text_truncates_long_transcripts(monkeypatch, tmp_pa
     )
     # Make sure the stub file exists so extract_text doesn't short-circuit.
     (tmp_path / "stub.pdf").write_bytes(b"%PDF-fake")
-    monkeypatch.setattr(pdf_reader, "extract_text", lambda _p: big_text)
+    monkeypatch.setattr(pdf_reader, "extract_text", lambda _p, **_kwargs: big_text)
 
     text = pdf_reader.read_recent_concall_text(
         [{"month": "Jan 2026", "transcript_url": "https://example.com/big.pdf"}],

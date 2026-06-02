@@ -1,0 +1,8 @@
+# Developer verification tools.
+#
+# Keep runtime dependencies in requirements.txt. This file is for local/CI
+# checks that do not need to be installed by an app user.
+pytest
+ruff
+bandit
+pip-audit

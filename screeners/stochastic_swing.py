@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """NIFTY 500 daily Stochastic swing-entry screener.
 
 Flow in plain English:
@@ -19,6 +17,8 @@ today" scan, so they are intentionally not implemented here. The informational
 `stop` and `target` columns still show where the strategy's fixed 3% stop and
 5% target would sit for the flagged entry.
 """
+
+from __future__ import annotations
 
 import pandas as pd
 

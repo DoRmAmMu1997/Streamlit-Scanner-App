@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Hemant Super 45 — 52 Week High/Low (Ceyhun) BUY screener.
 
 Flow in plain English:
@@ -19,6 +17,8 @@ Beginner note: this is a *shortlist*, not a buy signal on its own. The user
 still needs to look at the chart and decide whether the stock is making a
 sustainable base or just falling further.
 """
+
+from __future__ import annotations
 
 import pandas as pd
 

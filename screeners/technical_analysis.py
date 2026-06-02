@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Hemant Super 45 ∪ Good 45 — Technical Analysis (AI) screener.
 
 Flow in plain English:
@@ -30,6 +28,8 @@ so re-running the same day is free. The agent uses the Claude Agent SDK
 installed or the plan limit is hit, the screener degrades gracefully to
 gate-only "near support" candidates rather than failing the whole scan.
 """
+
+from __future__ import annotations
 
 import logging
 
@@ -95,6 +95,10 @@ class TechnicalAnalysis(BaseScanner):
             # "Fresh breakout": close crossed above a major resistance within
             # this many recent candles.
             "breakout_lookback_bars": 10,
+            # Budget guard: after the cheap gate admits this many candidates,
+            # skip further AI confirmations for the run. Cached verdicts still
+            # make repeat runs cheap, but this protects first runs on busy days.
+            "max_ai_candidates": 10,
         },
     }
 
@@ -192,6 +196,19 @@ class TechnicalAnalysis(BaseScanner):
         # Ask the Claude Agent SDK agent to confirm the pattern. If the SDK is
         # unavailable or the plan limit is hit, fall back to a gate-only
         # "near support" row so one missing dependency never fails the scan.
+        max_ai_candidates = int(params.get("max_ai_candidates") or 0)
+        ai_calls_used = int(params.get("_technical_ai_calls_used", 0))
+        if max_ai_candidates > 0 and ai_calls_used >= max_ai_candidates:
+            # The cheap gate can admit many stocks on volatile days. This cap is
+            # a budget guard for the expensive model step; dict/universe order
+            # gives deterministic behavior for repeatable scans and tests.
+            logger.info(
+                "Skipping %s technical AI confirmation; max_ai_candidates=%d reached",
+                symbol,
+                max_ai_candidates,
+            )
+            return None
+        params["_technical_ai_calls_used"] = ai_calls_used + 1
         try:
             verdict: TechnicalVerdict = _get_agent().analyze(symbol, frame, levels)
         except (FundamentalsAgentError, FundamentalsUsageLimitError) as exc:

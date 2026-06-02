@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Tests for the shared BaseScanner abstract class."""
+
+from __future__ import annotations
 
 from datetime import date
 from types import SimpleNamespace
@@ -66,15 +66,20 @@ class _FakeLoader:
 
     def __init__(self, frames):
         self.frames = frames
+        self.last_max_symbols = None
 
     def load_universe_history(self, universe_df, start_date, end_date,
-                              force_refresh=False, progress_callback=None):
+                              max_symbols=None, force_refresh=False, progress_callback=None):
+        self.last_max_symbols = max_symbols
+        selected = dict(self.frames)
+        if max_symbols is not None:
+            selected = dict(list(selected.items())[: int(max_symbols)])
         if progress_callback is not None:
-            total = len(self.frames)
-            for index, symbol in enumerate(self.frames.keys(), start=1):
+            total = len(selected)
+            for index, symbol in enumerate(selected.keys(), start=1):
                 progress_callback(index, total, symbol)
-        return SimpleNamespace(frames=dict(self.frames), failures=[],
-                               cache_hits=0, cache_misses=len(self.frames))
+        return SimpleNamespace(frames=selected, failures=[],
+                               cache_hits=0, cache_misses=len(selected))
 
 
 def _candles(closes):
@@ -212,6 +217,45 @@ def test_run_forwards_progress_callback():
     )
 
     assert seen == [(1, 1, "A")]
+
+
+def test_run_forwards_optional_max_symbols_to_loader():
+    """`max_symbols` stays a supported params-level cap for tests/CLI callers."""
+    frames = {
+        "A": _candles([10.0, 10.0]),
+        "B": _candles([10.0, 10.0]),
+    }
+    loader = _FakeLoader(frames)
+
+    result = _SimpleScanner().run(
+        pd.DataFrame(),
+        loader,
+        _params(max_symbols=1),
+    )
+
+    assert loader.last_max_symbols == 1
+    assert result["symbol"].tolist() == ["A"]
+
+
+def test_run_reports_compute_failures_through_callback():
+    """Compute failures should be visible to the app, not only terminal logs."""
+    frames = {"A": _candles([1.0, 2.0])}
+    failures = []
+
+    result = _FailingScanner().run(
+        pd.DataFrame(),
+        _FakeLoader(frames),
+        _params(compute_failure_callback=failures.append),
+    )
+
+    assert result.empty
+    assert failures == [
+        {
+            "symbol": "A",
+            "scanner": "_FailingScanner",
+            "message": "intentional failure on A",
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------

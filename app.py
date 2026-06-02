@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -363,7 +363,7 @@ def show_status_panel(selected: ScreenerDefinition) -> None:
     if not universe["exists"]:
         st.info(
             "Universe CSV is missing. Re-run the app via `python app.py` so the prefetch "
-            "step downloads it, or use **Refresh universes** in the sidebar."
+            "step downloads it before opening Streamlit."
         )
 
 
@@ -892,15 +892,13 @@ def _execute_screener(selected: ScreenerDefinition) -> dict[str, Any] | None:
     in `st.session_state["scan_cache"]` so subsequent reruns can re-render
     without re-executing.
     """
-    # The UI no longer exposes a date range. We always scan the ten years up to
-    # today, mirroring what the CLI prefetch cached locally. The screener can
-    # still slice further inside `run(...)` if needed.
+    # The UI no longer exposes a manual date range. Each screener declares how
+    # much history it actually needs via `lookback_days`, so quick strategies
+    # do not load ten years of parquet data just because Technical Analysis
+    # needs a much longer context.
     end_date = date.today()
-    try:
-        start_date = end_date.replace(year=end_date.year - _PREFETCH_YEARS_BACK)
-    except ValueError:
-        # Feb 29 -> Feb 28 on the historical year that lacks the leap day.
-        start_date = end_date.replace(month=2, day=28, year=end_date.year - _PREFETCH_YEARS_BACK)
+    lookback_days = max(1, int(selected.lookback_days))
+    start_date = end_date - timedelta(days=lookback_days)
 
     creds = credential_status()
     if not creds["ready"]:
@@ -934,9 +932,9 @@ def _execute_screener(selected: ScreenerDefinition) -> dict[str, Any] | None:
             f"Scanning **{symbol}** &mdash; {completed} / {total} symbols processed."
         )
 
-    # `params` carries the progress_callback into the screener. We keep a
-    # separate `params_for_chart` without the callback so `build_chart` later
-    # never receives a stale function reference.
+    # `params` carries callbacks into the screener. We keep a separate
+    # `params_for_chart` without callbacks so `build_chart` later never
+    # receives stale function references from a previous Streamlit rerun.
     params_for_chart: dict[str, Any] = dict(selected.default_params)
     # User overrides (typed into the sidebar's "Tune parameters" expander)
     # take precedence over the screener's declared defaults.
@@ -944,6 +942,8 @@ def _execute_screener(selected: ScreenerDefinition) -> dict[str, Any] | None:
     params_for_chart.update({"start_date": start_date, "end_date": end_date})
     params: dict[str, Any] = dict(params_for_chart)
     params["progress_callback"] = progress_callback
+    compute_failures: list[dict[str, Any]] = []
+    params["compute_failure_callback"] = compute_failures.append
 
     try:
         # The data loader handles cache/failure bookkeeping. The screener
@@ -964,6 +964,7 @@ def _execute_screener(selected: ScreenerDefinition) -> dict[str, Any] | None:
         "screener_key": selected.key,
         "results": results,
         "failures": list(data_loader.last_failures),
+        "compute_failures": compute_failures,
         "stats": {
             "cache_hits": data_loader.last_cache_hits,
             "cache_misses": data_loader.last_cache_misses,
@@ -981,6 +982,7 @@ def _render_scan_output(selected: ScreenerDefinition, cache: dict[str, Any]) -> 
     results: pd.DataFrame = cache["results"]
     stats = cache["stats"]
     failures: list[dict[str, Any]] = cache["failures"]
+    compute_failures: list[dict[str, Any]] = cache.get("compute_failures", [])
 
     # A short summary line, with the per-run diagnostics tucked into a
     # collapsed expander so they are available but never clutter the results.
@@ -992,16 +994,15 @@ def _render_scan_output(selected: ScreenerDefinition, cache: dict[str, Any]) -> 
         detail_col2.metric("API attempts (incl. retries)", stats["api_attempts"])
         detail_col2.metric("Rate-limit retries", stats["rate_limit_retries"])
         st.caption(f"Fetch failures: {len(failures)}")
+        st.caption(f"Compute failures: {len(compute_failures)}")
 
     if results.empty:
         st.warning("The screener returned no rows.")
     else:
         chart_symbol = _render_results_with_chart(selected, results, cache)
-        # If the selected stock belongs to Hemant Super 45 or Nifty 100, show
-        # the Check Fundamentals agent panel after the chart. The helper
-        # hides itself for ineligible symbols, so screeners scanning the F&O
-        # universe still get this section for any HS45/N100 member that
-        # happens to be shortlisted.
+        # Show the Check Fundamentals panel after the chart. The helper chooses
+        # criteria mode for curated symbols and universal mode for everything
+        # else, so every shortlisted stock can still get a fundamentals view.
         _render_fundamentals_panel(chart_symbol)
         # CSV-safe wrapper neutralizes formula injection before download. The
         # raw DataFrame still has full precision; only the on-screen Styler
@@ -1019,6 +1020,13 @@ def _render_scan_output(selected: ScreenerDefinition, cache: dict[str, Any]) -> 
             if "message" in failures_df.columns:
                 failures_df["message"] = failures_df["message"].map(_redact_secrets)
             st.dataframe(failures_df, width="stretch", hide_index=True)
+
+    if compute_failures:
+        with st.expander("Compute failures", expanded=True):
+            compute_df = pd.DataFrame(compute_failures)
+            if "message" in compute_df.columns:
+                compute_df["message"] = compute_df["message"].map(_redact_secrets)
+            st.dataframe(compute_df, width="stretch", hide_index=True)
 
 
 def _render_results_with_chart(

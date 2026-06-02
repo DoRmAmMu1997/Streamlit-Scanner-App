@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Shared base class for every screener in this app.
 
 What this module gives a new screener:
@@ -29,6 +27,8 @@ Beginner note on Abstract Base Classes (ABC):
   catches "I forgot to implement the strategy" mistakes at import time
   instead of mysterious "no rows ever shortlist" mistakes at runtime.
 """
+
+from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
@@ -170,11 +170,13 @@ class BaseScanner(ABC):
             universe_df=universe_df,
             start_date=params["start_date"],
             end_date=params["end_date"],
+            max_symbols=params.get("max_symbols"),
             force_refresh=bool(params.get("force_refresh", False)),
             progress_callback=params.get("progress_callback"),
         )
 
         rows: list[dict] = []
+        compute_failure_callback = params.get("compute_failure_callback")
         for symbol, candles in batch.frames.items():
             try:
                 signal = self.compute_signal(symbol, candles, params)
@@ -188,6 +190,18 @@ class BaseScanner(ABC):
                     symbol,
                     exc,
                 )
+                if callable(compute_failure_callback):
+                    # The UI can show this concise row in "Run details" while
+                    # the logger keeps the traceback for developers. This turns
+                    # "empty shortlist because every compute failed" into an
+                    # explainable run instead of a mystery.
+                    compute_failure_callback(
+                        {
+                            "symbol": symbol,
+                            "scanner": type(self).__name__,
+                            "message": str(exc),
+                        }
+                    )
                 continue
             if signal is not None:
                 rows.append(signal)

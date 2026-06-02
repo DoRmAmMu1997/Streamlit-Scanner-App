@@ -1,10 +1,11 @@
-from __future__ import annotations
-
 """Tests for building scanner universe CSVs from small fake source data."""
+
+from __future__ import annotations
 
 from datetime import date
 
 import pandas as pd
+import pytest
 
 from backend import universe_builder
 from backend.universe_builder import (
@@ -320,6 +321,34 @@ def test_load_instrument_master_writes_dated_snapshot(tmp_path, monkeypatch):
     saved = pd.read_csv(snapshot, dtype=str)
     assert list(saved.columns) == list(loaded.columns)
     assert saved.iloc[0]["SECURITY_ID"] == "2885"
+
+
+def test_download_csv_refuses_advertised_content_length_over_cap(monkeypatch):
+    """An oversized Content-Length should abort before reading body chunks."""
+
+    class OversizedResponse:
+        headers = {"Content-Length": "999"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def raise_for_status(self):
+            pass
+
+        def iter_content(self, chunk_size=1):
+            pytest.fail("download_csv should reject before streaming the body")
+
+    monkeypatch.setattr(
+        universe_builder.requests,
+        "get",
+        lambda *args, **kwargs: OversizedResponse(),
+    )
+
+    with pytest.raises(ValueError, match="advertised size"):
+        universe_builder.download_csv("https://example.com/large.csv", max_bytes=10)
 
 
 def test_union_of_mapped_universes_dedupes_by_security_id(tmp_path):

@@ -1,11 +1,11 @@
-from __future__ import annotations
-
 """Daily candle loading and local caching.
 
 Every real screener will need historical candles. Without this layer, each
 screener would have to repeat the same Dhan API calls, cache checks, and error
 handling. This module centralizes that work so screeners can stay small.
 """
+
+from __future__ import annotations
 
 import logging
 import re
@@ -31,19 +31,6 @@ logger = logging.getLogger(__name__)
 # The Streamlit UI uses this to drive st.progress(...) and a status line; tests
 # and CLI callers can pass None and skip the bookkeeping entirely.
 ProgressCallback = Callable[[int, int, str], None]
-
-
-def _date_key(value: date | datetime | str) -> str:
-    """Convert dates into compact strings used in legacy cache filenames.
-
-    Kept for backwards-compatibility with the legacy cleanup helper. Modern
-    cache filenames no longer include a date range.
-    """
-    if isinstance(value, datetime):
-        return value.date().strftime("%Y%m%d")
-    if isinstance(value, date):
-        return value.strftime("%Y%m%d")
-    return str(value).replace("-", "")
 
 
 def _coerce_date(value: date | datetime | str) -> date:
@@ -72,6 +59,20 @@ def safe_file_stem(value: object) -> str:
     if cleaned in {"", ".", ".."}:
         return "unknown"
     return cleaned
+
+
+def _date_bounds(candles: pd.DataFrame) -> tuple[date | None, date | None]:
+    """Return the first/last valid candle dates in a cached frame.
+
+    Cache decisions need both ends of the range. A file with today's candle but
+    no old history is not good enough for a long-lookback screener.
+    """
+    if candles.empty or "timestamp" not in candles.columns:
+        return None, None
+    timestamps = pd.to_datetime(candles["timestamp"], errors="coerce").dropna()
+    if timestamps.empty:
+        return None, None
+    return timestamps.min().date(), timestamps.max().date()
 
 
 @dataclass
@@ -141,6 +142,38 @@ class DailyDataLoader:
         file_name = f"{safe_file_stem(symbol)}_{safe_file_stem(security_id)}.parquet"
         return self.cache_dir / file_name
 
+    def checked_path(self, symbol: str, security_id: str | int) -> Path:
+        """Return the sidecar that remembers empty incremental checks.
+
+        When Dhan returns no rows for a weekend/holiday/pre-open request, the
+        parquet cannot advance. This marker prevents the next app launch from
+        paying for the exact same empty request again.
+        """
+        return self.cache_path(symbol, security_id).with_suffix(".checked")
+
+    def _read_checked_through(self, symbol: str, security_id: str | int) -> date | None:
+        """Read the latest date we already checked for an empty increment."""
+        path = self.checked_path(symbol, security_id)
+        if not path.exists():
+            return None
+        try:
+            return _coerce_date(path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            return None
+
+    def _write_checked_through(
+        self,
+        symbol: str,
+        security_id: str | int,
+        checked_date: date,
+    ) -> None:
+        """Persist the date of a no-new-rows incremental check."""
+        try:
+            path = self.checked_path(symbol, security_id)
+            path.write_text(checked_date.isoformat(), encoding="utf-8")
+        except OSError:
+            logger.warning("Could not write daily-cache checked marker for %s", symbol)
+
     def read_cached_history(self, symbol: str, security_id: str | int) -> pd.DataFrame:
         """Return the cached daily candles for one stock; empty DataFrame if missing.
 
@@ -202,11 +235,20 @@ class DailyDataLoader:
 
         path = self.cache_path(symbol, security_id)
         if path.exists() and not force_refresh:
-            # Cache hit: the prefetch step already stored a long history for
-            # this stock. Slicing to the requested range keeps screener
-            # semantics identical to the old behavior.
+            # Cache hit only when the file covers the entire requested range.
+            # A partial parquet is common after interrupted prefetches; slicing
+            # it would silently run long-lookback screeners on too little data.
             cached = pd.read_parquet(path)
-            return self._slice_to_range(cached, start_date, end_date), True
+            first_date, last_date = _date_bounds(cached)
+            requested_start = _coerce_date(start_date)
+            requested_end = _coerce_date(end_date)
+            if (
+                first_date is not None
+                and last_date is not None
+                and first_date <= requested_start
+                and last_date >= requested_end
+            ):
+                return self._slice_to_range(cached, start_date, end_date), True
 
         # Cache miss (or force_refresh): fetch the requested window from Dhan
         # and save under the stable filename for future calls.
@@ -234,6 +276,7 @@ class DailyDataLoader:
           - "fresh"           cache already covers today, no API call
           - "incremental"     fetched and appended N missing days
           - "fresh_download"  no cache existed, fetched the full window
+          - "backfilled"      cache existed but missed older requested history
 
         This is the engine behind the CLI prefetch. The Streamlit UI never
         calls it directly; it reads whatever is already on disk via
@@ -287,8 +330,8 @@ class DailyDataLoader:
                 candles.to_parquet(path, index=False)
             return candles, "fresh_download"
 
-        last_ts = pd.to_datetime(cached["timestamp"], errors="coerce").max()
-        if pd.isna(last_ts):
+        first_date, last_date = _date_bounds(cached)
+        if first_date is None or last_date is None:
             # The parquet had a timestamp column but every value was NaT. Treat
             # that like a corrupted cache: refetch the full window so we end
             # up with usable data.
@@ -303,8 +346,30 @@ class DailyDataLoader:
                 candles.to_parquet(path, index=False)
             return candles, "fresh_download"
 
-        last_date = last_ts.date()
+        if first_date > start:
+            # The cache may be current at the back but missing years at the
+            # front, usually after an old interrupted prefetch. Refetch the
+            # intended full window so long-lookback screeners see real history.
+            candles = self._fetch_with_rate_limit_retries(
+                security_id=security_id,
+                exchange_segment=exchange_segment,
+                instrument_type=instrument_type,
+                from_date=start,
+                to_date=today,
+            )
+            if not candles.empty:
+                candles.to_parquet(path, index=False)
+                return candles, "backfilled"
+            return cached, "fresh"
+
         if last_date >= today:
+            return cached, "fresh"
+
+        checked_through = self._read_checked_through(symbol, security_id)
+        if checked_through is not None and checked_through >= today:
+            # We already asked Dhan for this exact missing tail and got no rows
+            # (weekend, holiday, or pre-open). Avoid repeating the same empty
+            # request on every app launch.
             return cached, "fresh"
 
         # Incremental top-up: request from (last_date + 1) so we never re-pay
@@ -321,6 +386,7 @@ class DailyDataLoader:
         if new_rows.empty:
             # The API had no new candles (weekend, holiday, or pre-open).
             # Treat that as "fresh" so the progress line stays accurate.
+            self._write_checked_through(symbol, security_id, today)
             return cached, "fresh"
 
         merged = (

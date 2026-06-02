@@ -1,11 +1,11 @@
-from __future__ import annotations
-
 """Read and summarize generated universe CSV files.
 
 Universe building downloads/mapping data. Universe loading is the simpler
 runtime side: open the already-created CSV and make sure it has the columns a
 screener needs before Dhan candle fetching begins.
 """
+
+from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
@@ -33,7 +33,7 @@ def load_universe(universe_key: str, universe_dir: Path | str = UNIVERSE_DIR) ->
     path = universe_file_path(universe_key, universe_dir)
     if not path.exists():
         raise FileNotFoundError(
-            f"Universe CSV not found: {path}. Use Refresh universes before running this screener."
+            f"Universe CSV not found: {path}. Run `python app.py` to refresh universes before this screener."
         )
 
     df = pd.read_csv(path, dtype=str).fillna("")
