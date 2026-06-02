@@ -732,6 +732,7 @@ class FundamentalAgent:
         cache: FundamentalsCache | None = None,
         *,
         runner: RunnerFn | None = None,
+        fast_mode: bool = False,
     ) -> None:
         if not model:
             raise ValueError("FundamentalAgent: model is required.")
@@ -739,6 +740,8 @@ class FundamentalAgent:
         self._cache = cache or FundamentalsCache()
         # `runner` injection lets tests drive the loop without the SDK/CLI.
         self._runner = runner
+        # Fast mode disables extended thinking on the SDK call for lower latency.
+        self._fast_mode = bool(fast_mode)
 
     # ------------------------------------------------------------------
     # Tool implementations (plain, SDK-free, unit-testable)
@@ -848,6 +851,7 @@ class FundamentalAgent:
                 CLINotFoundError,
                 ProcessError,
                 ResultMessage,
+                ThinkingConfigDisabled,
                 create_sdk_mcp_server,
                 query,
                 tool,
@@ -915,6 +919,9 @@ class FundamentalAgent:
             # Do not load the user's Claude Code project/user settings or any
             # CLAUDE.md — this agent's behaviour comes entirely from our prompt.
             setting_sources=[],
+            # Fast mode disables extended thinking for lower latency; the
+            # fundamental checklist is well-bounded, so the depth is optional.
+            thinking=ThinkingConfigDisabled() if self._fast_mode else None,
         )
 
         final_text = ""

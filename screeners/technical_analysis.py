@@ -31,12 +31,13 @@ gate-only "near support" candidates rather than failing the whole scan.
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 
 import pandas as pd
 
 from backend.charts import candlestick_with_volume
-from backend.config import get_fundamentals_model
+from backend.config import get_agent_fast_mode, get_fundamentals_model
 from backend.fundamentals.fundamental_agent import (
     FundamentalsAgentError,
     FundamentalsUsageLimitError,
@@ -49,19 +50,22 @@ from backend.technical import TechnicalAnalysisAgent, TechnicalVerdict
 logger = logging.getLogger(__name__)
 
 
-# A module-level agent cache keyed by model, mirroring how app.py memoizes the
-# fundamental agent. The Claude Agent SDK authenticates via subscription, so
-# there is no API key — only the model name keys the cache.
-_AGENT_CACHE: dict[str, TechnicalAnalysisAgent] = {}
+# A module-level agent cache keyed by (model, fast_mode), mirroring how app.py
+# memoizes the fundamental agent. The Claude Agent SDK authenticates via
+# subscription, so there is no API key — only the model name and fast-mode flag
+# key the cache (so a toggled SCANNER_AGENT_FAST_MODE rebuilds the agent).
+_AGENT_CACHE: dict[tuple[str, bool], TechnicalAnalysisAgent] = {}
 
 
 def _get_agent() -> TechnicalAnalysisAgent:
-    """Return a cached technical agent for the configured Claude model."""
+    """Return a cached technical agent for the configured Claude model + fast mode."""
     model = get_fundamentals_model()
-    agent = _AGENT_CACHE.get(model)
+    fast_mode = get_agent_fast_mode()
+    key = (model, fast_mode)
+    agent = _AGENT_CACHE.get(key)
     if agent is None:
-        agent = TechnicalAnalysisAgent(model=model)
-        _AGENT_CACHE[model] = agent
+        agent = TechnicalAnalysisAgent(model=model, fast_mode=fast_mode)
+        _AGENT_CACHE[key] = agent
     return agent
 
 
@@ -164,8 +168,14 @@ class TechnicalAnalysis(BaseScanner):
     # Strategy hook
     # ------------------------------------------------------------------
 
-    def compute_signal(self, symbol: str, candles: pd.DataFrame, params: dict) -> dict | None:
-        """Return a BUY row when the gate + LLM agree on a qualifying setup."""
+    def _prepare_candidate(self, symbol: str, candles: pd.DataFrame, params: dict) -> dict | None:
+        """Run the cheap (no-LLM) prep + gate for one symbol.
+
+        Returns a candidate context dict (frame, levels, gate, close, etc.) when
+        the stock passes the gate, or None when it has too little history, no
+        major levels, or is mid-range. This is the part that is safe and fast to
+        run sequentially for the whole universe before any AI calls.
+        """
         frame = self.prepare_candles(candles)
         # Need enough history for the pivot windows to confirm at all.
         pivot_left = self.coerce_param(params, "pivot_left", int)
@@ -188,32 +198,36 @@ class TechnicalAnalysis(BaseScanner):
             # Mid-range stock — dropped for free, no LLM call.
             return None
 
-        close = float(frame.iloc[-1]["close"])
-        signal_date = frame.iloc[-1].get("timestamp", "")
         nearest_support = gate["nearest_support"]
-        nearest_level = float(nearest_support["price"]) if nearest_support else float("nan")
+        return {
+            "symbol": symbol,
+            "frame": frame,
+            "levels": levels,
+            "gate": gate,
+            "close": float(frame.iloc[-1]["close"]),
+            "signal_date": frame.iloc[-1].get("timestamp", ""),
+            "nearest_level": float(nearest_support["price"]) if nearest_support else float("nan"),
+        }
 
-        # Ask the Claude Agent SDK agent to confirm the pattern. If the SDK is
-        # unavailable or the plan limit is hit, fall back to a gate-only
-        # "near support" row so one missing dependency never fails the scan.
-        max_ai_candidates = int(params.get("max_ai_candidates") or 0)
-        ai_calls_used = int(params.get("_technical_ai_calls_used", 0))
-        if max_ai_candidates > 0 and ai_calls_used >= max_ai_candidates:
-            # The cheap gate can admit many stocks on volatile days. This cap is
-            # a budget guard for the expensive model step; dict/universe order
-            # gives deterministic behavior for repeatable scans and tests.
-            logger.info(
-                "Skipping %s technical AI confirmation; max_ai_candidates=%d reached",
-                symbol,
-                max_ai_candidates,
-            )
-            return None
-        params["_technical_ai_calls_used"] = ai_calls_used + 1
+    def _confirm_candidate(self, candidate: dict) -> dict | None:
+        """Run the AI confirmation for one gate-passing candidate → result row.
+
+        Calls the Claude Agent SDK agent and maps its verdict to a result row.
+        On agent failure (SDK missing / plan limit) it degrades to a gate-only
+        "at support" row, so one missing dependency never fails the scan. This
+        is the slow part — `run()` fans these calls out across a thread pool.
+        """
+        symbol = candidate["symbol"]
+        close = candidate["close"]
+        signal_date = candidate["signal_date"]
+        nearest_level = candidate["nearest_level"]
         try:
-            verdict: TechnicalVerdict = _get_agent().analyze(symbol, frame, levels)
+            verdict: TechnicalVerdict = _get_agent().analyze(
+                symbol, candidate["frame"], candidate["levels"]
+            )
         except (FundamentalsAgentError, FundamentalsUsageLimitError) as exc:
             logger.warning("Technical agent unavailable for %s: %s", symbol, exc)
-            if not gate["at_support"]:
+            if not candidate["gate"]["at_support"]:
                 return None
             return {
                 "symbol": symbol,
@@ -253,6 +267,101 @@ class TechnicalAnalysis(BaseScanner):
             "nearest_level": reported_level,
             "reason": verdict.reasoning,
         }
+
+    def compute_signal(self, symbol: str, candles: pd.DataFrame, params: dict) -> dict | None:
+        """Return a BUY row when the gate + LLM agree on a qualifying setup.
+
+        Single-symbol path (used by the BaseScanner contract and tests). The
+        screener's own `run()` override parallelizes the AI step across symbols,
+        but the gate → confirm logic is shared via the helpers below so behavior
+        is identical either way.
+        """
+        candidate = self._prepare_candidate(symbol, candles, params)
+        if candidate is None:
+            return None
+
+        # Budget guard: the cheap gate can admit many stocks on volatile days;
+        # this caps the expensive model step. Universe order gives deterministic
+        # behavior for repeatable scans and tests.
+        max_ai_candidates = int(params.get("max_ai_candidates") or 0)
+        ai_calls_used = int(params.get("_technical_ai_calls_used", 0))
+        if max_ai_candidates > 0 and ai_calls_used >= max_ai_candidates:
+            logger.info(
+                "Skipping %s technical AI confirmation; max_ai_candidates=%d reached",
+                symbol,
+                max_ai_candidates,
+            )
+            return None
+        params["_technical_ai_calls_used"] = ai_calls_used + 1
+        return self._confirm_candidate(candidate)
+
+    def run(self, universe_df: pd.DataFrame, data_loader, params: dict) -> pd.DataFrame:
+        """Fetch candles, then gate sequentially and confirm candidates in parallel.
+
+        Overrides `BaseScanner.run` for this screener ONLY. The cheap pivot gate
+        runs sequentially over the whole universe (pure pandas), then the few
+        gate-passing candidates (capped by `max_ai_candidates`) have their slow
+        Claude Agent SDK confirmations fanned out across a small thread pool —
+        each `analyze()` already owns its event loop, so they overlap safely.
+        Rows are assembled in universe order so output stays deterministic.
+        """
+        batch = data_loader.load_universe_history(
+            universe_df=universe_df,
+            start_date=params["start_date"],
+            end_date=params["end_date"],
+            max_symbols=params.get("max_symbols"),
+            force_refresh=bool(params.get("force_refresh", False)),
+            progress_callback=params.get("progress_callback"),
+        )
+
+        # 1. Sequential gate pass (cheap, no LLM). Respect the candidate budget.
+        max_ai_candidates = int(params.get("max_ai_candidates") or 0)
+        candidates: list[dict] = []
+        compute_failure_callback = params.get("compute_failure_callback")
+        for symbol, candles in batch.frames.items():
+            try:
+                candidate = self._prepare_candidate(symbol, candles, params)
+            except Exception as exc:  # noqa: BLE001 — one bad frame must not abort the scan
+                logger.warning("%s gate failed for %s: %s", type(self).__name__, symbol, exc)
+                if callable(compute_failure_callback):
+                    compute_failure_callback(
+                        {"symbol": symbol, "scanner": type(self).__name__, "message": str(exc)}
+                    )
+                continue
+            if candidate is not None:
+                candidates.append(candidate)
+            if max_ai_candidates > 0 and len(candidates) >= max_ai_candidates:
+                break
+
+        # 2. Parallel AI pass. Each analyze() owns its own event loop/subprocess,
+        #    so a small thread pool just overlaps the wall-clock latency.
+        rows_by_symbol: dict[str, dict] = {}
+        if candidates:
+            max_workers = min(len(candidates), 4)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_symbol = {
+                    executor.submit(self._confirm_candidate, candidate): candidate["symbol"]
+                    for candidate in candidates
+                }
+                for future in concurrent.futures.as_completed(future_to_symbol):
+                    symbol = future_to_symbol[future]
+                    try:
+                        row = future.result()
+                    except Exception as exc:  # noqa: BLE001 — isolate per-symbol failures
+                        logger.warning(
+                            "%s AI confirm failed for %s: %s", type(self).__name__, symbol, exc
+                        )
+                        if callable(compute_failure_callback):
+                            compute_failure_callback(
+                                {"symbol": symbol, "scanner": type(self).__name__, "message": str(exc)}
+                            )
+                        continue
+                    if row is not None:
+                        rows_by_symbol[symbol] = row
+
+        # 3. Assemble in universe order so the table + tests stay deterministic.
+        rows = [rows_by_symbol[c["symbol"]] for c in candidates if c["symbol"] in rows_by_symbol]
+        return pd.DataFrame(rows, columns=self.result_columns)
 
     # ------------------------------------------------------------------
     # Chart

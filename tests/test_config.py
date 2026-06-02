@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from backend.config import dhan_rate_limit_retry_delays, dhan_request_delay_seconds
+from backend.config import (
+    dhan_rate_limit_retry_delays,
+    dhan_request_delay_seconds,
+    get_agent_fast_mode,
+)
 
 
 def test_dhan_throttle_config_uses_safe_defaults(monkeypatch):
@@ -30,3 +34,21 @@ def test_dhan_throttle_config_accepts_valid_values(monkeypatch):
 
     assert dhan_request_delay_seconds() == 1.25
     assert dhan_rate_limit_retry_delays() == [3.0, 6.5]
+
+
+def test_agent_fast_mode_defaults_off(monkeypatch):
+    # Unset → thorough (current) behavior is the default.
+    monkeypatch.delenv("SCANNER_AGENT_FAST_MODE", raising=False)
+    assert get_agent_fast_mode() is False
+
+
+def test_agent_fast_mode_accepts_truthy_values(monkeypatch):
+    for value in ("1", "true", "TRUE", "yes", "On"):
+        monkeypatch.setenv("SCANNER_AGENT_FAST_MODE", value)
+        assert get_agent_fast_mode() is True, value
+
+
+def test_agent_fast_mode_rejects_other_values(monkeypatch):
+    for value in ("0", "false", "no", "", "maybe"):
+        monkeypatch.setenv("SCANNER_AGENT_FAST_MODE", value)
+        assert get_agent_fast_mode() is False, value

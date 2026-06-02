@@ -850,3 +850,34 @@ def test_technical_analysis_tolerates_empty_and_short_frames(monkeypatch):
     assert result.empty
     assert stub.calls == 0
     assert list(result.columns) == technical_analysis.RESULT_COLUMNS
+
+
+def test_technical_analysis_confirms_multiple_candidates_in_universe_order(monkeypatch):
+    """The parallel AI pass must confirm every gate-passing candidate and return
+    rows in deterministic universe order (not thread-completion order)."""
+    stub = _StubTechnicalAgent(_ta_verdict())
+    monkeypatch.setattr(technical_analysis, "_get_agent", lambda: stub)
+
+    # Three at-support stocks; the universe fixture lists them as AAA, BBB, CCC.
+    frames = {
+        "AAA": _ta_candles(_AT_SUPPORT_LOWS),
+        "BBB": _ta_candles(_AT_SUPPORT_LOWS),
+        "CCC": _ta_candles(_AT_SUPPORT_LOWS),
+    }
+    universe = pd.DataFrame(
+        {
+            "symbol": ["AAA", "BBB", "CCC"],
+            "security_id": ["1", "2", "3"],
+            "exchange_segment": ["NSE_EQ", "NSE_EQ", "NSE_EQ"],
+            "instrument_type": ["EQUITY", "EQUITY", "EQUITY"],
+            "mapping_status": ["mapped", "mapped", "mapped"],
+        }
+    )
+    result = technical_analysis.run(
+        universe, FakeDataLoader(frames), _ta_params(max_ai_candidates=10)
+    )
+
+    # All three confirmed, and the row order matches universe/candidate order
+    # regardless of which thread finished first.
+    assert result["symbol"].tolist() == ["AAA", "BBB", "CCC"]
+    assert stub.calls == 3

@@ -255,3 +255,78 @@ def test_agent_stamps_blank_symbol_model_and_date(tmp_path):
 def test_agent_requires_model():
     with pytest.raises(ValueError):
         TechnicalAnalysisAgent(model="")
+
+
+# ---------------------------------------------------------------------------
+# Fast mode — thinking is disabled in the real SDK options only when requested
+# ---------------------------------------------------------------------------
+
+
+def _install_fake_sdk(monkeypatch):
+    """Install a fake `claude_agent_sdk` that records ClaudeAgentOptions kwargs.
+
+    `_default_run` imports the SDK lazily and immediately runs `query(...)`. The
+    fake's `query` is an async generator yielding one ResultMessage carrying a
+    canned TechnicalVerdict JSON, so the agent's real option-construction path
+    runs end-to-end without a live CLI. Returns a dict the test inspects.
+    """
+    import sys
+    import types
+
+    captured: dict = {}
+
+    class ThinkingConfigDisabled:
+        pass
+
+    class ClaudeAgentOptions:
+        def __init__(self, **kwargs):
+            captured["options"] = kwargs
+
+    class ResultMessage:
+        def __init__(self, result):
+            self.result = result
+            self.total_cost_usd = None
+            self.is_error = False
+
+    class AssistantMessage:  # referenced by isinstance checks in _default_run
+        pass
+
+    class CLINotFoundError(Exception):
+        pass
+
+    class ProcessError(Exception):
+        pass
+
+    verdict_json = json.dumps(_sample_verdict().model_dump(mode="json"))
+
+    async def query(*, prompt, options):  # noqa: ARG001 — signature must match
+        yield ResultMessage(verdict_json)
+
+    fake = types.ModuleType("claude_agent_sdk")
+    fake.ClaudeAgentOptions = ClaudeAgentOptions
+    fake.ThinkingConfigDisabled = ThinkingConfigDisabled
+    fake.ResultMessage = ResultMessage
+    fake.AssistantMessage = AssistantMessage
+    fake.CLINotFoundError = CLINotFoundError
+    fake.ProcessError = ProcessError
+    fake.query = query
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake)
+    return captured, ThinkingConfigDisabled
+
+
+def test_default_run_sets_thinking_only_in_fast_mode(monkeypatch, tmp_path):
+    captured, ThinkingConfigDisabled = _install_fake_sdk(monkeypatch)
+    # Isolated cache + force_refresh so `_default_run` always runs (a cache hit
+    # would short-circuit before options are ever constructed).
+    cache = FundamentalsCache(cache_dir=tmp_path)
+
+    # Fast mode ON → options carry a ThinkingConfigDisabled instance.
+    agent = TechnicalAnalysisAgent(model="test-model", cache=cache, fast_mode=True)
+    agent.analyze("DEMO", _sample_candles(), _sample_levels(), force_refresh=True)
+    assert isinstance(captured["options"].get("thinking"), ThinkingConfigDisabled)
+
+    # Fast mode OFF → thinking is None (SDK default extended thinking).
+    captured.clear()
+    agent_off = TechnicalAnalysisAgent(model="test-model", cache=cache, fast_mode=False)
+    agent_off.analyze("DEMO", _sample_candles(), _sample_levels(), force_refresh=True)
+    assert captured["options"].get("thinking") is None

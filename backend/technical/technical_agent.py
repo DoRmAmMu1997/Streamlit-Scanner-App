@@ -297,6 +297,7 @@ class TechnicalAnalysisAgent:
         cache: FundamentalsCache | None = None,
         *,
         runner: RunnerFn | None = None,
+        fast_mode: bool = False,
     ) -> None:
         if not model:
             raise ValueError("TechnicalAnalysisAgent: model is required.")
@@ -306,6 +307,8 @@ class TechnicalAnalysisAgent:
         self._cache = cache or FundamentalsCache()
         # `runner` injection lets tests drive the loop without the SDK/CLI.
         self._runner = runner
+        # Fast mode disables extended thinking on the SDK call for lower latency.
+        self._fast_mode = bool(fast_mode)
 
     def _cache_model_key(self, candles: pd.DataFrame, levels: list[dict[str, Any]]) -> str:
         """Build the cache namespace for one technical-analysis prompt.
@@ -386,6 +389,7 @@ class TechnicalAnalysisAgent:
                 CLINotFoundError,
                 ProcessError,
                 ResultMessage,
+                ThinkingConfigDisabled,
                 query,
             )
         except ImportError as exc:  # pragma: no cover - environment dependent
@@ -406,6 +410,9 @@ class TechnicalAnalysisAgent:
             # filesystem/bash tools in a headless Streamlit run.
             permission_mode="dontAsk",
             setting_sources=[],
+            # Fast mode disables extended thinking for lower latency; pattern
+            # detection from the OHLC window is a single bounded pass.
+            thinking=ThinkingConfigDisabled() if self._fast_mode else None,
         )
 
         final_text = ""
