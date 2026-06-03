@@ -48,12 +48,11 @@ transcript signal + integrated view).
   - **20% Up Green Candles (Lovevanshi)** — Hemant Super 45 ∪ Good 45 stocks
     whose latest candle caps a run of consecutive green candles (up to 20) that
     moved more than 20% from the run's lowest low to its highest high.
-  - **Technical Analysis (AI)** — Hemant Super 45 ∪ Good 45 stocks with a
-    breakout-confirmed cup-and-handle or inverse head-and-shoulders, or sitting
-    at a major (multi-touch, full-history) support level. A cheap pivot-based
-    gate prefilters candidates, then a **Claude Agent SDK** agent (same
-    subscription-based auth as Check Fundamentals) confirms the pattern from the
-    OHLC data. Degrades to gate-only "near support" when the SDK is unavailable.
+  - **Technical Analysis (AI)** — Hemant Super 45 ∪ Good 45 stocks with an
+    AI-confirmed bullish setup: major support, breakout-confirmed classical
+    pattern, confirmed double bottom, bullish Fair Value Gap retest, or bullish
+    order-block tap. A cheap deterministic gate prefilters candidates, then a
+    **Claude Agent SDK** agent confirms with level, pattern, and structure tools.
 - **Per-stock Check Fundamentals AI agent** — see the
   [dedicated section below](#check-fundamentals-agent). One click on a
   shortlisted row runs a Claude Agent SDK agent that scrapes screener.in (peer
@@ -492,7 +491,7 @@ eyeballing a candle dump.
 
 ### Verification
 
-The full local verification set passes (`pytest` 285 passed, `compileall`,
+The full local verification set passes (`pytest` 266 passed, `compileall`,
 `ruff`, `bandit`, `pip-audit`). Detectors are covered by TDD-style tests with
 hand-verified synthetic fixtures. Note: a live end-to-end run of the agent
 calling its tools requires the Claude Agent SDK signed in and Dhan candle data,

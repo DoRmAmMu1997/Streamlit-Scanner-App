@@ -519,8 +519,10 @@ def detect_order_blocks(
     # ----- Bullish OB: last DOWN candle before the latest bullish BOS -----
     bos_up = _latest_break(high_positions, highs, "up")
     if bos_up is not None:
-        # Walk backwards from the breakout bar to the most recent bearish candle.
-        for k in range(bos_up, max(bos_up - (left + right + 5), -1), -1):
+        # Walk backwards from the candle BEFORE the breakout. The breakout candle
+        # proves the structure break; it is not the accumulation candle that
+        # created the order block, even if it happens to close red.
+        for k in range(bos_up - 1, max(bos_up - (left + right + 5), -1), -1):
             if closes[k] < opens[k]:  # a down (red) candle
                 top, bottom = float(highs[k]), float(lows[k])
                 # Mitigated if any candle AFTER the breakout dipped into the zone.
@@ -542,7 +544,9 @@ def detect_order_blocks(
     # ----- Bearish OB: last UP candle before the latest bearish BOS -----
     bos_down = _latest_break(low_positions, lows, "down")
     if bos_down is not None:
-        for k in range(bos_down, max(bos_down - (left + right + 5), -1), -1):
+        # Same rule in reverse: the bearish order block must be the final green
+        # candle before price breaks structure downward, not the break candle.
+        for k in range(bos_down - 1, max(bos_down - (left + right + 5), -1), -1):
             if closes[k] > opens[k]:  # an up (green) candle
                 top, bottom = float(highs[k]), float(lows[k])
                 later_highs = highs[bos_down + 1 :]

@@ -4,18 +4,17 @@ Flow in plain English:
 1. Fetch daily candles for every stock in the Hemant Super 45 ∪ Good 45 union.
 2. Compute that stock's MAJOR support/resistance levels — price zones touched
    by many confirmed pivots across the full ~10-year history.
-3. **Cheap gate (no LLM):** keep the stock as a *candidate* only if either
-   - its latest close is within `support_tolerance_pct` of a major support, OR
-   - its latest close has broken above a major resistance within the last
-     `breakout_lookback_bars` candles (a possible cup-rim / H&S-neckline break).
+3. **Cheap gate (no LLM):** keep the stock as a *candidate* only if it is near a
+   deterministic bullish trigger: at major support, freshly broken above major
+   resistance, freshly confirmed double bottom, retesting an unfilled bullish
+   Fair Value Gap, or tapping a bullish order block.
    Stocks that are mid-range get dropped here, before any LLM cost.
 4. **LLM confirm:** each candidate's OHLC window + major levels are sent to the
    `TechnicalAnalysisAgent` (Claude Agent SDK, on your Claude subscription),
-   which decides whether a breakout-confirmed cup-and-handle, a
-   breakout-confirmed inverse head-and-shoulders, or an at-major-support setup
-   is genuinely present.
-5. Shortlist (BUY) when the agent reports `at_support`, or one of the two chart
-   patterns WITH `confirmed=True`.
+   which calls tools for level relevance, price patterns, and market structure
+   before deciding whether one bullish setup is genuinely present.
+5. Shortlist (BUY) when the agent reports `at_support`, or one of the bullish
+   chart/price-action patterns WITH `confirmed=True`.
 
 Why a gate first: an LLM call per stock over ~90 names would be slow. The
 pivot-based gate is pure pandas and rejects most stocks for free, so only a
@@ -87,7 +86,7 @@ def _get_agent() -> TechnicalAnalysisAgent:
 
 
 class TechnicalAnalysis(BaseScanner):
-    """BUY when a breakout-confirmed pattern, or price at major support, is found."""
+    """BUY when price is at support or an AI-confirmed bullish setup is present."""
 
     SCREENER = {
         "key": "technical_analysis",

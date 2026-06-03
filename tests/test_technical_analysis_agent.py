@@ -333,6 +333,21 @@ def test_agent_stamps_blank_symbol_model_and_date(tmp_path):
     assert verdict.signal_date == "2026-02-09"
 
 
+def test_agent_overrides_mismatched_symbol_from_model(tmp_path):
+    # The tools and prompt are locked to the requested symbol. If the model still
+    # emits a different ticker, treat that as bookkeeping drift and stamp the
+    # trusted request symbol so downstream cache/UI data cannot drift.
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    mismatched = _sample_verdict(symbol="OTHER")
+    agent = TechnicalAnalysisAgent(
+        model="test-model", cache=cache, runner=_FakeRunner(mismatched)
+    )
+
+    verdict = agent.analyze("demo", _sample_candles(), _sample_levels())
+
+    assert verdict.symbol == "DEMO"
+
+
 def test_agent_requires_model():
     with pytest.raises(ValueError):
         TechnicalAnalysisAgent(model="")

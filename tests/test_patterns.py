@@ -201,6 +201,55 @@ def test_bullish_order_block_before_bos():
     assert ob["mitigated"] is False
 
 
+def test_bullish_order_block_uses_candle_before_breakout_not_breakout_candle():
+    # The breakout bar (idx 8) closes above the prior swing high at 105, but it is
+    # itself a red candle because it opened far above the close. The order block
+    # must still be the last red candle BEFORE the breakout (idx 6), not idx 8.
+    frame = _frame(
+        [
+            (100, 101, 99, 100),
+            (101, 103, 100, 102),
+            (103, 105, 102, 104),  # pivot high
+            (102, 103, 99, 100),
+            (99, 100, 95, 96),  # pivot low
+            (98, 101, 97, 100),
+            (101, 102, 97, 98),  # last red candle before the breakout
+            (99, 103, 98, 102),
+            (108, 109, 103, 106),  # breakout close above 105, but red candle
+            (106, 110, 105, 109),
+        ]
+    )
+
+    bullish = [b for b in detect_order_blocks(frame, left=2, right=2) if b["direction"] == "bullish"]
+
+    assert bullish
+    assert bullish[0]["origin_time"] == "2024-01-07"
+
+
+def test_bearish_order_block_uses_candle_before_breakout_not_breakout_candle():
+    # Mirror of the bullish case: idx 8 breaks below the pivot low at 95, but is
+    # a green candle. The bearish order block must be the prior green candle.
+    frame = _frame(
+        [
+            (100, 101, 99, 100),
+            (99, 100, 97, 98),
+            (97, 98, 95, 96),  # pivot low
+            (98, 101, 97, 100),
+            (101, 105, 100, 104),  # pivot high
+            (103, 104, 100, 101),
+            (99, 103, 98, 102),  # last green candle before the breakout
+            (101, 102, 96, 97),
+            (90, 94, 89, 93),  # breakout close below 95, but green candle
+            (92, 93, 88, 89),
+        ]
+    )
+
+    bearish = [b for b in detect_order_blocks(frame, left=2, right=2) if b["direction"] == "bearish"]
+
+    assert bearish
+    assert bearish[0]["origin_time"] == "2024-01-07"
+
+
 def test_order_blocks_empty_on_flat_series():
     # A perfectly flat series has no structure break, hence no order blocks.
     flat = _frame([(100, 101, 99, 100) for _ in range(20)])

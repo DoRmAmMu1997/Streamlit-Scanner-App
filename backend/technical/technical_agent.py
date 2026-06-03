@@ -5,19 +5,20 @@ same Claude Agent SDK, same Claude-subscription auth (no API key), same
 injectable `runner=` testing seam, same "emit one JSON object as the final
 message" contract validated with Pydantic, same on-disk verdict cache.
 
-The one deliberate difference: this agent needs NO tools. The data it reasons
-about — a recent OHLC window plus the stock's major support/resistance levels —
-is handed to it directly in the prompt, so `_default_run` just runs a single
-`query(...)` with a system prompt rather than wiring up an MCP tool server.
+The one deliberate difference from the original technical agent: this version
+does use a tiny in-process MCP tool server. The prompt gives Claude a compact
+OHLC/level orientation, then the tools return deterministic market-structure,
+level-map, and price-pattern facts for the selected stock.
 
 How it works:
 1. The `technical_analysis` screener runs a cheap pivot gate over Hemant Super
    45 ∪ Good 45 and sends only the few candidate stocks (close near a major
    support, or freshly broken above a major resistance) to `analyze(...)`.
-2. `analyze` builds the OHLC-window + major-levels prompt and runs one agentic
-   pass; the model's final message is a single `TechnicalVerdict` JSON object.
-3. The verdict is cached per (symbol, model, latest-candle-date) so re-runs on
-   unchanged data are free.
+2. `analyze` builds the OHLC-window + major-levels prompt, wires tools for this
+   one stock, and runs one agentic pass; the model's final message is a single
+   `TechnicalVerdict` JSON object.
+3. The verdict is cached per (symbol, model, chart-context hash,
+   latest-candle-date) so re-runs on unchanged data/settings are free.
 
 Testing seam: `TechnicalAnalysisAgent` accepts an optional `runner=` callable so
 unit tests drive the loop without spawning the Claude CLI. The real runner
@@ -163,16 +164,16 @@ class TechnicalVerdict(BaseModel):
         description=(
             "Which setup is present: a breakout-confirmed cup-and-handle, a "
             "breakout-confirmed inverse head-and-shoulders, price at a major "
-            "support, or 'none' if no qualifying setup exists."
+            "support, confirmed double bottom, bullish Fair Value Gap, bullish "
+            "order block, or 'none' if no qualifying setup exists."
         )
     )
     confirmed: bool = Field(
         default=False,
         description=(
-            "For the two chart patterns: True only when the breakout close has "
-            "ALREADY happened (above the handle/rim resistance, or above the "
-            "neckline). For 'at_support' this is True when price is currently at "
-            "the support. Always False when pattern is 'none'."
+            "True only when the trigger has ALREADY happened: breakout close for "
+            "classical/double-bottom patterns, current hold/reaction for support "
+            "or demand-zone setups. Always False when pattern is 'none'."
         ),
     )
     key_levels: list[float] = Field(
@@ -639,9 +640,10 @@ class TechnicalAnalysisAgent:
                 f"Technical agent returned an unexpected output type: {type(raw).__name__}"
             )
 
-        updates: dict[str, Any] = {}
-        if not verdict.symbol:
-            updates["symbol"] = symbol
+        # The requested symbol is the trusted source of truth. Claude sees only
+        # this stock's tool context, but if it emits a stale or mismatched ticker
+        # in the JSON, normalize it here before caching or returning the verdict.
+        updates: dict[str, Any] = {"symbol": symbol}
         if not verdict.model_used:
             updates["model_used"] = self._model
         if not verdict.signal_date:
