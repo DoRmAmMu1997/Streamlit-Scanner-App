@@ -339,6 +339,89 @@ def test_load_instrument_master_writes_dated_snapshot(tmp_path, monkeypatch):
     assert saved.iloc[0]["SECURITY_ID"] == "2885"
 
 
+def test_load_instrument_master_prunes_older_snapshots_after_success(tmp_path, monkeypatch):
+    # Only Dhan instrument-master snapshots should be cleaned up. These names
+    # mirror the real files in Dependencies/, while unrelated files and folders
+    # prove the cleanup stays tightly scoped.
+    old_snapshot = tmp_path / "all_instrument 2026-05-14.csv"
+    newer_old_snapshot = tmp_path / "all_instrument 2026-06-01.csv"
+    unrelated_csv = tmp_path / "manual_notes.csv"
+    matching_directory = tmp_path / "all_instrument 2026-05-01.csv"
+
+    old_snapshot.write_text("old", encoding="utf-8")
+    newer_old_snapshot.write_text("old", encoding="utf-8")
+    unrelated_csv.write_text("keep", encoding="utf-8")
+    matching_directory.mkdir()
+
+    def fake_download_csv(url: str):
+        return fake_instrument_master()
+
+    monkeypatch.setattr(universe_builder, "download_csv", fake_download_csv)
+
+    loaded = load_instrument_master(
+        url="memory://dhan-master",
+        save_snapshot=True,
+        snapshot_dir=tmp_path,
+        run_date=date(2026, 6, 3),
+    )
+
+    current_snapshot = tmp_path / "all_instrument 2026-06-03.csv"
+    assert current_snapshot.exists()
+    assert not old_snapshot.exists()
+    assert not newer_old_snapshot.exists()
+    assert unrelated_csv.exists()
+    assert matching_directory.exists()
+
+    saved = pd.read_csv(current_snapshot, dtype=str)
+    assert list(saved.columns) == list(loaded.columns)
+    assert saved.iloc[0]["SECURITY_ID"] == "2885"
+
+
+def test_load_instrument_master_save_snapshot_false_does_not_prune(tmp_path, monkeypatch):
+    # A caller can still load the master purely in memory. In that mode the
+    # function should neither write today's snapshot nor delete older ones.
+    old_snapshot = tmp_path / "all_instrument 2026-06-01.csv"
+    old_snapshot.write_text("old", encoding="utf-8")
+
+    def fake_download_csv(url: str):
+        return fake_instrument_master()
+
+    monkeypatch.setattr(universe_builder, "download_csv", fake_download_csv)
+
+    load_instrument_master(
+        url="memory://dhan-master",
+        save_snapshot=False,
+        snapshot_dir=tmp_path,
+        run_date=date(2026, 6, 3),
+    )
+
+    assert old_snapshot.exists()
+    assert not (tmp_path / "all_instrument 2026-06-03.csv").exists()
+
+
+def test_load_instrument_master_keeps_old_snapshots_when_download_fails(tmp_path, monkeypatch):
+    # Cleanup happens after a good download, normalization, and write. A failed
+    # Dhan request must leave the last usable local snapshot in place.
+    old_snapshot = tmp_path / "all_instrument 2026-06-01.csv"
+    old_snapshot.write_text("old", encoding="utf-8")
+
+    def fake_download_csv(url: str):
+        raise RuntimeError("download failed")
+
+    monkeypatch.setattr(universe_builder, "download_csv", fake_download_csv)
+
+    with pytest.raises(RuntimeError, match="download failed"):
+        load_instrument_master(
+            url="memory://dhan-master",
+            save_snapshot=True,
+            snapshot_dir=tmp_path,
+            run_date=date(2026, 6, 3),
+        )
+
+    assert old_snapshot.exists()
+    assert not (tmp_path / "all_instrument 2026-06-03.csv").exists()
+
+
 def test_download_csv_refuses_advertised_content_length_over_cap(monkeypatch):
     """An oversized Content-Length should abort before reading body chunks."""
 

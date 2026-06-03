@@ -87,7 +87,8 @@ transcript signal + integrated view).
   forward outlook.
 - **Automatic data prefetch** — running `python app.py` first downloads the
   stock universes and ~10 years of daily candles, *then* opens the UI, so the
-  app never blocks on downloads.
+  app never blocks on downloads. Each successful prefetch keeps only the latest
+  Dhan instrument-master snapshot in `Dependencies/`.
 - **Reusable scanner universes** — built-in universe keys include `nifty_100`,
   `nifty_500`, `fno`, `hemant_super_45`, `hemant_good_45`,
   `hemant_good_200`, and the composites `hemant_super_good_union`
