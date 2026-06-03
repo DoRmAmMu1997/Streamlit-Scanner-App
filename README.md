@@ -65,12 +65,6 @@ transcript signal + integrated view).
   - **20% Up Green Candles (Lovevanshi)** — Hemant Super 45 ∪ Good 45 stocks
     whose latest candle caps a run of consecutive green candles (up to 20) that
     moved more than 20% from the run's lowest low to its highest high.
-  - **Technical Analysis (AI)** — Hemant Super 45 ∪ Good 45 stocks with a
-    breakout-confirmed cup-and-handle or inverse head-and-shoulders, or sitting
-    at a major (multi-touch, full-history) support level. A cheap pivot-based
-    gate prefilters candidates, then a **Claude Agent SDK** agent (same
-    subscription-based auth as Check Fundamentals) confirms the pattern from the
-    OHLC data. Degrades to gate-only "near support" when the SDK is unavailable.
   - **67 Ka Funda (AI)** — Hemant Super 45 + Good 45 + Good 200 stocks that have
     fallen at least 67% from their available-history all-time high (with ≥100%
     upside back to it). A cheap deterministic drawdown gate shortlists candidates,
