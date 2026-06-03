@@ -6,6 +6,7 @@ from datetime import date
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from screeners import (
     bollinger_band_reversal,
@@ -15,9 +16,11 @@ from screeners import (
     green_candles_20pct_up,
     heikin_ashi_supertrend,
     stochastic_swing,
+    sixty_seven_ka_funda,
     technical_analysis,
     week52_low_ceyhun,
 )
+from backend.sixty_seven.agent import EvidenceItem, SixtySevenVerdict
 from backend.technical.technical_agent import TechnicalVerdict
 
 
@@ -1021,3 +1024,123 @@ def test_technical_analysis_agent_cache_is_thread_safe(monkeypatch):
 
     assert len(created_agents) == 1
     assert len({id(agent) for agent in agents}) == 1
+
+
+# ---------------------------------------------------------------------------
+# 67 Ka Funda (AI) - deterministic drawdown gate + AI approval
+# ---------------------------------------------------------------------------
+
+
+class _StubSixtySevenAgent:
+    def __init__(self, approvals: dict[str, bool]):
+        self.approvals = approvals
+        self.calls: list[tuple[str, bool]] = []
+
+    def verify(self, symbol, candidate, *, force_refresh=False, search_result_count=5):
+        self.calls.append((str(symbol).upper(), bool(force_refresh)))
+        approved = self.approvals.get(str(symbol).upper(), False)
+        return SixtySevenVerdict(
+            symbol=str(symbol).upper(),
+            approved=approved,
+            fall_reason_category="business" if approved else "unclear",
+            fall_reason_clear=approved,
+            fall_reason_no_longer_exists=approved,
+            proven_profit_record=approved,
+            future_growth_prospects=approved,
+            quarterly_improvement=approved,
+            minimum_upside_100pct=approved,
+            confidence=8 if approved else 3,
+            evidence=[
+                EvidenceItem(
+                    source="Screener.in",
+                    title="Quarterly trend",
+                    link="https://www.screener.in/company/BUY/",
+                    snippet="Latest quarter improved.",
+                )
+            ],
+            rejection_reason="" if approved else "Reason for the fall is still unclear.",
+            summary="Approved 67 ka funda setup." if approved else "Rejected.",
+            model_used="test-model",
+        )
+
+
+def _sixty_seven_candles(ath: float, latest_close: float) -> pd.DataFrame:
+    closes = [ath * 0.9, ath * 0.6, latest_close]
+    return pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-01-01", periods=3, freq="D"),
+            "open": closes,
+            "high": [ath, ath * 0.75, latest_close * 1.1],
+            "low": [ath * 0.85, ath * 0.55, latest_close * 0.95],
+            "close": closes,
+            "volume": [1000.0] * 3,
+        }
+    )
+
+
+def _sixty_seven_params(**overrides) -> dict:
+    params = dict(sixty_seven_ka_funda.SCREENER["default_params"])
+    params.update(
+        {
+            "start_date": date(2026, 1, 1),
+            "end_date": date(2026, 1, 3),
+        }
+    )
+    params.update(overrides)
+    return params
+
+
+def test_sixty_seven_screener_returns_ai_approved_rows_only(monkeypatch):
+    stub = _StubSixtySevenAgent({"BUY": True, "SELL": False})
+    monkeypatch.setattr(sixty_seven_ka_funda, "_get_agent", lambda: stub)
+    frames = {
+        "BUY": _sixty_seven_candles(300.0, 90.0),
+        "SELL": _sixty_seven_candles(300.0, 90.0),
+        "HOLD": _sixty_seven_candles(300.0, 150.0),
+    }
+
+    result = sixty_seven_ka_funda.run(
+        _universe(),
+        FakeDataLoader(frames),
+        _sixty_seven_params(max_ai_candidates=10),
+    )
+
+    assert result["symbol"].tolist() == ["BUY"]
+    assert stub.calls == [("BUY", False), ("SELL", False)]
+    row = result.iloc[0]
+    assert row["rating"] == "BUY"
+    assert row["drawdown_pct"] == pytest.approx(70.0)
+    assert row["fall_reason_category"] == "business"
+    assert "Approved" in row["reason"]
+    assert list(result.columns) == sixty_seven_ka_funda.RESULT_COLUMNS
+
+
+def test_sixty_seven_screener_honors_max_ai_candidates(monkeypatch):
+    stub = _StubSixtySevenAgent({"BUY": True, "SELL": True})
+    monkeypatch.setattr(sixty_seven_ka_funda, "_get_agent", lambda: stub)
+    frames = {
+        "BUY": _sixty_seven_candles(300.0, 90.0),
+        "SELL": _sixty_seven_candles(300.0, 90.0),
+    }
+
+    result = sixty_seven_ka_funda.run(
+        _universe(),
+        FakeDataLoader(frames),
+        _sixty_seven_params(max_ai_candidates=1),
+    )
+
+    assert result["symbol"].tolist() == ["BUY"]
+    assert stub.calls == [("BUY", False)]
+
+
+def test_sixty_seven_screener_forwards_force_refresh_to_agent(monkeypatch):
+    stub = _StubSixtySevenAgent({"BUY": True})
+    monkeypatch.setattr(sixty_seven_ka_funda, "_get_agent", lambda: stub)
+
+    sixty_seven_ka_funda.run(
+        _universe(),
+        FakeDataLoader({"BUY": _sixty_seven_candles(300.0, 90.0)}),
+        _sixty_seven_params(force_refresh=True),
+    )
+
+    assert stub.calls == [("BUY", True)]

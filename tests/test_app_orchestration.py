@@ -117,6 +117,30 @@ def test_execute_screener_uses_selected_lookback_days(monkeypatch):
     assert captured_params["start_date"] == real_date(2026, 6, 2) - timedelta(days=30)
 
 
+def test_redact_secrets_masks_serpapi_and_agent_keys(monkeypatch):
+    monkeypatch.setenv("SERPAPI_API_KEY", "serp-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-secret")
+    monkeypatch.setattr(
+        app,
+        "get_dhan_credentials",
+        lambda required=False: SimpleNamespace(
+            client_code="client-secret",
+            access_token="token-secret",
+        ),
+    )
+
+    redacted = app._redact_secrets(
+        "serp-secret anthropic-secret client-secret token-secret still-visible"
+    )
+
+    assert "serp-secret" not in redacted
+    assert "anthropic-secret" not in redacted
+    assert "client-secret" not in redacted
+    assert "token-secret" not in redacted
+    assert "still-visible" in redacted
+    assert redacted.count("***REDACTED***") == 4
+
+
 def test_universe_table_defers_status_loading_until_user_opts_in(monkeypatch):
     """Collapsed universe details should not scan every universe on each rerun."""
 

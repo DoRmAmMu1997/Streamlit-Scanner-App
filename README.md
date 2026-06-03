@@ -22,9 +22,26 @@ transcript signal + integrated view).
 
 ---
 
+## Changes Codex did
+
+- Added the `67 Ka Funda (AI)` screener: a deterministic 67% drawdown and
+  100% upside-to-ATH shortlister runs first, then a Claude Agent SDK verifier
+  approves only BUY rows backed by web and Screener.in evidence.
+- Added `backend/sixty_seven/` with the OHLC shortlister, SerpAPI Google search
+  client, and Claude verifier that treats all external text as untrusted
+  evidence.
+- Added the `hemant_super_good_200_union` universe and generated
+  `data/universes/hemant_super_good_200_union.csv`.
+- Added tests for the shortlister, SerpAPI client, Claude verifier, screener
+  flow, universe generation, and secret redaction.
+- Co-authored by: DoRmAmMu1997 <hemantdhamija@gmail.com> and Codex
+  <codex@openai.com>.
+
+---
+
 ## Features
 
-- **Nine built-in screeners**, all built on a common `BaseScanner` abstract
+- **Ten built-in screeners**, all built on a common `BaseScanner` abstract
   base class so adding new ones is a single-file change.
   - **Heikin Ashi SuperTrend** — F&O stocks where the daily Heikin Ashi close
     crosses the SuperTrend line.
@@ -48,6 +65,20 @@ transcript signal + integrated view).
   - **20% Up Green Candles (Lovevanshi)** — Hemant Super 45 ∪ Good 45 stocks
     whose latest candle caps a run of consecutive green candles (up to 20) that
     moved more than 20% from the run's lowest low to its highest high.
+  - **Technical Analysis (AI)** — Hemant Super 45 ∪ Good 45 stocks with a
+    breakout-confirmed cup-and-handle or inverse head-and-shoulders, or sitting
+    at a major (multi-touch, full-history) support level. A cheap pivot-based
+    gate prefilters candidates, then a **Claude Agent SDK** agent (same
+    subscription-based auth as Check Fundamentals) confirms the pattern from the
+    OHLC data. Degrades to gate-only "near support" when the SDK is unavailable.
+  - **67 Ka Funda (AI)** — Hemant Super 45 + Good 45 + Good 200 stocks that have
+    fallen at least 67% from their available-history all-time high (with ≥100%
+    upside back to it). A cheap deterministic drawdown gate shortlists candidates,
+    then a **Claude Agent SDK** verifier researches each survivor (Screener.in data
+    + SerpAPI Google snippets, all treated as untrusted evidence) and approves a
+    BUY only when the fall is explained, appears resolved, and the profit / growth
+    / quarterly-improvement checks pass. Needs a `SERPAPI_API_KEY`; degrades
+    gracefully (skips the AI step) when the SDK or SerpAPI is unavailable.
   - **Technical Analysis (AI)** — Hemant Super 45 ∪ Good 45 stocks with an
     AI-confirmed bullish setup: major support, breakout-confirmed classical
     pattern, confirmed double bottom, bullish Fair Value Gap retest, or bullish
@@ -65,8 +96,9 @@ transcript signal + integrated view).
   app never blocks on downloads.
 - **Reusable scanner universes** — built-in universe keys include `nifty_100`,
   `nifty_500`, `fno`, `hemant_super_45`, `hemant_good_45`,
-  `hemant_good_200`, and the composite `hemant_super_good_union`
-  (Hemant Super 45 ∪ Good 45, deduped).
+  `hemant_good_200`, and the composites `hemant_super_good_union`
+  (Hemant Super 45 ∪ Good 45) and `hemant_super_good_200_union`
+  (Hemant Super 45 ∪ Good 45 ∪ Good 200), both deduped.
 - **Interactive TradingView Lightweight Charts** — click any shortlisted stock
   to see a candlestick chart (with a drag-to-scale price axis) showing the
   screener's own indicator overlaid (Heikin Ashi candles for HA-based screeners;
@@ -173,8 +205,17 @@ network work happens up front in the terminal.
    CLAUDE_AGENT_MODEL=claude-sonnet-4-6
    ```
 
-   Most screeners run fine without any of this; the Check Fundamentals panel
-   and the Technical Analysis (AI) confirmation step need it.
+   The **67 Ka Funda (AI)** screener additionally needs a
+   [SerpAPI](https://serpapi.com/) key for its Google web research — add it to
+   `Dependencies/.env`:
+
+   ```env
+   SERPAPI_API_KEY=your-serpapi-key
+   ```
+
+   Most screeners run fine without any of this; only the Check Fundamentals
+   panel, the Technical Analysis (AI) confirmation step, and the 67 Ka Funda (AI)
+   verifier need it.
 
 > `Dependencies/.env` is git-ignored — your credentials never leave your machine.
 
@@ -224,8 +265,12 @@ Streamlit Scanner App/
 │   │   │                        # (pdfplumber → pypdf fallback)
 │   │   ├── fundamentals_cache.py# On-disk JSON cache (data + verdict)
 │   │   └── fundamental_agent.py # Claude Agent SDK agent + Pydantic schemas
-│   └── technical/               # Technical Analysis (AI) subsystem
-│       └── technical_agent.py  # Claude Agent SDK agent + TechnicalVerdict
+│   ├── technical/               # Technical Analysis (AI) subsystem
+│   │   └── technical_agent.py  # Claude Agent SDK agent + TechnicalVerdict
+│   └── sixty_seven/             # 67 Ka Funda (AI) subsystem
+│       ├── shortlister.py      # Deterministic 67% drawdown gate
+│       ├── search_client.py    # SerpAPI Google search client
+│       └── agent.py            # Claude Agent SDK verifier + Pydantic schemas
 ├── screeners/                   # One file per screener (the strategy logic)
 │   ├── heikin_ashi_supertrend.py
 │   ├── bollinger_band_reversal.py
@@ -235,7 +280,8 @@ Streamlit Scanner App/
 │   ├── stochastic_swing.py
 │   ├── week52_low_ceyhun.py
 │   ├── green_candles_20pct_up.py
-│   └── technical_analysis.py    # AI screener: pivot gate + technical agent
+│   ├── technical_analysis.py    # AI screener: pivot gate + technical agent
+│   └── sixty_seven_ka_funda.py  # AI screener: 67% drawdown gate + verifier
 ├── Dependencies/
 │   ├── .env.example             # Credential template (copy to .env)
 │   └── dhan_token_setup.py      # One-time OAuth token helper
@@ -339,8 +385,6 @@ Both are one-shot prices — the verdict cache covers subsequent clicks at zero
 cost until either the underlying data or the model changes. When the monthly
 credit is exhausted, the agent pauses until it refreshes (or falls back to
 standard API rates if you've enabled API billing).
-
----
 
 ## Adding your own screener
 
