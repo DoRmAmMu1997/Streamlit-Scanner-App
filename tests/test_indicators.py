@@ -29,6 +29,8 @@ from backend.indicators import (
     pivot_highs,
     pivot_lows,
     prepare_ohlc,
+    rank_levels,
+    resample_to_weekly,
     rsi,
     sma,
     stochastic,
@@ -353,3 +355,92 @@ def test_major_levels_returns_empty_when_too_short_to_confirm():
     # Three candles cannot confirm a left=2/right=2 pivot, so there are no levels.
     frame = _level_frame([10.0, 9.0, 10.0], [12.0, 11.0, 12.0])
     assert major_levels(frame, left=2, right=2, cluster_pct=2.0, min_touches=2) == []
+
+
+# ---------------------------------------------------------------------------
+# rank_levels — relevance scoring of support/resistance
+# ---------------------------------------------------------------------------
+
+
+def test_rank_levels_prefers_recent_near_price_level():
+    # Price drifts 100 → 150 over 60 bars (last close ≈ 150). The level at 150 is
+    # near price and freshly tested; the level at 100 was only touched long ago
+    # and is now far away. Despite fewer "touches", 150 must rank first because
+    # proximity + recency dominate.
+    close = np.linspace(100.0, 150.0, 60)
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=60, freq="D"),
+            "open": close,
+            "high": close + 1.0,
+            "low": close - 1.0,
+            "close": close,
+            "volume": [1000.0] * 60,
+        }
+    )
+    levels = [
+        {"price": 150.0, "touches": 3, "kind": "support"},
+        {"price": 100.0, "touches": 5, "kind": "support"},
+    ]
+
+    scored = rank_levels(frame, levels)
+
+    assert len(scored) == 2
+    # Sorted by relevance descending, the near/recent 150 level wins.
+    assert scored[0]["price"] == 150.0
+    assert scored[0]["relevance"] >= scored[1]["relevance"]
+    # Every enrichment field is present and well-formed.
+    for field in ("relevance", "components", "last_touch_bars_ago", "distance_pct", "flipped"):
+        assert field in scored[0]
+    assert 0.0 <= scored[0]["relevance"] <= 1.0
+
+
+def test_rank_levels_empty_inputs_are_safe():
+    frame = _level_frame([10.0, 9.0, 10.0], [12.0, 11.0, 12.0])
+    assert rank_levels(frame, []) == []
+    assert rank_levels(pd.DataFrame(), [{"price": 10.0, "touches": 2, "kind": "support"}]) == []
+
+
+# ---------------------------------------------------------------------------
+# resample_to_weekly — daily → weekly aggregation
+# ---------------------------------------------------------------------------
+
+
+def test_resample_to_weekly_aggregates_ohlcv_per_week():
+    # Two trading weeks (Mon–Fri). Each weekly candle takes the first open, the
+    # max high, the min low, the last close, and the summed volume.
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                [
+                    "2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05",
+                    "2024-01-08", "2024-01-09", "2024-01-10", "2024-01-11", "2024-01-12",
+                ]
+            ),
+            "open": [100, 104, 107, 102, 105, 108, 111, 113, 110, 112],
+            "high": [105, 108, 110, 106, 109, 112, 115, 116, 114, 118],
+            "low": [99, 103, 101, 100, 104, 107, 110, 109, 108, 111],
+            "close": [104, 107, 102, 105, 108, 111, 113, 110, 112, 117],
+            "volume": [10, 20, 30, 40, 50, 11, 22, 33, 44, 55],
+        }
+    )
+
+    weekly = resample_to_weekly(frame)
+
+    assert len(weekly) == 2
+    week1 = weekly.iloc[0]
+    assert week1["open"] == 100
+    assert week1["high"] == 110
+    assert week1["low"] == 99
+    assert week1["close"] == 108
+    assert week1["volume"] == 150
+    week2 = weekly.iloc[1]
+    assert week2["open"] == 108
+    assert week2["high"] == 118
+    assert week2["low"] == 107
+    assert week2["close"] == 117
+    assert week2["volume"] == 165
+
+
+def test_resample_to_weekly_empty_frame_is_safe():
+    assert resample_to_weekly(pd.DataFrame()).empty

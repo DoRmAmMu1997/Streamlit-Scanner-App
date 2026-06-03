@@ -54,6 +54,15 @@ _COLORS = {
     "stoch_k": "#42a5f5",
     "stoch_d": "#ffa726",
     "guide_line": "#888888",
+    # Technical Analysis (AI) screener overlays.
+    "level_support": "#26a69a",
+    "level_resistance": "#ef5350",
+    "level_both": "#b0bec5",
+    "fvg_bull": "#66bb6a",
+    "fvg_bear": "#ef9a9a",
+    "ob_bull": "#42a5f5",
+    "ob_bear": "#ab47bc",
+    "neckline": "#ffb300",
 }
 
 # A price column shows two decimals (NSE prices are paisa-precision).
@@ -395,6 +404,96 @@ def add_stochastic_overlay(spec: dict, candles: pd.DataFrame, *,
     ])
 
 
+def add_levels_overlay(spec: dict, levels: list[dict], *, pane: int = 0) -> None:
+    """Draw relevance-weighted support/resistance price lines on the price pane.
+
+    The line WIDTH scales with each level's ``relevance`` (more relevant = thicker)
+    so the eye lands on the levels that matter right now; the colour encodes the
+    kind (support / resistance / both). Expects the output of
+    `backend.indicators.rank_levels` (each level carries ``price``, ``kind`` and
+    ``relevance``); plain `major_levels` output still works (default width).
+    Levels are drawn SOLID so they read as firm lines, distinct from the dotted
+    zone bands added by `add_zone_overlays`.
+    """
+    panes = spec.get("panes", [])
+    if not (0 <= pane < len(panes)) or not levels:
+        return
+    color_by_kind = {
+        "support": _COLORS["level_support"],
+        "resistance": _COLORS["level_resistance"],
+        "both": _COLORS["level_both"],
+    }
+    price_lines = panes[pane].setdefault("price_lines", [])
+    for level in levels:
+        kind = str(level.get("kind", "both"))
+        relevance = level.get("relevance")
+        # Relevance 0..1 → width 1..4. Unscored levels get a neutral width 2.
+        width = 2 if relevance is None else 1 + round(float(relevance) * 3)
+        title = kind if relevance is None else f"{kind} r{float(relevance):.2f}"
+        price_lines.append(
+            {
+                "price": float(level["price"]),
+                "color": color_by_kind.get(kind, _COLORS["level_both"]),
+                "title": title,
+                "lineWidth": int(width),
+                "lineStyle": 0,  # solid
+            }
+        )
+
+
+def add_zone_overlays(spec: dict, zones: list[dict], *, pane: int = 0) -> None:
+    """Draw price-action ZONES (Fair Value Gaps, order blocks) as dotted bands.
+
+    Lightweight Charts v5 has no native filled rectangle in this app, so each zone
+    is drawn as a pair of DOTTED horizontal lines bounding the band. They extend
+    across the whole pane — the trader convention of carrying a demand/supply zone
+    forward until price mitigates it. `zones` is a list of
+    ``{"top", "bottom", "color", "title"}`` dicts; the title labels the top line.
+    """
+    panes = spec.get("panes", [])
+    if not (0 <= pane < len(panes)) or not zones:
+        return
+    price_lines = panes[pane].setdefault("price_lines", [])
+    for zone in zones:
+        # A zone names its colour semantically via `kind` (e.g. "fvg_bull"),
+        # resolved against the palette; an explicit "color" wins if given.
+        color = zone.get("color") or _COLORS.get(str(zone.get("kind", "")), _COLORS["guide_line"])
+        price_lines.append(
+            {
+                "price": float(zone["top"]),
+                "color": color,
+                "title": zone.get("title", ""),
+                "lineWidth": 1,
+                "lineStyle": 1,  # dotted
+            }
+        )
+        price_lines.append(
+            {
+                "price": float(zone["bottom"]),
+                "color": color,
+                "title": "",
+                "lineWidth": 1,
+                "lineStyle": 1,
+            }
+        )
+
+
+def add_neckline_overlay(spec: dict, price: float, title: str, *, pane: int = 0) -> None:
+    """Draw a single dashed neckline — the double top/bottom breakout level."""
+    panes = spec.get("panes", [])
+    if not (0 <= pane < len(panes)):
+        return
+    panes[pane].setdefault("price_lines", []).append(
+        {
+            "price": float(price),
+            "color": _COLORS["neckline"],
+            "title": title,
+            "lineWidth": 2,
+            "lineStyle": 2,  # dashed
+        }
+    )
+
+
 # ---------------------------------------------------------------------------
 # Spec -> HTML renderer
 # ---------------------------------------------------------------------------
@@ -454,7 +553,9 @@ const SPEC = __SPEC_JSON__;
     if (firstSeries) {
       (pane.price_lines || []).forEach(function (pl) {
         firstSeries.createPriceLine({
-          price: pl.price, color: pl.color, lineWidth: 1, lineStyle: 2,
+          price: pl.price, color: pl.color,
+          lineWidth: pl.lineWidth || 1,
+          lineStyle: (pl.lineStyle === undefined ? 2 : pl.lineStyle),
           axisLabelVisible: true, title: pl.title || "",
         });
       });
