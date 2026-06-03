@@ -135,6 +135,7 @@ LEGACY_COLUMN_CANDIDATES = {
 # generous headroom while preventing a misbehaving or hostile endpoint from
 # streaming gigabytes of data into the scanner's memory.
 MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
+INSTRUMENT_MASTER_SNAPSHOT_PATTERN = "all_instrument *.csv"
 
 
 def download_csv(
@@ -205,6 +206,41 @@ def instrument_master_snapshot_path(
     if isinstance(selected_date, datetime):
         selected_date = selected_date.date()
     return Path(snapshot_dir) / f"all_instrument {selected_date:%Y-%m-%d}.csv"
+
+
+def prune_old_instrument_master_snapshots(snapshot_path: Path | str) -> list[Path]:
+    """Delete older Dhan instrument-master snapshots after a fresh snapshot exists.
+
+    The important safety rule is order: callers should write and close the new
+    `snapshot_path` first, then call this helper. That way a failed download or
+    failed CSV write never removes the last usable local Dhan master.
+    """
+    keep_path = Path(snapshot_path).resolve()
+    snapshot_dir = keep_path.parent
+    deleted_paths: list[Path] = []
+
+    if not snapshot_dir.exists():
+        return deleted_paths
+
+    for candidate in snapshot_dir.glob(INSTRUMENT_MASTER_SNAPSHOT_PATTERN):
+        # `glob()` can match a directory if it has a .csv-looking name. Only
+        # normal files are old snapshots, so folders and other entries stay put.
+        if not candidate.is_file():
+            continue
+
+        candidate_path = candidate.resolve()
+        if candidate_path == keep_path:
+            continue
+
+        # The search starts in snapshot_dir, and this extra parent check keeps
+        # deletion scoped there even if a future path change gets clever.
+        if candidate.parent.resolve() != snapshot_dir:
+            continue
+
+        candidate.unlink()
+        deleted_paths.append(candidate)
+
+    return deleted_paths
 
 
 def strip_fno_suffix(trading_symbol: str) -> str:
@@ -284,6 +320,7 @@ def load_instrument_master(
         snapshot_path = instrument_master_snapshot_path(run_date=run_date, snapshot_dir=snapshot_dir)
         snapshot_path.parent.mkdir(parents=True, exist_ok=True)
         normalized.to_csv(snapshot_path, index=False)
+        prune_old_instrument_master_snapshots(snapshot_path)
     return normalized
 
 
