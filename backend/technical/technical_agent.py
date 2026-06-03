@@ -51,6 +51,12 @@ from backend.fundamentals.fundamental_agent import (
     _usage_limit_from_message,
 )
 from backend.fundamentals.fundamentals_cache import FundamentalsCache
+from backend.technical.knowledge import FINAL_OUTPUT_INSTRUCTION, build_system_prompt
+from backend.technical.tools import (
+    TechnicalToolContext,
+    build_technical_mcp_server,
+    resolve_params,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -68,12 +74,24 @@ _OHLC_WINDOW_BARS = 250
 RunnerFn = Callable[..., Awaitable[AgentRunResult]]
 
 
-def _technical_context_hash(candles: pd.DataFrame, levels: list[dict[str, Any]]) -> str:
-    """Return a stable hash for the chart facts given to the model.
+def _technical_context_hash(
+    candles: pd.DataFrame,
+    levels: list[dict[str, Any]],
+    params: dict[str, Any] | None = None,
+) -> str:
+    """Return a stable hash for the chart facts the model reasons about.
 
-    Cache safety depends on the prompt inputs, not only the latest candle date.
-    User-tuned pivot settings can produce different major levels on the same
-    day, so those levels and the prompt OHLC window both feed this digest.
+    Cache safety depends on EVERYTHING that can change the verdict, not only the
+    latest candle date. Three things feed this digest:
+    - the prompt OHLC window,
+    - the major support/resistance levels (user-tuned pivot settings can shift
+      these on the same day), and
+    - the detector settings (`params`) — because the agent's tools compute Fair
+      Value Gaps, order blocks, structure, etc. deterministically from these, a
+      changed setting can change the tool answers and therefore the verdict.
+
+    The detectors are pure functions of (candles, params), so hashing those keeps
+    a cached verdict reproducible.
     """
     window = candles.tail(_OHLC_WINDOW_BARS).copy() if not candles.empty else candles
     candle_records: list[dict[str, Any]] = []
@@ -88,6 +106,9 @@ def _technical_context_hash(candles: pd.DataFrame, levels: list[dict[str, Any]])
     payload = {
         "candles": candle_records,
         "levels": levels,
+        # Resolve to the full settings dict so omitted keys (which fall back to
+        # defaults) hash identically whether or not the caller passed them.
+        "params": resolve_params(params),
     }
     raw = json.dumps(payload, default=str, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
@@ -98,14 +119,34 @@ def _technical_context_hash(candles: pd.DataFrame, levels: list[dict[str, Any]])
 # ---------------------------------------------------------------------------
 
 
-# The four mutually-exclusive outcomes the agent can report. "none" means no
-# qualifying setup — the screener drops the stock in that case.
+# The mutually-exclusive BULLISH setups the agent can report (the screener is
+# long-only). "none" means no qualifying setup — the screener drops the stock.
+# Bearish structures are surfaced via `caution`, never as a `pattern`.
 PatternName = Literal[
     "cup_and_handle",
     "inverse_head_and_shoulders",
     "at_support",
+    "double_bottom",
+    "fair_value_gap",
+    "order_block",
     "none",
 ]
+
+
+class RelevantLevel(BaseModel):
+    """One support/resistance level the agent judged relevant to its verdict.
+
+    Surfacing these answers the user's question — *which* levels are relevant —
+    in the structured output instead of burying it in prose. `relevance` is the
+    agent's qualitative call (high/medium/low); the deterministic numeric score
+    is available separately from the `level_map` tool / `backend.indicators.
+    rank_levels`.
+    """
+
+    price: float
+    role: Literal["support", "resistance"] = "support"
+    relevance: Literal["high", "medium", "low"] = "medium"
+    why: str = Field(default="", description="One line on why this level matters now.")
 
 
 class TechnicalVerdict(BaseModel):
@@ -144,6 +185,28 @@ class TechnicalVerdict(BaseModel):
     confidence: int = Field(
         description="How confident the agent is in this read, 0-10 (10 = textbook)."
     )
+    trend: Literal["uptrend", "downtrend", "sideways"] = Field(
+        default="sideways",
+        description="The daily market-structure trend this read is set against.",
+    )
+    htf_alignment: Literal["aligned", "against", "neutral"] = Field(
+        default="neutral",
+        description=(
+            "Whether the weekly (higher-timeframe) trend supports the bullish "
+            "setup: 'aligned', 'against', or 'neutral'."
+        ),
+    )
+    relevant_levels: list[RelevantLevel] = Field(
+        default_factory=list,
+        description="The support/resistance levels the agent is keying on (0-4 of them).",
+    )
+    caution: str = Field(
+        default="",
+        description=(
+            "Bearish or structural warnings that temper the bullish read "
+            "(e.g. overhead resistance, downtrend, bearish CHoCH); '' if none."
+        ),
+    )
     reasoning: str = Field(
         description=(
             "2-4 sentences explaining the read: the structure seen, the level(s) "
@@ -166,78 +229,17 @@ class TechnicalVerdict(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# System prompt
+# System prompt (assembled from the externalized knowledge module)
 # ---------------------------------------------------------------------------
 
 
-SYSTEM_PROMPT = """\
-You are a professional technical analyst specializing in classical chart
-patterns on Indian equities. You read daily OHLC price data and identify
-high-conviction setups only — you are conservative and prefer "none" over a
-weak or speculative read.
-
-You will be given, for ONE stock:
-- a list of major support/resistance levels (price zones the market has
-  respected repeatedly over the stock's full history), and
-- a window of recent daily candles as CSV (date, open, high, low, close).
-
-Identify whether EXACTLY ONE of these three setups is present RIGHT NOW (as of
-the most recent candle):
-
-1. CUP AND HANDLE (`cup_and_handle`):
-   A rounded "cup" base followed by a smaller "handle" pullback, then a
-   breakout. Report this ONLY if the most recent price action has ALREADY
-   CLOSED ABOVE the handle/rim resistance (the breakout is confirmed). If the
-   cup or handle is still forming and price has NOT broken out, this does not
-   qualify — return "none".
-
-2. INVERSE HEAD AND SHOULDERS (`inverse_head_and_shoulders`):
-   A left shoulder, a lower head, and a right shoulder (roughly level with the
-   left), with a neckline across the two intervening highs. Report this ONLY if
-   price has ALREADY CLOSED ABOVE the neckline (the breakout is confirmed).
-   A still-forming shape with no neckline breakout does not qualify — "none".
-
-3. AT SUPPORT (`at_support`):
-   The latest close is sitting AT one of the MAJOR support levels provided
-   (within a small tolerance), having declined into it — a potential bounce
-   zone. Only use the major levels given; do NOT invent minor intraday levels.
-
-Rules:
-- Use ONLY major levels for support/resistance reasoning — the multi-touch,
-  full-history levels provided. Ignore minor noise.
-- "Completed pattern" ALWAYS means the breakout close has already occurred.
-  Never report `confirmed=true` for a pattern whose breakout has not happened.
-- If more than one setup could apply, pick the single strongest and most
-  clearly completed one.
-- If nothing clearly qualifies, return pattern="none", confirmed=false,
-  confidence reflecting how sure you are that there's no setup."""
-
-
-# Appended LAST to the system prompt. The Claude Agent SDK has no
-# `with_structured_output` equivalent, so we steer the model to emit a single
-# JSON object as its final message and validate it ourselves with Pydantic.
-_FINAL_OUTPUT_INSTRUCTION = """\
-
-============================================================
-FINAL OUTPUT FORMAT (STRICT)
-============================================================
-
-When your analysis is complete, your FINAL message must be a SINGLE JSON object
-and NOTHING else — no prose before or after it, and no markdown code fences.
-The object must contain exactly these keys:
-
-- "symbol": string
-- "pattern": one of "cup_and_handle", "inverse_head_and_shoulders",
-  "at_support", "none"
-- "confirmed": boolean (true only when a breakout/support is already in place;
-  always false when pattern is "none")
-- "key_levels": array of 1-3 numbers (the breakout/support prices); [] for "none"
-- "confidence": integer 0-10
-- "reasoning": string (2-4 sentences)
-- "signal_date": string (YYYY-MM-DD of the latest candle)
-- "model_used": string
-
-Emit ONLY this JSON object as your final answer."""
+# The agent's expertise now lives in `backend/technical/knowledge.py` so it can be
+# read, extended, and reviewed as prose. We compose it once at import time.
+# `analyze` appends `_FINAL_OUTPUT_INSTRUCTION` (the strict JSON contract) last,
+# exactly as the original inline prompt did. The names are kept so the rest of
+# this module (and its tests) are unchanged.
+SYSTEM_PROMPT = build_system_prompt()
+_FINAL_OUTPUT_INSTRUCTION = FINAL_OUTPUT_INSTRUCTION
 
 
 # ---------------------------------------------------------------------------
@@ -287,9 +289,10 @@ class TechnicalAnalysisAgent:
     `claude_agent_sdk`.
     """
 
-    # A single reasoning turn plus a structuring turn is plenty — there are no
-    # tools to call. The small ceiling guards against a runaway model.
-    MAX_TURNS = 4
+    # The agent now calls up to three analysis tools, then writes its JSON, so it
+    # needs a few more turns than the old tool-free agent. The ceiling still
+    # guards against a runaway loop (three tool calls + reasoning + final answer).
+    MAX_TURNS = 8
 
     def __init__(
         self,
@@ -310,17 +313,24 @@ class TechnicalAnalysisAgent:
         # Fast mode disables extended thinking on the SDK call for lower latency.
         self._fast_mode = bool(fast_mode)
 
-    def _cache_model_key(self, candles: pd.DataFrame, levels: list[dict[str, Any]]) -> str:
+    def _cache_model_key(
+        self,
+        candles: pd.DataFrame,
+        levels: list[dict[str, Any]],
+        params: dict[str, Any] | None = None,
+    ) -> str:
         """Build the cache namespace for one technical-analysis prompt.
 
         The date still lives in the cache filename via `data_date`; this model
-        key adds a digest of the chart context so changed support/resistance
-        levels cannot reuse an older verdict from the same candle date. Thorough
-        mode keeps the historical key shape for cache continuity; fast mode adds
-        a suffix so lower-latency verdicts never masquerade as thorough ones.
+        key adds a digest of the chart context (candles + levels + detector
+        `params`) so a changed setup cannot reuse an older verdict from the same
+        candle date. Thorough mode keeps the historical key shape for cache
+        continuity; fast mode adds a suffix so lower-latency verdicts never
+        masquerade as thorough ones.
         """
         speed_part = "::fast" if self._fast_mode else ""
-        return f"{self._model}::technical{speed_part}::{_technical_context_hash(candles, levels)}"
+        digest = _technical_context_hash(candles, levels, params)
+        return f"{self._model}::technical{speed_part}::{digest}"
 
     # ------------------------------------------------------------------
     # Prompt construction
@@ -354,17 +364,26 @@ class TechnicalAnalysisAgent:
     def _build_user_prompt(
         self, symbol: str, candles: pd.DataFrame, levels: list[dict[str, Any]]
     ) -> str:
-        """Build the per-stock kickoff message for the agent."""
+        """Build the per-stock kickoff message for the agent.
+
+        The candle CSV and a quick level summary are included for orientation, but
+        the precise analysis comes from the tools (`level_map`, `price_patterns`,
+        `market_structure`) — the prompt steers the agent to call them rather than
+        eyeball the CSV.
+        """
         return (
             f"Stock: {symbol}\n\n"
-            f"Major support/resistance levels (full-history, multi-touch):\n"
+            f"Quick view of major support/resistance (full detail via level_map):\n"
             f"{self._levels_text(levels)}\n\n"
-            f"Recent daily candles (CSV):\n{self._ohlc_csv(candles)}\n\n"
-            "Identify whether a breakout-confirmed cup-and-handle, a "
-            "breakout-confirmed inverse head-and-shoulders, or an at-major-support "
-            f"setup is present as of the latest candle. Set model_used to "
-            f"'{self._model}'. Then output the final TechnicalVerdict JSON exactly "
-            "per the FINAL OUTPUT FORMAT instructions."
+            f"Recent daily candles (CSV, for orientation):\n{self._ohlc_csv(candles)}\n\n"
+            "Call your tools to gather the facts: market_structure (trend + "
+            "BOS/CHoCH on daily and weekly), level_map (relevance-scored "
+            "support/resistance), and price_patterns (Fair Value Gaps, double "
+            "bottom/top, order blocks). Then decide whether ONE bullish setup is "
+            "present and confirmed as of the latest candle, judge which levels are "
+            "relevant, and gauge weekly alignment. "
+            f"Set model_used to '{self._model}'. Finally output the TechnicalVerdict "
+            "JSON exactly per the FINAL OUTPUT FORMAT instructions."
         )
 
     # ------------------------------------------------------------------
@@ -378,12 +397,15 @@ class TechnicalAnalysisAgent:
         system_prompt: str,
         model: str,
         max_turns: int,
+        tool_context: TechnicalToolContext | None = None,
     ) -> AgentRunResult:
         """Run one agentic loop on the Claude Agent SDK and return final text.
 
         Imports `claude_agent_sdk` lazily so this module imports cleanly even
         when the SDK is not installed (e.g. in CI running only the unit tests).
-        No tools are registered — the price data is already in `prompt`.
+        When `tool_context` is provided, an in-process MCP server exposing the
+        three technical tools is registered and the agent is restricted to those
+        tools only (see `backend/technical/tools.py`).
         """
         try:
             import claude_agent_sdk as claude_sdk  # type: ignore[import-not-found]
@@ -406,12 +428,22 @@ class TechnicalAnalysisAgent:
             ) from exc
         ThinkingConfigDisabled = getattr(claude_sdk, "ThinkingConfigDisabled", None)
 
+        # Build the in-process tool server for THIS stock. The handlers close over
+        # `tool_context`, so parallel confirmations never share mutable state.
+        mcp_servers: dict[str, Any] = {}
+        allowed_tools: list[str] = []
+        if tool_context is not None:
+            mcp_servers, allowed_tools = build_technical_mcp_server(tool_context)
+
         options_kwargs: dict[str, Any] = {
             "model": model,
             "system_prompt": system_prompt,
             "max_turns": max_turns,
-            # No tools: deny everything so the agent can never reach the built-in
-            # filesystem/bash tools in a headless Streamlit run.
+            # Expose ONLY our three technical tools. With "dontAsk", any tool not
+            # in allowed_tools is denied, so the agent can never reach the
+            # built-in filesystem/bash tools in a headless Streamlit run.
+            "mcp_servers": mcp_servers,
+            "allowed_tools": allowed_tools,
             "permission_mode": "dontAsk",
             "setting_sources": [],
         }
@@ -510,15 +542,19 @@ class TechnicalAnalysisAgent:
         candles: pd.DataFrame,
         levels: list[dict[str, Any]],
         *,
+        params: dict[str, Any] | None = None,
         force_refresh: bool = False,
     ) -> TechnicalVerdict:
         """Return a technical verdict for `symbol`, hitting the cache when possible.
 
         `candles` must be a prepared OHLC frame (oldest→newest, with a
         `timestamp` column). `levels` is the output of
-        `backend.indicators.major_levels`. The verdict is cached per
-        (symbol, model, latest-candle-date) so re-runs on unchanged data are
-        free; `force_refresh=True` bypasses and overwrites the cache.
+        `backend.indicators.major_levels`. `params` are the detector settings the
+        tools use (FVG/double/order-block/structure/relevance knobs); omitted keys
+        fall back to `tools.DEFAULT_TOOL_PARAMS`. The verdict is cached per
+        (symbol, model, context-hash, latest-candle-date) — and the context hash
+        includes `params` — so re-runs on unchanged data/settings are free;
+        `force_refresh=True` bypasses and overwrites the cache.
         """
         if not symbol or not str(symbol).strip():
             raise ValueError("TechnicalAnalysisAgent.analyze: symbol must be non-empty")
@@ -530,7 +566,7 @@ class TechnicalAnalysisAgent:
         if not candles.empty and "timestamp" in candles.columns:
             signal_date = str(candles.iloc[-1]["timestamp"])[:10]
         data_date = signal_date or datetime.now(UTC).date().isoformat()
-        cache_key_model = self._cache_model_key(candles, levels)
+        cache_key_model = self._cache_model_key(candles, levels, params)
 
         # 1. Verdict cache: free re-runs on the same candle date.
         if not force_refresh:
@@ -538,10 +574,11 @@ class TechnicalAnalysisAgent:
             if cached is not None:
                 return TechnicalVerdict.model_validate(cached)
 
-        # 2. Run the agentic loop. The data is in the prompt, so there are no
-        #    tools — one reasoning pass yields the final JSON.
+        # 2. Run the agentic loop. The agent calls the technical tools (built from
+        #    this per-call context) to gather facts, then emits the final JSON.
         system_prompt = SYSTEM_PROMPT + _FINAL_OUTPUT_INSTRUCTION
         prompt = self._build_user_prompt(normalized, candles, levels)
+        tool_context = TechnicalToolContext.build(normalized, candles, levels, params)
         runner = self._runner or self._default_run
 
         run_result = self._run_sync(
@@ -550,6 +587,7 @@ class TechnicalAnalysisAgent:
                 system_prompt=system_prompt,
                 model=self._model,
                 max_turns=self.MAX_TURNS,
+                tool_context=tool_context,
             )
         )
         if run_result.cost_usd is not None:

@@ -429,3 +429,71 @@ available, but the app falls back to pure-pandas math without them.
 ## License
 
 Released under the [MIT License](LICENSE).
+
+---
+
+## Changes Claude did
+
+This section documents the **Technical Analysis (AI) screener expansion** added in
+this branch. The goal was to make the screener's Claude agent a far more
+proficient technical analyst: able to judge *which* support/resistance is
+relevant, recognise modern price-action concepts, reason with market structure
+and a higher timeframe, and call **tools** for deterministic analysis instead of
+eyeballing a candle dump.
+
+### What's new
+
+- **Level relevance scoring** — answers "which support/resistance is relevant and
+  which is not". `backend/indicators.py:rank_levels` scores every major level
+  0–1 by blending five signals: touches, recency (exponential decay), proximity
+  to price, volume at the level, and reaction strength — plus `last_touch_bars_ago`
+  and a `flipped` (polarity-change) flag.
+- **New price-action detectors** (`backend/technical/patterns.py`, pure pandas,
+  deterministic): **Fair Value Gaps** (3-candle imbalances, with filled/unfilled
+  tracking), **Double Top / Double Bottom** (with neckline-breakout confirmation),
+  **Order Blocks** (demand/supply candle before a structure break, with
+  mitigation tracking), and **Market structure** (swing trend + Break of Structure
+  / Change of Character).
+- **Weekly multi-timeframe** — `backend/indicators.py:resample_to_weekly`
+  aggregates the cached daily candles into weekly candles (no new data source), so
+  the agent gets higher-timeframe trend/level context and reports `htf_alignment`.
+- **Externalized agent knowledge** — the agent's "skill" now lives in
+  `backend/technical/knowledge.py` as composable prose (concept definitions,
+  decision rules, tool-usage guide) composed by `build_system_prompt()`, instead
+  of one inline string.
+- **Agent MCP tools** — `backend/technical/tools.py` exposes three in-process
+  tools the agent calls on demand: `level_map` (relevance-scored S/R, daily +
+  weekly), `price_patterns` (FVGs, double tops/bottoms, order blocks), and
+  `market_structure` (trend + BOS/CHoCH on both timeframes). Wired exactly like
+  the fundamentals agent (`create_sdk_mcp_server`, `allowed_tools`,
+  `permission_mode="dontAsk"`). The per-day verdict cache stays correct because
+  the tool outputs are deterministic functions of the candles + settings, which
+  are folded into the cache hash.
+- **Richer verdict** — `TechnicalVerdict` gained `trend`, `htf_alignment`,
+  `relevant_levels` (the levels the agent is keying on, each high/medium/low), and
+  `caution` (bearish/structure warnings). New BUY-eligible patterns:
+  `double_bottom`, `fair_value_gap`, `order_block`.
+- **New first-class BUY triggers** — the cheap gate in
+  `screeners/technical_analysis.py` now also admits a freshly-confirmed double
+  bottom, a retested unfilled bullish Fair Value Gap, or a tap of a bullish order
+  block (in addition to at-support and resistance breakouts). Graceful gate-only
+  degradation (when the Claude Agent SDK is unavailable) covers the new triggers.
+- **Chart visualizations** — the screener chart now draws relevance-weighted
+  support/resistance (thicker line = more relevant), dotted FVG / order-block
+  zones, and double-pattern necklines (`backend/charts.py:add_levels_overlay`,
+  `add_zone_overlays`, `add_neckline_overlay`).
+
+### Files
+
+| Area | Files |
+|---|---|
+| New | `backend/technical/patterns.py`, `backend/technical/knowledge.py`, `backend/technical/tools.py`, `tests/test_patterns.py`, `tests/test_technical_tools.py` |
+| Changed | `backend/indicators.py`, `backend/technical/technical_agent.py`, `screeners/technical_analysis.py`, `backend/charts.py`, and their tests |
+
+### Verification
+
+The full local verification set passes (`pytest` 285 passed, `compileall`,
+`ruff`, `bandit`, `pip-audit`). Detectors are covered by TDD-style tests with
+hand-verified synthetic fixtures. Note: a live end-to-end run of the agent
+calling its tools requires the Claude Agent SDK signed in and Dhan candle data,
+which a normal `python app.py` run exercises.

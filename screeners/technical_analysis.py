@@ -37,15 +37,26 @@ import threading
 
 import pandas as pd
 
-from backend.charts import candlestick_with_volume
+from backend.charts import (
+    add_levels_overlay,
+    add_neckline_overlay,
+    add_zone_overlays,
+    candlestick_with_volume,
+)
 from backend.config import get_agent_fast_mode, get_fundamentals_model
 from backend.fundamentals.fundamental_agent import (
     FundamentalsAgentError,
     FundamentalsUsageLimitError,
 )
-from backend.indicators import major_levels
+from backend.indicators import major_levels, rank_levels
 from backend.scanner_base import BaseScanner
 from backend.technical import TechnicalAnalysisAgent, TechnicalVerdict
+from backend.technical.patterns import (
+    detect_double_patterns,
+    detect_fair_value_gaps,
+    detect_order_blocks,
+)
+from backend.technical.tools import DEFAULT_TOOL_PARAMS, resolve_params
 
 
 logger = logging.getLogger(__name__)
@@ -82,10 +93,12 @@ class TechnicalAnalysis(BaseScanner):
         "key": "technical_analysis",
         "name": "Technical Analysis (AI)",
         "description": (
-            "Hemant Super 45 ∪ Good 45 stocks with a breakout-confirmed "
-            "cup-and-handle or inverse head-and-shoulders, or sitting at a major "
-            "support level. A cheap pivot gate prefilters candidates; a Claude "
-            "Agent SDK agent confirms the pattern."
+            "Hemant Super 45 ∪ Good 45 stocks showing a bullish setup: at a major "
+            "support, a breakout-confirmed cup-and-handle / inverse head-and-"
+            "shoulders, a confirmed double bottom, a retested bullish Fair Value "
+            "Gap, or a tap of a bullish order block. A cheap pivot/price-action "
+            "gate prefilters candidates; a Claude Agent SDK agent (with tools for "
+            "level relevance, structure, and pattern detection) confirms the setup."
         ),
         "universe": "hemant_super_good_union",
         "timeframe": "daily",
@@ -101,10 +114,22 @@ class TechnicalAnalysis(BaseScanner):
             "cluster_pct": 2.0,
             "min_touches": 3,
             # "At support": latest close within this percent of a major support.
+            # Also used as the tolerance for "price is tapping" a FVG/order block.
             "support_tolerance_pct": 2.0,
             # "Fresh breakout": close crossed above a major resistance within
-            # this many recent candles.
+            # this many recent candles. Also bounds a "fresh" double-bottom
+            # neckline breakout.
             "breakout_lookback_bars": 10,
+            # Swing-pivot width for the price-action detectors (double patterns,
+            # order blocks, market structure).
+            "swing_left": 5,
+            "swing_right": 5,
+            # Smallest Fair Value Gap (percent of price) worth considering.
+            "fvg_min_gap_pct": 0.3,
+            # How equal the two lows of a double bottom must be (percent).
+            "double_tolerance_pct": 3.0,
+            # Resample daily → weekly so the agent gets higher-timeframe context.
+            "weekly_enabled": True,
             # Budget guard: after the cheap gate admits this many candidates,
             # skip further AI confirmations for the run. Cached verdicts still
             # make repeat runs cheap, but this protects first runs on busy days.
@@ -116,6 +141,7 @@ class TechnicalAnalysis(BaseScanner):
         "pattern",
         "confirmed",
         "confidence",
+        "trend",
         "nearest_level",
     ]
 
@@ -162,13 +188,76 @@ class TechnicalAnalysis(BaseScanner):
                     fresh_breakout = True
                     break
 
-        if not at_support and not fresh_breakout:
+        # --- New price-action triggers (still cheap, pure pandas) ---
+        # Resolve the detector settings exactly as the agent's tools do, so the
+        # gate and the agent agree on what counts as a setup.
+        cfg = resolve_params(self._tool_params(params))
+
+        # Fresh confirmed DOUBLE BOTTOM: the neckline breakout printed within the
+        # last `breakout_lookback` candles (so we catch it near the trigger).
+        double_bottom_fresh = False
+        doubles = detect_double_patterns(
+            frame,
+            left=int(cfg["swing_left"]),
+            right=int(cfg["swing_right"]),
+            tolerance_pct=float(cfg["double_tolerance_pct"]),
+            lookback_bars=int(cfg["double_lookback_bars"]),
+        )
+        db = doubles["double_bottom"]
+        if db and db["confirmed"] and db["confirm_bars_ago"] is not None:
+            double_bottom_fresh = db["confirm_bars_ago"] <= breakout_lookback
+
+        # Price tapping an UNFILLED bullish FAIR VALUE GAP (a demand zone): the
+        # latest close sits within the gap (allowing the support tolerance).
+        bullish_fvg = False
+        for gap in detect_fair_value_gaps(
+            frame,
+            min_gap_pct=float(cfg["fvg_min_gap_pct"]),
+            lookback_bars=int(cfg["fvg_lookback_bars"]),
+        ):
+            if gap["direction"] != "bullish" or gap["filled"]:
+                continue
+            if gap["bottom"] * (1 - support_tol) <= close <= gap["top"] * (1 + support_tol):
+                bullish_fvg = True
+                break
+
+        # Price tapping an UNMITIGATED bullish ORDER BLOCK (a demand zone).
+        order_block = False
+        for block in detect_order_blocks(
+            frame,
+            left=int(cfg["swing_left"]),
+            right=int(cfg["swing_right"]),
+            lookback_bars=int(cfg["ob_lookback_bars"]),
+        ):
+            if block["direction"] != "bullish" or block["mitigated"]:
+                continue
+            if block["bottom"] * (1 - support_tol) <= close <= block["top"] * (1 + support_tol):
+                order_block = True
+                break
+
+        if not (at_support or fresh_breakout or double_bottom_fresh or bullish_fvg or order_block):
+            # Mid-range stock with no bullish setup — dropped for free, no LLM.
             return None
         return {
             "nearest_support": nearest_support,
             "at_support": at_support,
             "fresh_breakout": fresh_breakout,
+            "double_bottom": double_bottom_fresh,
+            "bullish_fvg": bullish_fvg,
+            "order_block": order_block,
         }
+
+    @staticmethod
+    def _tool_params(params: dict) -> dict:
+        """Pass through only the detector settings the agent's tools understand.
+
+        The screener's `params` also carries run-time keys (start/end dates,
+        progress callbacks, the AI-budget counter) that must NEVER reach the
+        agent's verdict cache hash — a callback object would change the hash every
+        run. So we forward only the known tool knobs; the agent fills any missing
+        ones from `DEFAULT_TOOL_PARAMS`.
+        """
+        return {key: params[key] for key in DEFAULT_TOOL_PARAMS if key in params}
 
     # ------------------------------------------------------------------
     # Strategy hook
@@ -210,6 +299,8 @@ class TechnicalAnalysis(BaseScanner):
             "frame": frame,
             "levels": levels,
             "gate": gate,
+            # Only the detector knobs travel to the agent (see `_tool_params`).
+            "tool_params": self._tool_params(params),
             "close": float(frame.iloc[-1]["close"]),
             "signal_date": frame.iloc[-1].get("timestamp", ""),
             "nearest_level": float(nearest_support["price"]) if nearest_support else float("nan"),
@@ -229,36 +320,30 @@ class TechnicalAnalysis(BaseScanner):
         nearest_level = candidate["nearest_level"]
         try:
             # A user-triggered refresh should bypass both layers of cache:
-            # candles in the loader and AI verdicts inside the agent.
+            # candles in the loader and AI verdicts inside the agent. The detector
+            # settings travel along so the agent's tools match the gate.
             verdict: TechnicalVerdict = _get_agent().analyze(
                 symbol,
                 candidate["frame"],
                 candidate["levels"],
+                params=candidate.get("tool_params"),
                 force_refresh=force_refresh,
             )
         except (FundamentalsAgentError, FundamentalsUsageLimitError) as exc:
             logger.warning("Technical agent unavailable for %s: %s", symbol, exc)
-            if not candidate["gate"]["at_support"]:
-                return None
-            return {
-                "symbol": symbol,
-                "rating": "BUY",
-                "signal_date": signal_date,
-                "close": close,
-                "pattern": "at_support",
-                "confirmed": False,
-                "confidence": 0,
-                "nearest_level": nearest_level,
-                "reason": (
-                    f"Close {close:.2f} is at major support {nearest_level:.2f}. "
-                    "AI pattern confirmation unavailable (Claude Agent SDK not "
-                    "ready); showing gate-only candidate."
-                ),
-            }
+            return self._gate_only_row(candidate)
 
+        # A BUY needs either price currently AT a major support, or one of the
+        # bullish patterns with its trigger already confirmed (breakout/reaction).
+        bullish_confirmable = (
+            "cup_and_handle",
+            "inverse_head_and_shoulders",
+            "double_bottom",
+            "fair_value_gap",
+            "order_block",
+        )
         qualifies = verdict.pattern == "at_support" or (
-            verdict.pattern in ("cup_and_handle", "inverse_head_and_shoulders")
-            and verdict.confirmed
+            verdict.pattern in bullish_confirmable and verdict.confirmed
         )
         if not qualifies:
             return None
@@ -275,8 +360,51 @@ class TechnicalAnalysis(BaseScanner):
             "pattern": verdict.pattern,
             "confirmed": bool(verdict.confirmed),
             "confidence": int(verdict.confidence),
+            "trend": verdict.trend,
             "nearest_level": reported_level,
             "reason": verdict.reasoning,
+        }
+
+    @staticmethod
+    def _gate_only_row(candidate: dict) -> dict | None:
+        """Build a gate-only BUY row when the Claude Agent SDK is unavailable.
+
+        Without the agent (not installed, or plan limit hit) we still surface a
+        stock when the cheap gate found a *deterministically* bullish setup — at
+        support, a freshly confirmed double bottom, or price tapping an unfilled
+        bullish FVG / order block — so one missing dependency never fails the
+        scan. A bare resistance breakout is NOT surfaced here: identifying the
+        cup-and-handle / H&S behind it needs the AI, so it waits for confirmation.
+        `confirmed=False` flags that no AI confirmation happened.
+        """
+        gate = candidate["gate"]
+        close = candidate["close"]
+        nearest_level = candidate["nearest_level"]
+        if gate.get("at_support"):
+            pattern, what = "at_support", f"at major support {nearest_level:.2f}"
+        elif gate.get("double_bottom"):
+            pattern, what = "double_bottom", "at a freshly confirmed double bottom"
+        elif gate.get("bullish_fvg"):
+            pattern, what = "fair_value_gap", "tapping an unfilled bullish fair value gap"
+        elif gate.get("order_block"):
+            pattern, what = "order_block", "tapping a bullish order block"
+        else:
+            # Only a resistance breakout fired — that needs AI to label. Drop it.
+            return None
+        return {
+            "symbol": candidate["symbol"],
+            "rating": "BUY",
+            "signal_date": candidate["signal_date"],
+            "close": close,
+            "pattern": pattern,
+            "confirmed": False,
+            "confidence": 0,
+            "trend": "",
+            "nearest_level": nearest_level,
+            "reason": (
+                f"Gate: close {close:.2f} is {what}. AI confirmation unavailable "
+                "(Claude Agent SDK not ready); showing gate-only candidate."
+            ),
         }
 
     def compute_signal(self, symbol: str, candles: pd.DataFrame, params: dict) -> dict | None:
@@ -387,14 +515,25 @@ class TechnicalAnalysis(BaseScanner):
     # ------------------------------------------------------------------
 
     def build_chart(self, candles: pd.DataFrame, params: dict) -> dict:
-        """Daily candles with the major support/resistance levels as guide lines."""
+        """Daily candles annotated with the structures the agent reasons about.
+
+        Draws, on the price pane: relevance-weighted support/resistance (thicker
+        line = more relevant), the nearest unfilled Fair Value Gaps and
+        unmitigated order blocks as dotted demand/supply bands, and any
+        double-pattern neckline. This is the visual companion to the agent's
+        verdict so a beginner can *see* why a stock was shortlisted.
+        """
         frame = self.prepare_candles(candles)
         spec = candlestick_with_volume(
-            frame, title="Daily candles + major support/resistance", ha=False
+            frame, title="Daily candles + relevant levels, FVGs & order blocks", ha=False
         )
-        if frame.empty:
+        panes = spec.get("panes", [])
+        if frame.empty or not panes:
             return spec
 
+        cfg = resolve_params(self._tool_params(params))
+
+        # Relevance-weighted support/resistance.
         levels = major_levels(
             frame,
             left=self.coerce_param(params, "pivot_left", int),
@@ -402,19 +541,75 @@ class TechnicalAnalysis(BaseScanner):
             cluster_pct=self.coerce_param(params, "cluster_pct", float),
             min_touches=self.coerce_param(params, "min_touches", int),
         )
-        panes = spec.get("panes", [])
-        if levels and panes:
-            # Supports in teal, resistances in red, "both" in grey — drawn as
-            # horizontal price lines on the price pane (pane 0).
-            color_by_kind = {"support": "#26a69a", "resistance": "#ef5350", "both": "#888888"}
-            panes[0].setdefault("price_lines", []).extend(
-                {
-                    "price": float(level["price"]),
-                    "color": color_by_kind.get(str(level["kind"]), "#888888"),
-                    "title": f"{level['kind']} ({level['touches']})",
-                }
-                for level in levels
+        ranked = rank_levels(
+            frame,
+            levels,
+            band_pct=float(cfg["level_band_pct"]),
+            recency_halflife_bars=int(cfg["level_recency_halflife_bars"]),
+        )
+        add_levels_overlay(spec, ranked)
+
+        # Unfilled Fair Value Gaps + unmitigated order blocks, the few NEAREST to
+        # the latest close (keeps a 10-year chart readable).
+        close = float(frame.iloc[-1]["close"])
+        zones: list[dict] = []
+        gaps = [
+            g
+            for g in detect_fair_value_gaps(
+                frame,
+                min_gap_pct=float(cfg["fvg_min_gap_pct"]),
+                lookback_bars=int(cfg["fvg_lookback_bars"]),
             )
+            if not g["filled"]
+        ]
+        gaps.sort(key=lambda g: abs((g["top"] + g["bottom"]) / 2.0 - close))
+        for gap in gaps[:3]:
+            bull = gap["direction"] == "bullish"
+            zones.append(
+                {
+                    "top": gap["top"],
+                    "bottom": gap["bottom"],
+                    "kind": "fvg_bull" if bull else "fvg_bear",
+                    "title": f"{'Bull' if bull else 'Bear'} FVG",
+                }
+            )
+        blocks = [
+            b
+            for b in detect_order_blocks(
+                frame,
+                left=int(cfg["swing_left"]),
+                right=int(cfg["swing_right"]),
+                lookback_bars=int(cfg["ob_lookback_bars"]),
+            )
+            if not b["mitigated"]
+        ]
+        for ob in blocks[:2]:
+            bull = ob["direction"] == "bullish"
+            zones.append(
+                {
+                    "top": ob["top"],
+                    "bottom": ob["bottom"],
+                    "kind": "ob_bull" if bull else "ob_bear",
+                    "title": f"{'Bull' if bull else 'Bear'} OB",
+                }
+            )
+        add_zone_overlays(spec, zones)
+
+        # Double top/bottom necklines (the breakout trigger line).
+        doubles = detect_double_patterns(
+            frame,
+            left=int(cfg["swing_left"]),
+            right=int(cfg["swing_right"]),
+            tolerance_pct=float(cfg["double_tolerance_pct"]),
+            lookback_bars=int(cfg["double_lookback_bars"]),
+        )
+        for key, label in (
+            ("double_bottom", "Double-bottom neckline"),
+            ("double_top", "Double-top neckline"),
+        ):
+            pattern = doubles.get(key)
+            if pattern:
+                add_neckline_overlay(spec, pattern["neckline"], label)
         return spec
 
 

@@ -265,6 +265,230 @@ def major_levels(
 
 
 # ---------------------------------------------------------------------------
+# Level relevance scoring + weekly (higher-timeframe) resampling
+# ---------------------------------------------------------------------------
+
+
+# Relative weights for the five relevance components. They sum to 1.0 so the
+# final `relevance` score always lands in [0, 1] (1 = maximally relevant).
+# Proximity is weighted highest because a level you can act on *now* matters more
+# than an old one far from price; touches and recency come next.
+_RELEVANCE_WEIGHTS = {
+    "touches": 0.25,
+    "recency": 0.25,
+    "proximity": 0.30,
+    "volume": 0.10,
+    "reaction": 0.10,
+}
+
+
+def rank_levels(
+    frame: pd.DataFrame,
+    levels: list[dict],
+    *,
+    band_pct: float = 1.0,
+    recency_halflife_bars: int = 120,
+    reaction_bars: int = 5,
+) -> list[dict]:
+    """Score each support/resistance level by how *relevant* it is right now.
+
+    Why this exists (beginner note)
+    -------------------------------
+    `major_levels` finds price zones the market has respected, but it ranks them
+    only by raw touch count. A level touched 6 times back in 2015 and never since
+    is far less *relevant* today than a 3-touch level price is sitting on this
+    week. This function answers the user's question — "which S/R is relevant and
+    which is not" — by blending five intuitive signals into one 0..1 `relevance`
+    score:
+
+    1. **touches**   — more touches = stronger zone (relative to the busiest level).
+    2. **recency**   — how long since price last visited the level (exponential
+       decay: a level last tested `recency_halflife_bars` candles ago scores 0.5).
+    3. **proximity** — how close the latest close is to the level (actionability).
+    4. **volume**    — average volume on the touch bars vs the whole window (did
+       real participation happen there?). Neutral 0.5 when there is no volume data.
+    5. **reaction**  — how hard price bounced/rejected away from the level after
+       touching it (a level that produced big reactions is "respected").
+
+    Each input level dict is `{"price", "touches", "kind"}` (from `major_levels`).
+    The returned dicts are copies with extra fields, sorted by `relevance`
+    descending::
+
+        {..., "relevance": float, "components": {...}, "last_touch_bars_ago": int,
+         "distance_pct": float, "flipped": bool}
+
+    `flipped` flags a level price has closed on BOTH sides of (a polarity flip,
+    which traders treat as significant); `kind="both"` is always flipped.
+    """
+    if not levels or frame is None or frame.empty:
+        return []
+
+    work = frame.reset_index(drop=True)
+    highs = pd.to_numeric(work["high"], errors="coerce").to_numpy(dtype="float64")
+    lows = pd.to_numeric(work["low"], errors="coerce").to_numpy(dtype="float64")
+    closes = pd.to_numeric(work["close"], errors="coerce").to_numpy(dtype="float64")
+    n = len(work)
+    last_close = float(closes[-1]) if n else 0.0
+
+    has_volume = "volume" in work.columns
+    if has_volume:
+        volumes = pd.to_numeric(work["volume"], errors="coerce").to_numpy(dtype="float64")
+        overall_avg_volume = float(np.nanmean(volumes)) if n else 0.0
+    else:
+        volumes = None
+        overall_avg_volume = 0.0
+
+    # Touch count is scored RELATIVE to the busiest level in this set.
+    max_touches = max((int(lvl.get("touches", 0)) for lvl in levels), default=1) or 1
+    halflife = max(1, int(recency_halflife_bars))
+
+    scored: list[dict] = []
+    for lvl in levels:
+        price = float(lvl["price"])
+        if price <= 0:
+            continue
+        # A candle "touches" the level when its high-low range crosses a thin band
+        # of +/- band_pct around the level price.
+        band = price * float(band_pct) / 100.0
+        lo_band, hi_band = price - band, price + band
+        touch_mask = (lows <= hi_band) & (highs >= lo_band)
+        touch_positions = np.where(touch_mask)[0]
+
+        # --- recency: bars since the most recent touch, exponentially decayed ---
+        if touch_positions.size:
+            last_touch_bars_ago = int(n - 1 - touch_positions[-1])
+        else:
+            last_touch_bars_ago = n  # never revisited inside the window
+        recency_score = 0.5 ** (last_touch_bars_ago / halflife)
+
+        # --- touches: relative to the busiest level ---
+        touch_score = min(1.0, int(lvl.get("touches", 0)) / max_touches)
+
+        # --- proximity: 1/(1+d/2.5) → exactly at level = 1.0, ~2.5% away ≈ 0.5 ---
+        distance_pct = abs(last_close - price) / last_close * 100.0 if last_close > 0 else 1e9
+        proximity_score = 1.0 / (1.0 + distance_pct / 2.5)
+
+        # --- volume on the touch bars vs the whole window ---
+        volume_score = 0.5  # neutral default when we cannot measure it
+        if volumes is not None and touch_positions.size and overall_avg_volume > 0:
+            touch_avg_volume = float(np.nanmean(volumes[touch_positions]))
+            if np.isfinite(touch_avg_volume):
+                volume_score = min(1.0, touch_avg_volume / overall_avg_volume)
+
+        # --- reaction: average favourable move after each touch ---
+        reaction_score = _level_reaction_score(
+            str(lvl.get("kind", "support")), price, highs, lows, touch_positions, reaction_bars
+        )
+
+        # --- flipped: has price closed on both sides of the level? ---
+        closed_above = bool((closes > hi_band).any())
+        closed_below = bool((closes < lo_band).any())
+        flipped = str(lvl.get("kind")) == "both" or (closed_above and closed_below)
+
+        components = {
+            "touches": round(touch_score, 3),
+            "recency": round(recency_score, 3),
+            "proximity": round(proximity_score, 3),
+            "volume": round(volume_score, 3),
+            "reaction": round(reaction_score, 3),
+        }
+        relevance = sum(_RELEVANCE_WEIGHTS[name] * value for name, value in components.items())
+
+        enriched = dict(lvl)
+        enriched.update(
+            {
+                "relevance": round(float(relevance), 3),
+                "components": components,
+                "last_touch_bars_ago": last_touch_bars_ago,
+                "distance_pct": round(float(distance_pct), 2),
+                "flipped": flipped,
+            }
+        )
+        scored.append(enriched)
+
+    scored.sort(key=lambda d: d["relevance"], reverse=True)
+    return scored
+
+
+def _level_reaction_score(
+    kind: str,
+    price: float,
+    highs: np.ndarray,
+    lows: np.ndarray,
+    touch_positions: np.ndarray,
+    reaction_bars: int,
+) -> float:
+    """Average normalized bounce/rejection after a level's touches (0..1).
+
+    For a support we reward upward reactions (price rallying away); for a
+    resistance, downward reactions; for "both" we credit whichever was stronger.
+    A ~5% average reaction maps to 1.0 (capped) so the score stays in [0, 1].
+    """
+    if not touch_positions.size or price <= 0:
+        return 0.0
+    n = len(highs)
+    window = max(1, int(reaction_bars))
+    reactions: list[float] = []
+    for pos in touch_positions:
+        end = min(n, int(pos) + 1 + window)
+        if end <= int(pos) + 1:
+            continue  # the touch was on the very last bar; no "after" to measure
+        future_high = float(np.nanmax(highs[int(pos) + 1 : end]))
+        future_low = float(np.nanmin(lows[int(pos) + 1 : end]))
+        up_move = (future_high - price) / price * 100.0
+        down_move = (price - future_low) / price * 100.0
+        if kind == "support":
+            reactions.append(max(0.0, up_move))
+        elif kind == "resistance":
+            reactions.append(max(0.0, down_move))
+        else:  # "both" — credit whichever reaction was stronger
+            reactions.append(max(0.0, up_move, down_move))
+    if not reactions:
+        return 0.0
+    avg_reaction_pct = float(np.mean(reactions))
+    return min(1.0, avg_reaction_pct / 5.0)
+
+
+def resample_to_weekly(frame: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate a daily OHLC(V) frame into weekly candles (week ending Friday).
+
+    Why (beginner note)
+    -------------------
+    The app only stores *daily* candles, but a higher-timeframe (weekly) view is
+    invaluable context: a daily bounce *with* the weekly trend is far stronger
+    than one against it. Rather than fetch new data, we build the weekly series by
+    aggregating the daily candles we already have:
+
+    - open   = first daily open of the week
+    - high   = max daily high
+    - low    = min daily low
+    - close  = last daily close
+    - volume = sum of daily volume (when present)
+
+    Weeks are labelled by their Friday (``W-FRI``), the equity-market convention.
+    Returns a fresh frame with a ``timestamp`` column (oldest first), or an empty
+    frame when there are no dated candles to aggregate.
+    """
+    if frame is None or frame.empty or "timestamp" not in frame.columns:
+        # Without dates we cannot bucket candles into weeks. Return an empty frame
+        # with the standard columns so callers can chain `.iloc[-1]` etc. safely.
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+
+    work = frame.copy()
+    work["timestamp"] = pd.to_datetime(work["timestamp"], errors="coerce")
+    work = work.dropna(subset=["timestamp"]).sort_values("timestamp").set_index("timestamp")
+
+    aggregation = {"open": "first", "high": "max", "low": "min", "close": "last"}
+    if "volume" in work.columns:
+        aggregation["volume"] = "sum"
+
+    weekly = work.resample("W-FRI").agg(aggregation)
+    # Drop weeks that had no trading days (holidays) — they resample to all-NaN.
+    weekly = weekly.dropna(subset=["open", "high", "low", "close"])
+    return weekly.reset_index()
+
+
+# ---------------------------------------------------------------------------
 # Moving averages (EMA / SMA): TA-Lib primary, pandas fallback
 # ---------------------------------------------------------------------------
 

@@ -19,6 +19,7 @@ from backend.technical.technical_agent import (
     TechnicalAnalysisAgent,
     TechnicalVerdict,
 )
+from backend.technical.tools import SERVER_NAME, TOOL_NAMES, TechnicalToolContext
 
 
 def _sample_candles(periods: int = 40) -> pd.DataFrame:
@@ -74,6 +75,7 @@ class _FakeRunner:
         self.last_prompt: str | None = None
         self.last_system_prompt: str | None = None
         self.last_model: str | None = None
+        self.last_tool_context: object | None = None
 
     async def __call__(
         self,
@@ -82,11 +84,13 @@ class _FakeRunner:
         system_prompt: str,
         model: str,
         max_turns: int,
+        tool_context: object | None = None,
     ) -> AgentRunResult:
         self.calls += 1
         self.last_prompt = prompt
         self.last_system_prompt = system_prompt
         self.last_model = model
+        self.last_tool_context = tool_context
         return AgentRunResult(
             text=json.dumps(self.verdict.model_dump(mode="json")),
             cost_usd=self.cost_usd,
@@ -135,6 +139,48 @@ def test_agent_returns_parsed_verdict(tmp_path):
     # The runner was handed the configured model and the strict-output prompt.
     assert runner.last_model == "test-model"
     assert "FINAL OUTPUT FORMAT" in (runner.last_system_prompt or "")
+
+
+def test_agent_passes_per_call_tool_context_to_runner(tmp_path):
+    # The agent must build a TechnicalToolContext for THIS stock and hand it to
+    # the runner, so the tools (and parallel confirmations) work on the right data.
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    runner = _FakeRunner(_sample_verdict())
+    agent = TechnicalAnalysisAgent(model="test-model", cache=cache, runner=runner)
+
+    agent.analyze("DEMO", _sample_candles(), _sample_levels())
+
+    ctx = runner.last_tool_context
+    assert isinstance(ctx, TechnicalToolContext)
+    assert ctx.symbol == "DEMO"
+    # The levels passed in were relevance-scored on the way into the context.
+    assert ctx.daily_levels and "relevance" in ctx.daily_levels[0]
+
+
+def test_agent_round_trips_extended_verdict_fields(tmp_path):
+    # The new structured fields (trend, htf_alignment, relevant_levels, caution)
+    # and a new bullish pattern must survive the JSON round-trip unchanged.
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    verdict = _sample_verdict(
+        pattern="double_bottom",
+        confirmed=True,
+        trend="uptrend",
+        htf_alignment="aligned",
+        relevant_levels=[
+            {"price": 95.0, "role": "support", "relevance": "high", "why": "fresh bounce zone"}
+        ],
+        caution="overhead resistance near 140",
+    )
+    agent = TechnicalAnalysisAgent(model="test-model", cache=cache, runner=_FakeRunner(verdict))
+
+    out = agent.analyze("DEMO", _sample_candles(), _sample_levels())
+
+    assert out.pattern == "double_bottom"
+    assert out.trend == "uptrend"
+    assert out.htf_alignment == "aligned"
+    assert out.caution == "overhead resistance near 140"
+    assert out.relevant_levels[0].price == 95.0
+    assert out.relevant_levels[0].relevance == "high"
 
 
 def test_agent_caches_verdict_per_symbol_model_candle_date(tmp_path):
@@ -231,7 +277,7 @@ def test_agent_parses_verdict_from_fenced_json(tmp_path):
     cache = FundamentalsCache(cache_dir=tmp_path)
 
     class _FencedRunner(_FakeRunner):
-        async def __call__(self, prompt, *, system_prompt, model, max_turns):
+        async def __call__(self, prompt, *, system_prompt, model, max_turns, tool_context=None):
             self.calls += 1
             payload = json.dumps(self.verdict.model_dump(mode="json"))
             return AgentRunResult(text=f"Here is my analysis:\n```json\n{payload}\n```")
@@ -250,7 +296,7 @@ def test_agent_raises_when_no_json_in_final_message(tmp_path):
     cache = FundamentalsCache(cache_dir=tmp_path)
 
     class _ProseRunner(_FakeRunner):
-        async def __call__(self, prompt, *, system_prompt, model, max_turns):
+        async def __call__(self, prompt, *, system_prompt, model, max_turns, tool_context=None):
             self.calls += 1
             return AgentRunResult(text="I could not determine a pattern.")
 
@@ -337,6 +383,19 @@ def _install_fake_sdk(monkeypatch, *, include_thinking: bool = True):
     async def query(*, prompt, options):  # noqa: ARG001 — signature must match
         yield ResultMessage(verdict_json)
 
+    # The agent now builds an in-process MCP tool server, so the fake SDK must
+    # expose `tool` (a decorator) and `create_sdk_mcp_server`. The tools are never
+    # actually invoked here — `query` returns the final JSON immediately — so
+    # trivial stand-ins are enough.
+    def tool(name, description, schema):  # noqa: ARG001 — signature must match
+        def _decorator(fn):
+            return fn
+
+        return _decorator
+
+    def create_sdk_mcp_server(*, name, version, tools):  # noqa: ARG001
+        return {"name": name, "version": version, "tools": tools}
+
     fake = types.ModuleType("claude_agent_sdk")
     fake.ClaudeAgentOptions = ClaudeAgentOptions
     if include_thinking:
@@ -346,6 +405,8 @@ def _install_fake_sdk(monkeypatch, *, include_thinking: bool = True):
     fake.CLINotFoundError = CLINotFoundError
     fake.ProcessError = ProcessError
     fake.query = query
+    fake.tool = tool
+    fake.create_sdk_mcp_server = create_sdk_mcp_server
     monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake)
     return captured, ThinkingConfigDisabled
 
@@ -388,3 +449,23 @@ def test_default_run_tolerates_sdk_without_thinking_config(monkeypatch, tmp_path
 
     assert captured["options"].get("thinking") is None
     assert "fast mode" in caplog.text.lower()
+
+
+def test_default_run_registers_only_the_technical_tools(monkeypatch, tmp_path):
+    """The real option-construction path must expose exactly our three tools.
+
+    With permission_mode="dontAsk" the agent can ONLY call tools listed in
+    allowed_tools, so this also confirms the built-in filesystem/bash tools stay
+    out of reach in a headless run.
+    """
+    captured, _ = _install_fake_sdk(monkeypatch)
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    agent = TechnicalAnalysisAgent(model="test-model", cache=cache)
+
+    agent.analyze("DEMO", _sample_candles(), _sample_levels(), force_refresh=True)
+
+    options = captured["options"]
+    assert SERVER_NAME in options["mcp_servers"]
+    assert options["allowed_tools"] == TOOL_NAMES
+    assert options["permission_mode"] == "dontAsk"
+    assert options["setting_sources"] == []
