@@ -166,3 +166,34 @@ def test_research_tool_rejects_model_supplied_different_symbol(tmp_path):
 
 def test_fall_reason_category_type_alias_is_public():
     assert "sentiment" in FallReasonCategory.__args__
+
+
+def test_run_sync_propagates_caller_contextvars_into_worker_thread():
+    """Regression guard for the contextvars fix.
+
+    The agent loop runs on a ThreadPoolExecutor worker, which starts with an EMPTY
+    context and does NOT inherit the caller's ContextVars. `verify()` relies on
+    that propagation to bind the symbol / force_refresh / search-result count into
+    the SDK tool (`_research_company_impl` reads them via `asyncio.to_thread`).
+    Without `_run_sync` copying the caller's context across the thread boundary,
+    the tool silently reads the ContextVar *defaults* — defeating the symbol
+    binding and ignoring force_refresh. This test fails on the old code (reads
+    "DEFAULT") and passes once the context is copied.
+    """
+    import asyncio
+    import contextvars
+
+    probe: contextvars.ContextVar[str] = contextvars.ContextVar("probe", default="DEFAULT")
+
+    async def _read_via_thread() -> AgentRunResult:
+        # Mirrors how the real tool reads the bound values: off the event loop.
+        value = await asyncio.to_thread(probe.get)
+        return AgentRunResult(text=value, cost_usd=None)
+
+    token = probe.set("BOUND")
+    try:
+        result = SixtySevenAgent._run_sync(_read_via_thread())
+    finally:
+        probe.reset(token)
+
+    assert result.text == "BOUND"
