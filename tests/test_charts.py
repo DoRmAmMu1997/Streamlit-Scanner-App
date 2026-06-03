@@ -193,3 +193,51 @@ def test_empty_candles_return_minimal_renderable_spec():
     assert "panes" in spec
     # And that minimal spec still renders to HTML.
     assert "createChart" in charts.render_chart_html(spec)
+
+
+# ---------------------------------------------------------------------------
+# Technical Analysis (AI) overlays: relevance-weighted levels, zones, necklines
+# ---------------------------------------------------------------------------
+
+
+def test_add_levels_overlay_scales_width_with_relevance():
+    spec = charts.candlestick_with_volume(_candles(), "Title")
+    charts.add_levels_overlay(
+        spec,
+        [
+            {"price": 100.0, "kind": "support", "relevance": 1.0},
+            {"price": 120.0, "kind": "resistance", "relevance": 0.0},
+        ],
+    )
+    price_lines = {pl["price"]: pl for pl in spec["panes"][0]["price_lines"]}
+    # relevance 1.0 → width 4 (1 + round(1*3)); relevance 0.0 → width 1.
+    assert price_lines[100.0]["lineWidth"] == 4
+    assert price_lines[120.0]["lineWidth"] == 1
+    # Levels are SOLID and colour-coded by kind.
+    assert price_lines[100.0]["lineStyle"] == 0
+    assert price_lines[100.0]["color"] == charts._COLORS["level_support"]
+    assert price_lines[120.0]["color"] == charts._COLORS["level_resistance"]
+
+
+def test_add_zone_overlays_draws_dotted_top_and_bottom():
+    spec = charts.candlestick_with_volume(_candles(), "Title")
+    charts.add_zone_overlays(
+        spec,
+        [{"top": 110.0, "bottom": 105.0, "kind": "fvg_bull", "title": "Bull FVG"}],
+    )
+    price_lines = spec["panes"][0]["price_lines"]
+    # One zone draws TWO dotted bounding lines in the resolved palette colour.
+    assert {pl["price"] for pl in price_lines} == {110.0, 105.0}
+    assert all(pl["lineStyle"] == 1 for pl in price_lines)
+    assert all(pl["color"] == charts._COLORS["fvg_bull"] for pl in price_lines)
+    assert any(pl["title"] == "Bull FVG" for pl in price_lines)
+
+
+def test_add_neckline_overlay_draws_a_single_dashed_line():
+    spec = charts.candlestick_with_volume(_candles(), "Title")
+    charts.add_neckline_overlay(spec, 115.0, "Double-bottom neckline")
+    neckline = spec["panes"][0]["price_lines"][-1]
+    assert neckline["price"] == 115.0
+    assert neckline["lineStyle"] == 2  # dashed
+    assert neckline["color"] == charts._COLORS["neckline"]
+    assert neckline["title"] == "Double-bottom neckline"

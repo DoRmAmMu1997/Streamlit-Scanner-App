@@ -671,7 +671,7 @@ class _StubTechnicalAgent:
         self.calls = 0
         self.force_refreshes: list[bool] = []
 
-    def analyze(self, symbol, candles, levels, *, force_refresh=False):
+    def analyze(self, symbol, candles, levels, *, params=None, force_refresh=False):
         self.calls += 1
         self.force_refreshes.append(bool(force_refresh))
         return self.verdict.model_copy(update={"symbol": str(symbol).upper()})
@@ -724,14 +724,30 @@ _AT_SUPPORT_LOWS = [
     96.0, 89.5,                     # latest close = 90.5, at the ~90 support
 ]
 
-# Same support history, but the tail declines into a mid-range level far above
-# support with no upward breakout — the gate should reject it before any LLM.
-_MIDRANGE_LOWS = [
-    98.0, 96.0, 90.0, 96.0, 98.0,
-    100.0, 96.0, 90.0, 96.0, 98.0,
-    100.0, 96.0, 90.0, 96.0, 98.0,
-    106.0, 104.0, 102.0, 100.0, 99.0,  # declining into ~100, well above 90
-]
+def _midrange_candles() -> pd.DataFrame:
+    """A genuine non-setup: a 3-touch support at 90, but price drifts sideways in
+    the middle with WIDE, overlapping candles — so no FVG/order-block forms, the
+    close is far from support, and nothing broke out. The gate must reject it.
+
+    Wide candles (range 8) are deliberate: gentle moves never leave a 3-candle
+    imbalance, so none of the new price-action triggers can fire on noise.
+    """
+    lows = [
+        95.0, 92.0, 90.0, 92.0, 95.0,
+        97.0, 92.0, 90.0, 92.0, 95.0,
+        97.0, 92.0, 90.0, 92.0, 95.0,
+        96.0, 95.0, 96.0, 95.0, 96.0,  # sideways drift around 95–100, above 90
+    ]
+    return pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2020-01-01", periods=len(lows), freq="D"),
+            "open": [lo + 4.0 for lo in lows],
+            "high": [lo + 8.0 for lo in lows],
+            "low": lows,
+            "close": [lo + 4.0 for lo in lows],
+            "volume": [1000.0] * len(lows),
+        }
+    )
 
 
 def _ta_verdict(**overrides) -> TechnicalVerdict:
@@ -773,6 +789,7 @@ def test_technical_analysis_gate_admits_at_support_and_calls_agent(monkeypatch):
         "pattern",
         "confirmed",
         "confidence",
+        "trend",
         "nearest_level",
     ]
 
@@ -816,7 +833,7 @@ def test_technical_analysis_gate_rejects_midrange_without_calling_agent(monkeypa
     stub = _StubTechnicalAgent(_ta_verdict())
     monkeypatch.setattr(technical_analysis, "_get_agent", lambda: stub)
 
-    frames = {"BUY": _ta_candles(_MIDRANGE_LOWS)}
+    frames = {"BUY": _midrange_candles()}
     result = technical_analysis.run(_universe(), FakeDataLoader(frames), _ta_params())
 
     assert result.empty
@@ -856,8 +873,83 @@ def test_technical_analysis_degrades_when_agent_unavailable(monkeypatch):
         "pattern",
         "confirmed",
         "confidence",
+        "trend",
         "nearest_level",
     ]
+
+
+def _double_bottom_candles() -> pd.DataFrame:
+    """Two equal 45 lows (idx 2 & 8) around a 60 neckline (idx 5), then a close
+    above 60 at idx 11 → a confirmed double bottom that the gate should admit."""
+    high = [57, 54, 48, 55, 58, 60, 57, 53, 48, 55, 59, 63, 65, 67, 69]
+    low = [55, 52, 45, 52, 56, 58, 54, 50, 45, 52, 56, 60, 62, 64, 66]
+    close = [56, 53, 47, 54, 57, 59, 55, 51, 47, 54, 58, 62, 64, 66, 68]
+    return pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2020-01-01", periods=len(low), freq="D"),
+            "open": [c - 1.0 for c in close],
+            "high": [float(h) for h in high],
+            "low": [float(lo) for lo in low],
+            "close": [float(c) for c in close],
+            "volume": [1000.0] * len(low),
+        }
+    )
+
+
+def _double_bottom_params(**overrides) -> dict:
+    """Short-frame knobs so the 2-touch double bottom forms a level and confirms."""
+    return _ta_params(
+        min_touches=2,
+        cluster_pct=4.0,
+        swing_left=2,
+        swing_right=2,
+        double_tolerance_pct=4.0,
+        breakout_lookback_bars=6,
+        **overrides,
+    )
+
+
+def test_technical_analysis_admits_fresh_double_bottom_and_surfaces_trend(monkeypatch):
+    # A NEW first-class trigger: the stock is nowhere near support and never broke
+    # resistance, but a freshly-confirmed double bottom must still shortlist it.
+    stub = _StubTechnicalAgent(
+        _ta_verdict(pattern="double_bottom", confirmed=True, key_levels=[45.0], trend="uptrend")
+    )
+    monkeypatch.setattr(technical_analysis, "_get_agent", lambda: stub)
+
+    frames = {"BUY": _double_bottom_candles()}
+    result = technical_analysis.run(_universe(), FakeDataLoader(frames), _double_bottom_params())
+
+    assert result["symbol"].tolist() == ["BUY"]
+    row = result.iloc[0]
+    assert row["pattern"] == "double_bottom"
+    assert bool(row["confirmed"]) is True
+    assert row["trend"] == "uptrend"  # the new structure column is surfaced
+    assert stub.calls == 1
+
+
+def test_technical_analysis_double_bottom_degrades_without_agent(monkeypatch):
+    # Same fresh double bottom, but the agent is unavailable → the gate-only row
+    # should still surface it (labelled double_bottom, unconfirmed).
+    from backend.fundamentals.fundamental_agent import FundamentalsAgentError
+
+    def _raising_agent():
+        class _Boom:
+            def analyze(self, *a, **k):
+                raise FundamentalsAgentError("claude-agent-sdk is not installed.")
+
+        return _Boom()
+
+    monkeypatch.setattr(technical_analysis, "_get_agent", _raising_agent)
+
+    frames = {"BUY": _double_bottom_candles()}
+    result = technical_analysis.run(_universe(), FakeDataLoader(frames), _double_bottom_params())
+
+    assert result["symbol"].tolist() == ["BUY"]
+    row = result.iloc[0]
+    assert row["pattern"] == "double_bottom"
+    assert bool(row["confirmed"]) is False
+    assert "unavailable" in row["reason"].lower()
 
 
 def test_technical_analysis_tolerates_empty_and_short_frames(monkeypatch):
