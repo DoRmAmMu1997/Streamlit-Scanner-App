@@ -490,7 +490,12 @@ def _parse_peer_fragment_html(fragment_html: str) -> list[dict[str, str]]:
 
 
 def _clean_peer_rows(rows: list[dict[str, str]], *, limit: int = 7) -> list[dict[str, str]]:
-    """Remove screener.in aggregate rows and cap peer evidence to top-N rows."""
+    """Remove non-company peer rows and cap evidence to top-N rows.
+
+    Screener.in often adds a "Median" footer row to peer tables. That row is
+    useful for a human summary, but it is not a real listed company, so feeding it
+    to the agent as a peer can distort the market-leader comparison.
+    """
     cleaned = [
         row for row in rows
         if not any("median" in str(value).strip().lower() for value in row.values())
@@ -499,7 +504,12 @@ def _clean_peer_rows(rows: list[dict[str, str]], *, limit: int = 7) -> list[dict
 
 
 def _parse_static_peer_table(soup: BeautifulSoup) -> list[dict[str, str]]:
-    """Parse a visible peer-comparison table already present in the main page."""
+    """Parse a visible peer-comparison table already present in the main page.
+
+    Some Screener.in pages ship the peer table directly in the HTML, while others
+    leave a placeholder that is filled by an HTMX request. This helper handles
+    only the already-visible case; it never fetches another URL.
+    """
     try:
         table = None
         peers_section = soup.find(id="peers")
@@ -507,6 +517,8 @@ def _parse_static_peer_table(soup: BeautifulSoup) -> list[dict[str, str]]:
             table = peers_section.find("table")
 
         if table is None:
+            # Older or slightly different page layouts may not use id="peers".
+            # The visible heading is still stable enough to find the next table.
             for heading in soup.find_all(["h2", "h3", "h4"]):
                 text = heading.get_text(" ", strip=True).lower()
                 if "peer comparison" not in text:
@@ -530,10 +542,17 @@ def _fetch_peer_table(
     session: requests.Session | None,
     limit: int = 7,
 ) -> list[dict[str, str]]:
-    """Follow the HTMX peers URL and return the top-N rows (default 7).
+    """Return peer rows, preferring HTMX data and falling back to static HTML.
 
-    Soft-fails by returning ``[]`` on any error so the agent can still produce
-    a verdict (with the Market-leader criterion marked "data unavailable").
+    Screener.in has two shapes for peer comparison:
+    - a static table already included in the company page HTML
+    - an HTMX endpoint referenced by the page and loaded later by the browser
+
+    The HTMX endpoint can contain fresher or more complete rows, so it wins when
+    it is safe and parses cleanly. If that path is missing or fails, the static
+    table is still useful evidence. All failures soft-return `[]` after the
+    fallback is tried so the agent can mark peer evidence as unavailable instead
+    of crashing the whole scan.
     """
     static_rows = _parse_static_peer_table(soup)
     relative = _extract_peers_url(soup)
@@ -544,6 +563,8 @@ def _fetch_peer_table(
     absolute = urljoin(base_url, relative)
     base_host = (urlparse(base_url).hostname or "").lower()
     absolute_host = (urlparse(absolute).hostname or "").lower()
+    # Keep this fetch scoped to Screener.in. Search-result pages or arbitrary
+    # URLs are untrusted evidence, not instructions to fetch more HTML.
     if absolute_host != base_host or not is_safe_http_url(
         absolute,
         allowed_hosts=_SCREENER_ALLOWED_HOSTS,

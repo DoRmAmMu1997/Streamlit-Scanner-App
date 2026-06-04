@@ -290,7 +290,16 @@ def add_series_markers(
     pane: int = 0,
     series_index: int = 0,
 ) -> None:
-    """Attach Lightweight Charts series markers to an existing series."""
+    """Attach Lightweight Charts markers to an existing series in a chart spec.
+
+    A chart spec is just Python data until `render_chart_html(...)` turns it into
+    browser-side JavaScript. Markers follow the same pattern: callers store them
+    beside the target series here, and the renderer later calls Lightweight
+    Charts' `createSeriesMarkers(...)` API.
+
+    `pane=0, series_index=0` means "put the markers on the main price candles",
+    which is what most price-action annotations need.
+    """
     panes = spec.get("panes", [])
     if not (0 <= pane < len(panes)) or not markers:
         return
@@ -302,6 +311,8 @@ def add_series_markers(
     for marker in markers:
         item = dict(marker)
         if "time" in item:
+            # Lightweight Charts accepts date strings for daily candles. Normalizing
+            # here keeps callers free to pass pandas timestamps or plain dates.
             item["time"] = pd.to_datetime(item["time"]).strftime("%Y-%m-%d")
         normalized.append(item)
     series_list[series_index].setdefault("markers", []).extend(normalized)

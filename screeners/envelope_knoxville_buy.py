@@ -6,12 +6,19 @@ Flow in plain English:
    away). The lower band at 14% sits at `0.86 * EMA200`.
 3. Look for a recent bullish Knoxville Divergence: price makes a lower pivot
    low while momentum makes a higher pivot low and RSI is oversold.
-4. Shortlist only BUY candidates whose latest close is at, below, or within a
-   small buffer above the lower Envelope band.
+4. Shortlist BUY candidates through either of two paths:
+   - the original setup: near the lower Envelope plus a recent bullish Knoxville
+     Divergence
+   - the retest setup: the current close has returned to the latest bullish
+     Knoxville pivot low, even if that divergence happened long ago
 
 This pairs the Envelope lower-band "stretched down" filter with the Knoxville
 "selling pressure fading" filter — the same two-filter idea the old combined
 Bollinger screener used, but on the Envelope instead of Bollinger Bands.
+
+Beginner note:
+The retest setup is an OR path. A stock can qualify because it revisits the last
+bullish Knoxville pivot low even when the lower Envelope band is not nearby.
 
 Beginner glossary:
 - **Knoxville Divergence**: price prints a lower low but momentum prints a
@@ -31,7 +38,7 @@ from backend.scanner_base import BaseScanner
 
 
 class EnvelopeKnoxvilleBuy(BaseScanner):
-    """BUY-only Knoxville Divergence near the lower Envelope band."""
+    """BUY-only screener for lower-Envelope Knoxville setups and KD retests."""
 
     SCREENER = {
         "key": "envelope_knoxville_buy",
@@ -83,7 +90,15 @@ class EnvelopeKnoxvilleBuy(BaseScanner):
     ]
 
     def compute_signal(self, symbol: str, candles: pd.DataFrame, params: dict) -> dict | None:
-        """Return one BUY row for a symbol, or None when either filter fails."""
+        """Return one BUY row for a symbol, or None when no entry path qualifies.
+
+        There are two entry paths:
+        1. `recent_envelope_kd`: the classic rule. Price is close to the lower
+           Envelope band and a bullish Knoxville Divergence happened recently.
+        2. `old_kd_retest`: the new rule. The latest close is at, below, or only
+           slightly above the most recent Knoxville pivot low. This path does not
+           require the Envelope band to be nearby.
+        """
         frame = self.prepare_candles(candles)
         ema_period = self.coerce_param(params, "ema_period", int)
         if frame.empty or len(frame) < ema_period:
@@ -108,6 +123,8 @@ class EnvelopeKnoxvilleBuy(BaseScanner):
         #     close <= lower_band * (1 + proximity_pct)
         near_envelope = close <= lower_band * (1.0 + proximity_pct)
 
+        # Collect all divergences once. The recent path only needs the latest
+        # recent one, but the retest path and chart markers need older pivots too.
         all_divergences = bullish_knoxville_divergences(
             frame,
             rsi_period=self.coerce_param(params, "rsi_period", int),
@@ -128,6 +145,8 @@ class EnvelopeKnoxvilleBuy(BaseScanner):
         signal_recency = self.coerce_param(params, "signal_recency_bars", int)
         recent_divergence = None
         for candidate in reversed(all_divergences):
+            # `candidate.name` is the row number inside `frame`. Comparing it to
+            # the last row tells us how many candles ago the divergence occurred.
             if len(frame) - 1 - int(candidate.name) <= signal_recency:
                 recent_divergence = candidate
                 break
@@ -135,6 +154,8 @@ class EnvelopeKnoxvilleBuy(BaseScanner):
         last_divergence = all_divergences[-1]
         retest_proximity = self.coerce_param(params, "kd_retest_proximity_pct", float)
         divergence_price = float(last_divergence["low"])
+        # Positive means current price is above the pivot low; negative means it
+        # has undercut the pivot low. Both are useful to show in the results.
         kd_retest_distance_pct = (
             (close - divergence_price) / divergence_price
             if divergence_price > 0
@@ -147,6 +168,9 @@ class EnvelopeKnoxvilleBuy(BaseScanner):
             entry_trigger = "recent_envelope_kd"
             divergence = recent_divergence
         elif close <= divergence_price * (1.0 + retest_proximity):
+            # This is an OR condition. It deliberately does not check
+            # `near_envelope`, because the rule is about revisiting the Knoxville
+            # pivot price itself.
             entry_trigger = "old_kd_retest"
             divergence = last_divergence
         if divergence is None:
@@ -192,7 +216,12 @@ class EnvelopeKnoxvilleBuy(BaseScanner):
         }
 
     def build_chart(self, candles: pd.DataFrame, params: dict) -> dict:
-        """Render daily candles with the screener's Envelope overlaid."""
+        """Render daily candles with Envelope bands and bullish KD markers.
+
+        The chart marks every bullish Knoxville Divergence found in the loaded
+        history. Older pivots use `KD`; the most recent pivot uses `Latest KD` so
+        a user can quickly see the level used by the retest rule.
+        """
         ema_period = self.coerce_param(params, "ema_period", int)
         percent = self.coerce_param(params, "percent", float)
         exponential = self.coerce_param(params, "exponential", bool)
@@ -217,6 +246,8 @@ class EnvelopeKnoxvilleBuy(BaseScanner):
         markers = []
         for index, divergence in enumerate(divergences):
             is_latest = index == len(divergences) - 1
+            # Markers attach to the price candle series, not a separate indicator
+            # pane, because the actionable level is the divergence candle's low.
             markers.append(
                 {
                     "time": divergence["timestamp"],

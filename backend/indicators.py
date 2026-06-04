@@ -857,7 +857,15 @@ def bullish_knoxville_divergences(
     pivot_right: int = 2,
     oversold: float = 30.0,
 ) -> list[pd.Series]:
-    """Return every confirmed bullish Knoxville Divergence pivot, oldest first."""
+    """Return every confirmed bullish Knoxville Divergence pivot, oldest first.
+
+    A bullish Knoxville Divergence is checked on pivot lows, not every candle:
+    price must make a lower pivot low while momentum makes a higher pivot low,
+    and the latest pivot's RSI must be oversold. Returning all matches is useful
+    for charts and for "old divergence retest" rules, while the older
+    `bullish_knoxville_divergence(...)` wrapper still answers the narrower
+    question: "is there a recent qualifying divergence?"
+    """
     if frame is None or frame.empty:
         return []
 
@@ -890,6 +898,9 @@ def bullish_knoxville_divergences(
             momentum_made_higher_low = float(latest["momentum"]) > float(prior["momentum"])
             if price_made_lower_low and momentum_made_higher_low:
                 enriched_latest = latest.copy()
+                # Store the comparison pivot too. The screener currently displays
+                # the latest pivot low, but these fields make future explanations
+                # and chart annotations possible without recomputing the pair.
                 enriched_latest["prior_pivot_timestamp"] = prior.get("timestamp", "")
                 enriched_latest["prior_pivot_low"] = float(prior["low"])
                 enriched_latest["prior_pivot_momentum"] = float(prior["momentum"])

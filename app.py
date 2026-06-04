@@ -108,6 +108,12 @@ def _scan_history_start_date(today: date | None = None) -> date:
     the full 10-year cache. That lets long-memory checks (major levels, old
     Knoxville retests, ATH drawdowns) reason from the same data the prefetch
     step downloads.
+
+    Beginner note:
+    `lookback_days` is not wrong or unused; it still describes how much history
+    a strategy usually needs. The actual scan loads the larger shared window so
+    a short-lookback screener cannot accidentally hide older events that a chart
+    or secondary rule may need.
     """
     selected_date = today or date.today()
     try:
