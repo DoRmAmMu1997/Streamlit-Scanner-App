@@ -305,10 +305,21 @@ def test_require_authorized_user_normalizes_email_at_authorization_boundary(
     authentication step with a fake that returns a mixed-case email. If that
     upstream helper ever changes, admin tagging should still compare one
     normalized identity key against the normalized ``ADMIN_EMAILS`` set.
+
+    Beginner note:
+    ``monkeypatch.setattr`` temporarily swaps the real sign-in helper for the
+    small lambda below. That lets this unit test focus on the authorization
+    boundary without building a full fake Google login flow.
     """
+    # Make the app behave like production with no general allowlist. In that
+    # mode, the only way through should be membership in ADMIN_EMAILS.
     monkeypatch.setenv("ALLOWED_EMAILS", "")
     monkeypatch.setenv("ADMIN_EMAILS", "boss@example.com")
     monkeypatch.setenv("SCANNER_ENV", "production")
+
+    # Simulate an authenticated user object whose email was not lowercased by
+    # the previous AUTH-001 step. require_authorized_user should still normalize
+    # the value before comparing it with ADMIN_EMAILS.
     monkeypatch.setattr(
         session,
         "require_authenticated_user",
@@ -318,6 +329,8 @@ def test_require_authorized_user_normalizes_email_at_authorization_boundary(
 
     user = require_authorized_user(fake_st)
 
+    # The returned app state should use the same canonical email key that made
+    # the authorization decision, and the user should be clearly marked admin.
     assert user.email == "boss@example.com"
     assert user.is_admin is True
     assert fake_st.errors == []
