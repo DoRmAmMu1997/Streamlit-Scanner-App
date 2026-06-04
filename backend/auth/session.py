@@ -22,7 +22,7 @@ import os
 from dataclasses import dataclass, replace
 from typing import Any
 
-from backend.config import _clean_env_value, load_environment
+from backend.config import load_environment
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +121,7 @@ def get_authenticated_user(st_module: Any) -> AuthenticatedUser | None:
     # (the provider is fixed to Google above). The email is the stable value the
     # app exposes and that future AUTH tasks will match against an allowlist, so
     # we lower-case it to one canonical form instead of trusting Google's casing.
-    email = _user_value(raw_user, "email").lower()
+    email = _normalize_email(_user_value(raw_user, "email"))
     if not email:
         return None
     return AuthenticatedUser(email=email, name=_user_value(raw_user, "name") or None)
@@ -211,17 +211,18 @@ def require_authorized_user(st_module: Any) -> AuthenticatedUser:
     drew the sidebar "Log out") so they can switch to an authorized account.
     """
     user = require_authenticated_user(st_module)
+    email = _normalize_email(user.email)
 
     allowed = _allowed_emails()
     admins = _admin_emails()
 
     if not is_email_authorized(
-        user.email, allowed=allowed, admins=admins, production=_is_production_mode()
+        email, allowed=allowed, admins=admins, production=_is_production_mode()
     ):
         # Record the denied attempt for the operator's own audit trail. Only the
         # email is logged — never the allowlist itself — so the log cannot leak
         # who else has access.
-        logger.warning("Access denied for %s: email is not on the allowlist", user.email)
+        logger.warning("Access denied for %s: email is not on the allowlist", email)
         st_module.error(
             "You are not authorized to access this app. "
             "Ask the administrator to add your email to the allowlist."
@@ -229,7 +230,9 @@ def require_authorized_user(st_module: Any) -> AuthenticatedUser:
         _stop(st_module)
 
     # Authorized. Tag admins so future role-gated features (AUTH-003) can read it.
-    return replace(user, is_admin=user.email in admins)
+    # Replacing the email too keeps the returned app state in the same canonical
+    # lowercase form used for the allowlist/admin comparison.
+    return replace(user, email=email, is_admin=email in admins)
 
 
 def is_email_authorized(
@@ -247,7 +250,7 @@ def is_email_authorized(
       3. If no allowlist is configured, permit in development but deny in
          production (fail closed). Admins already passed at rule 1.
     """
-    email = email.strip().lower()
+    email = _normalize_email(email)
     if email in admins:
         return True
     if allowed:
@@ -259,13 +262,13 @@ def is_email_authorized(
 def _allowed_emails() -> frozenset[str]:
     """The ALLOWED_EMAILS set from the environment (normalized; may be empty)."""
     load_environment()
-    return _parse_email_set(_clean_env_value(os.getenv(_ALLOWED_EMAILS_ENV)))
+    return _parse_email_set(_clean_value(os.getenv(_ALLOWED_EMAILS_ENV)))
 
 
 def _admin_emails() -> frozenset[str]:
     """The ADMIN_EMAILS set from the environment (normalized; may be empty)."""
     load_environment()
-    return _parse_email_set(_clean_env_value(os.getenv(_ADMIN_EMAILS_ENV)))
+    return _parse_email_set(_clean_value(os.getenv(_ADMIN_EMAILS_ENV)))
 
 
 def _parse_email_set(raw: str) -> frozenset[str]:
@@ -276,7 +279,7 @@ def _parse_email_set(raw: str) -> frozenset[str]:
     auth gate produces. Empty entries (e.g. a trailing comma) are dropped.
     """
     return frozenset(
-        cleaned.lower() for part in raw.split(",") if (cleaned := part.strip())
+        email for part in raw.split(",") if (email := _normalize_email(part))
     )
 
 
@@ -371,6 +374,11 @@ def _user_value(user: Any, key: str) -> str:
 def _clean_value(value: Any) -> str:
     """Convert a possibly-empty config/user value into trimmed text."""
     return str(value or "").strip()
+
+
+def _normalize_email(value: Any) -> str:
+    """Convert an email-like value into the canonical allowlist comparison key."""
+    return _clean_value(value).lower()
 
 
 def _stop(st_module: Any) -> None:

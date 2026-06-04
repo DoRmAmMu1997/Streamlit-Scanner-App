@@ -295,6 +295,34 @@ def test_require_authorized_user_flags_admin(monkeypatch):
     assert fake_st.errors == []
 
 
+def test_require_authorized_user_normalizes_email_at_authorization_boundary(
+    monkeypatch,
+):
+    """Authorization should not depend on the authentication helper's casing.
+
+    ``get_authenticated_user`` already lowercases real Streamlit emails. This
+    test protects ``require_authorized_user`` itself by replacing the
+    authentication step with a fake that returns a mixed-case email. If that
+    upstream helper ever changes, admin tagging should still compare one
+    normalized identity key against the normalized ``ADMIN_EMAILS`` set.
+    """
+    monkeypatch.setenv("ALLOWED_EMAILS", "")
+    monkeypatch.setenv("ADMIN_EMAILS", "boss@example.com")
+    monkeypatch.setenv("SCANNER_ENV", "production")
+    monkeypatch.setattr(
+        session,
+        "require_authenticated_user",
+        lambda _st: AuthenticatedUser(email="BOSS@example.com", name="Boss"),
+    )
+    fake_st = _FakeStreamlit()
+
+    user = require_authorized_user(fake_st)
+
+    assert user.email == "boss@example.com"
+    assert user.is_admin is True
+    assert fake_st.errors == []
+
+
 def test_require_authorized_user_denies_unlisted_email(monkeypatch):
     """A signed-in user not on a populated allowlist is stopped with an error."""
     monkeypatch.setenv("ALLOWED_EMAILS", "sunny@example.com")
