@@ -103,3 +103,23 @@ def test_session_scope_commits_and_rolls_back(monkeypatch, tmp_path: Path):
         assert session.scalar(select(text("count(*)")).select_from(ScanRun)) == 1
 
     engine.dispose()
+
+
+def test_make_engine_applies_sqlite_concurrency_pragmas(tmp_path: Path):
+    """Every SQLite connection should enforce keys and survive write contention.
+
+    ``foreign_keys`` keeps the ON DELETE CASCADE working; ``busy_timeout`` makes a
+    blocked writer wait instead of immediately raising "database is locked"; and
+    WAL lets the history page read while a scan writes. These matter once SCAN-003
+    runs under Streamlit's worker threads.
+    """
+    from backend.storage.database import _make_engine
+
+    engine = _make_engine(f"sqlite:///{(tmp_path / 'pragmas.db').as_posix()}")
+    try:
+        with engine.connect() as connection:
+            assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+            assert connection.exec_driver_sql("PRAGMA busy_timeout").scalar() == 5000
+            assert connection.exec_driver_sql("PRAGMA journal_mode").scalar().lower() == "wal"
+    finally:
+        engine.dispose()

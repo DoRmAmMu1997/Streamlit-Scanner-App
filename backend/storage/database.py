@@ -73,11 +73,20 @@ def _make_engine(url: str | None = None) -> Engine:
     if database_url.startswith("sqlite"):
 
         @event.listens_for(created_engine, "connect")
-        def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
+        def _apply_sqlite_pragmas(dbapi_connection, _connection_record):
             # SQLite parses FOREIGN KEY declarations but does not enforce them
             # unless this pragma is enabled for every new connection. Without
             # it, deleting a scan_runs row would leave orphan scan_results rows.
             dbapi_connection.execute("PRAGMA foreign_keys=ON")
+            # Wait for a write lock instead of immediately raising "database is
+            # locked" when a Streamlit rerun reads while a scan writes. pysqlite
+            # already defaults to 5000ms; setting it keeps that budget explicit
+            # and stable even if the driver default changes.
+            dbapi_connection.execute("PRAGMA busy_timeout=5000")
+            # WAL lets the history page read while a scan writes, which a default
+            # DELETE-journal database cannot do. WAL persists in the database file,
+            # so this is effectively a no-op after the first connection.
+            dbapi_connection.execute("PRAGMA journal_mode=WAL")
 
     return created_engine
 
