@@ -173,6 +173,18 @@ def _universe() -> pd.DataFrame:
     )
 
 
+def _universe_for(symbols: list[str]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "symbol": symbols,
+            "security_id": [str(index) for index, _symbol in enumerate(symbols, start=1)],
+            "exchange_segment": ["NSE_EQ"] * len(symbols),
+            "instrument_type": ["EQUITY"] * len(symbols),
+            "mapping_status": ["mapped"] * len(symbols),
+        }
+    )
+
+
 def test_heikin_ashi_supertrend_screener_returns_buy_and_sell_only():
     # BUY and SELL are shaped to create fresh latest-candle crossovers. HOLD has
     # enough candles but no fresh crossover, so it should be omitted.
@@ -354,7 +366,41 @@ def test_envelope_knoxville_buy_returns_buy_only_when_both_filters_pass():
     row = result.iloc[0]
     assert row["rating"] == "BUY"
     assert row["close"] <= row["env_lower"] * 1.01
+    assert row["entry_trigger"] == "recent_envelope_kd"
     assert "Knoxville" in row["reason"]
+
+
+def test_envelope_knoxville_buy_shortlists_old_kd_retest_without_envelope():
+    params = _env_knox_params()
+    kd_pivot_low = 89.5
+    exactly_two_pct_up = kd_pivot_low * 1.02
+    above_two_pct = kd_pivot_low * 1.02 + 0.10
+
+    base_path = [
+        100.0, 100.0, 100.0, 100.0, 96.0,
+        92.0, 96.0, 100.0, 95.0, 90.0,
+        93.0, 110.0, 105.0, 100.0, 98.0,
+        99.0, 100.0, 99.0, 98.0, 97.0,
+        96.0, 95.0, 94.0, 93.0,
+    ]
+    frames = {
+        "OLD": _env_knox_candles(base_path + [exactly_two_pct_up]),
+        "ABOVE": _env_knox_candles(base_path + [above_two_pct]),
+    }
+
+    result = envelope_knoxville_buy.run(
+        _universe_for(["OLD", "ABOVE"]),
+        FakeDataLoader(frames),
+        params,
+    )
+
+    assert result["symbol"].tolist() == ["OLD"]
+    row = result.iloc[0]
+    assert row["entry_trigger"] == "old_kd_retest"
+    assert row["divergence_price"] == pytest.approx(kd_pivot_low)
+    assert row["divergence_bars_ago"] > params["signal_recency_bars"]
+    assert row["kd_retest_distance_pct"] == pytest.approx(0.02)
+    assert row["close"] > row["env_lower"] * 1.01
 
 
 def test_envelope_knoxville_buy_tolerates_empty_and_short_frames():

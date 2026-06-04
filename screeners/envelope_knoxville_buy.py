@@ -21,10 +21,12 @@ Beginner glossary:
 
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 
-from backend.charts import add_envelope_overlay, candlestick_with_volume
-from backend.indicators import bullish_knoxville_divergence, envelope
+from backend.charts import add_envelope_overlay, add_series_markers, candlestick_with_volume
+from backend.indicators import bullish_knoxville_divergences, envelope
 from backend.scanner_base import BaseScanner
 
 
@@ -57,6 +59,9 @@ class EnvelopeKnoxvilleBuy(BaseScanner):
             "momentum_period": 20,
             "divergence_bars_back": 20,
             "signal_recency_bars": 10,
+            # A stock may also qualify when it retests the most recent bullish
+            # Knoxville pivot low, even if that divergence is old.
+            "kd_retest_proximity_pct": 0.02,
             "pivot_left": 2,
             "pivot_right": 2,
             "oversold": 30.0,
@@ -68,7 +73,11 @@ class EnvelopeKnoxvilleBuy(BaseScanner):
         "env_lower",
         "env_upper",
         "env_distance_pct",
+        "entry_trigger",
         "divergence_date",
+        "divergence_price",
+        "divergence_bars_ago",
+        "kd_retest_distance_pct",
         "rsi",
         "momentum",
     ]
@@ -97,22 +106,18 @@ class EnvelopeKnoxvilleBuy(BaseScanner):
         proximity_pct = self.coerce_param(params, "env_proximity_pct", float)
         # Bollinger-style proximity test, but against the Envelope lower band:
         #     close <= lower_band * (1 + proximity_pct)
-        if close > lower_band * (1.0 + proximity_pct):
-            return None
+        near_envelope = close <= lower_band * (1.0 + proximity_pct)
 
-        # The Envelope filter says price is stretched down; the Knoxville filter
-        # says downside momentum may be weakening. Both are required for a BUY.
-        divergence = bullish_knoxville_divergence(
+        all_divergences = bullish_knoxville_divergences(
             frame,
             rsi_period=self.coerce_param(params, "rsi_period", int),
             momentum_period=self.coerce_param(params, "momentum_period", int),
             bars_back=self.coerce_param(params, "divergence_bars_back", int),
-            recency=self.coerce_param(params, "signal_recency_bars", int),
             pivot_left=self.coerce_param(params, "pivot_left", int),
             pivot_right=self.coerce_param(params, "pivot_right", int),
             oversold=self.coerce_param(params, "oversold", float),
         )
-        if divergence is None:
+        if not all_divergences:
             return None
 
         if lower_band == 0:
@@ -120,14 +125,52 @@ class EnvelopeKnoxvilleBuy(BaseScanner):
         else:
             env_distance_pct = (close - lower_band) / lower_band
 
+        signal_recency = self.coerce_param(params, "signal_recency_bars", int)
+        recent_divergence = None
+        for candidate in reversed(all_divergences):
+            if len(frame) - 1 - int(candidate.name) <= signal_recency:
+                recent_divergence = candidate
+                break
+
+        last_divergence = all_divergences[-1]
+        retest_proximity = self.coerce_param(params, "kd_retest_proximity_pct", float)
+        divergence_price = float(last_divergence["low"])
+        kd_retest_distance_pct = (
+            (close - divergence_price) / divergence_price
+            if divergence_price > 0
+            else math.inf
+        )
+
+        entry_trigger = ""
+        divergence = None
+        if near_envelope and recent_divergence is not None:
+            entry_trigger = "recent_envelope_kd"
+            divergence = recent_divergence
+        elif close <= divergence_price * (1.0 + retest_proximity):
+            entry_trigger = "old_kd_retest"
+            divergence = last_divergence
+        if divergence is None:
+            return None
+
+        selected_divergence_price = float(divergence["low"])
+        selected_bars_ago = len(frame) - 1 - int(divergence.name)
         rsi_value = float(divergence["rsi"])
         momentum_value = float(divergence["momentum"])
-        reason = (
-            f"Close {close:.2f} is {env_distance_pct * 100:.2f}% from the lower "
-            f"Envelope band ({lower_band:.2f}). Bullish Knoxville: price made a "
-            f"lower low while momentum made a higher low ({momentum_value:.2f}) "
-            f"with RSI oversold ({rsi_value:.1f})."
-        )
+        if entry_trigger == "recent_envelope_kd":
+            reason = (
+                f"Close {close:.2f} is {env_distance_pct * 100:.2f}% from the lower "
+                f"Envelope band ({lower_band:.2f}). Recent bullish Knoxville: "
+                f"price made a lower low while momentum made a higher low "
+                f"({momentum_value:.2f}) with RSI oversold ({rsi_value:.1f})."
+            )
+        else:
+            reason = (
+                f"Close {close:.2f} is {kd_retest_distance_pct * 100:.2f}% from "
+                f"the last bullish Knoxville pivot low ({selected_divergence_price:.2f}) "
+                f"made {selected_bars_ago} bars ago. This is within the "
+                f"{retest_proximity * 100:.2f}% retest buffer; Envelope proximity "
+                f"is not required for this trigger."
+            )
 
         return {
             "symbol": symbol,
@@ -138,7 +181,11 @@ class EnvelopeKnoxvilleBuy(BaseScanner):
             "env_lower": lower_band,
             "env_upper": float(bands["env_upper"].iloc[-1]),
             "env_distance_pct": env_distance_pct,
+            "entry_trigger": entry_trigger,
             "divergence_date": divergence.get("timestamp", ""),
+            "divergence_price": selected_divergence_price,
+            "divergence_bars_ago": selected_bars_ago,
+            "kd_retest_distance_pct": kd_retest_distance_pct,
             "rsi": rsi_value,
             "momentum": momentum_value,
             "reason": reason,
@@ -158,6 +205,28 @@ class EnvelopeKnoxvilleBuy(BaseScanner):
         add_envelope_overlay(
             spec, candles, period=ema_period, percent=percent, exponential=exponential
         )
+        divergences = bullish_knoxville_divergences(
+            self.prepare_candles(candles),
+            rsi_period=self.coerce_param(params, "rsi_period", int),
+            momentum_period=self.coerce_param(params, "momentum_period", int),
+            bars_back=self.coerce_param(params, "divergence_bars_back", int),
+            pivot_left=self.coerce_param(params, "pivot_left", int),
+            pivot_right=self.coerce_param(params, "pivot_right", int),
+            oversold=self.coerce_param(params, "oversold", float),
+        )
+        markers = []
+        for index, divergence in enumerate(divergences):
+            is_latest = index == len(divergences) - 1
+            markers.append(
+                {
+                    "time": divergence["timestamp"],
+                    "position": "belowBar",
+                    "shape": "arrowUp",
+                    "color": "#ffd54f" if is_latest else "#00c853",
+                    "text": "Latest KD" if is_latest else "KD",
+                }
+            )
+        add_series_markers(spec, markers)
         return spec
 
 

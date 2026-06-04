@@ -23,6 +23,8 @@ from backend.indicators import (
     _supertrend_fallback,
     bollinger_bands,
     build_heikin_ashi,
+    bullish_knoxville_divergence,
+    bullish_knoxville_divergences,
     ema,
     major_levels,
     momentum,
@@ -305,6 +307,77 @@ def test_pivot_highs_handles_nan_inputs_without_raising():
     assert bool(mask.iloc[0]) is False
     # Interior peak at index 2 sits above both neighbors → confirmed.
     assert bool(mask.iloc[2]) is True
+
+
+# ---------------------------------------------------------------------------
+# Knoxville Divergence — all matches plus the legacy recent-wrapper behavior
+# ---------------------------------------------------------------------------
+
+
+def _knoxville_candles(close_values: list[float]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-01-01", periods=len(close_values), freq="D"),
+            "open": [value - 0.25 for value in close_values],
+            "high": [value + 1.0 for value in close_values],
+            "low": [value - 0.5 for value in close_values],
+            "close": close_values,
+            "volume": [1000.0] * len(close_values),
+        }
+    )
+
+
+def test_bullish_knoxville_divergences_returns_all_matches_and_wrapper_keeps_recency():
+    frame = _knoxville_candles(
+        [
+            100.0, 100.0, 100.0, 100.0, 96.0,
+            92.0, 96.0, 100.0, 95.0, 90.0,
+            93.0, 110.0, 105.0, 100.0, 95.0,
+            98.0, 101.0, 96.0, 93.0, 96.0,
+            100.0,
+        ]
+    )
+
+    all_divergences = bullish_knoxville_divergences(
+        frame,
+        rsi_period=3,
+        momentum_period=3,
+        bars_back=10,
+        pivot_left=1,
+        pivot_right=1,
+        oversold=100.0,
+    )
+
+    assert [row["timestamp"].strftime("%Y-%m-%d") for row in all_divergences] == [
+        "2026-01-10",
+        "2026-01-19",
+    ]
+    assert [float(row["low"]) for row in all_divergences] == pytest.approx([89.5, 92.5])
+
+    recent = bullish_knoxville_divergence(
+        frame,
+        rsi_period=3,
+        momentum_period=3,
+        bars_back=10,
+        recency=3,
+        pivot_left=1,
+        pivot_right=1,
+        oversold=100.0,
+    )
+    assert recent is not None
+    assert recent["timestamp"].strftime("%Y-%m-%d") == "2026-01-19"
+
+    stale = bullish_knoxville_divergence(
+        frame,
+        rsi_period=3,
+        momentum_period=3,
+        bars_back=10,
+        recency=1,
+        pivot_left=1,
+        pivot_right=1,
+        oversold=100.0,
+    )
+    assert stale is None
 
 
 # ---------------------------------------------------------------------------

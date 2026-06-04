@@ -34,7 +34,7 @@ import logging
 import os
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +98,28 @@ def running_inside_streamlit() -> bool:
     "missing ScriptRunContext" warnings instead of opening the browser.
     """
     return get_script_run_ctx(suppress_warning=True) is not None
+
+
+def _scan_history_start_date(today: date | None = None) -> date:
+    """Return the first candle date every screener should receive.
+
+    Screeners still declare `lookback_days` for UI context and indicator-specific
+    defaults, but the candle frame passed into `compute_signal(...)` should be
+    the full 10-year cache. That lets long-memory checks (major levels, old
+    Knoxville retests, ATH drawdowns) reason from the same data the prefetch
+    step downloads.
+    """
+    selected_date = today or date.today()
+    try:
+        return selected_date.replace(year=selected_date.year - _PREFETCH_YEARS_BACK)
+    except ValueError:
+        # Feb 29 minus whole calendar years can land on a non-leap year. Match
+        # DailyDataLoader.ensure_daily_history by falling back to Feb 28.
+        return selected_date.replace(
+            month=2,
+            day=28,
+            year=selected_date.year - _PREFETCH_YEARS_BACK,
+        )
 
 
 def prefetch_data_assets() -> None:
@@ -894,9 +916,9 @@ def _render_sidebar(screeners: dict[str, ScreenerDefinition]) -> ScreenerDefinit
     """Render the sidebar and return the selected screener definition.
 
     The sidebar is intentionally minimal: data refresh belongs to the CLI
-    prefetch step (`python app.py`), and date ranges are derived automatically
-    from each screener's `lookback_days`. The Run button writes flags into
-    `st.session_state` so the main flow can detect them on the same rerun.
+    prefetch step (`python app.py`), and every scan uses the 10-year candle
+    window maintained there. The Run button writes flags into `st.session_state`
+    so the main flow can detect them on the same rerun.
     """
     with st.sidebar:
         st.header("Scanner")
@@ -945,13 +967,11 @@ def _execute_screener(selected: ScreenerDefinition) -> dict[str, Any] | None:
     in `st.session_state["scan_cache"]` so subsequent reruns can re-render
     without re-executing.
     """
-    # The UI no longer exposes a manual date range. Each screener declares how
-    # much history it actually needs via `lookback_days`, so quick strategies
-    # do not load ten years of parquet data just because Technical Analysis
-    # needs a much longer context.
+    # The UI no longer exposes a manual date range. Every screener receives the
+    # same 10-year daily history the CLI prefetch maintains; `lookback_days`
+    # remains display/strategy metadata, not a data-loading limit.
     end_date = date.today()
-    lookback_days = max(1, int(selected.lookback_days))
-    start_date = end_date - timedelta(days=lookback_days)
+    start_date = _scan_history_start_date(end_date)
 
     creds = credential_status()
     if not creds["ready"]:

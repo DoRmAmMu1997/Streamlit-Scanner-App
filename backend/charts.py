@@ -63,6 +63,8 @@ _COLORS = {
     "ob_bull": "#42a5f5",
     "ob_bear": "#ab47bc",
     "neckline": "#ffb300",
+    "knoxville": "#00c853",
+    "knoxville_latest": "#ffd54f",
 }
 
 # A price column shows two decimals (NSE prices are paisa-precision).
@@ -279,6 +281,30 @@ def add_line_overlay(spec: dict, timestamps, values, name: str, color: str,
     panes = spec.get("panes", [])
     if 0 <= pane < len(panes):
         panes[pane]["series"].append(_line_series(timestamps, values, name, color, dash=dash))
+
+
+def add_series_markers(
+    spec: dict,
+    markers: list[dict],
+    *,
+    pane: int = 0,
+    series_index: int = 0,
+) -> None:
+    """Attach Lightweight Charts series markers to an existing series."""
+    panes = spec.get("panes", [])
+    if not (0 <= pane < len(panes)) or not markers:
+        return
+    series_list = panes[pane].get("series", [])
+    if not (0 <= series_index < len(series_list)):
+        return
+
+    normalized: list[dict] = []
+    for marker in markers:
+        item = dict(marker)
+        if "time" in item:
+            item["time"] = pd.to_datetime(item["time"]).strftime("%Y-%m-%d")
+        normalized.append(item)
+    series_list[series_index].setdefault("markers", []).extend(normalized)
 
 
 def add_supertrend_overlay(spec: dict, candles_for_st: pd.DataFrame, *,
@@ -548,6 +574,9 @@ const SPEC = __SPEC_JSON__;
       if (!ctor) { return; }
       const series = chart.addSeries(ctor, s.options || {}, paneIndex);
       series.setData(s.data || []);
+      if (Array.isArray(s.markers) && s.markers.length && LWC.createSeriesMarkers) {
+        LWC.createSeriesMarkers(series, s.markers);
+      }
       if (!firstSeries) { firstSeries = series; }
     });
     if (firstSeries) {

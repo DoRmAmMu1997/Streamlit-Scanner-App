@@ -134,25 +134,18 @@ def test_parse_company_page_extracts_balance_sheet_pieces_for_net_debt_calc():
     assert payload["latest_reserves"] == pytest.approx(10000)
 
 
-def test_parse_company_page_captures_tables_but_skips_peers_without_session():
-    """With Job 4, the peer table is fetched via a second HTMX request.
-
-    `_parse_company_page` only triggers that second fetch when a
-    `requests.Session` is passed in. The end-to-end peers extraction is
-    covered by `test_fetch_peer_table_*` below — this test only confirms
-    that the static-tables path still works AND that peers stay empty
-    in the no-session path used by unit tests.
-    """
+def test_parse_company_page_captures_static_peer_table_without_session():
+    """A visible peer table in the main HTML should be parsed without HTMX."""
     payload = _parse_company_page(_DEMO_HTML, symbol="DEMO", source_url="http://test/demo")
 
     # Tables come back as a list[dict] with the original column headers.
     assert len(payload["profit_loss"]) >= 3  # Sales, Net Profit, EPS rows
     assert len(payload["quarters"]) >= 2
-    # Peers stays empty without a session — the static <section id="peers">
-    # on the live screener.in page is only a placeholder. See
-    # `test_fetch_peer_table_follows_htmx_url_and_strips_median_row` for
-    # the actual peer-fetch coverage.
-    assert payload["peers"] == []
+    assert [row["Name"] for row in payload["peers"]] == [
+        "Demo Industries",
+        "Peer A",
+        "Peer B",
+    ]
     # Job 4 additions: announcements and concalls now live in the payload too.
     assert "announcements" in payload
     assert "concalls" in payload
@@ -234,6 +227,30 @@ _PEERS_FRAGMENT_HTML = """
 </table>
 """
 
+_HTML_WITH_STATIC_PEER_TABLE = """
+<html><body>
+  <h1>Demo Industries Ltd.</h1>
+  <section id="peers">
+    <h2>Peer comparison</h2>
+    <table>
+      <thead>
+        <tr><th>S.No.</th><th>Name</th><th>CMP Rs.</th><th>P/E</th><th>Mar Cap Rs.Cr.</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>1.</td><td>Demo Industries</td><td>2281.00</td><td>15.70</td><td>825285.85</td></tr>
+        <tr><td>2.</td><td>Peer One</td><td>1159.15</td><td>15.60</td><td>470111.80</td></tr>
+        <tr><td>Median: 68 Co.</td><td></td><td>258.5</td><td>20.62</td><td>1261.91</td></tr>
+      </tbody>
+    </table>
+  </section>
+</body></html>
+"""
+
+_HTML_WITH_HTMX_AND_STATIC_PEERS = _HTML_WITH_STATIC_PEER_TABLE.replace(
+    '<section id="peers">',
+    '<section id="peers" hx-get="/api/company/12345/peers/?sort=mar_cap">',
+)
+
 
 def test_extract_peers_url_finds_hx_get_attribute():
     from bs4 import BeautifulSoup
@@ -287,6 +304,58 @@ def test_fetch_peer_table_follows_htmx_url_and_strips_median_row(monkeypatch):
     assert "Demo Industries" in names
     assert "Peer One" in names
     assert not any("Median" in name for name in names)
+
+
+def test_fetch_peer_table_uses_static_table_when_htmx_url_missing():
+    from bs4 import BeautifulSoup
+    from backend.fundamentals import screener_in_client as module
+
+    rows = module._fetch_peer_table(
+        BeautifulSoup(_HTML_WITH_STATIC_PEER_TABLE, "lxml"),
+        base_url="https://www.screener.in/company/DEMO/",
+        session=None,  # type: ignore[arg-type]
+        limit=7,
+    )
+
+    names = [row.get("Name", "") for row in rows]
+    assert names == ["Demo Industries", "Peer One"]
+    assert not any("Median" in name for name in names)
+
+
+def test_fetch_peer_table_falls_back_to_static_table_when_htmx_fetch_fails(monkeypatch):
+    from bs4 import BeautifulSoup
+    from backend.fundamentals.screener_in_client import ScreenerInFetchError
+    from backend.fundamentals import screener_in_client as module
+
+    def boom(url, session):
+        raise ScreenerInFetchError("simulated rate limit")
+
+    monkeypatch.setattr(module, "_fetch_html", boom)
+
+    rows = module._fetch_peer_table(
+        BeautifulSoup(_HTML_WITH_HTMX_AND_STATIC_PEERS, "lxml"),
+        base_url="https://www.screener.in/company/DEMO/",
+        session=None,  # type: ignore[arg-type]
+        limit=7,
+    )
+
+    assert [row.get("Name", "") for row in rows] == ["Demo Industries", "Peer One"]
+
+
+def test_fetch_peer_table_falls_back_to_static_table_when_htmx_fragment_empty(monkeypatch):
+    from bs4 import BeautifulSoup
+    from backend.fundamentals import screener_in_client as module
+
+    monkeypatch.setattr(module, "_fetch_html", lambda url, session: "<div>no rows</div>")
+
+    rows = module._fetch_peer_table(
+        BeautifulSoup(_HTML_WITH_HTMX_AND_STATIC_PEERS, "lxml"),
+        base_url="https://www.screener.in/company/DEMO/",
+        session=None,  # type: ignore[arg-type]
+        limit=7,
+    )
+
+    assert [row.get("Name", "") for row in rows] == ["Demo Industries", "Peer One"]
 
 
 def test_fetch_peer_table_caps_at_limit(monkeypatch):
