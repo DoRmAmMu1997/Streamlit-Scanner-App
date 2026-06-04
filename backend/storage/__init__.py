@@ -1,5 +1,17 @@
 """Persistence subsystem for scan history.
 
+Beginner note:
+Importing from ``backend.storage`` is the friendly public path. Internally the
+package is split into small files:
+
+- ``models.py`` owns table shapes.
+- ``database.py`` owns connections and sessions.
+- ``repository.py`` owns queries and writes.
+
+Re-exporting the important names here lets future code use
+``from backend.storage import session_scope, create_scan_run`` without needing
+to remember which small file each helper lives in.
+
 Public surface:
 - `Base` — the SQLAlchemy declarative base; `Base.metadata` holds every table.
 - `ScanRun` — one row per scan execution (the audit header).

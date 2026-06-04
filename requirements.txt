@@ -10,6 +10,8 @@ pyarrow
 # scan_runs / scan_results ORM models in backend/storage/models.py. The
 # engine, sessions, and Alembic migrations that USE this schema are SCAN-002.
 SQLAlchemy
+# Alembic is SQLAlchemy's migration tool. It creates/updates the physical
+# database tables from versioned migration files instead of ad-hoc create_all().
 alembic
 
 # Dhan API and environment loading.

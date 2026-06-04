@@ -1,4 +1,10 @@
-"""Create scan_runs and scan_results."""
+"""Create scan_runs and scan_results.
+
+This is the first real persistence migration for SCAN-002. It turns the
+SQLAlchemy ORM models from SCAN-001 into physical tables. Keep this migration
+boring and explicit: initial schema migrations are much easier to review when
+every column and index is visible in one place.
+"""
 
 from __future__ import annotations
 
@@ -13,11 +19,21 @@ depends_on = None
 
 
 def _big_int_primary_key() -> sa.BigInteger:
+    """Return the same primary-key type shape used by the ORM models.
+
+    SQLite only auto-increments a column that is literally INTEGER PRIMARY KEY.
+    Postgres can use BIGINT. The SQLAlchemy variant gives each database the
+    shape it expects while keeping one migration.
+    """
     return sa.BigInteger().with_variant(sa.Integer(), "sqlite")
 
 
 def upgrade() -> None:
+    """Create the scan-history tables and indexes."""
     big_int_primary_key = _big_int_primary_key()
+    # Store enum values as a VARCHAR plus a CHECK constraint, not as a native
+    # Postgres enum. That keeps SQLite and Postgres behavior aligned and makes a
+    # future "add status value" migration straightforward.
     scan_status = sa.Enum(
         "running",
         "success",
@@ -29,6 +45,9 @@ def upgrade() -> None:
         length=16,
     )
 
+    # scan_runs is the audit header: one row per attempt to run a screener over a
+    # universe. It stores the reproducibility facts before we get to per-symbol
+    # results.
     op.create_table(
         "scan_runs",
         sa.Column("id", big_int_primary_key, nullable=False),
@@ -49,6 +68,9 @@ def upgrade() -> None:
     op.create_index("ix_scan_runs_status", "scan_runs", ["status"])
     op.create_index("ix_scan_runs_universe_key", "scan_runs", ["universe_key"])
 
+    # scan_results is the child table: one row per shortlisted stock produced by
+    # the parent run. The raw/provenance JSON columns let deterministic and AI
+    # screeners share this same table without losing their extra fields.
     op.create_table(
         "scan_results",
         sa.Column("id", big_int_primary_key, nullable=False),
@@ -70,6 +92,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Drop child objects before parent objects so foreign keys do not block us."""
     op.drop_index("ix_scan_results_symbol", table_name="scan_results")
     op.drop_index("ix_scan_results_run_id", table_name="scan_results")
     op.drop_table("scan_results")

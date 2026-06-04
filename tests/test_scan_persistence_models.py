@@ -154,6 +154,7 @@ def test_status_roundtrips_and_is_stored_as_its_lowercase_value(session):
 
 
 def test_status_column_rejects_values_outside_scan_status_enum(session):
+    """The database should reject typo statuses, not just the Python enum layer."""
     with pytest.raises(IntegrityError):
         session.execute(
             text(

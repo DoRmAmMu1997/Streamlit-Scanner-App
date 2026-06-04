@@ -1,4 +1,9 @@
-"""Tests for the SCAN-002 scan-history repository helpers."""
+"""Tests for the SCAN-002 scan-history repository helpers.
+
+The repository is the public write/read API that SCAN-003 will call. These tests
+use a temporary SQLite database and real ORM objects so they exercise the same
+mapping code the app will use, without needing Streamlit or Dhan data.
+"""
 
 from __future__ import annotations
 
@@ -14,10 +19,13 @@ from backend.storage.models import Base, ScanStatus
 
 @pytest.fixture
 def session():
+    """Yield a clean in-memory SQLite session for each repository test."""
     engine = create_engine("sqlite://", future=True)
 
     @event.listens_for(engine, "connect")
     def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
+        # Match the production SQLite engine behavior so relationship and raw
+        # database cascades are both available in tests.
         dbapi_connection.execute("PRAGMA foreign_keys=ON")
 
     Base.metadata.create_all(engine)
@@ -27,6 +35,7 @@ def session():
 
 
 def test_repository_creates_run_results_and_failed_status(session):
+    """A caller can create a run, store rows, and mark the run failed."""
     from backend.storage.repository import (
         create_scan_run,
         finish_scan_run,
@@ -35,6 +44,9 @@ def test_repository_creates_run_results_and_failed_status(session):
         save_scan_results,
     )
 
+    # The run header captures the facts needed to explain or replay the scan:
+    # which screener, which universe, which params, which data date, and who
+    # triggered it.
     run = create_scan_run(
         session,
         screener_key="technical_analysis_ai",
@@ -46,6 +58,8 @@ def test_repository_creates_run_results_and_failed_status(session):
         triggered_by="ui:hemant@example.com",
     )
 
+    # Use one deterministic-style row and one AI-style row. This proves the same
+    # table can keep typed columns plus the full flexible raw JSON payload.
     results = save_scan_results(
         session,
         run,
@@ -72,6 +86,8 @@ def test_repository_creates_run_results_and_failed_status(session):
             },
         ],
     )
+    # A failed scan can still have partial rows. SCAN-004 will show the error
+    # message beside the rows that were saved before failure.
     finish_scan_run(
         session,
         run,
@@ -90,7 +106,10 @@ def test_repository_creates_run_results_and_failed_status(session):
     assert [loaded.id for loaded in latest] == [run.id]
 
     by_symbol = {result.symbol: result for result in get_scan_results(session, run.id)}
+    # Typed money columns keep Decimal precision for querying and display.
     assert by_symbol["RELIANCE"].close_price == Decimal("1234.5678")
+    # JSON snapshots store Decimal values as strings so the audit copy is
+    # lossless and JSON-serializable.
     assert by_symbol["RELIANCE"].raw_result_json["close"] == "1234.5678"
     assert by_symbol["RELIANCE"].raw_result_json["extra"]["threshold"] == "0.07"
     assert by_symbol["TCS"].close_price == Decimal("3890.0000")
@@ -102,6 +121,7 @@ def test_repository_creates_run_results_and_failed_status(session):
 
 
 def test_repository_orders_latest_runs_newest_first(session):
+    """History queries should show the most recent run first."""
     from backend.storage.repository import create_scan_run, get_latest_scan_runs
 
     first = create_scan_run(session, screener_key="envelope", universe_key="nifty_500")
