@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from backend.auth import session
 from backend.auth.session import AuthenticatedUser, require_authenticated_user
 
 
@@ -108,6 +109,18 @@ def _google_auth_secrets() -> dict:
     }
 
 
+@pytest.fixture(autouse=True)
+def _authlib_installed(monkeypatch):
+    """Default every test to "Authlib is installed" so the login path is exercised.
+
+    The real runtime dependency is declared in requirements.txt/constraints.txt.
+    Forcing it here keeps these fake-Streamlit tests deterministic regardless of
+    whether Authlib happens to be installed in the local environment. The missing
+    dependency case overrides this fixture explicitly.
+    """
+    monkeypatch.setattr(session, "_is_authlib_available", lambda: True)
+
+
 def test_unauthenticated_user_sees_google_login_and_cannot_continue():
     """A signed-out user should see only the login button, then the run stops."""
     fake_st = _FakeStreamlit()
@@ -167,3 +180,45 @@ def test_logged_in_user_without_email_cannot_continue():
         require_authenticated_user(fake_st)
 
     assert fake_st.errors == ["Your login did not provide an email address."]
+
+
+def test_missing_authlib_dependency_blocks_login(monkeypatch):
+    """Without Authlib, st.login would crash, so the gate must not offer it."""
+    monkeypatch.setattr(session, "_is_authlib_available", lambda: False)
+    fake_st = _FakeStreamlit()
+
+    with pytest.raises(_StopCalled):
+        require_authenticated_user(fake_st)
+
+    # No login button is rendered, so the user never hits the StreamlitAuthError
+    # Streamlit raises when Authlib is missing; they get a setup message instead.
+    assert fake_st.buttons == []
+    assert fake_st.login_calls == []
+    assert any("Authlib" in message for message in fake_st.errors)
+
+
+def test_authenticated_user_email_is_normalized_to_lowercase():
+    """A mixed-case email must collapse to one stable lowercase identity key."""
+    fake_st = _FakeStreamlit(
+        user=SimpleNamespace(is_logged_in=True, email="Sunny@Example.COM", name="Sunny"),
+        clicked_labels={"Log out"},
+    )
+
+    user = require_authenticated_user(fake_st)
+
+    assert user == AuthenticatedUser(email="sunny@example.com", name="Sunny")
+    assert fake_st.captions == ["Signed in as sunny@example.com"]
+
+
+def test_logged_in_user_with_unverified_email_cannot_continue():
+    """An email the provider marks unverified must not be accepted as identity."""
+    fake_st = _FakeStreamlit(
+        user=SimpleNamespace(
+            is_logged_in=True, email="spoofed@example.com", email_verified=False
+        )
+    )
+
+    with pytest.raises(_StopCalled):
+        require_authenticated_user(fake_st)
+
+    assert fake_st.errors == ["Your Google account email is not verified."]

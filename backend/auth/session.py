@@ -16,6 +16,7 @@ rules yet.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 from dataclasses import dataclass
 from typing import Any
@@ -103,9 +104,11 @@ def get_authenticated_user(st_module: Any) -> AuthenticatedUser | None:
     if not _is_user_logged_in(raw_user):
         return None
 
-    # Google normally returns "email". "preferred_username" is a harmless
-    # fallback for OIDC providers that name the same concept differently.
-    email = _user_value(raw_user, "email") or _user_value(raw_user, "preferred_username")
+    # Google always returns an "email" claim, so we read only that one field
+    # (the provider is fixed to Google above). The email is the stable value the
+    # app exposes and that future AUTH tasks will match against an allowlist, so
+    # we lower-case it to one canonical form instead of trusting Google's casing.
+    email = _user_value(raw_user, "email").lower()
     if not email:
         return None
     return AuthenticatedUser(email=email, name=_user_value(raw_user, "name") or None)
@@ -133,6 +136,16 @@ def require_authenticated_user(st_module: Any) -> AuthenticatedUser:
 
     raw_user = getattr(st_module, "user", None)
     if not _is_user_logged_in(raw_user):
+        # Without Authlib, st.login raises StreamlitAuthError the instant the
+        # button is pressed. The app cannot function without it in any
+        # environment, so treat it as a hard setup error and stop before
+        # rendering a login button that would only throw.
+        if not _is_authlib_available():
+            st_module.error(
+                "Google SSO needs the 'Authlib' package (>=1.3.2), which is not "
+                "installed. Install it with `pip install Authlib` and restart the app."
+            )
+            _stop(st_module)
         # Streamlit reruns the script when a widget is clicked. Passing
         # st.login as the button callback lets Streamlit begin the Google OIDC
         # redirect flow at the exact moment the user presses the button.
@@ -147,6 +160,14 @@ def require_authenticated_user(st_module: Any) -> AuthenticatedUser:
     user = get_authenticated_user(st_module)
     if user is None:
         st_module.error("Your login did not provide an email address.")
+        _stop(st_module)
+
+    # Defense in depth for the future allowlist work: only trust an email as an
+    # identity once the provider has confirmed it belongs to this user. Google
+    # always sends this claim; an explicit "unverified" is the only thing we
+    # reject (see _is_email_verified for why an absent claim is allowed).
+    if not _is_email_verified(raw_user):
+        st_module.error("Your Google account email is not verified.")
         _stop(st_module)
 
     # Keep account controls in the sidebar where the scanner's command controls
@@ -182,6 +203,18 @@ def _is_production_mode() -> bool:
     return _clean_value(os.getenv("SCANNER_ENV")).lower() in _PRODUCTION_ENV_VALUES
 
 
+def _is_authlib_available() -> bool:
+    """Return True when the Authlib package needed for Google login is importable.
+
+    Streamlit's ``st.login`` performs the Google OIDC redirect through Authlib. If
+    Authlib is not installed, Streamlit raises ``StreamlitAuthError`` the moment
+    the login button is pressed. Detecting it up front lets the gate fail with a
+    clear setup message instead of a raw stack trace. ``find_spec`` only checks
+    importability and does not import the package.
+    """
+    return importlib.util.find_spec("authlib") is not None
+
+
 def _streamlit_secrets(st_module: Any) -> Any:
     """Read st.secrets safely, even from tests or partially configured runs."""
     try:
@@ -210,6 +243,21 @@ def _is_user_logged_in(user: Any) -> bool:
     if value is None:
         value = _mapping_get(user, "is_logged_in", False)
     return bool(value)
+
+
+def _is_email_verified(user: Any) -> bool:
+    """Return False only when the provider explicitly marks the email unverified.
+
+    Google always sends an ``email_verified`` boolean in its OIDC claims, and the
+    email is the value future AUTH tasks will compare against an allowlist. We
+    only trust it as an identity when Google has verified it. When the claim is
+    absent (other providers, or test fakes that omit it) we do not lock the user
+    out, since this gate intentionally avoids inventing authorization rules.
+    """
+    value = getattr(user, "email_verified", None)
+    if value is None:
+        value = _mapping_get(user, "email_verified", None)
+    return True if value is None else bool(value)
 
 
 def _user_value(user: Any, key: str) -> str:

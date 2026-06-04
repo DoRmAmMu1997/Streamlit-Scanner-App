@@ -1,6 +1,12 @@
 # Web UI.
 streamlit
 
+# Google SSO (OIDC) login for the Streamlit auth gate. Streamlit's st.login()
+# imports Authlib at runtime to run the Google redirect and raises
+# StreamlitAuthError without it. Authlib is not a Streamlit transitive
+# dependency, so the app must declare it explicitly.
+authlib
+
 # Data handling and calculations.
 pandas
 numpy
