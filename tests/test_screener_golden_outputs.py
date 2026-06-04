@@ -1,7 +1,38 @@
+"""Golden-file (snapshot) regression tests for the deterministic screeners (TEST-001).
+
+What a golden test is
+---------------------
+Each case runs one screener over a tiny, fixed set of synthetic candles and compares its
+*entire* normalized output against a checked-in JSON snapshot under
+``tests/golden/screeners/``. If a code change alters a screener's output — a rating, a
+``reason`` string, or any indicator column — the snapshot no longer matches and the test
+fails. That is the whole point: catch unintended **output drift**, including drift in the
+underlying indicator math (Bollinger / EMA / RSI / SuperTrend), before it ships.
+
+Important properties
+--------------------
+- These tests pin *current* behavior, not correctness. A golden test freezes whatever the
+  screener produces today; it does not independently prove the signal is "right".
+- Fully offline and deterministic: a ``FakeDataLoader`` supplies fixed candle frames (no
+  Dhan / Streamlit / LLM / network), and floats are rounded to 6 decimals. Determinism
+  relies on the numpy/pandas versions pinned in ``constraints.txt``.
+
+Regenerating the snapshots
+--------------------------
+When you change a screener *on purpose*, its golden file must be refreshed. Run::
+
+    UPDATE_GOLDEN=1 python -m pytest tests/test_screener_golden_outputs.py
+
+That rewrites every snapshot from the current output (and skips the assertions). **Review
+the resulting JSON diff** to confirm the change is intentional, commit it, then run the
+suite again without the flag to verify it passes.
+"""
+
 from __future__ import annotations
 
 import json
 import math
+import os
 from dataclasses import dataclass
 from datetime import date, datetime
 from numbers import Integral, Real
@@ -171,11 +202,19 @@ def _env_knox_params() -> dict:
 
 def _golden_cases() -> list[GoldenCase]:
     """Define the three P0 screener snapshots covered by TEST-001."""
+    # Heikin-Ashi + SuperTrend fixtures. Each symbol is engineered to a known outcome:
+    #   BUY  -> flat at 10, then a 5->15 jump flips the HA close above SuperTrend (cross up).
+    #   SELL -> flat at 20, then a 30->10 plunge flips the HA close below SuperTrend (cross down).
+    #   HOLD -> perfectly flat: no cross, so no row (proves non-signals stay out of the golden).
     heikin_frames = {
         "BUY": _flat_candles([10.0] * 10 + [5.0, 15.0]),
         "SELL": _flat_candles([20.0] * 10 + [30.0, 10.0]),
         "HOLD": _flat_candles([10.0] * 12),
     }
+    # Bollinger reversal fixtures (period=3). The final candle of each symbol is the test:
+    #   BUY  -> dips below the lower band (low 8) and closes GREEN (11->12) = bullish reversal.
+    #   SELL -> pierces above the upper band (high 22) and closes RED (19->18) = bearish reversal.
+    #   HOLD -> flat candles never pierce a band -> no row.
     bollinger_frames = {
         "BUY": _bollinger_candles(
             open_values=[10.0, 10.0, 11.0],
@@ -196,6 +235,10 @@ def _golden_cases() -> list[GoldenCase]:
             close_values=[10.0, 10.0, 10.0],
         ),
     }
+    # Envelope + Knoxville fixtures (small windows via _env_knox_params). Outcomes:
+    #   BUY    -> dips, prints a bullish Knoxville divergence, then returns to the lower band.
+    #   NO_KD  -> a plain straight drop: no momentum divergence -> no Knoxville -> no row.
+    #   NO_ENV -> diverges but rebounds away from the lower band -> no row.
     envelope_frames = {
         "BUY": _env_knox_candles(
             [
@@ -312,13 +355,38 @@ def _load_golden_records(key: str) -> list[dict]:
         return json.load(file)
 
 
+def _write_golden_records(key: str, records: list[dict]) -> None:
+    """Overwrite one screener's snapshot. Used ONLY by the ``UPDATE_GOLDEN`` workflow.
+
+    Writes pretty-printed JSON so the regenerated snapshot is easy to read in a diff.
+    This never runs during a normal test (it is gated on the env var below), so a
+    stray import or CI run can't silently rewrite the goldens.
+    """
+    path = GOLDEN_DIR / f"{key}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as file:
+        json.dump(records, file, indent=2)
+        file.write("\n")
+
+
 @pytest.mark.parametrize("case", _golden_cases(), ids=lambda case: case.key)
 def test_screener_output_matches_golden_snapshot(case: GoldenCase):
-    """Important screeners should fail tests when their full output drifts."""
+    """Important screeners should fail tests when their full output drifts.
+
+    Set ``UPDATE_GOLDEN=1`` to rewrite the snapshots instead of asserting (see the
+    module docstring) — use it after an *intentional* screener change, then review the diff.
+    """
     result = case.run(
         _universe_for(case.universe_symbols),
         FakeDataLoader(case.frames),
         case.params,
     )
+    records = _normalize_records(result)
 
-    assert _normalize_records(result) == _load_golden_records(case.key)
+    if os.environ.get("UPDATE_GOLDEN"):
+        _write_golden_records(case.key, records)
+        pytest.skip(
+            f"Rewrote golden snapshot for {case.key}; rerun without UPDATE_GOLDEN to verify."
+        )
+
+    assert records == _load_golden_records(case.key)
