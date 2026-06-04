@@ -11,6 +11,12 @@ data/universes/*
 !data/universes/hemant_good_200.csv
 !data/universes/hemant_super_good_200_union.csv
 
+# Local SQLite scan-history database (SCAN-001 schema / SCAN-002 layer). The DB
+# file is generated locally from the models and must never be committed.
+data/*.db
+*.sqlite
+*.sqlite3
+
 # Python/runtime noise.
 __pycache__/
 *.py[cod]

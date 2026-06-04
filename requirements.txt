@@ -6,6 +6,11 @@ pandas
 numpy
 pyarrow
 
+# Persistence layer schema (SCAN-001). SQLAlchemy 2.0 defines the
+# scan_runs / scan_results ORM models in backend/storage/models.py. The
+# engine, sessions, and Alembic migrations that USE this schema are SCAN-002.
+SQLAlchemy
+
 # Dhan API and environment loading.
 requests
 python-dotenv
