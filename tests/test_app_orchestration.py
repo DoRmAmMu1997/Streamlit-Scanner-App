@@ -13,6 +13,7 @@ from datetime import date as real_date
 from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 import app
 from backend.screener_registry import ScreenerDefinition
@@ -149,6 +150,71 @@ def test_redact_secrets_masks_serpapi_and_agent_keys(monkeypatch):
     assert "token-secret" not in redacted
     assert "still-visible" in redacted
     assert redacted.count("***REDACTED***") == 4
+
+
+def test_redact_secrets_masks_streamlit_auth_secrets(monkeypatch):
+    """OIDC config values should be treated like broker/API secrets in errors."""
+    monkeypatch.setattr(app, "get_dhan_credentials", lambda required=False: None)
+    monkeypatch.setattr(
+        app,
+        "st",
+        SimpleNamespace(
+            secrets={
+                "auth": {
+                    "cookie_secret": "cookie-secret",
+                    "google": {
+                        "client_id": "google-client",
+                        "client_secret": "google-secret",
+                    },
+                }
+            }
+        ),
+    )
+
+    redacted = app._redact_secrets(
+        "cookie-secret google-client google-secret still-visible"
+    )
+
+    assert "cookie-secret" not in redacted
+    assert "google-client" not in redacted
+    assert "google-secret" not in redacted
+    assert "still-visible" in redacted
+    assert redacted.count("***REDACTED***") == 3
+
+
+def test_main_requires_auth_before_discovering_screeners(monkeypatch):
+    """The main app must not discover or run screeners before auth succeeds."""
+
+    class StopFromAuth(RuntimeError):
+        """Test-only signal that the auth gate stopped the Streamlit run."""
+
+        pass
+
+    def stop_at_auth(_st):
+        # A real Streamlit stop would end this script run. Raising lets pytest
+        # assert that the run stopped before `discover_screeners()` was called.
+        raise StopFromAuth()
+
+    def fail_if_discovered():
+        raise AssertionError("screener discovery must wait for authentication")
+
+    monkeypatch.setattr(app, "require_authenticated_user", stop_at_auth)
+    monkeypatch.setattr(app, "discover_screeners", fail_if_discovered)
+    monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
+    monkeypatch.setattr(app, "_configure_logging", lambda: None)
+    monkeypatch.setattr(
+        app,
+        "st",
+        SimpleNamespace(
+            set_page_config=lambda **_kwargs: None,
+            markdown=lambda *_args, **_kwargs: None,
+            title=lambda *_args, **_kwargs: None,
+            caption=lambda *_args, **_kwargs: None,
+        ),
+    )
+
+    with pytest.raises(StopFromAuth):
+        app.main()
 
 
 def test_universe_table_defers_status_loading_until_user_opts_in(monkeypatch):
