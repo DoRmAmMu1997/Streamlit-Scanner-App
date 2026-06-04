@@ -12,7 +12,12 @@ from types import SimpleNamespace
 import pytest
 
 from backend.auth import session
-from backend.auth.session import AuthenticatedUser, require_authenticated_user
+from backend.auth.session import (
+    AuthenticatedUser,
+    is_email_authorized,
+    require_authenticated_user,
+    require_authorized_user,
+)
 
 
 class _StopCalled(RuntimeError):
@@ -222,3 +227,161 @@ def test_logged_in_user_with_unverified_email_cannot_continue():
         require_authenticated_user(fake_st)
 
     assert fake_st.errors == ["Your Google account email is not verified."]
+
+
+# ---------------------------------------------------------------------------
+# AUTH-002: email allowlist + admin identification
+# ---------------------------------------------------------------------------
+
+
+def _signed_in(email: str, name: str = "User") -> _FakeStreamlit:
+    """A fake Streamlit whose user is signed in with a verified Google email."""
+    return _FakeStreamlit(user=SimpleNamespace(is_logged_in=True, email=email, name=name))
+
+
+def test_is_email_authorized_admin_is_always_allowed():
+    """An admin gets in even when the allowlist is empty and prod is locked down."""
+    assert is_email_authorized(
+        "boss@example.com",
+        allowed=frozenset(),
+        admins=frozenset({"boss@example.com"}),
+        production=True,
+    )
+
+
+def test_is_email_authorized_checks_membership_when_allowlist_set():
+    """With a populated allowlist, only listed emails pass."""
+    allowed = frozenset({"a@example.com"})
+    assert is_email_authorized("a@example.com", allowed=allowed, admins=frozenset(), production=False)
+    assert not is_email_authorized("b@example.com", allowed=allowed, admins=frozenset(), production=False)
+
+
+def test_is_email_authorized_empty_allowlist_dev_permits_prod_denies():
+    """Empty allowlist: development permits everyone; production fails closed."""
+    assert is_email_authorized("anyone@example.com", allowed=frozenset(), admins=frozenset(), production=False)
+    assert not is_email_authorized("anyone@example.com", allowed=frozenset(), admins=frozenset(), production=True)
+
+
+def test_is_email_authorized_normalizes_case_and_whitespace():
+    """A padded mixed-case email matches a lowercased allowlist entry."""
+    allowed = frozenset({"sunny@example.com"})
+    assert is_email_authorized("  Sunny@Example.COM ", allowed=allowed, admins=frozenset(), production=True)
+
+
+def test_require_authorized_user_allows_listed_email(monkeypatch):
+    """A signed-in, allow-listed user is returned (non-admin) with no error."""
+    monkeypatch.setenv("ALLOWED_EMAILS", "sunny@example.com, friend@example.com")
+    monkeypatch.setenv("ADMIN_EMAILS", "")
+    monkeypatch.setenv("SCANNER_ENV", "production")
+    fake_st = _signed_in("sunny@example.com", "Sunny")
+
+    user = require_authorized_user(fake_st)
+
+    assert user == AuthenticatedUser(email="sunny@example.com", name="Sunny", is_admin=False)
+    assert fake_st.errors == []
+
+
+def test_require_authorized_user_flags_admin(monkeypatch):
+    """An ADMIN_EMAILS member is allowed (even if absent from ALLOWED_EMAILS) and flagged."""
+    monkeypatch.setenv("ALLOWED_EMAILS", "sunny@example.com")
+    monkeypatch.setenv("ADMIN_EMAILS", "Boss@Example.com")
+    monkeypatch.setenv("SCANNER_ENV", "production")
+    fake_st = _signed_in("BOSS@example.com", "Boss")
+
+    user = require_authorized_user(fake_st)
+
+    assert user.email == "boss@example.com"
+    assert user.is_admin is True
+    assert fake_st.errors == []
+
+
+def test_require_authorized_user_normalizes_email_at_authorization_boundary(
+    monkeypatch,
+):
+    """Authorization should not depend on the authentication helper's casing.
+
+    ``get_authenticated_user`` already lowercases real Streamlit emails. This
+    test protects ``require_authorized_user`` itself by replacing the
+    authentication step with a fake that returns a mixed-case email. If that
+    upstream helper ever changes, admin tagging should still compare one
+    normalized identity key against the normalized ``ADMIN_EMAILS`` set.
+
+    Beginner note:
+    ``monkeypatch.setattr`` temporarily swaps the real sign-in helper for the
+    small lambda below. That lets this unit test focus on the authorization
+    boundary without building a full fake Google login flow.
+    """
+    # Make the app behave like production with no general allowlist. In that
+    # mode, the only way through should be membership in ADMIN_EMAILS.
+    monkeypatch.setenv("ALLOWED_EMAILS", "")
+    monkeypatch.setenv("ADMIN_EMAILS", "boss@example.com")
+    monkeypatch.setenv("SCANNER_ENV", "production")
+
+    # Simulate an authenticated user object whose email was not lowercased by
+    # the previous AUTH-001 step. require_authorized_user should still normalize
+    # the value before comparing it with ADMIN_EMAILS.
+    monkeypatch.setattr(
+        session,
+        "require_authenticated_user",
+        lambda _st: AuthenticatedUser(email="BOSS@example.com", name="Boss"),
+    )
+    fake_st = _FakeStreamlit()
+
+    user = require_authorized_user(fake_st)
+
+    # The returned app state should use the same canonical email key that made
+    # the authorization decision, and the user should be clearly marked admin.
+    assert user.email == "boss@example.com"
+    assert user.is_admin is True
+    assert fake_st.errors == []
+
+
+def test_require_authorized_user_denies_unlisted_email(monkeypatch):
+    """A signed-in user not on a populated allowlist is stopped with an error."""
+    monkeypatch.setenv("ALLOWED_EMAILS", "sunny@example.com")
+    monkeypatch.setenv("ADMIN_EMAILS", "")
+    monkeypatch.setenv("SCANNER_ENV", "production")
+    fake_st = _signed_in("intruder@example.com")
+
+    with pytest.raises(_StopCalled):
+        require_authorized_user(fake_st)
+
+    assert any("not authorized" in message.lower() for message in fake_st.errors)
+
+
+def test_require_authorized_user_empty_allowlist_denies_in_production(monkeypatch):
+    """Empty allowlist in production fails closed for non-admins."""
+    monkeypatch.setenv("ALLOWED_EMAILS", "")
+    monkeypatch.setenv("ADMIN_EMAILS", "")
+    monkeypatch.setenv("SCANNER_ENV", "production")
+    fake_st = _signed_in("anyone@example.com")
+
+    with pytest.raises(_StopCalled):
+        require_authorized_user(fake_st)
+
+    assert any("not authorized" in message.lower() for message in fake_st.errors)
+
+
+def test_require_authorized_user_empty_allowlist_permits_in_development(monkeypatch):
+    """Empty allowlist in development permits any signed-in user."""
+    monkeypatch.setenv("ALLOWED_EMAILS", "")
+    monkeypatch.setenv("ADMIN_EMAILS", "")
+    monkeypatch.setenv("SCANNER_ENV", "development")
+    fake_st = _signed_in("anyone@example.com", "Dev User")
+
+    user = require_authorized_user(fake_st)
+
+    assert user.email == "anyone@example.com"
+    assert user.is_admin is False
+
+
+def test_require_authorized_user_requires_email_via_auth_gate(monkeypatch):
+    """Authorization can't run without an email: the AUTH-001 gate stops first."""
+    monkeypatch.setenv("ALLOWED_EMAILS", "sunny@example.com")
+    monkeypatch.setenv("SCANNER_ENV", "development")
+    fake_st = _FakeStreamlit(user=SimpleNamespace(is_logged_in=True, name="No Email"))
+
+    with pytest.raises(_StopCalled):
+        require_authorized_user(fake_st)
+
+    assert fake_st.errors == ["Your login did not provide an email address."]

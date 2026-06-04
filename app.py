@@ -52,7 +52,7 @@ from backend.config import (
     get_dhan_credentials,
     get_fundamentals_model,
 )
-from backend.auth.session import auth_secret_values, require_authenticated_user
+from backend.auth.session import auth_secret_values, require_authorized_user
 from backend.fundamentals import (
     AgentVerdict,
     FundamentalAgent,
@@ -886,10 +886,11 @@ def main() -> None:
     )
     # Beginner note:
     # Streamlit reruns this file from top to bottom for every browser session.
-    # Keeping the auth gate here means unauthenticated users stop before
-    # screener discovery, Dhan credential checks, cached scan state, charts, or
-    # CSV downloads are even reached.
-    require_authenticated_user(st)
+    # Keeping the auth gate here means unauthenticated OR unauthorized users stop
+    # before screener discovery, Dhan credential checks, cached scan state,
+    # charts, or CSV downloads are even reached. require_authorized_user runs the
+    # AUTH-001 sign-in gate and then enforces the AUTH-002 email allowlist.
+    require_authorized_user(st)
 
     try:
         # A screener is just a Python module in `screeners/`. Discovery happens

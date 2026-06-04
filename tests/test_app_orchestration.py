@@ -198,7 +198,7 @@ def test_main_requires_auth_before_discovering_screeners(monkeypatch):
     def fail_if_discovered():
         raise AssertionError("screener discovery must wait for authentication")
 
-    monkeypatch.setattr(app, "require_authenticated_user", stop_at_auth)
+    monkeypatch.setattr(app, "require_authorized_user", stop_at_auth)
     monkeypatch.setattr(app, "discover_screeners", fail_if_discovered)
     monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
     monkeypatch.setattr(app, "_configure_logging", lambda: None)

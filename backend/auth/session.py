@@ -17,11 +17,14 @@ rules yet.
 from __future__ import annotations
 
 import importlib.util
+import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from backend.config import load_environment
+
+logger = logging.getLogger(__name__)
 
 
 # Streamlit names each OIDC provider by the nested table under [auth].
@@ -39,6 +42,13 @@ _PRODUCTION_ENV_VALUES = {"prod", "production"}
 _SHARED_AUTH_KEYS = ("redirect_uri", "cookie_secret")
 _PROVIDER_AUTH_KEYS = ("client_id", "client_secret", "server_metadata_url")
 
+# AUTH-002 email allowlist. These name the comma-separated environment variables
+# read from the process env (or Dependencies/.env). ADMIN_EMAILS are always
+# allowed; see is_email_authorized for the empty-allowlist dev-permit /
+# prod-fail-closed rule.
+_ALLOWED_EMAILS_ENV = "ALLOWED_EMAILS"
+_ADMIN_EMAILS_ENV = "ADMIN_EMAILS"
+
 
 @dataclass(frozen=True)
 class AuthenticatedUser:
@@ -51,6 +61,9 @@ class AuthenticatedUser:
 
     email: str
     name: str | None = None
+    # AUTH-002 fills this from ADMIN_EMAILS. AUTH-001's authentication gate builds
+    # the user without it (defaults False); role-gated features (AUTH-003) can read it.
+    is_admin: bool = False
 
 
 def auth_config_status(st_module: Any) -> dict[str, object]:
@@ -108,7 +121,7 @@ def get_authenticated_user(st_module: Any) -> AuthenticatedUser | None:
     # (the provider is fixed to Google above). The email is the stable value the
     # app exposes and that future AUTH tasks will match against an allowlist, so
     # we lower-case it to one canonical form instead of trusting Google's casing.
-    email = _user_value(raw_user, "email").lower()
+    email = _normalize_email(_user_value(raw_user, "email"))
     if not email:
         return None
     return AuthenticatedUser(email=email, name=_user_value(raw_user, "name") or None)
@@ -178,6 +191,127 @@ def require_authenticated_user(st_module: Any) -> AuthenticatedUser:
         st_module.button("Log out", on_click=st_module.logout)
 
     return user
+
+
+def require_authorized_user(st_module: Any) -> AuthenticatedUser:
+    """Authenticate (AUTH-001) AND authorize (AUTH-002) the current user.
+
+    This is the single gate the Streamlit app should call before loading any
+    scanner feature. It first runs the AUTH-001 sign-in gate
+    (``require_authenticated_user``), then enforces the email allowlist:
+
+    - ``ADMIN_EMAILS`` are always allowed and come back with ``is_admin=True``.
+    - If ``ALLOWED_EMAILS`` is non-empty, the signed-in email must be on it.
+    - If ``ALLOWED_EMAILS`` is empty, development permits any verified user but
+      production fails closed (only admins get in). This mirrors how AUTH-001
+      treats missing SSO config as a dev warning but a production hard error.
+
+    A rejected user sees a generic message and the run stops before any scanner
+    control, result, or download renders. They stay signed in (AUTH-001 already
+    drew the sidebar "Log out") so they can switch to an authorized account.
+
+    Beginner note:
+    Authentication answers "who is signed in?" Authorization answers "is that
+    signed-in person allowed to use this app?" Those are separate checks on
+    purpose. Even though AUTH-001 already lowercases real Google emails, this
+    AUTH-002 boundary normalizes the email again before allowlist/admin checks.
+    That makes this function robust if a future auth provider, fake test object,
+    or refactor returns ``Sunny@Example.COM`` instead of ``sunny@example.com``.
+    """
+    user = require_authenticated_user(st_module)
+
+    # Convert the signed-in user's email to the exact same lowercase key format
+    # used by ALLOWED_EMAILS and ADMIN_EMAILS. This keeps all authorization
+    # comparisons case-insensitive and prevents subtle admin-flag bugs.
+    email = _normalize_email(user.email)
+
+    # These helpers read from the process environment after load_environment()
+    # has pulled in Dependencies/.env for local runs. Both helpers return
+    # frozensets of already-normalized email keys.
+    allowed = _allowed_emails()
+    admins = _admin_emails()
+
+    if not is_email_authorized(
+        email, allowed=allowed, admins=admins, production=_is_production_mode()
+    ):
+        # Record the denied attempt for the operator's own audit trail. Only the
+        # email is logged — never the allowlist itself — so the log cannot leak
+        # who else has access.
+        logger.warning("Access denied for %s: email is not on the allowlist", email)
+        st_module.error(
+            "You are not authorized to access this app. "
+            "Ask the administrator to add your email to the allowlist."
+        )
+        _stop(st_module)
+
+    # Authorized. Tag admins so future role-gated features (AUTH-003) can read it.
+    # Replacing the email too keeps the returned app state in the same canonical
+    # lowercase form used for the allowlist/admin comparison.
+    return replace(user, email=email, is_admin=email in admins)
+
+
+def is_email_authorized(
+    email: str,
+    *,
+    allowed: frozenset[str],
+    admins: frozenset[str],
+    production: bool,
+) -> bool:
+    """Pure allowlist decision — no Streamlit and no env reads, so it tests easily.
+
+    Rules, in order:
+      1. Admins are always authorized.
+      2. If an allowlist is configured, the email must be on it.
+      3. If no allowlist is configured, permit in development but deny in
+         production (fail closed). Admins already passed at rule 1.
+    """
+    email = _normalize_email(email)
+    if email in admins:
+        return True
+    if allowed:
+        return email in allowed
+    # No allowlist configured: dev permits everyone signed in; prod locks down.
+    return not production
+
+
+def _allowed_emails() -> frozenset[str]:
+    """Return the configured non-admin allowlist.
+
+    ``ALLOWED_EMAILS`` is a comma-separated environment variable, for example
+    ``sunny@example.com,friend@example.com``. Empty text is a meaningful value:
+    development mode treats it as "let any signed-in user through", while
+    production mode treats it as "deny everyone except admins".
+    """
+    load_environment()
+    return _parse_email_set(_clean_value(os.getenv(_ALLOWED_EMAILS_ENV)))
+
+
+def _admin_emails() -> frozenset[str]:
+    """Return the configured administrator email set.
+
+    ``ADMIN_EMAILS`` uses the same comma-separated format as ``ALLOWED_EMAILS``.
+    Admins are always authorized, even when ``ALLOWED_EMAILS`` is empty or does
+    not include them. AUTH-002 only identifies admins; actual admin-only feature
+    gating remains intentionally out of scope until AUTH-003.
+    """
+    load_environment()
+    return _parse_email_set(_clean_value(os.getenv(_ADMIN_EMAILS_ENV)))
+
+
+def _parse_email_set(raw: str) -> frozenset[str]:
+    """Split a comma-separated email list into a normalized lowercase set.
+
+    Whitespace around each entry is stripped and casing is collapsed so that
+    "  Sunny@Example.COM " in the env matches the lowercased identity email the
+    auth gate produces. Empty entries (e.g. a trailing comma) are dropped.
+
+    A ``frozenset`` is used because the result is a read-only collection for one
+    authorization decision. That makes it clear the parsed allowlist should not
+    be mutated elsewhere in the app.
+    """
+    return frozenset(
+        email for part in raw.split(",") if (email := _normalize_email(part))
+    )
 
 
 def auth_secret_values(st_module: Any) -> list[str]:
@@ -271,6 +405,19 @@ def _user_value(user: Any, key: str) -> str:
 def _clean_value(value: Any) -> str:
     """Convert a possibly-empty config/user value into trimmed text."""
     return str(value or "").strip()
+
+
+def _normalize_email(value: Any) -> str:
+    """Convert an email-like value into the canonical allowlist comparison key.
+
+    Beginner note:
+    Email addresses are usually treated case-insensitively by people and by most
+    identity-provider workflows, but raw strings are not. Python considers
+    ``"BOSS@example.com"`` and ``"boss@example.com"`` different strings. Every
+    auth decision in this module therefore compares the same trimmed,
+    lowercased representation.
+    """
+    return _clean_value(value).lower()
 
 
 def _stop(st_module: Any) -> None:
