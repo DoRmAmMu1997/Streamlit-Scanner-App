@@ -162,7 +162,18 @@ network work happens up front in the terminal.
    pip install -r requirements-optional.txt
    ```
 
-3. **Add your DhanHQ credentials**
+3. **Create the local scan-history database**
+
+   By default, persisted scan runs live in `data/scanner.db`, which is
+   generated locally and git-ignored. To use Postgres or another database in a
+   deployed environment, set `DATABASE_URL` in the process environment or in
+   `Dependencies/.env`.
+
+   ```bash
+   python -m alembic upgrade head
+   ```
+
+4. **Add your DhanHQ credentials**
 
    Copy the template and fill in your details:
 
@@ -174,7 +185,7 @@ network work happens up front in the terminal.
    `DHAN_API_SECRET` (from web.dhan.co → My Profile → DhanHQ Trading APIs).
    Leave `DHAN_ACCESS_TOKEN` blank for now.
 
-4. **Generate the access token** (one-time, valid 12 months)
+5. **Generate the access token** (one-time, valid 12 months)
 
    ```bash
    python Dependencies/dhan_token_setup.py
