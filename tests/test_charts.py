@@ -127,6 +127,66 @@ def test_render_chart_html_neutralizes_script_breakout():
     assert "&lt;b&gt;hi&lt;/b&gt;" in titled
 
 
+def test_render_chart_html_supports_series_markers():
+    spec = charts.candlestick_with_volume(_candles(12), "Title")
+    charts.add_series_markers(
+        spec,
+        [
+            {
+                "time": "2024-01-10",
+                "position": "belowBar",
+                "shape": "arrowUp",
+                "color": "#00c853",
+                "text": "KD",
+            }
+        ],
+    )
+
+    candle_series = spec["panes"][0]["series"][0]
+    assert candle_series["markers"][0]["text"] == "KD"
+    assert "createSeriesMarkers" in charts.render_chart_html(spec)
+
+
+def test_envelope_knoxville_chart_marks_bullish_divergences():
+    close = [
+        100.0, 100.0, 100.0, 100.0, 96.0,
+        92.0, 96.0, 100.0, 95.0, 90.0,
+        93.0, 110.0, 105.0, 100.0, 95.0,
+        98.0, 101.0, 96.0, 93.0, 96.0,
+        100.0,
+    ]
+    candles = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-01-01", periods=len(close), freq="D"),
+            "open": [value - 0.25 for value in close],
+            "high": [value + 1.0 for value in close],
+            "low": [value - 0.5 for value in close],
+            "close": close,
+            "volume": [1000.0] * len(close),
+        }
+    )
+    params = dict(envelope_knoxville_buy.SCREENER["default_params"])
+    params.update(
+        {
+            "ema_period": 5,
+            "percent": 10.0,
+            "exponential": False,
+            "rsi_period": 3,
+            "momentum_period": 3,
+            "divergence_bars_back": 10,
+            "pivot_left": 1,
+            "pivot_right": 1,
+            "oversold": 100.0,
+        }
+    )
+
+    spec = envelope_knoxville_buy.build_chart(candles, params)
+    markers = spec["panes"][0]["series"][0].get("markers", [])
+
+    assert [marker["time"] for marker in markers] == ["2026-01-10", "2026-01-19"]
+    assert markers[-1]["text"] == "Latest KD"
+
+
 def _trending_candles() -> pd.DataFrame:
     """Candles that fall then rise — forcing at least one SuperTrend flip."""
     close = np.concatenate([np.linspace(200.0, 130.0, 50), np.linspace(130.0, 210.0, 50)])

@@ -847,6 +847,69 @@ def bullish_knoxville_divergence(
     return None
 
 
+def bullish_knoxville_divergences(
+    frame: pd.DataFrame,
+    *,
+    rsi_period: int = 14,
+    momentum_period: int = 20,
+    bars_back: int = 20,
+    pivot_left: int = 2,
+    pivot_right: int = 2,
+    oversold: float = 30.0,
+) -> list[pd.Series]:
+    """Return every confirmed bullish Knoxville Divergence pivot, oldest first.
+
+    A bullish Knoxville Divergence is checked on pivot lows, not every candle:
+    price must make a lower pivot low while momentum makes a higher pivot low,
+    and the latest pivot's RSI must be oversold. Returning all matches is useful
+    for charts and for "old divergence retest" rules, while the older
+    `bullish_knoxville_divergence(...)` wrapper still answers the narrower
+    question: "is there a recent qualifying divergence?"
+    """
+    if frame is None or frame.empty:
+        return []
+
+    enriched = frame.reset_index(drop=True).copy()
+    enriched["rsi"] = rsi(enriched["close"], period=rsi_period)
+    enriched["momentum"] = momentum(enriched["close"], period=momentum_period)
+
+    pivot_mask = pivot_lows(enriched["low"], left=pivot_left, right=pivot_right)
+    pivot_rows = enriched.loc[pivot_mask].dropna(subset=["low", "rsi", "momentum"])
+    if len(pivot_rows) < 2:
+        return []
+
+    matches: list[pd.Series] = []
+    bars_back = max(1, int(bars_back))
+    for latest_index in pivot_rows.index[1:]:
+        latest_index = int(latest_index)
+        latest = enriched.loc[latest_index]
+        if float(latest["rsi"]) > float(oversold):
+            continue
+
+        earliest_index = max(0, latest_index - bars_back)
+        prior_pivots = pivot_rows.loc[
+            (pivot_rows.index >= earliest_index) & (pivot_rows.index < latest_index)
+        ]
+        # Iterate backward so the stored comparison pair is the nearest prior
+        # pivot, matching the legacy single-divergence function's choice.
+        for prior_index in reversed(prior_pivots.index.tolist()):
+            prior = enriched.loc[int(prior_index)]
+            price_made_lower_low = float(latest["low"]) < float(prior["low"])
+            momentum_made_higher_low = float(latest["momentum"]) > float(prior["momentum"])
+            if price_made_lower_low and momentum_made_higher_low:
+                enriched_latest = latest.copy()
+                # Store the comparison pivot too. The screener currently displays
+                # the latest pivot low, but these fields make future explanations
+                # and chart annotations possible without recomputing the pair.
+                enriched_latest["prior_pivot_timestamp"] = prior.get("timestamp", "")
+                enriched_latest["prior_pivot_low"] = float(prior["low"])
+                enriched_latest["prior_pivot_momentum"] = float(prior["momentum"])
+                matches.append(enriched_latest)
+                break
+
+    return matches
+
+
 # ---------------------------------------------------------------------------
 # Heikin Ashi candles: pandas_ta primary, pandas fallback
 # ---------------------------------------------------------------------------

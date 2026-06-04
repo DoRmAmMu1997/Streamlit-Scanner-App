@@ -10,7 +10,6 @@ from __future__ import annotations
 import os
 import time
 from datetime import date as real_date
-from datetime import timedelta
 from types import SimpleNamespace
 
 import pandas as pd
@@ -68,8 +67,19 @@ class _FakeDataLoader:
         self.last_rate_limit_retries = 0
 
 
-def test_execute_screener_uses_selected_lookback_days(monkeypatch):
-    """The UI promise says each screener controls its own lookback window."""
+def test_scan_history_start_date_subtracts_calendar_years_and_handles_leap_day(monkeypatch):
+    class LeapDay(real_date):
+        @classmethod
+        def today(cls) -> "LeapDay":
+            return cls(2024, 2, 29)
+
+    monkeypatch.setattr(app, "date", LeapDay)
+
+    assert app._scan_history_start_date() == real_date(2014, 2, 28)
+
+
+def test_execute_screener_uses_ten_year_data_window_independent_of_lookback(monkeypatch):
+    """Screener lookback is display/strategy metadata; candle history is always 10y."""
     captured_params: dict = {}
 
     def fake_run(universe_df, data_loader, params):
@@ -114,7 +124,7 @@ def test_execute_screener_uses_selected_lookback_days(monkeypatch):
 
     assert cache is not None
     assert captured_params["end_date"] == real_date(2026, 6, 2)
-    assert captured_params["start_date"] == real_date(2026, 6, 2) - timedelta(days=30)
+    assert captured_params["start_date"] == real_date(2016, 6, 2)
 
 
 def test_redact_secrets_masks_serpapi_and_agent_keys(monkeypatch):

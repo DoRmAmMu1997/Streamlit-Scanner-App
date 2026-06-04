@@ -489,48 +489,101 @@ def _parse_peer_fragment_html(fragment_html: str) -> list[dict[str, str]]:
         return []
 
 
+def _clean_peer_rows(rows: list[dict[str, str]], *, limit: int = 7) -> list[dict[str, str]]:
+    """Remove non-company peer rows and cap evidence to top-N rows.
+
+    Screener.in often adds a "Median" footer row to peer tables. That row is
+    useful for a human summary, but it is not a real listed company, so feeding it
+    to the agent as a peer can distort the market-leader comparison.
+    """
+    cleaned = [
+        row for row in rows
+        if not any("median" in str(value).strip().lower() for value in row.values())
+    ]
+    return cleaned[: max(1, int(limit))]
+
+
+def _parse_static_peer_table(soup: BeautifulSoup) -> list[dict[str, str]]:
+    """Parse a visible peer-comparison table already present in the main page.
+
+    Some Screener.in pages ship the peer table directly in the HTML, while others
+    leave a placeholder that is filled by an HTMX request. This helper handles
+    only the already-visible case; it never fetches another URL.
+    """
+    try:
+        table = None
+        peers_section = soup.find(id="peers")
+        if peers_section is not None:
+            table = peers_section.find("table")
+
+        if table is None:
+            # Older or slightly different page layouts may not use id="peers".
+            # The visible heading is still stable enough to find the next table.
+            for heading in soup.find_all(["h2", "h3", "h4"]):
+                text = heading.get_text(" ", strip=True).lower()
+                if "peer comparison" not in text:
+                    continue
+                table = heading.find_next("table")
+                if table is not None:
+                    break
+
+        if table is None:
+            return []
+        return _parse_peer_fragment_html(str(table))
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not parse static peer table", exc_info=True)
+        return []
+
+
 def _fetch_peer_table(
     soup: BeautifulSoup,
     *,
     base_url: str,
-    session: requests.Session,
+    session: requests.Session | None,
     limit: int = 7,
 ) -> list[dict[str, str]]:
-    """Follow the HTMX peers URL and return the top-N rows (default 7).
+    """Return peer rows, preferring HTMX data and falling back to static HTML.
 
-    Soft-fails by returning ``[]`` on any error so the agent can still produce
-    a verdict (with the Market-leader criterion marked "data unavailable").
+    Screener.in has two shapes for peer comparison:
+    - a static table already included in the company page HTML
+    - an HTMX endpoint referenced by the page and loaded later by the browser
+
+    The HTMX endpoint can contain fresher or more complete rows, so it wins when
+    it is safe and parses cleanly. If that path is missing or fails, the static
+    table is still useful evidence. All failures soft-return `[]` after the
+    fallback is tried so the agent can mark peer evidence as unavailable instead
+    of crashing the whole scan.
     """
+    static_rows = _parse_static_peer_table(soup)
     relative = _extract_peers_url(soup)
     if not relative:
         logger.info("No HTMX peers URL found on page %s", base_url)
-        return []
+        return _clean_peer_rows(static_rows, limit=limit)
 
     absolute = urljoin(base_url, relative)
     base_host = (urlparse(base_url).hostname or "").lower()
     absolute_host = (urlparse(absolute).hostname or "").lower()
+    # Keep this fetch scoped to Screener.in. Search-result pages or arbitrary
+    # URLs are untrusted evidence, not instructions to fetch more HTML.
     if absolute_host != base_host or not is_safe_http_url(
         absolute,
         allowed_hosts=_SCREENER_ALLOWED_HOSTS,
     ):
         logger.warning("Refusing unsafe peer-table URL %s from page %s", absolute, base_url)
-        return []
+        return _clean_peer_rows(static_rows, limit=limit)
     try:
         fragment = _fetch_html(absolute, session)
     except ScreenerInFetchError:
         logger.warning("Peer-table fetch failed for %s", absolute, exc_info=True)
-        return []
+        return _clean_peer_rows(static_rows, limit=limit)
     if not fragment:
-        return []
+        return _clean_peer_rows(static_rows, limit=limit)
 
     rows = _parse_peer_fragment_html(fragment)
-    # Drop the screener.in "median" footer row if present — it's an
-    # aggregate, not a real peer.
-    rows = [
-        row for row in rows
-        if not any("median" in str(value).strip().lower() for value in row.values())
-    ]
-    return rows[: max(1, int(limit))]
+    cleaned = _clean_peer_rows(rows, limit=limit)
+    if cleaned:
+        return cleaned
+    return _clean_peer_rows(static_rows, limit=limit)
 
 
 # ---------------------------------------------------------------------------
@@ -726,14 +779,10 @@ def _parse_company_page(
     cash_flow = _parse_table(soup, "cash-flow")
     ratios_yearly = _parse_table(soup, "ratios")
     shareholding = _parse_table(soup, "shareholding")
-    # The peer table is HTMX-loaded — the static page only ships a placeholder.
-    # When a session is provided, follow the HTMX URL and parse the fragment.
-    # Without a session (unit tests) the peers list stays empty, which the
-    # agent already tolerates.
-    if session is not None:
-        peers = _fetch_peer_table(soup, base_url=source_url, session=session)
-    else:
-        peers = []
+    # The peer table is often HTMX-loaded, while some pages render it statically.
+    # When the HTMX URL is unavailable or fails, fall back to any static table
+    # already rendered in the main page HTML.
+    peers = _fetch_peer_table(soup, base_url=source_url, session=session)
     # Median P/E also comes from a JSON chart endpoint (the on-page "Median PE"
     # line is computed in JS, not present in the HTML). Same session guard as
     # peers: without a session (unit tests) it stays None and the agent falls
