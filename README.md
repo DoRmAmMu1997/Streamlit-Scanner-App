@@ -183,7 +183,45 @@ network work happens up front in the terminal.
    This walks you through the DhanHQ OAuth login and writes
    `DHAN_ACCESS_TOKEN` back into `Dependencies/.env` for you.
 
-5. **(Optional) Enable the Check Fundamentals agent** — it runs on the
+5. **Configure Google SSO for the Streamlit app**
+
+   Create a Google OAuth/OIDC client with this local redirect URI:
+
+   ```text
+   http://localhost:8501/oauth2callback
+   ```
+
+   For a deployed app, add the same callback path on the deployed base URL:
+
+   ```text
+   https://your-app.example.com/oauth2callback
+   ```
+
+   Then copy the Streamlit secrets template and fill in the Google client
+   values:
+
+   ```bash
+   cp .streamlit/secrets.example.toml .streamlit/secrets.toml
+   ```
+
+   Required keys:
+
+   ```toml
+   [auth]
+   redirect_uri = "http://localhost:8501/oauth2callback"
+   cookie_secret = "a-long-random-secret"
+
+   [auth.google]
+   client_id = "your-google-oauth-client-id"
+   client_secret = "your-google-oauth-client-secret"
+   server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
+   ```
+
+   Set `SCANNER_ENV=production` in `Dependencies/.env` or the deployment
+   environment for production. If SSO config is missing in production, the app
+   fails closed before loading any scanner controls.
+
+6. **(Optional) Enable the Check Fundamentals agent** — it runs on the
    [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview) using
    your Claude subscription (Pro/Max), not an API key:
 
@@ -212,7 +250,8 @@ network work happens up front in the terminal.
    panel, the Technical Analysis (AI) confirmation step, and the 67 Ka Funda (AI)
    verifier need it.
 
-> `Dependencies/.env` is git-ignored — your credentials never leave your machine.
+> `Dependencies/.env` and `.streamlit/secrets.toml` are git-ignored — your
+> credentials never leave your machine.
 
 ---
 
@@ -223,6 +262,8 @@ python app.py
 ```
 
 This downloads the data first, then opens the Streamlit app in your browser.
+The app requires Google SSO before any scanner controls, results, charts, or
+CSV downloads are available.
 
 > **First run is slow.** It backfills ~10 years of candles for ~500 stocks.
 > Every later run only fetches the days added since you last ran it, so it is
@@ -243,6 +284,7 @@ Streamlit Scanner App/
 ├── requirements-dev.txt         # Local verification tools
 ├── constraints.txt              # Verified direct dependency pins
 ├── backend/                     # Data + infrastructure (no strategy logic)
+│   ├── auth/                    # Streamlit OIDC login/session gate
 │   ├── config.py                # Paths, credentials, tuning knobs
 │   ├── dhan_client.py           # DhanHQ API wrapper
 │   ├── daily_data_loader.py     # Candle fetching + Parquet cache
@@ -280,6 +322,9 @@ Streamlit Scanner App/
 ├── Dependencies/
 │   ├── .env.example             # Credential template (copy to .env)
 │   └── dhan_token_setup.py      # One-time OAuth token helper
+├── .streamlit/
+│   ├── config.toml              # Streamlit theme
+│   └── secrets.example.toml     # Google SSO template (copy to secrets.toml)
 ├── data/                        # Generated at runtime (git-ignored)
 │   ├── cache/daily/             # Cached candles (Parquet)
 │   ├── cache/fundamentals/      # Cached screener.in data + agent verdicts

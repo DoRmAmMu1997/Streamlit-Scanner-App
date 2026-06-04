@@ -52,6 +52,7 @@ from backend.config import (
     get_dhan_credentials,
     get_fundamentals_model,
 )
+from backend.auth.session import auth_secret_values, require_authenticated_user
 from backend.fundamentals import (
     AgentVerdict,
     FundamentalAgent,
@@ -266,9 +267,14 @@ def _redact_secrets(text: str) -> str:
     """Strip any loaded credentials from an error message before display.
 
     Masks the Dhan access token / client code plus optional web-search or LLM
-    provider keys that may be present in the environment. SDKs occasionally
-    embed request payloads in exception messages, so we replace those values
-    with a fixed mask before passing text to `st.error(...)`.
+    provider keys that may be present in the environment. It also masks the
+    Streamlit OIDC cookie/client secrets configured for Google SSO.
+
+    Beginner note:
+    SDKs and frameworks occasionally embed request payloads or config values in
+    exception messages. We replace known secret values with a fixed mask before
+    passing text to `st.error(...)`, so an error panel can still be useful
+    without accidentally leaking credentials.
     """
     if not isinstance(text, str) or not text:
         return text
@@ -286,6 +292,7 @@ def _redact_secrets(text: str) -> str:
         value = os.getenv(env_name)
         if value:
             secrets.append(value)
+    secrets.extend(auth_secret_values(st))
 
     if not secrets:
         return text
@@ -877,6 +884,12 @@ def main() -> None:
         "Pluggable daily-candle scanner for Indian equities. "
         "Pick a screener and run — ten years of candles are already cached locally."
     )
+    # Beginner note:
+    # Streamlit reruns this file from top to bottom for every browser session.
+    # Keeping the auth gate here means unauthenticated users stop before
+    # screener discovery, Dhan credential checks, cached scan state, charts, or
+    # CSV downloads are even reached.
+    require_authenticated_user(st)
 
     try:
         # A screener is just a Python module in `screeners/`. Discovery happens
