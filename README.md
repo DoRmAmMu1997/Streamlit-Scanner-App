@@ -17,6 +17,10 @@ for every other stock), a 0–10 holistic rating, peer / margin / governance
 observations, and a three-part forward outlook (announcements signal + concall
 transcript signal + integrated view).
 
+Access is gated behind **Google sign-in with an email allowlist**, and the app
+ships with a **scan-history persistence foundation** (SQLAlchemy + Alembic; SQLite
+by default or Postgres) that is ready to record every run for later replay and audit.
+
 > **Disclaimer:** This is an educational / personal research tool. Nothing here
 > is financial advice. Always do your own research before trading.
 
@@ -102,8 +106,22 @@ transcript signal + integrated view).
   when installed, and fall back to pure-pandas implementations otherwise.
 - **Local Parquet cache** — candles are cached on disk; subsequent runs only
   fetch the days that are missing.
+- **Authentication & access control** — every page sits behind a Google SSO
+  (OIDC) sign-in gate (`backend/auth/`). An environment-driven **email allowlist**
+  (`ALLOWED_EMAILS`) restricts who may use the app, with **admin identification**
+  (`ADMIN_EMAILS`); in production the gate fails closed when SSO config or the
+  allowlist is missing.
+- **Scan-run persistence (foundation)** — a SQLAlchemy `scan_runs` / `scan_results`
+  schema (`backend/storage/`) with a local SQLite default (`data/scanner.db`) or
+  Postgres via `DATABASE_URL`, managed by **Alembic** migrations and a small
+  repository API. It is built to capture a run's parameters, data snapshot, status,
+  and shortlisted rows for replay/audit. The schema, database, migrations, and
+  repository are in place and tested; the scan-service layer that writes records
+  during a live scan is the next step (until then the database stays empty).
 - **Tested** — a `pytest` suite covers the indicators, data loader, universe
-  builder, screener registry, and the screeners themselves.
+  builder, screener registry, the screeners themselves, the auth gate, and the
+  persistence layer — plus **golden-snapshot** tests that catch screener output
+  drift and an Alembic migration drift-guard.
 
 ---
 
@@ -194,7 +212,7 @@ network work happens up front in the terminal.
    This walks you through the DhanHQ OAuth login and writes
    `DHAN_ACCESS_TOKEN` back into `Dependencies/.env` for you.
 
-5. **Configure Google SSO for the Streamlit app**
+6. **Configure Google SSO for the Streamlit app**
 
    Create a Google OAuth/OIDC client with this local redirect URI:
 
@@ -248,7 +266,7 @@ network work happens up front in the terminal.
      `ADMIN_EMAILS` get in. A signed-in user who isn't allowed sees an
      "unauthorized" message instead of the scanner.
 
-6. **(Optional) Enable the Check Fundamentals agent** — it runs on the
+7. **(Optional) Enable the Check Fundamentals agent** — it runs on the
    [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview) using
    your Claude subscription (Pro/Max), not an API key:
 
@@ -290,7 +308,7 @@ python app.py
 
 This downloads the data first, then opens the Streamlit app in your browser.
 The app requires Google SSO before any scanner controls, results, charts, or
-CSV downloads are available, and only allow-listed emails (see step 5) may
+CSV downloads are available, and only allow-listed emails (see step 6) may
 proceed past sign-in.
 
 > **First run is slow.** It backfills ~10 years of candles for ~500 stocks.
@@ -311,6 +329,9 @@ Streamlit Scanner App/
 ├── requirements-optional.txt    # Optional TA-Lib/pandas_ta accelerators
 ├── requirements-dev.txt         # Local verification tools
 ├── constraints.txt              # Verified direct dependency pins
+├── alembic.ini                  # Alembic config for scan-history migrations
+├── migrations/                  # Alembic migration scripts (scan-history schema)
+├── docs/architecture/           # Design docs (scan-run persistence, handoffs)
 ├── backend/                     # Data + infrastructure (no strategy logic)
 │   ├── auth/                    # Streamlit OIDC login/session gate
 │   ├── config.py                # Paths, credentials, tuning knobs
@@ -332,10 +353,14 @@ Streamlit Scanner App/
 │   │   └── fundamental_agent.py # Claude Agent SDK agent + Pydantic schemas
 │   ├── technical/               # Technical Analysis (AI) subsystem
 │   │   └── technical_agent.py  # Claude Agent SDK agent + TechnicalVerdict
-│   └── sixty_seven/             # 67 Ka Funda (AI) subsystem
-│       ├── shortlister.py      # Deterministic 67% drawdown gate
-│       ├── search_client.py    # SerpAPI Google search client
-│       └── agent.py            # Claude Agent SDK verifier + Pydantic schemas
+│   ├── sixty_seven/             # 67 Ka Funda (AI) subsystem
+│   │   ├── shortlister.py      # Deterministic 67% drawdown gate
+│   │   ├── search_client.py    # SerpAPI Google search client
+│   │   └── agent.py            # Claude Agent SDK verifier + Pydantic schemas
+│   └── storage/                 # Scan-history persistence (SCAN-001/002)
+│       ├── models.py           # scan_runs / scan_results ORM schema
+│       ├── database.py         # Engine + session factory (SQLite/Postgres)
+│       └── repository.py       # Create/finish runs, save/read scan results
 ├── screeners/                   # One file per screener (the strategy logic)
 │   ├── heikin_ashi_supertrend.py
 │   ├── bollinger_band_reversal.py
@@ -358,7 +383,7 @@ Streamlit Scanner App/
 │   ├── cache/fundamentals/      # Cached screener.in data + agent verdicts
 │   │   └── pdfs/                # Downloaded concall transcripts + .txt
 │   └── universes/               # Universe CSVs, including tracked Hemant lists
-└── tests/                       # pytest suite
+└── tests/                       # pytest suite (+ tests/golden/ screener snapshots)
 ```
 
 The boundary is deliberate: **strategy logic lives in `screeners/`**, and
@@ -454,6 +479,55 @@ cost until either the underlying data or the model changes. When the monthly
 credit is exhausted, the agent pauses until it refreshes (or falls back to
 standard API rates if you've enabled API billing).
 
+---
+
+## Authentication & access control
+
+The Streamlit app is gated. `backend/auth/session.py` runs a single
+`require_authorized_user(st)` check at the top of `main()`, so an unauthenticated
+or unauthorized visitor stops **before** any screener control, result, chart, or
+CSV download is reached.
+
+- **Sign-in (AUTH-001)** — Google SSO via Streamlit's native OpenID Connect
+  (`st.login` / `st.user` / `st.logout`), configured in `.streamlit/secrets.toml`
+  (setup step 6). The email claim is verified and lower-cased.
+- **Allowlist + admins (AUTH-002)** — `ALLOWED_EMAILS` decides who may use the
+  app; `ADMIN_EMAILS` are always allowed and flagged `is_admin` (reserved for
+  future admin-only features). Both are comma-separated and case/space-insensitive.
+- **Dev-permits / prod-fails-closed** — with an empty `ALLOWED_EMAILS`,
+  development lets any signed-in Google user through, but `SCANNER_ENV=production`
+  locks the app down to `ADMIN_EMAILS` only. Missing SSO config in production is a
+  hard error, not a warning.
+
+Role-based feature gating (beyond `is_admin` identification) is intentionally out
+of scope for now.
+
+---
+
+## Scan history & persistence
+
+A persistence layer records each scan execution and its shortlisted rows so the
+app can later answer *"why was this stock shortlisted on date D?"* without
+re-running today's data, universe, or model.
+
+- **Schema (SCAN-001)** — two SQLAlchemy tables in `backend/storage/models.py`:
+  `scan_runs` (the audit header — screener, universe, params, data snapshot,
+  app/git version, status, error) and `scan_results` (one row per shortlisted
+  stock, with the full screener output plus a provenance JSON column).
+- **Database layer (SCAN-002)** — `backend/storage/database.py` (engine + short
+  `session_scope()` sessions; SQLite default at `data/scanner.db`, Postgres via
+  `DATABASE_URL`) and `backend/storage/repository.py` (the only query/write
+  helpers: `create_scan_run`, `save_scan_results`, `finish_scan_run`,
+  `get_latest_scan_runs`, `get_scan_results`). Schema changes are versioned with
+  **Alembic** (`migrations/`, `alembic.ini`); create or upgrade the local database
+  with `python -m alembic upgrade head` (setup step 3).
+- **Status** — the schema, database, migrations, and repository are in place and
+  covered by tests. Wiring the scan flow to record a run on every scan is the next
+  step (the scan-service layer); until then the database stays empty.
+
+The design is documented in
+[`docs/architecture/scan-run-persistence.md`](docs/architecture/scan-run-persistence.md).
+
 ## Adding your own screener
 
 Create a new file in `screeners/`, for example `screeners/my_screener.py`,
@@ -534,6 +608,13 @@ python -m pip_audit -r requirements.txt
 Beginner note: `requirements-optional.txt` is intentionally separate. Those
 packages speed up some indicators when their native prerequisites are already
 available, but the app falls back to pure-pandas math without them.
+
+The suite includes **golden-snapshot** regression tests for the deterministic
+screeners (`tests/test_screener_golden_outputs.py`, with snapshots under
+`tests/golden/`). After an *intentional* screener change, refresh the snapshots
+with `UPDATE_GOLDEN=1 python -m pytest tests/test_screener_golden_outputs.py` and
+review the diff. The Alembic migration is also guarded by a drift test that fails
+if the ORM models and the migration fall out of sync.
 
 ---
 
