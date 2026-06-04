@@ -1,0 +1,28 @@
+[
+  {
+    "symbol": "BUY",
+    "rating": "BUY",
+    "signal_date": "2026-01-03",
+    "close": 12.0,
+    "reason": "Daily candle traded below the lower Bollinger Band (8.78) and closed green at 12.00.",
+    "open": 11.0,
+    "high": 12.0,
+    "low": 8.0,
+    "bb_middle": 10.666667,
+    "bb_upper": 12.552285,
+    "bb_lower": 8.781049
+  },
+  {
+    "symbol": "SELL",
+    "rating": "SELL",
+    "signal_date": "2026-01-03",
+    "close": 18.0,
+    "reason": "Daily candle traded above the upper Bollinger Band (21.22) and closed red at 18.00.",
+    "open": 19.0,
+    "high": 22.0,
+    "low": 17.0,
+    "bb_middle": 19.333333,
+    "bb_upper": 21.218951,
+    "bb_lower": 17.447715
+  }
+]
