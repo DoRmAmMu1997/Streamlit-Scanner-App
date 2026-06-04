@@ -17,7 +17,6 @@ state across button clicks.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -25,7 +24,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from backend.config import DATA_DIR, _clean_env_value, load_environment
+from backend.config import get_settings
 from backend.storage.models import Base
 
 
@@ -37,16 +36,13 @@ def get_database_url() -> str:
     under ``data/``. That file is ignored by git, so real scan history and local
     experiments never get committed by accident.
     """
-    load_environment()
-    url = _clean_env_value(os.getenv("DATABASE_URL"))
-    if url:
-        return url
-
-    # ``DATA_DIR`` is the same runtime data folder used by the candle and
-    # fundamentals caches. Creating it here makes `alembic upgrade head` work in
-    # a fresh checkout before any scanner has run.
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    return f"sqlite:///{(DATA_DIR / 'scanner.db').as_posix()}"
+    settings = get_settings()
+    if not settings.database_url_from_env:
+        # ``DATA_DIR`` is the same runtime data folder used by the candle and
+        # fundamentals caches. Creating it here makes `alembic upgrade head` work
+        # in a fresh checkout before any scanner has run.
+        settings.data_dir.mkdir(parents=True, exist_ok=True)
+    return settings.database_url
 
 
 def _make_engine(url: str | None = None) -> Engine:

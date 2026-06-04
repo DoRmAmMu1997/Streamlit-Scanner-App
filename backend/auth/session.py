@@ -18,11 +18,10 @@ from __future__ import annotations
 
 import importlib.util
 import logging
-import os
 from dataclasses import dataclass, replace
 from typing import Any
 
-from backend.config import load_environment
+from backend.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -32,22 +31,11 @@ logger = logging.getLogger(__name__)
 # st.login(...) is exactly "google".
 AUTH_PROVIDER = "google"
 
-# Production mode is intentionally strict. If the deployed app is missing SSO
-# config, it must stop before exposing scanner controls or market data actions.
-_PRODUCTION_ENV_VALUES = {"prod", "production"}
-
 # These are the minimum Streamlit auth settings needed before we can even offer
 # a Google login button. Keeping them in tuples makes the validation loop small
 # and makes future provider/config changes obvious.
 _SHARED_AUTH_KEYS = ("redirect_uri", "cookie_secret")
 _PROVIDER_AUTH_KEYS = ("client_id", "client_secret", "server_metadata_url")
-
-# AUTH-002 email allowlist. These name the comma-separated environment variables
-# read from the process env (or Dependencies/.env). ADMIN_EMAILS are always
-# allowed; see is_email_authorized for the empty-allowlist dev-permit /
-# prod-fail-closed rule.
-_ALLOWED_EMAILS_ENV = "ALLOWED_EMAILS"
-_ADMIN_EMAILS_ENV = "ADMIN_EMAILS"
 
 
 @dataclass(frozen=True)
@@ -282,8 +270,7 @@ def _allowed_emails() -> frozenset[str]:
     development mode treats it as "let any signed-in user through", while
     production mode treats it as "deny everyone except admins".
     """
-    load_environment()
-    return _parse_email_set(_clean_value(os.getenv(_ALLOWED_EMAILS_ENV)))
+    return get_settings().allowed_emails
 
 
 def _admin_emails() -> frozenset[str]:
@@ -294,8 +281,7 @@ def _admin_emails() -> frozenset[str]:
     not include them. AUTH-002 only identifies admins; actual admin-only feature
     gating remains intentionally out of scope until AUTH-003.
     """
-    load_environment()
-    return _parse_email_set(_clean_value(os.getenv(_ADMIN_EMAILS_ENV)))
+    return get_settings().admin_emails
 
 
 def _parse_email_set(raw: str) -> frozenset[str]:
@@ -333,8 +319,7 @@ def auth_secret_values(st_module: Any) -> list[str]:
 
 def _is_production_mode() -> bool:
     """Return True when local/deployment config says this is production."""
-    load_environment()
-    return _clean_value(os.getenv("SCANNER_ENV")).lower() in _PRODUCTION_ENV_VALUES
+    return get_settings().is_production
 
 
 def _is_authlib_available() -> bool:

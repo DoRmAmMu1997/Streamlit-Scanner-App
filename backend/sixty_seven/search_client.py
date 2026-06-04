@@ -17,11 +17,12 @@ around that single endpoint, and it is deliberately careful about two things:
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any
 
 import requests
+
+from backend.config import get_settings
 
 
 class SerpApiSetupError(RuntimeError):
@@ -62,8 +63,8 @@ class SerpApiClient:
     """A small, dependency-light client for SerpAPI's Google Search endpoint.
 
     Construct once and reuse it (it keeps a pooled `requests.Session`). The API key
-    comes from the ``SERPAPI_API_KEY`` environment variable unless one is passed in
-    explicitly; the test suite injects a fake session instead of hitting the network.
+    comes from centralized settings unless one is passed in explicitly; the test
+    suite injects a fake session instead of hitting the network.
     """
 
     # The ONLY endpoint this client talks to (a fixed URL → no SSRF surface).
@@ -77,7 +78,8 @@ class SerpApiClient:
         api_key: str | None = None,
         session: requests.Session | None = None,
     ) -> None:
-        self.api_key = (api_key if api_key is not None else os.getenv("SERPAPI_API_KEY", "")).strip()
+        configured_key = get_settings().serpapi_api_key if api_key is None else api_key
+        self.api_key = (configured_key or "").strip()
         self.session = session or requests.Session()
 
     def ensure_ready(self) -> None:
