@@ -14,6 +14,9 @@ data/universes/*
 # Local SQLite scan-history database (SCAN-001 schema / SCAN-002 layer). The DB
 # file is generated locally from the models and must never be committed.
 data/*.db
+# WAL journal mode (SCAN-002) writes these sidecar files next to the database.
+data/*.db-wal
+data/*.db-shm
 *.sqlite
 *.sqlite3
 

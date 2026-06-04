@@ -130,6 +130,10 @@ class ScanRun(Base):
             ScanStatus,
             name="scan_status",
             native_enum=False,
+            # SQLAlchemy only emits the VARCHAR CHECK constraint when this flag
+            # is true. The design doc promises database-level status protection,
+            # so SCAN-002 pins that behavior with a regression test.
+            create_constraint=True,
             length=16,
             values_callable=lambda enum_cls: [member.value for member in enum_cls],
         ),

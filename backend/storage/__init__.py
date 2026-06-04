@@ -1,20 +1,55 @@
-"""Persistence subsystem — the database schema for scan history.
+"""Persistence subsystem for scan history.
 
-Public surface (SCAN-001, schema only):
+Beginner note:
+Importing from ``backend.storage`` is the friendly public path. Internally the
+package is split into small files:
+
+- ``models.py`` owns table shapes.
+- ``database.py`` owns connections and sessions.
+- ``repository.py`` owns queries and writes.
+
+Re-exporting the important names here lets future code use
+``from backend.storage import session_scope, create_scan_run`` without needing
+to remember which small file each helper lives in.
+
+Public surface:
 - `Base` — the SQLAlchemy declarative base; `Base.metadata` holds every table.
 - `ScanRun` — one row per scan execution (the audit header).
 - `ScanResult` — one row per shortlisted stock (the audit line item).
 - `ScanStatus` — allowed run states (running / success / partial / failed).
-
-The engine, session, migrations, and repository helpers are SCAN-002 (Codex) —
-see the "NEXT: SCAN-002" block at the bottom of `models.py`.
+- `SessionLocal` / `session_scope` — short-lived SQLAlchemy sessions.
+- Repository helpers — the only public query/write helpers for scan history.
 """
 
+from backend.storage.database import (
+    SessionLocal,
+    engine,
+    get_database_url,
+    init_db,
+    session_scope,
+)
 from backend.storage.models import Base, ScanResult, ScanRun, ScanStatus
+from backend.storage.repository import (
+    create_scan_run,
+    finish_scan_run,
+    get_latest_scan_runs,
+    get_scan_results,
+    save_scan_results,
+)
 
 __all__ = [
     "Base",
+    "SessionLocal",
     "ScanResult",
     "ScanRun",
     "ScanStatus",
+    "create_scan_run",
+    "engine",
+    "finish_scan_run",
+    "get_database_url",
+    "get_latest_scan_runs",
+    "get_scan_results",
+    "init_db",
+    "save_scan_results",
+    "session_scope",
 ]
