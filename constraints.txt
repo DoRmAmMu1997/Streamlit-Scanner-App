@@ -8,6 +8,7 @@
 
 # Runtime application dependencies.
 streamlit==1.55.0
+authlib==1.7.2
 pandas==2.3.3
 numpy==2.2.6
 pyarrow==23.0.1
