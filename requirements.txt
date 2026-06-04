@@ -10,6 +10,7 @@ pyarrow
 # scan_runs / scan_results ORM models in backend/storage/models.py. The
 # engine, sessions, and Alembic migrations that USE this schema are SCAN-002.
 SQLAlchemy
+alembic
 
 # Dhan API and environment loading.
 requests

@@ -15,6 +15,7 @@ import datetime as dt
 from decimal import Decimal
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy import create_engine, event, select, text
 from sqlalchemy.orm import Session
 
@@ -150,6 +151,20 @@ def test_status_roundtrips_and_is_stored_as_its_lowercase_value(session):
     # and it keeps the stored data stable and human-readable.
     raw_value = session.execute(text("SELECT status FROM scan_runs")).scalar_one()
     assert raw_value == "partial"
+
+
+def test_status_column_rejects_values_outside_scan_status_enum(session):
+    with pytest.raises(IntegrityError):
+        session.execute(
+            text(
+                """
+                INSERT INTO scan_runs (started_at, status, screener_key, universe_key)
+                VALUES (:started_at, 'finished', 'envelope', 'nifty_500')
+                """
+            ),
+            {"started_at": "2026-06-04 09:30:00"},
+        )
+        session.commit()
 
 
 # ---------------------------------------------------------------------------
