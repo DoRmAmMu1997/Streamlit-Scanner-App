@@ -78,8 +78,13 @@ class SerpApiClient:
         api_key: str | None = None,
         session: requests.Session | None = None,
     ) -> None:
+        # Passing api_key explicitly is useful for tests and one-off scripts.
+        # Normal app code passes nothing, so the key comes from the central
+        # DEPLOY-004 settings object instead of this client reading os.environ.
         configured_key = get_settings().serpapi_api_key if api_key is None else api_key
         self.api_key = (configured_key or "").strip()
+        # A requests.Session keeps HTTP connection pooling in one place and lets
+        # tests inject a fake session so no live SerpAPI calls happen.
         self.session = session or requests.Session()
 
     def ensure_ready(self) -> None:

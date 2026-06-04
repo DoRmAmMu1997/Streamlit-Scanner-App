@@ -3,6 +3,12 @@
 DEPLOY-004 moved runtime settings into ``backend.config.settings``. This package
 still exposes the old names from ``backend.config`` so existing imports keep
 working while new deployment code can use the typed settings object directly.
+
+Beginner note:
+Python treats a folder with ``__init__.py`` as a package. That means existing
+code can still say ``from backend.config import DATA_DIR`` even though
+``backend/config.py`` became the ``backend/config/`` folder. This file is the
+bridge between the old import style and the new settings module.
 """
 
 from __future__ import annotations
@@ -40,12 +46,20 @@ _settings = get_settings()
 # Historical path constants. They are evaluated at import time from the current
 # settings so deployments that set DATA_DIR before startup still get the right
 # runtime folders, while old callers can keep importing these names.
+#
+# Important subtlety:
+# These constants are snapshots. New code that needs to observe env changes made
+# during a test should call get_settings() directly; old code that just needs the
+# startup paths can keep using DATA_DIR / DAILY_CACHE_DIR exactly as before.
 DATA_DIR = _settings.data_dir
 UNIVERSE_DIR = _settings.universe_dir
 DAILY_CACHE_DIR = _settings.daily_cache_dir
 FUNDAMENTALS_CACHE_DIR = _settings.fundamentals_cache_dir
 FUNDAMENTALS_PDF_DIR = _settings.fundamentals_pdf_dir
 
+# __all__ documents the public surface of backend.config. It also helps readers
+# see which names are intentionally supported versus merely imported as an
+# implementation detail above.
 __all__ = [
     "AppSettings",
     "DAILY_CACHE_DIR",

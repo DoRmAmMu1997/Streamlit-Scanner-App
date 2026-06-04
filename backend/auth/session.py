@@ -8,10 +8,13 @@ are their identity claims". The app does not handle Google passwords directly;
 it only asks Streamlit to start the Google login flow and then reads the trusted
 identity information Streamlit exposes.
 
-AUTH-001 deliberately keeps authorization out of scope. This module only answers
-"is someone signed in, and what email did Google give us?" Later tasks can use
-the returned email for allowlists or roles, but this file should not grow those
-rules yet.
+This module now owns both parts of the gate:
+- authentication: "is someone signed in, and what email did Google give us?"
+- authorization: "is that email allowed to use this scanner?"
+
+DEPLOY-004 keeps the allowlist and environment-mode reads in
+``backend.config.settings`` so this file does not need to parse environment
+variables directly.
 """
 
 from __future__ import annotations
@@ -270,6 +273,9 @@ def _allowed_emails() -> frozenset[str]:
     development mode treats it as "let any signed-in user through", while
     production mode treats it as "deny everyone except admins".
     """
+    # Settings already handles Dependencies/.env loading, trimming, lowercasing,
+    # and empty-entry removal. Keeping that parsing centralized prevents auth and
+    # production validation from drifting apart.
     return get_settings().allowed_emails
 
 
@@ -281,6 +287,8 @@ def _admin_emails() -> frozenset[str]:
     not include them. AUTH-002 only identifies admins; actual admin-only feature
     gating remains intentionally out of scope until AUTH-003.
     """
+    # Admin parsing uses the same settings path as ALLOWED_EMAILS so casing and
+    # whitespace behave identically for both lists.
     return get_settings().admin_emails
 
 
@@ -319,6 +327,9 @@ def auth_secret_values(st_module: Any) -> list[str]:
 
 def _is_production_mode() -> bool:
     """Return True when local/deployment config says this is production."""
+    # APP_ENV is the canonical DEPLOY-004 setting; SCANNER_ENV is still accepted
+    # inside get_settings() as a legacy alias. Auth should not know about those
+    # env names directly.
     return get_settings().is_production
 
 

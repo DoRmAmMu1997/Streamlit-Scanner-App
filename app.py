@@ -270,26 +270,36 @@ def _redact_secrets(text: str) -> str:
     """Strip any loaded credentials from an error message before display.
 
     Masks the Dhan access token / client code plus optional web-search or LLM
-    provider keys that may be present in the environment. It also masks the
-    Streamlit OIDC cookie/client secrets configured for Google SSO.
+    provider keys that may be present in the centralized settings object. It
+    also masks the Streamlit OIDC cookie/client secrets configured for Google
+    SSO.
 
     Beginner note:
     SDKs and frameworks occasionally embed request payloads or config values in
     exception messages. We replace known secret values with a fixed mask before
     passing text to `st.error(...)`, so an error panel can still be useful
     without accidentally leaking credentials.
+
+    This helper is intentionally best-effort. If settings parsing itself failed
+    (for example `LOG_LEVEL=chatty`), this function must still return a readable
+    error string instead of raising a second exception while trying to redact the
+    first one.
     """
     if not isinstance(text, str) or not text:
         return text
     secrets: list[str] = []
 
     try:
+        # Dhan credentials are pulled separately for compatibility with older
+        # tests that patch get_dhan_credentials directly.
         dhan = get_dhan_credentials(required=False)
     except SettingsError:
         dhan = None
     if dhan is not None:
         secrets.extend(filter(None, [dhan.access_token, dhan.client_code]))
     try:
+        # secret_values() covers the new DEPLOY-004 settings surface, including
+        # DATABASE_URL because it may contain a database password.
         secrets.extend(secret_values())
     except SettingsError:
         # The caller may be trying to display the settings error itself. Redact
@@ -858,6 +868,8 @@ def _configure_logging() -> None:
         # Some Python entry point already configured the root logger
         # (e.g. the CLI prefetch). Honor that rather than reconfiguring.
         return
+    # get_settings() validates LOG_LEVEL, so getattr is mostly defensive here:
+    # if Python ever lacks a named level, keep the app quiet at WARNING.
     level = getattr(logging, get_settings().log_level, logging.WARNING)
     logging.basicConfig(
         level=level,
@@ -872,6 +884,14 @@ def _configure_logging() -> None:
 
 
 def main() -> None:
+    """Run the Streamlit app after validating runtime settings.
+
+    Beginner note:
+    Streamlit reruns this function from top to bottom for each browser session
+    and widget interaction. DEPLOY-004 validation happens first so a production
+    misconfiguration stops before we create local folders, discover screeners, or
+    expose any scanner UI.
+    """
     try:
         settings = validate_production_settings(get_settings())
     except SettingsError as exc:

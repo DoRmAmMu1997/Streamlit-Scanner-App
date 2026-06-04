@@ -1,3 +1,11 @@
+"""Tests for DEPLOY-004 runtime settings.
+
+These tests are intentionally table-like and offline. They pass small ``env``
+dictionaries into ``get_settings(...)`` instead of reading this developer
+machine's real environment, so a local secret or shell variable cannot make the
+test pass or fail by accident.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -17,6 +25,8 @@ def test_local_defaults_are_safe_for_development():
     """A fresh checkout should run locally without production-only secrets."""
     settings = get_settings(env={})
 
+    # Local defaults should be boring and runnable: no production validation, no
+    # required auth gate, and a SQLite DB under the repo's git-ignored data/.
     assert settings.app_env == "development"
     assert settings.is_production is False
     assert settings.data_dir == PROJECT_ROOT / "data"
@@ -30,6 +40,8 @@ def test_local_defaults_are_safe_for_development():
 def test_environment_overrides_are_cleaned_and_normalized(tmp_path: Path):
     """Quoted env values, email casing, paths, and booleans should normalize."""
     data_dir = tmp_path / "runtime-data"
+    # This mapping simulates values as they often appear in real dashboards or
+    # hand-edited .env files: quoted, mixed-case, and padded with spaces.
     settings = get_settings(
         env={
             "APP_ENV": ' "production" ',
@@ -60,6 +72,9 @@ def test_environment_overrides_are_cleaned_and_normalized(tmp_path: Path):
 
 def test_legacy_aliases_remain_supported(tmp_path: Path):
     """Older deployed/local env names should keep working during the transition."""
+    # SCANNER_ENV, SCANNER_DEBUG, and DHAN_CLIENT_CODE are intentionally legacy
+    # names. They should still work so existing local .env files do not break on
+    # upgrade, but new docs point users to APP_ENV, LOG_LEVEL, and DHAN_CLIENT_ID.
     settings = get_settings(
         env={
             "SCANNER_ENV": "production",
@@ -81,6 +96,8 @@ def test_legacy_aliases_remain_supported(tmp_path: Path):
 
 def test_canonical_env_values_win_over_legacy_aliases(tmp_path: Path):
     """DEPLOY-004 names should take precedence when both old and new names exist."""
+    # When both names exist, the new canonical setting must win. That prevents an
+    # old leftover variable from overriding a deployment's explicit new value.
     settings = get_settings(
         env={
             "APP_ENV": "production",
@@ -111,6 +128,8 @@ def test_production_validation_reports_missing_required_names():
     """Production should fail closed with names, not secret values."""
     settings = get_settings(env={"APP_ENV": "production"})
 
+    # The error should be actionable for an operator: list the missing variable
+    # names, but never include any actual secret values.
     with pytest.raises(SettingsError) as exc_info:
         validate_production_settings(settings)
 
@@ -145,6 +164,8 @@ def test_production_cannot_disable_auth(tmp_path: Path):
 
 def test_settings_repr_and_safe_dict_never_print_secret_values(tmp_path: Path):
     """Debug output may show which secrets exist, but never the secrets."""
+    # Put obvious marker strings in every secret-like field. If a future repr or
+    # safe_dict accidentally prints raw values, this test will catch it loudly.
     settings = get_settings(
         env={
             "APP_ENV": "production",

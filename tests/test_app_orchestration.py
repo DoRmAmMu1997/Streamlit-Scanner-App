@@ -185,6 +185,9 @@ def test_redact_secrets_masks_streamlit_auth_secrets(monkeypatch):
 
 def test_redact_secrets_survives_settings_parse_errors(monkeypatch):
     """Displaying a settings error should not make redaction raise again."""
+    # Simulate the exact failure mode we care about: settings parsing already
+    # failed, and the app is trying to show that settings error to the user. The
+    # redactor should degrade gracefully instead of raising a second SettingsError.
     monkeypatch.setattr(
         app,
         "get_dhan_credentials",
@@ -219,6 +222,9 @@ def test_main_requires_auth_before_discovering_screeners(monkeypatch):
     monkeypatch.setattr(app, "discover_screeners", fail_if_discovered)
     monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
     monkeypatch.setattr(app, "_configure_logging", lambda: None)
+    # Local development defaults AUTH_REQUIRED to false. This test is about the
+    # guarded path, so opt in explicitly and then assert discovery never runs
+    # before the auth gate stops the Streamlit rerun.
     monkeypatch.setenv("AUTH_REQUIRED", "true")
     monkeypatch.setattr(
         app,
@@ -238,6 +244,9 @@ def test_main_requires_auth_before_discovering_screeners(monkeypatch):
 def test_main_stops_before_runtime_dirs_when_production_settings_are_invalid(monkeypatch):
     """Misconfigured production should fail before local fallback folders appear."""
     errors: list[str] = []
+    # APP_ENV=production with no other settings is intentionally invalid. It
+    # should produce a clear settings error before any side-effectful startup
+    # work, such as creating local data/ folders or discovering screeners.
     settings = get_settings(env={"APP_ENV": "production"})
 
     monkeypatch.setattr(app, "get_settings", lambda: settings)

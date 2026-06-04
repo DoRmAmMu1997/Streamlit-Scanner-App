@@ -56,7 +56,13 @@ _FALSE_VALUES = {"0", "false", "no", "off"}
 
 
 class SettingsError(RuntimeError):
-    """Raised when runtime settings are invalid or unsafe."""
+    """Raised when runtime settings are invalid or unsafe.
+
+    Beginner note:
+    A plain ``ValueError`` would also work technically, but this custom error
+    makes it obvious to callers that the problem is deployment configuration,
+    not a bug in a screener or a failed Dhan/SerpAPI network call.
+    """
 
 
 @dataclass(frozen=True)
@@ -74,6 +80,16 @@ class AppSettings:
     ``repr=False`` plus the custom ``__repr__`` below are deliberate. A default
     dataclass repr would print API keys and database passwords into logs or test
     failures. This object only prints a safe summary.
+
+    Field guide:
+    - string fields hold the cleaned value from the environment or ``""`` when
+      absent;
+    - email fields are immutable lower-case sets so allowlist comparisons are
+      case-insensitive and cannot be mutated by accident;
+    - ``database_url_from_env`` and ``data_dir_from_env`` remember whether the
+      value came from an explicit deploy setting. Production validation uses
+      those flags to distinguish "operator configured this" from "we fell back
+      to a local development default".
     """
 
     app_env: str
@@ -116,7 +132,13 @@ class AppSettings:
         return self.fundamentals_cache_dir / "pdfs"
 
     def safe_dict(self) -> dict[str, object]:
-        """Return a log/debug-safe summary that never includes secret values."""
+        """Return a log/debug-safe summary that never includes secret values.
+
+        This is the object to print when debugging config. It intentionally says
+        whether a secret exists (``has_serpapi_api_key``) without showing the
+        actual secret. That gives operators useful setup information without
+        leaking credentials into terminal logs, Streamlit UI, or CI artifacts.
+        """
         return {
             "app_env": self.app_env,
             "is_production": self.is_production,
@@ -140,7 +162,13 @@ class AppSettings:
 
 
 def load_environment() -> None:
-    """Load only the scanner app's local ``Dependencies/.env`` file."""
+    """Load only the scanner app's local ``Dependencies/.env`` file.
+
+    Hosting platforms normally inject environment variables directly. Local
+    developers usually keep them in ``Dependencies/.env``. Loading that one file
+    here keeps the rest of the codebase from importing ``dotenv`` or knowing
+    where the local env file lives.
+    """
     if load_dotenv is None:
         return
     if ENV_PATH.exists():
@@ -149,7 +177,12 @@ def load_environment() -> None:
 
 
 def _clean_env_value(value: Any) -> str:
-    """Normalize env values so KEY=value and KEY="value" both work."""
+    """Normalize env values so KEY=value and KEY="value" both work.
+
+    Env vars are always text. People often paste values with surrounding quotes,
+    especially on Windows or from dashboard UIs. Stripping one matching quote
+    pair makes those common inputs behave like the unquoted form.
+    """
     cleaned = str(value or "").strip()
     if cleaned.startswith(('"', "'")) and cleaned.endswith(('"', "'")):
         cleaned = cleaned[1:-1]
@@ -157,7 +190,13 @@ def _clean_env_value(value: Any) -> str:
 
 
 def _env_value(source: Mapping[str, str], name: str, *aliases: str) -> str:
-    """Read the canonical env name first, then any legacy aliases."""
+    """Read the canonical env name first, then any legacy aliases.
+
+    DEPLOY-004 introduces new names such as ``APP_ENV`` and ``DHAN_CLIENT_ID``.
+    Older checkouts may still have ``SCANNER_ENV`` or ``DHAN_CLIENT_CODE`` in
+    their local ``.env`` file. This helper lets new names win while keeping the
+    old names functional during migration.
+    """
     for key in (name, *aliases):
         value = _clean_env_value(source.get(key))
         if value:
@@ -166,7 +205,12 @@ def _env_value(source: Mapping[str, str], name: str, *aliases: str) -> str:
 
 
 def _normalize_app_env(raw: str) -> str:
-    """Collapse common env spellings while leaving custom names readable."""
+    """Collapse common env spellings while leaving custom names readable.
+
+    The app only has special behavior for development-like and production-like
+    values. A custom value such as ``staging`` is kept as ``staging`` so logs and
+    summaries remain honest, but it does not trigger production-only validation.
+    """
     value = (raw or "development").strip().lower()
     if value in {"dev", "development", "local"}:
         return "development"
@@ -176,7 +220,12 @@ def _normalize_app_env(raw: str) -> str:
 
 
 def _parse_bool(raw: str, *, default: bool) -> bool:
-    """Parse an env boolean with a caller-chosen default."""
+    """Parse an env boolean with a caller-chosen default.
+
+    Strings like ``true`` and ``1`` are easy for humans to type but Python will
+    treat every non-empty string as truthy. Explicit parsing prevents
+    ``AUTH_REQUIRED=false`` from accidentally behaving as True.
+    """
     value = _clean_env_value(raw).lower()
     if not value:
         return default
@@ -201,7 +250,12 @@ def _parse_log_level(raw: str) -> str:
 
 
 def _parse_email_set(raw: str) -> frozenset[str]:
-    """Split a comma-separated email list into normalized lowercase values."""
+    """Split a comma-separated email list into normalized lowercase values.
+
+    A frozenset is immutable, which is useful here because a settings object is
+    meant to describe one startup configuration. Callers can read it, but they
+    should not append or remove emails behind the settings module's back.
+    """
     return frozenset(
         email
         for part in _clean_env_value(raw).split(",")
@@ -220,23 +274,39 @@ def get_settings(
     ``Dependencies/.env`` file. Normal application code calls ``get_settings()``
     with no arguments so the local dotenv file and process environment are read.
     """
+    # Test code passes a tiny mapping so it can control every input precisely.
+    # Runtime code passes nothing, so we first load Dependencies/.env and then
+    # read the real process environment. python-dotenv uses override=False, so a
+    # hosting platform's env vars still beat local .env values.
     if env is None:
         load_environment()
         source: Mapping[str, str] = os.environ
     else:
         source = env
 
+    # APP_ENV is the canonical DEPLOY-004 name. SCANNER_ENV is accepted only as
+    # a compatibility alias for older local files.
     app_env = _normalize_app_env(_env_value(source, "APP_ENV", "SCANNER_ENV"))
+
+    # DATA_DIR controls all generated runtime data, not just the database. In
+    # development it defaults to the repo's git-ignored data/ folder.
     data_dir_value = _env_value(source, "DATA_DIR")
     data_dir = Path(data_dir_value).expanduser() if data_dir_value else DEFAULT_DATA_DIR
 
+    # DATABASE_URL is optional locally because SQLite is good enough for a fresh
+    # checkout. Production validation below requires it to be explicit.
     database_url_value = _env_value(source, "DATABASE_URL")
     database_url = database_url_value or f"sqlite:///{(data_dir / 'scanner.db').as_posix()}"
 
+    # LOG_LEVEL is the normal deploy knob. SCANNER_DEBUG=1 remains a small
+    # backwards-compatible shortcut for local debugging.
     log_level_raw = _env_value(source, "LOG_LEVEL")
     if not log_level_raw and _env_value(source, "SCANNER_DEBUG").lower() in _TRUE_VALUES:
         log_level_raw = "DEBUG"
 
+    # Keep construction in one visible block so reviewing a new env var later is
+    # straightforward: add the field, parse it here, and test it in
+    # tests/test_settings.py.
     settings = AppSettings(
         app_env=app_env,
         database_url=database_url,
@@ -261,22 +331,35 @@ def get_settings(
 
 
 def validate_production_settings(settings: AppSettings | None = None) -> AppSettings:
-    """Fail clearly when production is missing required runtime config."""
+    """Fail clearly when production is missing required runtime config.
+
+    Local development optimizes for convenience. Production optimizes for
+    explicitness and fail-closed safety: no hidden SQLite fallback, no implicit
+    repo-local data directory, no missing Dhan credentials, and no disabled auth.
+    """
     settings = settings or get_settings()
     if not settings.is_production:
         return settings
 
     missing: list[str] = []
+    # In production, a local SQLite fallback would be surprising and easy to
+    # lose on a redeploy, so DATABASE_URL must be explicitly provided.
     if not settings.database_url_from_env:
         missing.append("DATABASE_URL")
+    # DATA_DIR should point at a persistent disk/volume in production. Reusing
+    # the development data/ fallback would make generated files ephemeral.
     if not settings.data_dir_from_env:
         missing.append("DATA_DIR")
+    # Dhan credentials are required because every real scan needs market data.
     if not settings.dhan_client_id:
         missing.append("DHAN_CLIENT_ID")
     if not settings.dhan_access_token:
         missing.append("DHAN_ACCESS_TOKEN")
+    # Production must not expose the scanner without the auth gate.
     if settings.auth_required is False:
         missing.append("AUTH_REQUIRED cannot be false in production")
+    # With auth enabled, at least one allowlist/admin email must exist so the
+    # app fails closed instead of letting everyone through.
     if settings.auth_required and not (settings.allowed_emails or settings.admin_emails):
         missing.append("ALLOWED_EMAILS or ADMIN_EMAILS")
 
@@ -290,7 +373,12 @@ def validate_production_settings(settings: AppSettings | None = None) -> AppSett
 
 
 def secret_values(settings: AppSettings | None = None) -> list[str]:
-    """Return configured secret-like values for redaction helpers."""
+    """Return configured secret-like values for redaction helpers.
+
+    The full database URL is included because it may contain a username and
+    password. Dhan client ids are included too: they are not passwords, but they
+    are account identifiers and should not be echoed into UI error panels.
+    """
     settings = settings or get_settings()
     return [
         value
@@ -306,8 +394,15 @@ def secret_values(settings: AppSettings | None = None) -> list[str]:
 
 
 def ensure_project_dirs() -> None:
-    """Create runtime folders that are safe to generate locally."""
+    """Create runtime folders that are safe to generate locally.
+
+    This helper deliberately creates directories, not files. It prepares the
+    folder skeleton the app expects while leaving secrets, database contents, and
+    downloaded market data under the user's control.
+    """
     settings = get_settings()
+    # Use settings-derived paths instead of module constants so DATA_DIR can
+    # redirect every generated artifact to a persistent volume in deployment.
     for path in (
         DEPENDENCIES_DIR,
         settings.universe_dir,
@@ -320,7 +415,12 @@ def ensure_project_dirs() -> None:
 
 
 def get_dhan_credentials(required: bool = False) -> DhanCredentials | None:
-    """Return Dhan credentials from the centralized settings object."""
+    """Return Dhan credentials from the centralized settings object.
+
+    ``required=False`` is used by the UI so it can show a setup message instead
+    of crashing on first launch. ``required=True`` is used by code paths that
+    cannot do useful work without credentials.
+    """
     settings = get_settings()
     if settings.dhan_client_id and settings.dhan_access_token:
         return DhanCredentials(
@@ -343,21 +443,34 @@ def get_dhan_credentials(required: bool = False) -> DhanCredentials | None:
 
 
 def get_fundamentals_model() -> str:
-    """Return the Claude model used by this app's Claude Agent SDK features."""
+    """Return the Claude model used by this app's Claude Agent SDK features.
+
+    This remains a small standalone helper because ``CLAUDE_AGENT_MODEL`` is a
+    feature-tuning knob, not part of DEPLOY-004's production-required settings.
+    """
     if load_dotenv is not None:
         load_environment()
     return _clean_env_value(os.getenv("CLAUDE_AGENT_MODEL")) or DEFAULT_FUNDAMENTALS_MODEL
 
 
 def get_agent_fast_mode() -> bool:
-    """Return True when the AI agents should run in low-latency fast mode."""
+    """Return True when the AI agents should run in low-latency fast mode.
+
+    The env value is intentionally permissive (1/true/yes/on) because this is a
+    developer/operator convenience switch, not a security boundary.
+    """
     load_environment()
     raw = _clean_env_value(os.getenv("SCANNER_AGENT_FAST_MODE")).lower()
     return raw in _TRUE_VALUES
 
 
 def credential_status() -> dict[str, object]:
-    """Return a UI-friendly credential summary without exposing secrets."""
+    """Return a UI-friendly credential summary without exposing secrets.
+
+    Streamlit only needs booleans to decide whether to show a "credentials
+    missing" message. Returning the actual token here would create an avoidable
+    leak path into UI state or test failure output.
+    """
     settings = get_settings()
     return {
         "env_path": str(ENV_PATH),

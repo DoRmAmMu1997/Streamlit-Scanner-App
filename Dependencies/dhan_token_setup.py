@@ -182,12 +182,17 @@ def _require_dhan_client_id() -> str:
     accepts both names instead of forcing every developer to edit their file
     before they can refresh a token.
     """
+    # Prefer the canonical DEPLOY-004 name. This is the name shown in the new
+    # .env.example and README, so fresh installs should land here.
     value = (os.getenv("DHAN_CLIENT_ID") or "").strip()
     if value.startswith(('"', "'")) and value.endswith(('"', "'")):
         value = value[1:-1]
     if value:
         return value
 
+    # Compatibility path for existing local files. We do not write a replacement
+    # DHAN_CLIENT_ID here because this script's job is only to refresh the access
+    # token while preserving the user's hand-edited .env layout.
     value = (os.getenv("DHAN_CLIENT_CODE") or "").strip()
     if value.startswith(('"', "'")) and value.endswith(('"', "'")):
         value = value[1:-1]
