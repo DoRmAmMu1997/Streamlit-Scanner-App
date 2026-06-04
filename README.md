@@ -221,6 +221,22 @@ network work happens up front in the terminal.
    environment for production. If SSO config is missing in production, the app
    fails closed before loading any scanner controls.
 
+   **Restrict who can use the app (email allowlist).** Once Google SSO works,
+   limit access by email in `Dependencies/.env`:
+
+   ```env
+   # Comma-separated; case and surrounding spaces don't matter.
+   ALLOWED_EMAILS=you@gmail.com, teammate@gmail.com
+   ADMIN_EMAILS=you@gmail.com
+   ```
+
+   - `ADMIN_EMAILS` are always allowed and are flagged as admins (reserved for
+     future admin-only features).
+   - If `ALLOWED_EMAILS` is **empty**, development permits any signed-in Google
+     user, but production (`SCANNER_ENV=production`) fails closed — only
+     `ADMIN_EMAILS` get in. A signed-in user who isn't allowed sees an
+     "unauthorized" message instead of the scanner.
+
 6. **(Optional) Enable the Check Fundamentals agent** — it runs on the
    [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview) using
    your Claude subscription (Pro/Max), not an API key:
@@ -263,7 +279,8 @@ python app.py
 
 This downloads the data first, then opens the Streamlit app in your browser.
 The app requires Google SSO before any scanner controls, results, charts, or
-CSV downloads are available.
+CSV downloads are available, and only allow-listed emails (see step 5) may
+proceed past sign-in.
 
 > **First run is slow.** It backfills ~10 years of candles for ~500 stocks.
 > Every later run only fetches the days added since you last ran it, so it is

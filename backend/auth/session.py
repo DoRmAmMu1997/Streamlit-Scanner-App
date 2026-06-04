@@ -17,11 +17,14 @@ rules yet.
 from __future__ import annotations
 
 import importlib.util
+import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
-from backend.config import load_environment
+from backend.config import _clean_env_value, load_environment
+
+logger = logging.getLogger(__name__)
 
 
 # Streamlit names each OIDC provider by the nested table under [auth].
@@ -39,6 +42,13 @@ _PRODUCTION_ENV_VALUES = {"prod", "production"}
 _SHARED_AUTH_KEYS = ("redirect_uri", "cookie_secret")
 _PROVIDER_AUTH_KEYS = ("client_id", "client_secret", "server_metadata_url")
 
+# AUTH-002 email allowlist. These name the comma-separated environment variables
+# read from the process env (or Dependencies/.env). ADMIN_EMAILS are always
+# allowed; see is_email_authorized for the empty-allowlist dev-permit /
+# prod-fail-closed rule.
+_ALLOWED_EMAILS_ENV = "ALLOWED_EMAILS"
+_ADMIN_EMAILS_ENV = "ADMIN_EMAILS"
+
 
 @dataclass(frozen=True)
 class AuthenticatedUser:
@@ -51,6 +61,9 @@ class AuthenticatedUser:
 
     email: str
     name: str | None = None
+    # AUTH-002 fills this from ADMIN_EMAILS. AUTH-001's authentication gate builds
+    # the user without it (defaults False); role-gated features (AUTH-003) can read it.
+    is_admin: bool = False
 
 
 def auth_config_status(st_module: Any) -> dict[str, object]:
@@ -178,6 +191,93 @@ def require_authenticated_user(st_module: Any) -> AuthenticatedUser:
         st_module.button("Log out", on_click=st_module.logout)
 
     return user
+
+
+def require_authorized_user(st_module: Any) -> AuthenticatedUser:
+    """Authenticate (AUTH-001) AND authorize (AUTH-002) the current user.
+
+    This is the single gate the Streamlit app should call before loading any
+    scanner feature. It first runs the AUTH-001 sign-in gate
+    (``require_authenticated_user``), then enforces the email allowlist:
+
+    - ``ADMIN_EMAILS`` are always allowed and come back with ``is_admin=True``.
+    - If ``ALLOWED_EMAILS`` is non-empty, the signed-in email must be on it.
+    - If ``ALLOWED_EMAILS`` is empty, development permits any verified user but
+      production fails closed (only admins get in). This mirrors how AUTH-001
+      treats missing SSO config as a dev warning but a production hard error.
+
+    A rejected user sees a generic message and the run stops before any scanner
+    control, result, or download renders. They stay signed in (AUTH-001 already
+    drew the sidebar "Log out") so they can switch to an authorized account.
+    """
+    user = require_authenticated_user(st_module)
+
+    allowed = _allowed_emails()
+    admins = _admin_emails()
+
+    if not is_email_authorized(
+        user.email, allowed=allowed, admins=admins, production=_is_production_mode()
+    ):
+        # Record the denied attempt for the operator's own audit trail. Only the
+        # email is logged — never the allowlist itself — so the log cannot leak
+        # who else has access.
+        logger.warning("Access denied for %s: email is not on the allowlist", user.email)
+        st_module.error(
+            "You are not authorized to access this app. "
+            "Ask the administrator to add your email to the allowlist."
+        )
+        _stop(st_module)
+
+    # Authorized. Tag admins so future role-gated features (AUTH-003) can read it.
+    return replace(user, is_admin=user.email in admins)
+
+
+def is_email_authorized(
+    email: str,
+    *,
+    allowed: frozenset[str],
+    admins: frozenset[str],
+    production: bool,
+) -> bool:
+    """Pure allowlist decision — no Streamlit and no env reads, so it tests easily.
+
+    Rules, in order:
+      1. Admins are always authorized.
+      2. If an allowlist is configured, the email must be on it.
+      3. If no allowlist is configured, permit in development but deny in
+         production (fail closed). Admins already passed at rule 1.
+    """
+    email = email.strip().lower()
+    if email in admins:
+        return True
+    if allowed:
+        return email in allowed
+    # No allowlist configured: dev permits everyone signed in; prod locks down.
+    return not production
+
+
+def _allowed_emails() -> frozenset[str]:
+    """The ALLOWED_EMAILS set from the environment (normalized; may be empty)."""
+    load_environment()
+    return _parse_email_set(_clean_env_value(os.getenv(_ALLOWED_EMAILS_ENV)))
+
+
+def _admin_emails() -> frozenset[str]:
+    """The ADMIN_EMAILS set from the environment (normalized; may be empty)."""
+    load_environment()
+    return _parse_email_set(_clean_env_value(os.getenv(_ADMIN_EMAILS_ENV)))
+
+
+def _parse_email_set(raw: str) -> frozenset[str]:
+    """Split a comma-separated email list into a normalized lowercase set.
+
+    Whitespace around each entry is stripped and casing is collapsed so that
+    "  Sunny@Example.COM " in the env matches the lowercased identity email the
+    auth gate produces. Empty entries (e.g. a trailing comma) are dropped.
+    """
+    return frozenset(
+        cleaned.lower() for part in raw.split(",") if (cleaned := part.strip())
+    )
 
 
 def auth_secret_values(st_module: Any) -> list[str]:
