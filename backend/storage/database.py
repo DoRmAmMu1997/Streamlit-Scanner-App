@@ -17,7 +17,6 @@ state across button clicks.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -25,7 +24,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from backend.config import DATA_DIR, _clean_env_value, load_environment
+from backend.config import get_settings
 from backend.storage.models import Base
 
 
@@ -36,17 +35,23 @@ def get_database_url() -> str:
     Postgres without changing code. Local development falls back to a SQLite file
     under ``data/``. That file is ignored by git, so real scan history and local
     experiments never get committed by accident.
-    """
-    load_environment()
-    url = _clean_env_value(os.getenv("DATABASE_URL"))
-    if url:
-        return url
 
-    # ``DATA_DIR`` is the same runtime data folder used by the candle and
-    # fundamentals caches. Creating it here makes `alembic upgrade head` work in
-    # a fresh checkout before any scanner has run.
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    return f"sqlite:///{(DATA_DIR / 'scanner.db').as_posix()}"
+    Beginner note:
+    SQLAlchemy uses URLs for every database backend. SQLite URLs point at a local
+    file, while Postgres URLs normally include a host, database name, username,
+    and password. This helper hides that difference from the repository layer.
+    """
+    settings = get_settings()
+    if not settings.database_url_from_env:
+        # ``DATA_DIR`` is the same runtime data folder used by the candle and
+        # fundamentals caches. Creating it here makes `alembic upgrade head` work
+        # in a fresh checkout before any scanner has run.
+        #
+        # Production startup validation requires DATABASE_URL and DATA_DIR to be
+        # explicit, so this fallback directory creation is for local development
+        # and migration commands, not a hidden production storage choice.
+        settings.data_dir.mkdir(parents=True, exist_ok=True)
+    return settings.database_url
 
 
 def _make_engine(url: str | None = None) -> Engine:
@@ -74,6 +79,13 @@ def _make_engine(url: str | None = None) -> Engine:
 
         @event.listens_for(created_engine, "connect")
         def _apply_sqlite_pragmas(dbapi_connection, _connection_record):
+            """Apply SQLite-only safety switches to each low-level connection.
+
+            Beginner note:
+            SQLAlchemy's engine may open multiple DB-API connections over time.
+            SQLite PRAGMAs live on the connection, not just the database file, so
+            this hook repeats the settings every time a connection is created.
+            """
             # SQLite parses FOREIGN KEY declarations but does not enforce them
             # unless this pragma is enabled for every new connection. Without
             # it, deleting a scan_runs row would leave orphan scan_results rows.

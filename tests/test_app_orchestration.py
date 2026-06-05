@@ -16,6 +16,7 @@ import pandas as pd
 import pytest
 
 import app
+from backend.config.settings import get_settings
 from backend.screener_registry import ScreenerDefinition
 
 
@@ -182,6 +183,25 @@ def test_redact_secrets_masks_streamlit_auth_secrets(monkeypatch):
     assert redacted.count("***REDACTED***") == 3
 
 
+def test_redact_secrets_survives_settings_parse_errors(monkeypatch):
+    """Displaying a settings error should not make redaction raise again."""
+    # Simulate the exact failure mode we care about: settings parsing already
+    # failed, and the app is trying to show that settings error to the user. The
+    # redactor should degrade gracefully instead of raising a second SettingsError.
+    monkeypatch.setattr(
+        app,
+        "get_dhan_credentials",
+        lambda required=False: (_ for _ in ()).throw(app.SettingsError("bad")),
+    )
+    monkeypatch.setattr(
+        app,
+        "secret_values",
+        lambda: (_ for _ in ()).throw(app.SettingsError("bad")),
+    )
+
+    assert app._redact_secrets("Invalid LOG_LEVEL") == "Invalid LOG_LEVEL"
+
+
 def test_main_requires_auth_before_discovering_screeners(monkeypatch):
     """The main app must not discover or run screeners before auth succeeds."""
 
@@ -202,6 +222,10 @@ def test_main_requires_auth_before_discovering_screeners(monkeypatch):
     monkeypatch.setattr(app, "discover_screeners", fail_if_discovered)
     monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
     monkeypatch.setattr(app, "_configure_logging", lambda: None)
+    # Local development defaults AUTH_REQUIRED to false. This test is about the
+    # guarded path, so opt in explicitly and then assert discovery never runs
+    # before the auth gate stops the Streamlit rerun.
+    monkeypatch.setenv("AUTH_REQUIRED", "true")
     monkeypatch.setattr(
         app,
         "st",
@@ -215,6 +239,85 @@ def test_main_requires_auth_before_discovering_screeners(monkeypatch):
 
     with pytest.raises(StopFromAuth):
         app.main()
+
+
+def test_main_stops_before_runtime_dirs_when_production_settings_are_invalid(monkeypatch):
+    """Misconfigured production should fail before local fallback folders appear."""
+    errors: list[str] = []
+    # APP_ENV=production with no other settings is intentionally invalid. It
+    # should produce a clear settings error before any side-effectful startup
+    # work, such as creating local data/ folders or discovering screeners.
+    settings = get_settings(env={"APP_ENV": "production"})
+
+    monkeypatch.setattr(app, "get_settings", lambda: settings)
+    monkeypatch.setattr(app, "secret_values", lambda: [])
+    monkeypatch.setattr(
+        app,
+        "ensure_project_dirs",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("runtime dirs should not be created")
+        ),
+    )
+    monkeypatch.setattr(
+        app,
+        "discover_screeners",
+        lambda: (_ for _ in ()).throw(AssertionError("screeners should not load")),
+    )
+    monkeypatch.setattr(
+        app,
+        "st",
+        SimpleNamespace(error=lambda message: errors.append(message)),
+    )
+
+    app.main()
+
+    assert errors
+    assert "Runtime configuration error" in errors[0]
+    assert "DATABASE_URL" in errors[0]
+    assert "DATA_DIR" in errors[0]
+
+
+def test_main_skips_auth_gate_when_auth_not_required(monkeypatch):
+    """Development default (AUTH_REQUIRED=false) should skip the auth gate.
+
+    DEPLOY-004 changed main() from always gating to ``if settings.auth_required``.
+    This locks the dev-skips-auth branch: the gate is not called, yet the run still
+    proceeds to screener discovery. Production safety is covered separately by the
+    settings validation tests (AUTH_REQUIRED cannot be false in production).
+    """
+
+    class _StopAtDiscovery(RuntimeError):
+        """Test-only signal that main() reached discovery without the auth gate."""
+
+    auth_calls: list[int] = []
+    # get_settings(env={}) yields development defaults: auth_required is False and
+    # is_production is False, so production validation passes and the gate is skipped.
+    settings = get_settings(env={})
+
+    monkeypatch.setattr(app, "get_settings", lambda: settings)
+    monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
+    monkeypatch.setattr(app, "_configure_logging", lambda: None)
+    monkeypatch.setattr(app, "require_authorized_user", lambda _st: auth_calls.append(1))
+    monkeypatch.setattr(
+        app,
+        "discover_screeners",
+        lambda: (_ for _ in ()).throw(_StopAtDiscovery()),
+    )
+    monkeypatch.setattr(
+        app,
+        "st",
+        SimpleNamespace(
+            set_page_config=lambda **_kwargs: None,
+            markdown=lambda *_args, **_kwargs: None,
+            title=lambda *_args, **_kwargs: None,
+            caption=lambda *_args, **_kwargs: None,
+        ),
+    )
+
+    with pytest.raises(_StopAtDiscovery):
+        app.main()
+
+    assert auth_calls == []
 
 
 def test_universe_table_defers_status_loading_until_user_opts_in(monkeypatch):

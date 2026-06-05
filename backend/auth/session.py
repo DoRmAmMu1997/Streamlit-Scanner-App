@@ -8,21 +8,23 @@ are their identity claims". The app does not handle Google passwords directly;
 it only asks Streamlit to start the Google login flow and then reads the trusted
 identity information Streamlit exposes.
 
-AUTH-001 deliberately keeps authorization out of scope. This module only answers
-"is someone signed in, and what email did Google give us?" Later tasks can use
-the returned email for allowlists or roles, but this file should not grow those
-rules yet.
+This module now owns both parts of the gate:
+- authentication: "is someone signed in, and what email did Google give us?"
+- authorization: "is that email allowed to use this scanner?"
+
+DEPLOY-004 keeps the allowlist and environment-mode reads in
+``backend.config.settings`` so this file does not need to parse environment
+variables directly.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import logging
-import os
 from dataclasses import dataclass, replace
 from typing import Any
 
-from backend.config import load_environment
+from backend.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -32,22 +34,11 @@ logger = logging.getLogger(__name__)
 # st.login(...) is exactly "google".
 AUTH_PROVIDER = "google"
 
-# Production mode is intentionally strict. If the deployed app is missing SSO
-# config, it must stop before exposing scanner controls or market data actions.
-_PRODUCTION_ENV_VALUES = {"prod", "production"}
-
 # These are the minimum Streamlit auth settings needed before we can even offer
 # a Google login button. Keeping them in tuples makes the validation loop small
 # and makes future provider/config changes obvious.
 _SHARED_AUTH_KEYS = ("redirect_uri", "cookie_secret")
 _PROVIDER_AUTH_KEYS = ("client_id", "client_secret", "server_metadata_url")
-
-# AUTH-002 email allowlist. These name the comma-separated environment variables
-# read from the process env (or Dependencies/.env). ADMIN_EMAILS are always
-# allowed; see is_email_authorized for the empty-allowlist dev-permit /
-# prod-fail-closed rule.
-_ALLOWED_EMAILS_ENV = "ALLOWED_EMAILS"
-_ADMIN_EMAILS_ENV = "ADMIN_EMAILS"
 
 
 @dataclass(frozen=True)
@@ -282,8 +273,10 @@ def _allowed_emails() -> frozenset[str]:
     development mode treats it as "let any signed-in user through", while
     production mode treats it as "deny everyone except admins".
     """
-    load_environment()
-    return _parse_email_set(_clean_value(os.getenv(_ALLOWED_EMAILS_ENV)))
+    # Settings already handles Dependencies/.env loading, trimming, lowercasing,
+    # and empty-entry removal. Keeping that parsing centralized prevents auth and
+    # production validation from drifting apart.
+    return get_settings().allowed_emails
 
 
 def _admin_emails() -> frozenset[str]:
@@ -294,8 +287,9 @@ def _admin_emails() -> frozenset[str]:
     not include them. AUTH-002 only identifies admins; actual admin-only feature
     gating remains intentionally out of scope until AUTH-003.
     """
-    load_environment()
-    return _parse_email_set(_clean_value(os.getenv(_ADMIN_EMAILS_ENV)))
+    # Admin parsing uses the same settings path as ALLOWED_EMAILS so casing and
+    # whitespace behave identically for both lists.
+    return get_settings().admin_emails
 
 
 def _parse_email_set(raw: str) -> frozenset[str]:
@@ -333,8 +327,10 @@ def auth_secret_values(st_module: Any) -> list[str]:
 
 def _is_production_mode() -> bool:
     """Return True when local/deployment config says this is production."""
-    load_environment()
-    return _clean_value(os.getenv("SCANNER_ENV")).lower() in _PRODUCTION_ENV_VALUES
+    # APP_ENV is the canonical DEPLOY-004 setting; SCANNER_ENV is still accepted
+    # inside get_settings() as a legacy alias. Auth should not know about those
+    # env names directly.
+    return get_settings().is_production
 
 
 def _is_authlib_available() -> bool:
