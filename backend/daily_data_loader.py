@@ -580,6 +580,9 @@ class DailyDataLoader:
                     item = HistoryLoadItem(symbol=symbol, candles=candles, from_cache=from_cache)
                 except Exception as exc:
                     consecutive_failures += 1
+                    # Dhan/HTTP exceptions can include request details. This
+                    # message is stored in ``last_failures`` and later rendered
+                    # by Streamlit, so redact at the source.
                     safe_message = redact_text(str(exc))
                     logger.warning("Failed to load history for %s: %s", symbol, safe_message)
                     failure = {

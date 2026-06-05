@@ -61,15 +61,29 @@ def redact_text(text: Any, *, extra_secrets: Iterable[str] | None = None) -> Any
     if not isinstance(text, str) or not text:
         return text
 
+    # Order matters. Exact configured values go first because they are the most
+    # reliable signal we have: if the full Dhan token or database URL appears in
+    # the text, replace that exact value before broader regexes start operating
+    # on smaller pieces of the same string.
     redacted = _redact_known_values(text, extra_secrets=extra_secrets)
+    # Database URLs hide the password between ``user:`` and ``@host`` rather
+    # than behind a ``password=...`` key. This pass preserves the scheme, user,
+    # host, and database name so operators still know which connection failed.
     redacted = _DATABASE_URL_PASSWORD_RE.sub(
         rf"\g<prefix>{MASK}\g<suffix>",
         redacted,
     )
+    # Authorization headers are another common shape that does not look like a
+    # normal key/value assignment. Keep the header name and auth scheme visible;
+    # only the bearer value is sensitive.
     redacted = _AUTHORIZATION_BEARER_RE.sub(
         lambda match: f"{match.group(1)}{MASK}",
         redacted,
     )
+    # Finally handle generic key/value and query-string tokens such as
+    # ``api_key=...`` and ``client_secret: ...``. This is intentionally last so
+    # the more specific URL/header redactions have already preserved useful
+    # surrounding context.
     redacted = _KEY_VALUE_RE.sub(
         lambda match: f"{match.group('key')}{match.group('sep')}{MASK}",
         redacted,
@@ -114,10 +128,22 @@ class SecretRedactionFilter(logging.Filter):
         self.extra_secrets = tuple(_clean_secret(value) for value in extra_secrets or ())
 
     def filter(self, record: logging.LogRecord) -> bool:
-        """Mutate the log record in place and keep it enabled."""
+        """Mutate the log record in place and keep it enabled.
+
+        Beginner note:
+        A ``LogRecord`` stores the format string and the arguments separately.
+        If we only redacted ``record.msg``, a handler could still interpolate
+        the original secret-bearing ``record.args`` later. Calling
+        ``record.getMessage()`` first gives us the fully formatted text; clearing
+        ``record.args`` prevents Python logging from formatting it a second time.
+        """
         record.msg = redact_text(record.getMessage(), extra_secrets=self.extra_secrets)
         record.args = ()
         if record.exc_info:
+            # ``exc_info`` is the structured traceback tuple. Python formatters
+            # turn it into text after filters run, so we precompute a redacted
+            # ``exc_text`` string. The formatter will use this safe string
+            # instead of rendering the raw traceback later.
             raw_traceback = "".join(traceback.format_exception(*record.exc_info))
             record.exc_text = redact_text(raw_traceback, extra_secrets=self.extra_secrets)
         if record.stack_info:
@@ -139,6 +165,12 @@ def install_secret_redaction_filter(
     stack multiple redaction filters onto the same logger or handler. It returns
     the filter so tests can verify installation and callers can inspect it if
     needed.
+
+    Beginner note:
+    Filters on a logger do not necessarily protect every record that reaches a
+    handler through propagation. Attaching the same filter to existing handlers
+    makes the final output sink safe even when records come from child loggers
+    such as ``backend.daily_data_loader`` or ``screeners.*``.
     """
     target = logger or logging.getLogger()
     existing = _first_redaction_filter(target.filters)
@@ -157,7 +189,13 @@ def _redact_known_values(
     *,
     extra_secrets: Iterable[str] | None,
 ) -> str:
-    """Mask exact configured/extra secret values, longest first."""
+    """Mask exact configured/extra secret values, longest first.
+
+    Longest-first replacement avoids partial leaks. For example, if a short
+    client id is also embedded inside a longer database URL, masking the longer
+    URL first prevents the shorter replacement from leaving the URL password or
+    host context in a strange half-redacted state.
+    """
     secrets: list[str] = []
     for raw_secret in (*_configured_secret_values(), *(extra_secrets or ())):
         cleaned = _clean_secret(raw_secret)
@@ -170,7 +208,12 @@ def _redact_known_values(
 
 
 def _configured_secret_values() -> tuple[str, ...]:
-    """Read settings secrets defensively so redaction never raises a new error."""
+    """Read settings secrets defensively so redaction never raises a new error.
+
+    The import stays inside the function for two reasons: it avoids import-time
+    cycles during app startup, and it lets redaction degrade gracefully if
+    settings parsing is exactly the thing currently failing.
+    """
     try:
         from backend.config import secret_values
 

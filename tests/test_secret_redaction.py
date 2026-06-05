@@ -21,6 +21,9 @@ from backend.security.redaction import (
 
 def test_redact_text_masks_configured_settings_secrets(monkeypatch):
     """Secrets loaded from DEPLOY-004 settings should never be echoed back."""
+    # monkeypatch.setenv keeps the test isolated from the developer machine. If
+    # someone has real Dhan/SerpAPI values in their shell, these fake values win
+    # for the duration of this test and disappear afterward.
     monkeypatch.setenv("DATABASE_URL", "postgresql://scanner:db-secret@db/scanner")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-secret")
     monkeypatch.setenv("SERPAPI_API_KEY", "serp-secret")
@@ -59,6 +62,10 @@ def test_redact_text_masks_extra_secrets_for_streamlit_auth():
 
 def test_redact_text_masks_common_secret_formats_without_hiding_normal_errors():
     """Pattern masking catches secrets we do not already know from settings."""
+    # This raw string intentionally mixes several shapes from real error text:
+    # URL query params, HTTP auth headers, database URLs, and plain key/value
+    # pairs. The final "Invalid API key" phrase is the negative control: it is
+    # useful operator text and should not be hidden just because it says "API".
     raw = (
         "api_key=api-key-secret "
         "access_token=access-token-secret "
@@ -106,6 +113,8 @@ def test_secret_redaction_filter_masks_messages_args_and_tracebacks():
     handler = logging.StreamHandler(stream)
     handler.setFormatter(logging.Formatter("%(levelname)s:%(message)s"))
 
+    # Use a private logger instead of root logging so this test cannot affect
+    # other tests. Clearing handlers/filters makes the setup deterministic.
     logger = logging.getLogger("tests.secret_redaction")
     logger.handlers = [handler]
     logger.filters = []
@@ -113,6 +122,8 @@ def test_secret_redaction_filter_masks_messages_args_and_tracebacks():
     logger.setLevel(logging.INFO)
     install_secret_redaction_filter(logger)
 
+    # The first log exercises format-string arguments. The second exercises
+    # exception tracebacks, where the secret lives inside the exception text.
     logger.warning("request failed with api_key=%s", "argument-secret")
     try:
         raise RuntimeError("Authorization: Bearer traceback-secret")

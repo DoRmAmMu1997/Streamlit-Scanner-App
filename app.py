@@ -153,6 +153,10 @@ def prefetch_data_assets() -> None:
     This runs in plain Python BEFORE Streamlit boots, when the user starts the
     app via `python app.py`. The Streamlit UI never blocks on downloads.
     """
+    # This helper can be called directly from tests or future scripts, bypassing
+    # launch_streamlit_from_plain_python(). Install the filter here as a local
+    # safety net so prefetch logs are redacted no matter how this function is
+    # entered.
     install_secret_redaction_filter(logging.getLogger())
     ensure_project_dirs()
 
@@ -237,6 +241,9 @@ def launch_streamlit_from_plain_python() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         stream=sys.stderr,
     )
+    # The prefetch phase logs before Streamlit starts. Installing the same
+    # filter here gives terminal users the same secret protection as the browser
+    # UI path.
     install_secret_redaction_filter(logging.getLogger())
 
     prefetch_data_assets()

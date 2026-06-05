@@ -203,6 +203,8 @@ def test_prefetch_redacts_dhan_setup_errors(monkeypatch, capsys):
             return 0
 
     def build_broken_dhan_client():
+        # This mimics an SDK/setup error echoing a credential in its message.
+        # The test asserts the terminal output sees only the redacted version.
         raise RuntimeError("Dhan setup failed with access_token=broker-token-secret")
 
     monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
