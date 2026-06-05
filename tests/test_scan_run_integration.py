@@ -92,8 +92,11 @@ class _FakeDataLoader:
     like the production object without opening any broker/network connection.
     """
 
-    def __init__(self) -> None:
-        self.last_failures: list[dict] = []
+    def __init__(self, last_failures: list[dict] | None = None) -> None:
+        # A partial integration test can pass loader failures here to exercise
+        # the real SCAN-003 PARTIAL classification. The happy-path test leaves it
+        # empty, matching a clean Dhan/cache load.
+        self.last_failures: list[dict] = list(last_failures or [])
         self.last_cache_hits = 2
         self.last_cache_misses = 0
         self.last_api_attempts = 0
@@ -214,3 +217,144 @@ def test_full_scan_run_persists_results_and_history_can_be_queried(
         assert rows[1].rating == "WATCH"
         assert rows[1].close_price == Decimal("3890.2500")
         assert rows[1].raw_result_json["extra_note"] == "kept in raw_result_json"
+
+
+def test_partial_scan_run_persists_status_message_and_results(
+    integration_engine,
+    integration_session_factory,
+):
+    """A partial integration run should persist both usable rows and failures.
+
+    Service-level unit tests already prove the PARTIAL decision in isolation.
+    This integration case crosses the database boundary too: it verifies the
+    returned PARTIAL status, the committed ``scan_runs`` status/error text, and
+    the saved ``scan_results`` rows all agree in the same temp SQLite database.
+    """
+    fake_universe = pd.DataFrame(
+        {
+            "symbol": ["RELIANCE", "TCS", "INFY"],
+            "company_name": ["Reliance Industries", "Tata Consultancy", "Infosys"],
+        }
+    )
+    fake_loader = _FakeDataLoader(
+        last_failures=[
+            {
+                "symbol": "INFY",
+                "security_id": "1594",
+                "message": "offline fixture load failure",
+            }
+        ]
+    )
+    scan_params = {
+        "start_date": date(2026, 1, 1),
+        "end_date": date(2026, 6, 2),
+    }
+
+    def partial_screener(_universe_df, _data_loader, params):
+        """Return one usable row while reporting one per-symbol compute failure."""
+        params["compute_failure_callback"](
+            {"symbol": "TCS", "message": "offline fixture compute failure"}
+        )
+        return pd.DataFrame(
+            [
+                {
+                    "symbol": "RELIANCE",
+                    "rating": "BUY",
+                    "signal_date": date(2026, 6, 1),
+                    "close": Decimal("2500.00"),
+                    "reason": "usable row survived partial scan",
+                }
+            ]
+        )
+
+    result = run_scan(
+        screener_key="fake_partial_screener",
+        universe_key="fake_universe",
+        run_callable=partial_screener,
+        universe_df=fake_universe,
+        data_loader=fake_loader,
+        params=scan_params,
+        triggered_by="job:daily_scan",
+        session_factory=integration_session_factory,
+    )
+
+    assert result.status is ScanStatus.PARTIAL
+    assert result.run_id is not None
+    assert result.error_message == (
+        "1 symbol(s) failed to load and 1 failed to compute."
+    )
+    assert result.compute_failures == [
+        {"symbol": "TCS", "message": "offline fixture compute failure"}
+    ]
+    assert list(result.results["symbol"]) == ["RELIANCE"]
+
+    with Session(integration_engine) as session:
+        runs = get_latest_scan_runs(session, limit=5)
+        assert len(runs) == 1
+
+        saved_run = runs[0]
+        assert saved_run.id == result.run_id
+        assert saved_run.status is ScanStatus.PARTIAL
+        assert saved_run.screener_key == "fake_partial_screener"
+        assert saved_run.triggered_by == "job:daily_scan"
+        assert saved_run.finished_at is not None
+        assert saved_run.error_message == result.error_message
+
+        rows = get_scan_results(session, saved_run.id)
+        assert [row.symbol for row in rows] == ["RELIANCE"]
+        assert rows[0].close_price == Decimal("2500.0000")
+        assert rows[0].raw_result_json["reason"] == "usable row survived partial scan"
+
+
+def test_failed_scan_run_persists_secret_safe_error_and_no_results(
+    integration_engine,
+    integration_session_factory,
+):
+    """A failed integration run should persist FAILED without leaking secrets.
+
+    The fake exception contains a deliberately obvious secret marker. The
+    integration assertion checks both service output and committed database rows
+    so a future history UI cannot accidentally expose raw broker/API exception
+    text from ``scan_runs.error_message``.
+    """
+    fake_universe = pd.DataFrame(
+        {
+            "symbol": ["RELIANCE", "TCS"],
+            "company_name": ["Reliance Industries", "Tata Consultancy"],
+        }
+    )
+    fake_loader = _FakeDataLoader()
+
+    def failed_screener(_universe_df, _data_loader, _params):
+        """Raise before producing rows, like a fatal screener bug would."""
+        raise RuntimeError("token=SUPERSECRET should never be persisted")
+
+    result = run_scan(
+        screener_key="fake_failed_screener",
+        universe_key="fake_universe",
+        run_callable=failed_screener,
+        universe_df=fake_universe,
+        data_loader=fake_loader,
+        params={"start_date": date(2026, 1, 1), "end_date": date(2026, 6, 2)},
+        triggered_by="job:daily_scan",
+        session_factory=integration_session_factory,
+    )
+
+    assert result.status is ScanStatus.FAILED
+    assert result.run_id is not None
+    assert result.results.empty
+    assert "RuntimeError" in (result.error_message or "")
+    assert "SUPERSECRET" not in (result.error_message or "")
+
+    with Session(integration_engine) as session:
+        runs = get_latest_scan_runs(session, limit=5)
+        assert len(runs) == 1
+
+        saved_run = runs[0]
+        assert saved_run.id == result.run_id
+        assert saved_run.status is ScanStatus.FAILED
+        assert saved_run.screener_key == "fake_failed_screener"
+        assert saved_run.finished_at is not None
+        assert "RuntimeError" in (saved_run.error_message or "")
+        assert "SUPERSECRET" not in (saved_run.error_message or "")
+        assert get_scan_results(session, saved_run.id) == []
