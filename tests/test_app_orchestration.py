@@ -246,7 +246,14 @@ def test_main_requires_auth_before_discovering_screeners(monkeypatch):
 
 
 def test_main_passes_authenticated_email_as_scan_trigger(monkeypatch):
-    """Authenticated UI scans should persist who triggered the run."""
+    """Authenticated UI scans should persist who triggered the run.
+
+    Beginner note:
+    This test does not run a real screener. It replaces ``_execute_screener``
+    with a tiny fake whose only job is to capture the keyword argument that
+    ``main()`` passes down. That keeps the test focused on auth-to-audit wiring
+    instead of data loading, charts, Dhan credentials, or Streamlit rendering.
+    """
     settings = get_settings(env={"AUTH_REQUIRED": "true"})
     selected = ScreenerDefinition(
         key="demo",
@@ -262,6 +269,9 @@ def test_main_passes_authenticated_email_as_scan_trigger(monkeypatch):
     captured: dict[str, str] = {}
 
     def fake_execute(_selected, *, triggered_by):
+        # The keyword-only signature is intentional. If main() ever calls
+        # _execute_screener(selected) without the audit label again, pytest fails
+        # with a TypeError before this fake can quietly accept the mistake.
         captured["triggered_by"] = triggered_by
         return {
             "screener_key": selected.key,
@@ -282,6 +292,8 @@ def test_main_passes_authenticated_email_as_scan_trigger(monkeypatch):
     monkeypatch.setattr(
         app,
         "require_authorized_user",
+        # The mixed-case email proves app.main() normalizes through _scan_trigger
+        # before the value reaches run_scan/persistence.
         lambda _st: SimpleNamespace(email="Sunny@Example.COM"),
     )
     monkeypatch.setattr(app, "discover_screeners", lambda: {selected.key: selected})

@@ -927,6 +927,10 @@ def main() -> None:
     # charts, or CSV downloads are even reached. Local development may opt out
     # through AUTH_REQUIRED=false; production validation above prevents that
     # unsafe setting in deployed environments.
+    # Keep the authenticated identity in a small local variable instead of
+    # reaching back into Streamlit later. Streamlit's auth object is UI/session
+    # state; the scan service only needs a plain audit string like "ui" or
+    # "ui:person@example.com".
     authenticated_user: AuthenticatedUser | None = None
     if settings.auth_required:
         authenticated_user = require_authorized_user(st)
@@ -1029,6 +1033,10 @@ def _scan_trigger(authenticated_user: AuthenticatedUser | None) -> str:
     historical value ``"ui"``. When auth is enabled, storing ``ui:<email>`` lets
     a future history page answer "who started this scan?" without exposing any
     extra identity fields.
+
+    We lower-case the email because email identity comparisons elsewhere in the
+    app are case-insensitive. That keeps ``Sunny@Example.COM`` and
+    ``sunny@example.com`` from becoming two different audit identities.
     """
     if authenticated_user is None:
         return "ui"
@@ -1047,8 +1055,13 @@ def _execute_screener(
     Returns `None` when the run aborted before producing results (e.g.,
     missing credentials, universe load failure). The returned dict is stashed
     in `st.session_state["scan_cache"]` so subsequent reruns can re-render
-    without re-executing. ``triggered_by`` is the audit label persisted by the
-    scan service; the default keeps direct/test calls backwards-compatible.
+    without re-executing.
+
+    ``triggered_by`` is deliberately passed in instead of discovered here. This
+    helper already has plenty of UI work to do (credentials, progress widgets,
+    chart params, data loading). Keeping auth/audit formatting in ``main()``
+    makes this function easy to call from tests and keeps the persistence layer
+    independent from Streamlit's auth object.
     """
     # The UI no longer exposes a manual date range. Every screener receives the
     # same 10-year daily history the CLI prefetch maintains; `lookback_days`
@@ -1102,7 +1115,10 @@ def _execute_screener(
     try:
         # The data loader handles cache/failure bookkeeping. The scan service
         # (SCAN-003) runs the screener AND persists the run + results; it returns
-        # a structured result instead of raising on a screener/DB failure.
+        # a structured result instead of raising on a screener/DB failure. The
+        # triggered_by value is the only auth detail the service sees, which keeps
+        # the backend reusable for a future scheduled job that will not have a
+        # Streamlit user session.
         data_loader = DailyDataLoader(DhanDataClient.from_env())
         result = run_scan(
             screener_key=selected.key,

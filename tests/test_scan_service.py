@@ -124,11 +124,19 @@ def test_run_scan_success_persists_run_and_results(db_engine, session_factory):
 def test_run_scan_creates_running_row_before_invoking_screener(
     db_engine, session_factory
 ):
-    """The RUNNING audit row should exist while the screener is still executing."""
+    """The RUNNING audit row should exist while the screener is still executing.
+
+    Beginner note:
+    This is the regression test for the SCAN-003 review finding. The fake
+    screener opens a brand-new session while ``run_scan`` is still inside
+    ``run_callable``. If the service creates the header only after the screener
+    returns, this inner query sees zero rows and the test fails.
+    """
 
     def screener_run(_universe_df, _data_loader, _params):
-        # This assertion runs *inside* the screener callback. If SCAN-003 creates
-        # the header only after the screener returns, there will be no row here.
+        # This assertion runs inside the screener callback. A separate Session
+        # proves the RUNNING row was committed, not merely added to an uncommitted
+        # transaction that only this service can see.
         with Session(db_engine) as session:
             runs = get_latest_scan_runs(session)
             assert len(runs) == 1
@@ -157,7 +165,13 @@ def test_run_scan_creates_running_row_before_invoking_screener(
 
 
 def test_run_scan_records_failed_run_when_screener_raises(db_engine, session_factory):
-    """A screener exception is caught, recorded FAILED, and never re-raised."""
+    """A screener exception is caught, recorded FAILED, and never re-raised.
+
+    The exception text intentionally contains a fake secret. The service may
+    store the exception type (``RuntimeError``) because that helps operators, but
+    it must never store the raw message because real broker/API exceptions can
+    include credentials or request payloads.
+    """
 
     def boom(_universe_df, _data_loader, _params):
         raise RuntimeError("token=SUPERSECRET should not be stored")
@@ -181,6 +195,9 @@ def test_run_scan_records_failed_run_when_screener_raises(db_engine, session_fac
     with Session(db_engine) as session:
         runs = get_latest_scan_runs(session)
         assert runs[0].status is ScanStatus.FAILED
+        # started_at comes from the pre-scan RUNNING row; finished_at is added
+        # after the exception is caught. Having both timestamps is what makes a
+        # failed long-running scan auditable in the future history page.
         assert runs[0].started_at is not None
         assert runs[0].finished_at is not None
         assert runs[0].started_at <= runs[0].finished_at

@@ -20,8 +20,9 @@ Two deliberate design choices:
 2. **Persistence is best-effort.** Running the screener is the primary job, so a
    database problem is logged and the results are still returned to the caller.
    We create the audit header before scanner execution when possible, then save
-   rows/final status afterward. If any persistence phase fails, the scanner that
-   worked before scan-history existed still keeps working.
+   rows/final status afterward. These are separate database transactions on
+   purpose: the RUNNING row becomes visible immediately, while the actual scan
+   can take as long as it needs without holding a database lock.
 """
 
 from __future__ import annotations
@@ -64,6 +65,11 @@ class ScanRunResult:
     ``results`` is the screener's DataFrame, unchanged, so the UI renders exactly
     as it did before persistence existed. ``run_id`` is the database id when a
     run header was created, or ``None`` when persistence was unavailable.
+
+    Beginner note:
+    This dataclass is the service boundary. Streamlit should not need to know
+    whether the database write happened in one transaction, two transactions, or
+    not at all; it only needs this compact result object.
     """
 
     status: ScanStatus
@@ -89,6 +95,13 @@ def run_scan(
     The function does not raise for screener failures or database failures. A
     caller such as Streamlit gets one predictable ``ScanRunResult`` to render,
     while operators still get detailed tracebacks in logs.
+
+    Lifecycle detail:
+    ``create_scan_run`` happens before ``run_callable`` so a long-running scan is
+    auditable while it is still running. ``save_scan_results`` and
+    ``finish_scan_run`` happen afterward, once the screener has returned or
+    failed. That mirrors how a job queue usually records "started" and "finished"
+    events.
     """
     # The service owns failure observation so it can decide SUCCESS vs PARTIAL and
     # so callers do not each have to wire a callback. Copy params first: we must
@@ -115,7 +128,9 @@ def run_scan(
         results = run_callable(universe_df, data_loader, run_params)
     except Exception as exc:
         # Log the full traceback for the operator, but keep the stored/displayed
-        # message secret-free. A raw exception string could echo a token or URL.
+        # message secret-free. A raw exception string could echo a token, URL, or
+        # broker response body, while the exception class (RuntimeError, KeyError,
+        # etc.) is useful and safe enough for the future history UI.
         logger.exception("Screener %s raised during scan", screener_key)
         results = pd.DataFrame()
         status = ScanStatus.FAILED
@@ -137,8 +152,9 @@ def run_scan(
 
     # --- 3. Persist rows + final status best-effort ----------------------------
     # If the header could not be created, run_id is None and this becomes a no-op.
-    # If saving rows fails after the header exists, we try to mark that run FAILED
-    # with a secret-safe persistence message so the history table is still honest.
+    # The UI still receives the screener rows. If saving rows fails after the
+    # header exists, we try to mark that run FAILED with a secret-safe persistence
+    # message so the history table does not get stuck forever in RUNNING.
     _persist_run_outcome(
         run_id=run_id,
         results=results,
@@ -169,7 +185,9 @@ def _create_run_header(
     Beginner note:
     The header row is the durable "this scan started" breadcrumb. We commit it
     before calling the screener so a slow or failing scan remains auditable. If
-    this insert fails, we return ``None`` and the scan still runs normally.
+    this insert fails, we return ``None`` and the scan still runs normally. That
+    tradeoff keeps scan-history helpful but never mandatory for the scanner's
+    core job: returning the latest shortlist to the user.
     """
     try:
         with session_factory() as session:
@@ -183,6 +201,9 @@ def _create_run_header(
                 triggered_by=triggered_by,
             )
             # Read the flushed id before the context manager commits and closes.
+            # SQLAlchemy fills this value during flush, which create_scan_run()
+            # performs for us; after the context manager exits, tests and callers
+            # can use the id to fetch the same run in a new session.
             return run.id
     except Exception:
         logger.warning(
@@ -206,12 +227,20 @@ def _persist_run_outcome(
     This is separate from ``_create_run_header`` so the database transaction is
     open only while we write, not while the screener computes candles. That keeps
     SQLite/Postgres locks short and makes long scans safer.
+
+    If result persistence fails, the returned ``ScanRunResult`` still reflects
+    what happened in memory. The database row may be marked FAILED as a separate
+    audit concern, because "the scan succeeded but history write failed" is still
+    something operators should be able to notice.
     """
     if run_id is None:
         return
 
     try:
         with session_factory() as session:
+            # Fetch the header in this fresh session. The object returned by
+            # _create_run_header() belonged to a different transaction and should
+            # not be reused after that transaction has committed.
             run = session.get(ScanRun, run_id)
             if run is None:
                 raise RuntimeError("scan run header disappeared before finish")
@@ -235,7 +264,9 @@ def _mark_run_failed_after_persistence_error(
 
     We include only the exception *type* in the stored message. The full traceback
     is already in logs, while ``scan_runs.error_message`` may be shown in a future
-    history UI and must not echo secrets from raw exception text.
+    history UI and must not echo secrets from raw exception text. This is why the
+    message says ``IntegrityError`` or ``OperationalError`` instead of copying the
+    database driver's whole exception string.
     """
     error_message = (
         f"Could not persist scan results ({type(persistence_error).__name__})."
