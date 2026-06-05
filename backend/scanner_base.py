@@ -37,6 +37,7 @@ from typing import Any, Callable
 import pandas as pd
 
 from backend.indicators import prepare_ohlc
+from backend.security import redact_text
 
 
 logger = logging.getLogger(__name__)
@@ -165,11 +166,12 @@ class BaseScanner(ABC):
         try:
             return self.compute_signal(symbol, candles, params)
         except Exception as exc:  # noqa: BLE001 - scan resiliency is intentional here
+            safe_message = redact_text(str(exc))
             logger.warning(
                 "%s.compute_signal failed for %s: %s",
                 type(self).__name__,
                 symbol,
-                exc,
+                safe_message,
             )
             if callable(compute_failure_callback):
                 # The UI can show this concise row in "Run details" while the
@@ -180,7 +182,7 @@ class BaseScanner(ABC):
                     {
                         "symbol": symbol,
                         "scanner": type(self).__name__,
-                        "message": str(exc),
+                        "message": safe_message,
                     }
                 )
             return None
@@ -248,6 +250,7 @@ class BaseScanner(ABC):
             try:
                 signal = self.compute_signal(symbol, candles, params)
             except Exception as exc:  # noqa: BLE001 — we log and continue intentionally
+                safe_message = redact_text(str(exc))
                 # A bad candle frame for ONE symbol should not abort the
                 # whole scan. The warning is enough for diagnosis in DEBUG
                 # mode without breaking the user's overall workflow.
@@ -255,7 +258,7 @@ class BaseScanner(ABC):
                     "%s.compute_signal failed for %s: %s",
                     type(self).__name__,
                     symbol,
-                    exc,
+                    safe_message,
                 )
                 if callable(compute_failure_callback):
                     # The UI can show this concise row in "Run details" while
@@ -266,7 +269,7 @@ class BaseScanner(ABC):
                         {
                             "symbol": symbol,
                             "scanner": type(self).__name__,
-                            "message": str(exc),
+                            "message": safe_message,
                         }
                     )
                 continue

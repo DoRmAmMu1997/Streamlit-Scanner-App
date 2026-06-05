@@ -49,10 +49,8 @@ from backend.config import (
     credential_status,
     ensure_project_dirs,
     get_agent_fast_mode,
-    get_dhan_credentials,
     get_fundamentals_model,
     get_settings,
-    secret_values,
     validate_production_settings,
 )
 from backend.auth.session import (
@@ -67,6 +65,7 @@ from backend.fundamentals import (
 )
 from backend.daily_data_loader import DailyDataLoader
 from backend.dhan_client import DhanDataClient
+from backend.security import install_secret_redaction_filter, redact_text
 from backend.screener_registry import ScreenerDefinition, ScreenerRegistryError, discover_screeners
 from backend.scanning import ScanStatus, run_scan
 from backend.universe_builder import (
@@ -154,6 +153,7 @@ def prefetch_data_assets() -> None:
     This runs in plain Python BEFORE Streamlit boots, when the user starts the
     app via `python app.py`. The Streamlit UI never blocks on downloads.
     """
+    install_secret_redaction_filter(logging.getLogger())
     ensure_project_dirs()
 
     print("[prefetch] Refreshing Dhan instrument master and universe CSVs...", flush=True)
@@ -163,7 +163,7 @@ def prefetch_data_assets() -> None:
         # Stale local CSVs may still be usable. We surface the error to the
         # terminal so the user can fix it (often a transient network issue).
         logger.exception("Universe refresh failed during prefetch")
-        print(f"[prefetch] WARNING: universe refresh failed: {exc}", flush=True)
+        print(f"[prefetch] WARNING: universe refresh failed: {_redact_secrets(str(exc))}", flush=True)
         return
     for key, path in written.items():
         display_name = UNIVERSE_CONFIG.get(key, {}).get("display_name", key)
@@ -192,7 +192,11 @@ def prefetch_data_assets() -> None:
         # No credentials = no candle prefetch, but the app should still start
         # so the user can fix the .env and rerun.
         logger.exception("Could not build Dhan client for candle prefetch")
-        print(f"[prefetch] WARNING: cannot fetch candles ({exc}). Skipping.", flush=True)
+        print(
+            "[prefetch] WARNING: cannot fetch candles "
+            f"({_redact_secrets(str(exc))}). Skipping.",
+            flush=True,
+        )
         print("[prefetch] Done. Launching Streamlit UI...", flush=True)
         return
 
@@ -207,7 +211,11 @@ def prefetch_data_assets() -> None:
         except Exception as exc:
             logger.exception("Prefetch failed for %s", symbol)
             status_counts["failed"] = status_counts.get("failed", 0) + 1
-            print(f"[prefetch] {index:>4}/{total}  {symbol:<14}  FAILED  {exc}", flush=True)
+            print(
+                f"[prefetch] {index:>4}/{total}  {symbol:<14}  FAILED  "
+                f"{_redact_secrets(str(exc))}",
+                flush=True,
+            )
 
     summary = ", ".join(f"{key}={value}" for key, value in sorted(status_counts.items()))
     print(f"[prefetch] Candle prefetch complete: {summary}.", flush=True)
@@ -229,6 +237,7 @@ def launch_streamlit_from_plain_python() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         stream=sys.stderr,
     )
+    install_secret_redaction_filter(logging.getLogger())
 
     prefetch_data_assets()
 
@@ -274,10 +283,10 @@ def _escape_cell(value: Any) -> Any:
 def _redact_secrets(text: str) -> str:
     """Strip any loaded credentials from an error message before display.
 
-    Masks the Dhan access token / client code plus optional web-search or LLM
-    provider keys that may be present in the centralized settings object. It
-    also masks the Streamlit OIDC cookie/client secrets configured for Google
-    SSO.
+    Delegates to ``backend.security.redaction`` so Streamlit, backend jobs, and
+    tests all share one definition of "secret-looking text." Streamlit-specific
+    OIDC values still come from ``st.secrets``, so this wrapper passes them as
+    extra secrets on top of the process/env-backed DEPLOY-004 settings.
 
     Beginner note:
     SDKs and frameworks occasionally embed request payloads or config values in
@@ -285,43 +294,12 @@ def _redact_secrets(text: str) -> str:
     passing text to `st.error(...)`, so an error panel can still be useful
     without accidentally leaking credentials.
 
-    This helper is intentionally best-effort. If settings parsing itself failed
-    (for example `LOG_LEVEL=chatty`), this function must still return a readable
-    error string instead of raising a second exception while trying to redact the
-    first one.
+    The shared helper is intentionally best-effort. If settings parsing itself
+    failed (for example `LOG_LEVEL=chatty`), this function must still return a
+    readable error string instead of raising a second exception while trying to
+    redact the first one.
     """
-    if not isinstance(text, str) or not text:
-        return text
-    secrets: list[str] = []
-
-    try:
-        # Dhan credentials are pulled separately for compatibility with older
-        # tests that patch get_dhan_credentials directly.
-        dhan = get_dhan_credentials(required=False)
-    except SettingsError:
-        dhan = None
-    if dhan is not None:
-        secrets.extend(filter(None, [dhan.access_token, dhan.client_code]))
-    try:
-        # secret_values() covers the new DEPLOY-004 settings surface, including
-        # DATABASE_URL because it may contain a database password.
-        secrets.extend(secret_values())
-    except SettingsError:
-        # The caller may be trying to display the settings error itself. Redact
-        # whatever we can instead of making the error path fail a second time.
-        pass
-    secrets.extend(auth_secret_values(st))
-
-    if not secrets:
-        return text
-
-    redacted = text
-    # Replace the longest values first so substring overlaps cannot leak parts
-    # of a longer secret after the shorter one is masked.
-    for secret in sorted(secrets, key=len, reverse=True):
-        if secret:
-            redacted = redacted.replace(secret, "***REDACTED***")
-    return redacted
+    return redact_text(text, extra_secrets=auth_secret_values(st))
 
 
 # ---------------------------------------------------------------------------
@@ -869,9 +847,11 @@ def _configure_logging() -> None:
     means we do not stomp on a logger already configured by the CLI prefetch
     path, where `launch_streamlit_from_plain_python` has its own setup.
     """
-    if logging.getLogger().handlers:
+    root_logger = logging.getLogger()
+    if root_logger.handlers:
         # Some Python entry point already configured the root logger
         # (e.g. the CLI prefetch). Honor that rather than reconfiguring.
+        install_secret_redaction_filter(root_logger)
         return
     # get_settings() validates LOG_LEVEL, so getattr is mostly defensive here:
     # if Python ever lacks a named level, keep the app quiet at WARNING.
@@ -881,6 +861,7 @@ def _configure_logging() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         stream=sys.stderr,
     )
+    install_secret_redaction_filter(root_logger)
 
 
 # ---------------------------------------------------------------------------

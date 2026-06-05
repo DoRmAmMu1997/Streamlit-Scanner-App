@@ -61,6 +61,13 @@ class _FailingScanner(BaseScanner):
         raise RuntimeError(f"intentional failure on {symbol}")
 
 
+class _SecretFailingScanner(_FailingScanner):
+    """A failing scanner whose error message looks like a broker token leak."""
+
+    def compute_signal(self, symbol, candles, params):
+        raise RuntimeError(f"token=broker-token-secret for {symbol}")
+
+
 class _FakeLoader:
     """Drop-in for DailyDataLoader. Returns prebuilt frames; no Dhan calls."""
 
@@ -284,6 +291,27 @@ def test_run_reports_compute_failures_through_callback():
             "message": "intentional failure on A",
         }
     ]
+
+
+def test_run_redacts_compute_failure_secrets_in_callback_and_logs(caplog):
+    """Per-symbol failures may reach UI details, so they must be secret-safe."""
+    frames = {"A": _candles([1.0, 2.0])}
+    failures = []
+
+    with caplog.at_level("WARNING"):
+        result = _SecretFailingScanner().run(
+            pd.DataFrame(),
+            _FakeLoader(frames),
+            _params(compute_failure_callback=failures.append),
+        )
+
+    assert result.empty
+    assert failures[0]["symbol"] == "A"
+    assert "broker-token-secret" not in failures[0]["message"]
+    assert "***REDACTED***" in failures[0]["message"]
+    messages = " ".join(record.getMessage() for record in caplog.records)
+    assert "broker-token-secret" not in messages
+    assert "***REDACTED***" in messages
 
 
 def test_run_uses_streaming_loader_when_available():

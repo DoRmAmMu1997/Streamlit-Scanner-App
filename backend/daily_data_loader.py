@@ -20,6 +20,7 @@ import pandas as pd
 
 from backend.config import DAILY_CACHE_DIR, dhan_rate_limit_retry_delays, dhan_request_delay_seconds
 from backend.dhan_client import DhanDataClient, DhanRateLimitError
+from backend.security import redact_text
 
 
 # Module-level logger. Streamlit captures stderr, so logger output appears in the
@@ -579,11 +580,12 @@ class DailyDataLoader:
                     item = HistoryLoadItem(symbol=symbol, candles=candles, from_cache=from_cache)
                 except Exception as exc:
                     consecutive_failures += 1
-                    logger.exception("Failed to load history for %s", symbol)
+                    safe_message = redact_text(str(exc))
+                    logger.warning("Failed to load history for %s: %s", symbol, safe_message)
                     failure = {
                         "symbol": symbol,
                         "security_id": row.get("security_id", ""),
-                        "message": str(exc),
+                        "message": safe_message,
                     }
                     result.failures.append(failure)
                     item = HistoryLoadItem(symbol=symbol, failure=failure)
