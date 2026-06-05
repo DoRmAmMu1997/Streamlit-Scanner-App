@@ -8,6 +8,9 @@ test pass or fail by accident.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -203,3 +206,26 @@ def test_settings_repr_and_safe_dict_never_print_secret_values(tmp_path: Path):
         "client-secret",
         "token-secret",
     }
+
+
+def test_importing_backend_config_survives_malformed_log_level():
+    """A bad LOG_LEVEL must not crash imports; the friendly error fires later.
+
+    ``backend.config`` snapshots legacy path constants at import time. If that
+    snapshot raised on a malformed value, every importer (``app``,
+    ``backend.storage.database``, Alembic's ``env.py``) would crash with a raw
+    traceback instead of the friendly startup error. This runs the import in a
+    subprocess with ``LOG_LEVEL=chatty`` so a clean import is the only way to
+    pass. The real configuration error still surfaces at app startup via
+    ``validate_production_settings(get_settings())``.
+    """
+    env = {**os.environ, "LOG_LEVEL": "chatty"}
+    result = subprocess.run(
+        [sys.executable, "-c", "import backend.config; print(backend.config.DATA_DIR)"],
+        env=env,
+        capture_output=True,
+        text=True,
+        cwd=str(PROJECT_ROOT),
+    )
+
+    assert result.returncode == 0, result.stderr

@@ -41,7 +41,16 @@ from .settings import (
     validate_production_settings,
 )
 
-_settings = get_settings()
+try:
+    _settings = get_settings()
+except SettingsError:
+    # A malformed value (e.g. LOG_LEVEL=chatty or AUTH_REQUIRED=maybe) must not
+    # break importing these legacy path constants, or any module that imports
+    # backend.config (app, backend.storage.database, Alembic's env.py). Fall back
+    # to safe development defaults for the snapshot below; the real configuration
+    # error is re-raised with a friendly message by get_settings() /
+    # validate_production_settings() at app startup.
+    _settings = get_settings(env={})
 
 # Historical path constants. They are evaluated at import time from the current
 # settings so deployments that set DATA_DIR before startup still get the right

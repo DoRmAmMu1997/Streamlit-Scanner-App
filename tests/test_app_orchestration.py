@@ -277,6 +277,49 @@ def test_main_stops_before_runtime_dirs_when_production_settings_are_invalid(mon
     assert "DATA_DIR" in errors[0]
 
 
+def test_main_skips_auth_gate_when_auth_not_required(monkeypatch):
+    """Development default (AUTH_REQUIRED=false) should skip the auth gate.
+
+    DEPLOY-004 changed main() from always gating to ``if settings.auth_required``.
+    This locks the dev-skips-auth branch: the gate is not called, yet the run still
+    proceeds to screener discovery. Production safety is covered separately by the
+    settings validation tests (AUTH_REQUIRED cannot be false in production).
+    """
+
+    class _StopAtDiscovery(RuntimeError):
+        """Test-only signal that main() reached discovery without the auth gate."""
+
+    auth_calls: list[int] = []
+    # get_settings(env={}) yields development defaults: auth_required is False and
+    # is_production is False, so production validation passes and the gate is skipped.
+    settings = get_settings(env={})
+
+    monkeypatch.setattr(app, "get_settings", lambda: settings)
+    monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
+    monkeypatch.setattr(app, "_configure_logging", lambda: None)
+    monkeypatch.setattr(app, "require_authorized_user", lambda _st: auth_calls.append(1))
+    monkeypatch.setattr(
+        app,
+        "discover_screeners",
+        lambda: (_ for _ in ()).throw(_StopAtDiscovery()),
+    )
+    monkeypatch.setattr(
+        app,
+        "st",
+        SimpleNamespace(
+            set_page_config=lambda **_kwargs: None,
+            markdown=lambda *_args, **_kwargs: None,
+            title=lambda *_args, **_kwargs: None,
+            caption=lambda *_args, **_kwargs: None,
+        ),
+    )
+
+    with pytest.raises(_StopAtDiscovery):
+        app.main()
+
+    assert auth_calls == []
+
+
 def test_universe_table_defers_status_loading_until_user_opts_in(monkeypatch):
     """Collapsed universe details should not scan every universe on each rerun."""
 
