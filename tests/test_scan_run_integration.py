@@ -11,6 +11,13 @@ same boundaries a real scan crosses after SCAN-003:
 4. The repository saves ``scan_results`` and marks the run finished.
 5. History queries read the saved run and results back.
 
+The three tests cover the three persisted end states a future history UI needs
+to trust:
+
+- SUCCESS: rows were produced and every symbol path completed.
+- PARTIAL: useful rows exist, but the run also recorded per-symbol problems.
+- FAILED: the screener aborted before producing usable rows.
+
 The important safety rule: every external dependency is fake. There is no Dhan
 client, no Streamlit browser, no LLM, no Screener.in request, and no real
 ``data/scanner.db`` write. The only database is a temporary SQLite file created
@@ -90,6 +97,12 @@ class _FakeDataLoader:
     ``run_scan`` only needs failure bookkeeping from the loader. The extra stats
     mirror the fields ``app.py`` reads after a real scan, making the fake look
     like the production object without opening any broker/network connection.
+
+    Beginner note:
+    In the real app, loader failures mean "we could not fetch candles for one
+    symbol" (rate limit, missing security id, timeout, etc.). That is different
+    from a screener compute failure, where candles existed but strategy math
+    failed for that symbol. SCAN-003 treats either kind as PARTIAL.
     """
 
     def __init__(self, last_failures: list[dict] | None = None) -> None:
@@ -229,6 +242,13 @@ def test_partial_scan_run_persists_status_message_and_results(
     This integration case crosses the database boundary too: it verifies the
     returned PARTIAL status, the committed ``scan_runs`` status/error text, and
     the saved ``scan_results`` rows all agree in the same temp SQLite database.
+
+    Beginner note:
+    Partial is not "bad enough to throw everything away." It means the scan
+    still produced useful shortlist rows, but operators need a durable warning
+    that some symbols were skipped or failed. That durable warning lives on the
+    parent ``scan_runs`` row, while the usable shortlist still lives in
+    ``scan_results``.
     """
     fake_universe = pd.DataFrame(
         {
@@ -245,13 +265,21 @@ def test_partial_scan_run_persists_status_message_and_results(
             }
         ]
     )
+    # Keep params minimal here. The integration point we care about is not a
+    # screener's strategy knobs; it is that SCAN-003 persists the end date as the
+    # data snapshot and stores the final PARTIAL status.
     scan_params = {
         "start_date": date(2026, 1, 1),
         "end_date": date(2026, 6, 2),
     }
 
     def partial_screener(_universe_df, _data_loader, params):
-        """Return one usable row while reporting one per-symbol compute failure."""
+        """Return one usable row while reporting one per-symbol compute failure.
+
+        ``run_scan`` injects ``compute_failure_callback`` into the params copy it
+        passes to screeners. A real BaseScanner calls this callback when one
+        symbol's indicator math fails but the wider scan can continue.
+        """
         params["compute_failure_callback"](
             {"symbol": "TCS", "message": "offline fixture compute failure"}
         )
@@ -289,6 +317,9 @@ def test_partial_scan_run_persists_status_message_and_results(
     assert list(result.results["symbol"]) == ["RELIANCE"]
 
     with Session(integration_engine) as session:
+        # Re-open a new Session on purpose. If the service only changed in-memory
+        # objects and forgot to commit, this independent history query would see
+        # nothing.
         runs = get_latest_scan_runs(session, limit=5)
         assert len(runs) == 1
 
@@ -300,6 +331,9 @@ def test_partial_scan_run_persists_status_message_and_results(
         assert saved_run.finished_at is not None
         assert saved_run.error_message == result.error_message
 
+        # Even though the parent run is PARTIAL, the good row should still be
+        # queryable. This is the behavior a future history page needs: show the
+        # user both the warning and the usable shortlist.
         rows = get_scan_results(session, saved_run.id)
         assert [row.symbol for row in rows] == ["RELIANCE"]
         assert rows[0].close_price == Decimal("2500.0000")
@@ -316,6 +350,11 @@ def test_failed_scan_run_persists_secret_safe_error_and_no_results(
     integration assertion checks both service output and committed database rows
     so a future history UI cannot accidentally expose raw broker/API exception
     text from ``scan_runs.error_message``.
+
+    Beginner note:
+    A FAILED run is different from PARTIAL. Here the screener raises before it
+    can return a valid result table, so there should be a parent audit row but no
+    child ``scan_results`` rows.
     """
     fake_universe = pd.DataFrame(
         {
@@ -326,7 +365,12 @@ def test_failed_scan_run_persists_secret_safe_error_and_no_results(
     fake_loader = _FakeDataLoader()
 
     def failed_screener(_universe_df, _data_loader, _params):
-        """Raise before producing rows, like a fatal screener bug would."""
+        """Raise before producing rows, like a fatal screener bug would.
+
+        The raw message intentionally looks like it contains a credential. The
+        service should preserve the safe exception type (RuntimeError) and drop
+        the unsafe raw text from returned/persisted messages.
+        """
         raise RuntimeError("token=SUPERSECRET should never be persisted")
 
     result = run_scan(
@@ -343,6 +387,8 @@ def test_failed_scan_run_persists_secret_safe_error_and_no_results(
     assert result.status is ScanStatus.FAILED
     assert result.run_id is not None
     assert result.results.empty
+    # The service result may be shown directly to a caller, so check it before
+    # checking the database copy.
     assert "RuntimeError" in (result.error_message or "")
     assert "SUPERSECRET" not in (result.error_message or "")
 
@@ -355,6 +401,9 @@ def test_failed_scan_run_persists_secret_safe_error_and_no_results(
         assert saved_run.status is ScanStatus.FAILED
         assert saved_run.screener_key == "fake_failed_screener"
         assert saved_run.finished_at is not None
+        # The persisted message is the one a future scan-history UI will render.
+        # Keeping this assertion at the database boundary catches accidental raw
+        # exception storage, not just accidental raw exception return values.
         assert "RuntimeError" in (saved_run.error_message or "")
         assert "SUPERSECRET" not in (saved_run.error_message or "")
         assert get_scan_results(session, saved_run.id) == []
