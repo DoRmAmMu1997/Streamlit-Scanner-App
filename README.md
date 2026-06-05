@@ -352,6 +352,42 @@ uses whatever data is already cached locally (no prefetch).
 
 ---
 
+## Running the daily scan job
+
+JOB-001 adds a headless command for schedulers, terminals, and hosting
+platforms that need to run scans without opening Streamlit:
+
+```bash
+python -m backend.jobs.run_daily_scan
+```
+
+By default it runs the deterministic daily set:
+`bollinger_band_reversal`, `heikin_ashi_supertrend`, and
+`envelope_knoxville_buy`. Each screener uses the universe declared in its
+registry metadata, so F&O screeners run on `fno` and the Envelope + Knoxville
+screener runs on `hemant_super_45`.
+
+The command expects the normal runtime setup to exist first: run
+`python -m alembic upgrade head` so scan history tables are present, keep the
+universe CSVs under `DATA_DIR/universes`, and configure Dhan credentials so the
+daily data loader can fetch/cache candles. Local scan history defaults to
+`data/scanner.db`; deployments can point `DATABASE_URL` at Postgres or another
+SQLAlchemy-supported database.
+
+To run a custom set, repeat `--screener`:
+
+```bash
+python -m backend.jobs.run_daily_scan --screener technical_analysis --screener envelope
+```
+
+Exit code `0` means every selected scan persisted history and finished
+`success` or `partial`. Exit code `1` means a fatal problem occurred, such as an
+unknown screener key, missing setup, a failed screener, or a scan whose results
+could not be written to `scan_runs` / `scan_results`. Operator summaries include
+status and run ids, but not raw secrets.
+
+---
+
 ## Project structure
 
 ```
@@ -373,6 +409,7 @@ Streamlit Scanner App/
 │   ├── universe_loader.py       # Reads the universe CSVs
 │   ├── screener_registry.py     # Discovers + validates screeners
 │   ├── scanner_base.py          # BaseScanner ABC every screener subclasses
+│   ├── jobs/                    # Headless commands such as daily scans
 │   ├── indicators.py            # Indicators (TA-Lib/pandas_ta + fallbacks)
 │   ├── url_safety.py            # Shared guardrails for server-side fetches
 │   ├── charts.py                # Lightweight Charts chart-spec builders
