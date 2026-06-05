@@ -16,6 +16,7 @@ import pandas as pd
 import pytest
 
 import app
+from backend.scanning import ScanRunResult, ScanStatus
 from backend.screener_registry import ScreenerDefinition
 
 
@@ -83,12 +84,14 @@ def test_execute_screener_uses_ten_year_data_window_independent_of_lookback(monk
     """Screener lookback is display/strategy metadata; candle history is always 10y."""
     captured_params: dict = {}
 
-    def fake_run(universe_df, data_loader, params):
+    def fake_run_scan(
+        *, screener_key, universe_key, run_callable, universe_df, data_loader,
+        params, triggered_by="ui",
+    ):
+        # `_execute_screener` now delegates running + persistence to the service.
+        # We assert the 10-year window via the params it forwards.
         captured_params.update(params)
-        return pd.DataFrame(
-            [],
-            columns=["symbol", "rating", "signal_date", "close", "reason"],
-        )
+        return ScanRunResult(status=ScanStatus.SUCCESS, results=pd.DataFrame())
 
     selected = ScreenerDefinition(
         key="demo",
@@ -99,7 +102,7 @@ def test_execute_screener_uses_ten_year_data_window_independent_of_lookback(monk
         lookback_days=30,
         default_params={},
         module_name="screeners.demo",
-        run=fake_run,
+        run=lambda *_args, **_kwargs: pd.DataFrame(),
     )
 
     monkeypatch.setattr(app, "date", _FixedDate)
@@ -111,6 +114,7 @@ def test_execute_screener_uses_ten_year_data_window_independent_of_lookback(monk
         "DhanDataClient",
         SimpleNamespace(from_env=lambda: object()),
     )
+    monkeypatch.setattr(app, "run_scan", fake_run_scan)
     monkeypatch.setattr(
         app,
         "st",
