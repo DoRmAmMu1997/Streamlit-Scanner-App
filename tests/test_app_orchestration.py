@@ -17,6 +17,7 @@ import pytest
 
 import app
 from backend.config.settings import get_settings
+from backend.scanning import ScanRunResult, ScanStatus
 from backend.screener_registry import ScreenerDefinition
 
 
@@ -84,12 +85,14 @@ def test_execute_screener_uses_ten_year_data_window_independent_of_lookback(monk
     """Screener lookback is display/strategy metadata; candle history is always 10y."""
     captured_params: dict = {}
 
-    def fake_run(universe_df, data_loader, params):
+    def fake_run_scan(
+        *, screener_key, universe_key, run_callable, universe_df, data_loader,
+        params, triggered_by="ui",
+    ):
+        # `_execute_screener` now delegates running + persistence to the service.
+        # We assert the 10-year window via the params it forwards.
         captured_params.update(params)
-        return pd.DataFrame(
-            [],
-            columns=["symbol", "rating", "signal_date", "close", "reason"],
-        )
+        return ScanRunResult(status=ScanStatus.SUCCESS, results=pd.DataFrame())
 
     selected = ScreenerDefinition(
         key="demo",
@@ -100,7 +103,7 @@ def test_execute_screener_uses_ten_year_data_window_independent_of_lookback(monk
         lookback_days=30,
         default_params={},
         module_name="screeners.demo",
-        run=fake_run,
+        run=lambda *_args, **_kwargs: pd.DataFrame(),
     )
 
     monkeypatch.setattr(app, "date", _FixedDate)
@@ -112,6 +115,7 @@ def test_execute_screener_uses_ten_year_data_window_independent_of_lookback(monk
         "DhanDataClient",
         SimpleNamespace(from_env=lambda: object()),
     )
+    monkeypatch.setattr(app, "run_scan", fake_run_scan)
     monkeypatch.setattr(
         app,
         "st",
@@ -239,6 +243,84 @@ def test_main_requires_auth_before_discovering_screeners(monkeypatch):
 
     with pytest.raises(StopFromAuth):
         app.main()
+
+
+def test_main_passes_authenticated_email_as_scan_trigger(monkeypatch):
+    """Authenticated UI scans should persist who triggered the run.
+
+    Beginner note:
+    This test does not run a real screener. It replaces ``_execute_screener``
+    with a tiny fake whose only job is to capture the keyword argument that
+    ``main()`` passes down. That keeps the test focused on auth-to-audit wiring
+    instead of data loading, charts, Dhan credentials, or Streamlit rendering.
+    """
+    settings = get_settings(env={"AUTH_REQUIRED": "true"})
+    selected = ScreenerDefinition(
+        key="demo",
+        name="Demo",
+        description="Test-only screener",
+        universe="demo_universe",
+        timeframe="daily",
+        lookback_days=30,
+        default_params={},
+        module_name="screeners.demo",
+        run=lambda *_args, **_kwargs: pd.DataFrame(),
+    )
+    captured: dict[str, str] = {}
+
+    def fake_execute(_selected, *, triggered_by):
+        # The keyword-only signature is intentional. If main() ever calls
+        # _execute_screener(selected) without the audit label again, pytest fails
+        # with a TypeError before this fake can quietly accept the mistake.
+        captured["triggered_by"] = triggered_by
+        return {
+            "screener_key": selected.key,
+            "results": pd.DataFrame(),
+            "failures": [],
+            "compute_failures": [],
+            "stats": {},
+            "universe_df": pd.DataFrame(),
+            "params_for_chart": {},
+            "data_loader": object(),
+            "run_id": 123,
+            "status": "success",
+        }
+
+    monkeypatch.setattr(app, "get_settings", lambda: settings)
+    monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
+    monkeypatch.setattr(app, "_configure_logging", lambda: None)
+    monkeypatch.setattr(
+        app,
+        "require_authorized_user",
+        # The mixed-case email proves app.main() normalizes through _scan_trigger
+        # before the value reaches run_scan/persistence.
+        lambda _st: SimpleNamespace(email="Sunny@Example.COM"),
+    )
+    monkeypatch.setattr(app, "discover_screeners", lambda: {selected.key: selected})
+    monkeypatch.setattr(app, "_render_sidebar", lambda _screeners: selected)
+    monkeypatch.setattr(app, "show_status_panel", lambda _selected: None)
+    monkeypatch.setattr(app, "render_universe_table", lambda: None)
+    monkeypatch.setattr(app, "_execute_screener", fake_execute)
+    monkeypatch.setattr(app, "_render_scan_output", lambda _selected, _cache: None)
+    monkeypatch.setattr(
+        app,
+        "st",
+        SimpleNamespace(
+            session_state={"pending_run": True},
+            set_page_config=lambda **_kwargs: None,
+            markdown=lambda *_args, **_kwargs: None,
+            title=lambda *_args, **_kwargs: None,
+            caption=lambda *_args, **_kwargs: None,
+            subheader=lambda *_args, **_kwargs: None,
+            write=lambda *_args, **_kwargs: None,
+            info=lambda *_args, **_kwargs: None,
+            error=lambda message: (_ for _ in ()).throw(AssertionError(message)),
+        ),
+    )
+
+    app.main()
+
+    assert captured["triggered_by"] == "ui:sunny@example.com"
 
 
 def test_main_stops_before_runtime_dirs_when_production_settings_are_invalid(monkeypatch):

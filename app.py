@@ -55,7 +55,11 @@ from backend.config import (
     secret_values,
     validate_production_settings,
 )
-from backend.auth.session import auth_secret_values, require_authorized_user
+from backend.auth.session import (
+    AuthenticatedUser,
+    auth_secret_values,
+    require_authorized_user,
+)
 from backend.fundamentals import (
     AgentVerdict,
     FundamentalAgent,
@@ -64,6 +68,7 @@ from backend.fundamentals import (
 from backend.daily_data_loader import DailyDataLoader
 from backend.dhan_client import DhanDataClient
 from backend.screener_registry import ScreenerDefinition, ScreenerRegistryError, discover_screeners
+from backend.scanning import ScanStatus, run_scan
 from backend.universe_builder import (
     UNIVERSE_CONFIG,
     refresh_universe_files,
@@ -922,8 +927,13 @@ def main() -> None:
     # charts, or CSV downloads are even reached. Local development may opt out
     # through AUTH_REQUIRED=false; production validation above prevents that
     # unsafe setting in deployed environments.
+    # Keep the authenticated identity in a small local variable instead of
+    # reaching back into Streamlit later. Streamlit's auth object is UI/session
+    # state; the scan service only needs a plain audit string like "ui" or
+    # "ui:person@example.com".
+    authenticated_user: AuthenticatedUser | None = None
     if settings.auth_required:
-        require_authorized_user(st)
+        authenticated_user = require_authorized_user(st)
 
     try:
         # A screener is just a Python module in `screeners/`. Discovery happens
@@ -953,7 +963,10 @@ def main() -> None:
     #   simply re-render from `scan_cache` so the user does not lose state.
     # - Switching screeners invalidates the cache via the key mismatch check.
     if st.session_state.pop("pending_run", False):
-        cache = _execute_screener(selected)
+        cache = _execute_screener(
+            selected,
+            triggered_by=_scan_trigger(authenticated_user),
+        )
         if cache is not None:
             st.session_state["scan_cache"] = cache
 
@@ -1012,13 +1025,43 @@ def _render_sidebar(screeners: dict[str, ScreenerDefinition]) -> ScreenerDefinit
     return selected
 
 
-def _execute_screener(selected: ScreenerDefinition) -> dict[str, Any] | None:
+def _scan_trigger(authenticated_user: AuthenticatedUser | None) -> str:
+    """Return the small audit label stored in ``scan_runs.triggered_by``.
+
+    Beginner note:
+    Local development often runs with auth disabled, so those scans stay as the
+    historical value ``"ui"``. When auth is enabled, storing ``ui:<email>`` lets
+    a future history page answer "who started this scan?" without exposing any
+    extra identity fields.
+
+    We lower-case the email because email identity comparisons elsewhere in the
+    app are case-insensitive. That keeps ``Sunny@Example.COM`` and
+    ``sunny@example.com`` from becoming two different audit identities.
+    """
+    if authenticated_user is None:
+        return "ui"
+
+    email = str(authenticated_user.email).strip().lower()
+    return f"ui:{email}" if email else "ui"
+
+
+def _execute_screener(
+    selected: ScreenerDefinition,
+    *,
+    triggered_by: str = "ui",
+) -> dict[str, Any] | None:
     """Run the selected screener and return a cache payload.
 
     Returns `None` when the run aborted before producing results (e.g.,
     missing credentials, universe load failure). The returned dict is stashed
     in `st.session_state["scan_cache"]` so subsequent reruns can re-render
     without re-executing.
+
+    ``triggered_by`` is deliberately passed in instead of discovered here. This
+    helper already has plenty of UI work to do (credentials, progress widgets,
+    chart params, data loading). Keeping auth/audit formatting in ``main()``
+    makes this function easy to call from tests and keeps the persistence layer
+    independent from Streamlit's auth object.
     """
     # The UI no longer exposes a manual date range. Every screener receives the
     # same 10-year daily history the CLI prefetch maintains; `lookback_days`
@@ -1068,15 +1111,27 @@ def _execute_screener(selected: ScreenerDefinition) -> dict[str, Any] | None:
     params_for_chart.update({"start_date": start_date, "end_date": end_date})
     params: dict[str, Any] = dict(params_for_chart)
     params["progress_callback"] = progress_callback
-    compute_failures: list[dict[str, Any]] = []
-    params["compute_failure_callback"] = compute_failures.append
 
     try:
-        # The data loader handles cache/failure bookkeeping. The screener
-        # only receives a clean data access object and returns a DataFrame.
+        # The data loader handles cache/failure bookkeeping. The scan service
+        # (SCAN-003) runs the screener AND persists the run + results; it returns
+        # a structured result instead of raising on a screener/DB failure. The
+        # triggered_by value is the only auth detail the service sees, which keeps
+        # the backend reusable for a future scheduled job that will not have a
+        # Streamlit user session.
         data_loader = DailyDataLoader(DhanDataClient.from_env())
-        results = selected.run(universe_df, data_loader, params)
+        result = run_scan(
+            screener_key=selected.key,
+            universe_key=selected.universe,
+            run_callable=selected.run,
+            universe_df=universe_df,
+            data_loader=data_loader,
+            params=params,
+            triggered_by=triggered_by,
+        )
     except Exception as exc:
+        # Reached only for unexpected setup errors (e.g. building the data loader).
+        # Screener and persistence failures are captured inside `result`.
         logger.exception("Screener run failed for %s", selected.key)
         st.error(f"Screener run failed: {_redact_secrets(str(exc))}")
         return None
@@ -1086,11 +1141,19 @@ def _execute_screener(selected: ScreenerDefinition) -> dict[str, Any] | None:
         progress_bar.empty()
         progress_status.empty()
 
+    # A screener that raised before producing rows behaves like before: show the
+    # error and skip caching. The FAILED run itself is still recorded by the service.
+    if result.status is ScanStatus.FAILED:
+        st.error(
+            f"Screener run failed: {_redact_secrets(result.error_message or 'unknown error')}"
+        )
+        return None
+
     return {
         "screener_key": selected.key,
-        "results": results,
+        "results": result.results,
         "failures": list(data_loader.last_failures),
-        "compute_failures": compute_failures,
+        "compute_failures": result.compute_failures,
         "stats": {
             "cache_hits": data_loader.last_cache_hits,
             "cache_misses": data_loader.last_cache_misses,
@@ -1100,6 +1163,8 @@ def _execute_screener(selected: ScreenerDefinition) -> dict[str, Any] | None:
         "universe_df": universe_df,
         "params_for_chart": params_for_chart,
         "data_loader": data_loader,
+        "run_id": result.run_id,
+        "status": result.status.value,
     }
 
 
