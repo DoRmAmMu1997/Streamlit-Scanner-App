@@ -26,7 +26,7 @@ WHEN TO RUN THIS SCRIPT
 WHAT YOU NEED FIRST (before running this)
 -----------------------------------------
 Open `Dependencies/.env` and fill in:
-    DHAN_CLIENT_CODE       <- your 10-digit dhan client id
+    DHAN_CLIENT_ID         <- your 10-digit dhan client id
     DHAN_API_KEY           <- the API Key  (also called "app_id"  in DhanHQ docs)
     DHAN_API_SECRET        <- the API Secret (also called "app_secret")
 Leave DHAN_ACCESS_TOKEN blank; this script populates it for you.
@@ -132,7 +132,8 @@ def _load_env() -> dict:
         print(
             f"ERROR: .env not found at {ENV_PATH}\n"
             "Open that file (it is a template at the same path) and fill in "
-            "DHAN_CLIENT_CODE / DHAN_API_KEY / DHAN_API_SECRET first."
+            "DHAN_CLIENT_ID / DHAN_API_KEY / DHAN_API_SECRET first. "
+            "The old DHAN_CLIENT_CODE name is still accepted."
         )
         sys.exit(1)
 
@@ -170,6 +171,40 @@ def _require(env_var: str) -> str:
         )
         sys.exit(1)
     return value
+
+
+def _require_dhan_client_id() -> str:
+    """
+    Return the Dhan client id using the new name, then the legacy alias.
+
+    DEPLOY-004 standardizes the app on ``DHAN_CLIENT_ID``. Older local ``.env``
+    files may still contain ``DHAN_CLIENT_CODE``, so the token-refresh helper
+    accepts both names instead of forcing every developer to edit their file
+    before they can refresh a token.
+    """
+    # Prefer the canonical DEPLOY-004 name. This is the name shown in the new
+    # .env.example and README, so fresh installs should land here.
+    value = (os.getenv("DHAN_CLIENT_ID") or "").strip()
+    if value.startswith(('"', "'")) and value.endswith(('"', "'")):
+        value = value[1:-1]
+    if value:
+        return value
+
+    # Compatibility path for existing local files. We do not write a replacement
+    # DHAN_CLIENT_ID here because this script's job is only to refresh the access
+    # token while preserving the user's hand-edited .env layout.
+    value = (os.getenv("DHAN_CLIENT_CODE") or "").strip()
+    if value.startswith(('"', "'")) and value.endswith(('"', "'")):
+        value = value[1:-1]
+    if value:
+        return value
+
+    print(
+        "ERROR: DHAN_CLIENT_ID is empty in .env\n"
+        f"Open {ENV_PATH} and set DHAN_CLIENT_ID before running this script. "
+        "Legacy DHAN_CLIENT_CODE is also accepted."
+    )
+    sys.exit(1)
 
 
 def _write_access_token_to_env(new_token: str) -> None:
@@ -259,7 +294,7 @@ def main() -> None:
     # Load .env and grab the three required pieces of identity. If any of
     # them is missing we abort here -- the rest of the flow can't proceed.
     _load_env()
-    client_code = _require("DHAN_CLIENT_CODE")
+    client_code = _require_dhan_client_id()
     api_key = _require("DHAN_API_KEY")
     api_secret = _require("DHAN_API_SECRET")
 

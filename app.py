@@ -31,7 +31,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -46,13 +45,21 @@ from streamlit.runtime.scriptrunner import get_script_run_ctx
 from backend.charts import render_chart_html
 from backend.config import (
     DAILY_CACHE_DIR,
+    SettingsError,
     credential_status,
     ensure_project_dirs,
     get_agent_fast_mode,
     get_dhan_credentials,
     get_fundamentals_model,
+    get_settings,
+    secret_values,
+    validate_production_settings,
 )
-from backend.auth.session import auth_secret_values, require_authorized_user
+from backend.auth.session import (
+    AuthenticatedUser,
+    auth_secret_values,
+    require_authorized_user,
+)
 from backend.fundamentals import (
     AgentVerdict,
     FundamentalAgent,
@@ -268,31 +275,41 @@ def _redact_secrets(text: str) -> str:
     """Strip any loaded credentials from an error message before display.
 
     Masks the Dhan access token / client code plus optional web-search or LLM
-    provider keys that may be present in the environment. It also masks the
-    Streamlit OIDC cookie/client secrets configured for Google SSO.
+    provider keys that may be present in the centralized settings object. It
+    also masks the Streamlit OIDC cookie/client secrets configured for Google
+    SSO.
 
     Beginner note:
     SDKs and frameworks occasionally embed request payloads or config values in
     exception messages. We replace known secret values with a fixed mask before
     passing text to `st.error(...)`, so an error panel can still be useful
     without accidentally leaking credentials.
+
+    This helper is intentionally best-effort. If settings parsing itself failed
+    (for example `LOG_LEVEL=chatty`), this function must still return a readable
+    error string instead of raising a second exception while trying to redact the
+    first one.
     """
     if not isinstance(text, str) or not text:
         return text
     secrets: list[str] = []
 
-    dhan = get_dhan_credentials(required=False)
+    try:
+        # Dhan credentials are pulled separately for compatibility with older
+        # tests that patch get_dhan_credentials directly.
+        dhan = get_dhan_credentials(required=False)
+    except SettingsError:
+        dhan = None
     if dhan is not None:
         secrets.extend(filter(None, [dhan.access_token, dhan.client_code]))
-    for env_name in (
-        "SERPAPI_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "CLAUDE_API_KEY",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-    ):
-        value = os.getenv(env_name)
-        if value:
-            secrets.append(value)
+    try:
+        # secret_values() covers the new DEPLOY-004 settings surface, including
+        # DATABASE_URL because it may contain a database password.
+        secrets.extend(secret_values())
+    except SettingsError:
+        # The caller may be trying to display the settings error itself. Redact
+        # whatever we can instead of making the error path fail a second time.
+        pass
     secrets.extend(auth_secret_values(st))
 
     if not secrets:
@@ -846,7 +863,8 @@ def _apply_param_overrides(selected: ScreenerDefinition, params: dict[str, Any])
 def _configure_logging() -> None:
     """Set up root logging once per Streamlit session.
 
-    Honors `SCANNER_DEBUG=1` for DEBUG output; otherwise stays at WARNING so
+    Honors `LOG_LEVEL` (or legacy `SCANNER_DEBUG=1`) so deployments can control
+    verbosity without editing code. The default stays at WARNING so
     indicator/screener internals do not flood the terminal. `force=False`
     means we do not stomp on a logger already configured by the CLI prefetch
     path, where `launch_streamlit_from_plain_python` has its own setup.
@@ -855,7 +873,9 @@ def _configure_logging() -> None:
         # Some Python entry point already configured the root logger
         # (e.g. the CLI prefetch). Honor that rather than reconfiguring.
         return
-    level = logging.DEBUG if os.getenv("SCANNER_DEBUG") == "1" else logging.WARNING
+    # get_settings() validates LOG_LEVEL, so getattr is mostly defensive here:
+    # if Python ever lacks a named level, keep the app quiet at WARNING.
+    level = getattr(logging, get_settings().log_level, logging.WARNING)
     logging.basicConfig(
         level=level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -869,8 +889,23 @@ def _configure_logging() -> None:
 
 
 def main() -> None:
-    # Create safe runtime folders on every startup. This avoids first-run
-    # crashes when `data/cache/daily` or `data/universes` does not exist yet.
+    """Run the Streamlit app after validating runtime settings.
+
+    Beginner note:
+    Streamlit reruns this function from top to bottom for each browser session
+    and widget interaction. DEPLOY-004 validation happens first so a production
+    misconfiguration stops before we create local folders, discover screeners, or
+    expose any scanner UI.
+    """
+    try:
+        settings = validate_production_settings(get_settings())
+    except SettingsError as exc:
+        st.error(f"Runtime configuration error: {_redact_secrets(str(exc))}")
+        return
+
+    # Create safe runtime folders only after production settings validate. That
+    # way a misconfigured deployment fails clearly instead of quietly creating a
+    # local fallback data directory.
     ensure_project_dirs()
 
     # Root logger setup happens before any screener code runs so per-symbol
@@ -889,9 +924,12 @@ def main() -> None:
     # Streamlit reruns this file from top to bottom for every browser session.
     # Keeping the auth gate here means unauthenticated OR unauthorized users stop
     # before screener discovery, Dhan credential checks, cached scan state,
-    # charts, or CSV downloads are even reached. require_authorized_user runs the
-    # AUTH-001 sign-in gate and then enforces the AUTH-002 email allowlist.
-    require_authorized_user(st)
+    # charts, or CSV downloads are even reached. Local development may opt out
+    # through AUTH_REQUIRED=false; production validation above prevents that
+    # unsafe setting in deployed environments.
+    authenticated_user: AuthenticatedUser | None = None
+    if settings.auth_required:
+        authenticated_user = require_authorized_user(st)
 
     try:
         # A screener is just a Python module in `screeners/`. Discovery happens
@@ -921,7 +959,10 @@ def main() -> None:
     #   simply re-render from `scan_cache` so the user does not lose state.
     # - Switching screeners invalidates the cache via the key mismatch check.
     if st.session_state.pop("pending_run", False):
-        cache = _execute_screener(selected)
+        cache = _execute_screener(
+            selected,
+            triggered_by=_scan_trigger(authenticated_user),
+        )
         if cache is not None:
             st.session_state["scan_cache"] = cache
 
@@ -980,13 +1021,34 @@ def _render_sidebar(screeners: dict[str, ScreenerDefinition]) -> ScreenerDefinit
     return selected
 
 
-def _execute_screener(selected: ScreenerDefinition) -> dict[str, Any] | None:
+def _scan_trigger(authenticated_user: AuthenticatedUser | None) -> str:
+    """Return the small audit label stored in ``scan_runs.triggered_by``.
+
+    Beginner note:
+    Local development often runs with auth disabled, so those scans stay as the
+    historical value ``"ui"``. When auth is enabled, storing ``ui:<email>`` lets
+    a future history page answer "who started this scan?" without exposing any
+    extra identity fields.
+    """
+    if authenticated_user is None:
+        return "ui"
+
+    email = str(authenticated_user.email).strip().lower()
+    return f"ui:{email}" if email else "ui"
+
+
+def _execute_screener(
+    selected: ScreenerDefinition,
+    *,
+    triggered_by: str = "ui",
+) -> dict[str, Any] | None:
     """Run the selected screener and return a cache payload.
 
     Returns `None` when the run aborted before producing results (e.g.,
     missing credentials, universe load failure). The returned dict is stashed
     in `st.session_state["scan_cache"]` so subsequent reruns can re-render
-    without re-executing.
+    without re-executing. ``triggered_by`` is the audit label persisted by the
+    scan service; the default keeps direct/test calls backwards-compatible.
     """
     # The UI no longer exposes a manual date range. Every screener receives the
     # same 10-year daily history the CLI prefetch maintains; `lookback_days`
@@ -1049,7 +1111,7 @@ def _execute_screener(selected: ScreenerDefinition) -> dict[str, Any] | None:
             universe_df=universe_df,
             data_loader=data_loader,
             params=params,
-            triggered_by="ui",
+            triggered_by=triggered_by,
         )
     except Exception as exc:
         # Reached only for unexpected setup errors (e.g. building the data loader).

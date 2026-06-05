@@ -183,15 +183,45 @@ network work happens up front in the terminal.
 3. **Create the local scan-history database**
 
    By default, persisted scan runs live in `data/scanner.db`, which is
-   generated locally and git-ignored. To use Postgres or another database in a
-   deployed environment, set `DATABASE_URL` in the process environment or in
-   `Dependencies/.env`.
+   generated locally and git-ignored. `DATA_DIR` can point the whole runtime
+   data folder somewhere else, and `DATABASE_URL` can point the app at Postgres
+   or another SQLAlchemy-supported database in deployed environments.
 
    ```bash
    python -m alembic upgrade head
    ```
 
-4. **Add your DhanHQ credentials**
+4. **Review runtime settings**
+
+   The app reads runtime config through `backend.config.settings`. Local
+   development has safe defaults:
+
+   ```env
+   APP_ENV=development
+   LOG_LEVEL=WARNING
+   AUTH_REQUIRED=false
+   # DATA_DIR defaults to ./data
+   # DATABASE_URL defaults to sqlite:///data/scanner.db
+   ```
+
+   Production should set these in the hosting environment, not in committed
+   files:
+
+   ```env
+   APP_ENV=production
+   DATA_DIR=/persistent/data
+   DATABASE_URL=postgresql+psycopg://scanner:password@host:5432/scanner
+   AUTH_REQUIRED=true
+   ALLOWED_EMAILS=you@gmail.com
+   ADMIN_EMAILS=you@gmail.com
+   ```
+
+   Production fails clearly if `DATABASE_URL`, `DATA_DIR`, Dhan credentials, or
+   an authorized/admin email is missing. It also rejects
+   `AUTH_REQUIRED=false`. Secret-like values are used for redaction and are
+   never printed in settings summaries or UI error text.
+
+5. **Add your DhanHQ credentials**
 
    Copy the template and fill in your details:
 
@@ -199,11 +229,12 @@ network work happens up front in the terminal.
    cp Dependencies/.env.example Dependencies/.env
    ```
 
-   Open `Dependencies/.env` and set `DHAN_CLIENT_CODE`, `DHAN_API_KEY`, and
+   Open `Dependencies/.env` and set `DHAN_CLIENT_ID`, `DHAN_API_KEY`, and
    `DHAN_API_SECRET` (from web.dhan.co → My Profile → DhanHQ Trading APIs).
-   Leave `DHAN_ACCESS_TOKEN` blank for now.
+   Leave `DHAN_ACCESS_TOKEN` blank for now. Existing `.env` files that still
+   use the legacy `DHAN_CLIENT_CODE` name continue to work.
 
-5. **Generate the access token** (one-time, valid 12 months)
+6. **Generate the access token** (one-time, valid 12 months)
 
    ```bash
    python Dependencies/dhan_token_setup.py
@@ -212,7 +243,7 @@ network work happens up front in the terminal.
    This walks you through the DhanHQ OAuth login and writes
    `DHAN_ACCESS_TOKEN` back into `Dependencies/.env` for you.
 
-6. **Configure Google SSO for the Streamlit app**
+7. **Configure Google SSO for the Streamlit app**
 
    Create a Google OAuth/OIDC client with this local redirect URI:
 
@@ -246,9 +277,10 @@ network work happens up front in the terminal.
    server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
    ```
 
-   Set `SCANNER_ENV=production` in `Dependencies/.env` or the deployment
+   Set `APP_ENV=production` and `AUTH_REQUIRED=true` in the deployment
    environment for production. If SSO config is missing in production, the app
-   fails closed before loading any scanner controls.
+   fails closed before loading any scanner controls. `SCANNER_ENV` is still
+   accepted as a legacy alias for older local files.
 
    **Restrict who can use the app (email allowlist).** Once Google SSO works,
    limit access by email in `Dependencies/.env`:
@@ -262,11 +294,11 @@ network work happens up front in the terminal.
    - `ADMIN_EMAILS` are always allowed and are flagged as admins (reserved for
      future admin-only features).
    - If `ALLOWED_EMAILS` is **empty**, development permits any signed-in Google
-     user, but production (`SCANNER_ENV=production`) fails closed — only
-     `ADMIN_EMAILS` get in. A signed-in user who isn't allowed sees an
-     "unauthorized" message instead of the scanner.
+     user when auth is enabled, but production (`APP_ENV=production`) requires
+     either `ALLOWED_EMAILS` or `ADMIN_EMAILS`. A signed-in user who is not
+     allowed sees an "unauthorized" message instead of the scanner.
 
-7. **(Optional) Enable the Check Fundamentals agent** — it runs on the
+8. **(Optional) Enable the Check Fundamentals agent** — it runs on the
    [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk/overview) using
    your Claude subscription (Pro/Max), not an API key:
 
@@ -307,9 +339,9 @@ python app.py
 ```
 
 This downloads the data first, then opens the Streamlit app in your browser.
-The app requires Google SSO before any scanner controls, results, charts, or
-CSV downloads are available, and only allow-listed emails (see step 6) may
-proceed past sign-in.
+Local development skips Google SSO unless `AUTH_REQUIRED=true` is set. When
+auth is required, only allow-listed or admin emails (see step 7) may proceed
+past sign-in before scanner controls, results, charts, or CSV downloads load.
 
 > **First run is slow.** It backfills ~10 years of candles for ~500 stocks.
 > Every later run only fetches the days added since you last ran it, so it is
@@ -334,7 +366,7 @@ Streamlit Scanner App/
 ├── docs/architecture/           # Design docs (scan-run persistence, handoffs)
 ├── backend/                     # Data + infrastructure (no strategy logic)
 │   ├── auth/                    # Streamlit OIDC login/session gate
-│   ├── config.py                # Paths, credentials, tuning knobs
+│   ├── config/                  # Runtime settings package + legacy exports
 │   ├── dhan_client.py           # DhanHQ API wrapper
 │   ├── daily_data_loader.py     # Candle fetching + Parquet cache
 │   ├── universe_builder.py      # Builds the stock-universe CSVs
@@ -495,9 +527,9 @@ CSV download is reached.
   app; `ADMIN_EMAILS` are always allowed and flagged `is_admin` (reserved for
   future admin-only features). Both are comma-separated and case/space-insensitive.
 - **Dev-permits / prod-fails-closed** — with an empty `ALLOWED_EMAILS`,
-  development lets any signed-in Google user through, but `SCANNER_ENV=production`
-  locks the app down to `ADMIN_EMAILS` only. Missing SSO config in production is a
-  hard error, not a warning.
+  development lets any signed-in Google user through when auth is enabled, but
+  `APP_ENV=production` requires at least one allowed or admin email and cannot
+  disable auth. Missing SSO config in production is a hard error, not a warning.
 
 Role-based feature gating (beyond `is_admin` identification) is intentionally out
 of scope for now.

@@ -121,6 +121,36 @@ def test_run_scan_success_persists_run_and_results(db_engine, session_factory):
         assert [r.symbol for r in rows] == ["RELIANCE", "TCS"]
 
 
+def test_run_scan_creates_running_row_before_invoking_screener(
+    db_engine, session_factory
+):
+    """The RUNNING audit row should exist while the screener is still executing."""
+
+    def screener_run(_universe_df, _data_loader, _params):
+        # This assertion runs *inside* the screener callback. If SCAN-003 creates
+        # the header only after the screener returns, there will be no row here.
+        with Session(db_engine) as session:
+            runs = get_latest_scan_runs(session)
+            assert len(runs) == 1
+            assert runs[0].status is ScanStatus.RUNNING
+            assert runs[0].finished_at is None
+            assert runs[0].started_at is not None
+        return _two_buy_rows()
+
+    result = run_scan(
+        screener_key="envelope",
+        universe_key="hemant_super_45",
+        run_callable=screener_run,
+        universe_df=pd.DataFrame({"symbol": ["RELIANCE", "TCS"]}),
+        data_loader=_FakeLoader(),
+        params=_base_params(),
+        session_factory=session_factory,
+    )
+
+    assert result.status is ScanStatus.SUCCESS
+    assert result.run_id is not None
+
+
 # ---------------------------------------------------------------------------
 # Failed run (screener raises)
 # ---------------------------------------------------------------------------
@@ -146,11 +176,16 @@ def test_run_scan_records_failed_run_when_screener_raises(db_engine, session_fac
     assert result.results.empty
     # The stored/returned message must be secret-free (no raw exception text).
     assert "SUPERSECRET" not in (result.error_message or "")
+    assert "RuntimeError" in (result.error_message or "")
 
     with Session(db_engine) as session:
         runs = get_latest_scan_runs(session)
         assert runs[0].status is ScanStatus.FAILED
+        assert runs[0].started_at is not None
+        assert runs[0].finished_at is not None
+        assert runs[0].started_at <= runs[0].finished_at
         assert "SUPERSECRET" not in (runs[0].error_message or "")
+        assert "RuntimeError" in (runs[0].error_message or "")
         assert get_scan_results(session, runs[0].id) == []
 
 
