@@ -13,6 +13,12 @@ external dependency with a tiny fake:
 The only real cross-layer path exercised here is the important one:
 ``backend.jobs.run_daily_scan`` calls the SCAN-003 ``run_scan`` service, which
 then writes ``scan_runs`` and ``scan_results`` through the repository layer.
+
+Beginner note:
+Most tests in this file pass injected functions into ``run_daily_scan``. That is
+not "mocking for its own sake"; it is how we keep the test offline while still
+exercising the real job orchestration and, in the persistence test, the real
+SCAN-003 service/database path.
 """
 
 from __future__ import annotations
@@ -60,7 +66,13 @@ def job_engine(tmp_path) -> Engine:
 
 @pytest.fixture
 def job_session_factory(job_engine):
-    """Return the transaction helper shape expected by ``run_scan``."""
+    """Return the transaction helper shape expected by ``run_scan``.
+
+    ``run_scan`` does not create SQLAlchemy sessions by hand; it asks for a
+    factory that behaves like ``backend.storage.database.session_scope``. This
+    fixture gives it the same commit-on-success / rollback-on-error behavior,
+    but against the temporary test engine.
+    """
 
     @contextmanager
     def factory():
@@ -76,7 +88,13 @@ def job_session_factory(job_engine):
 
 
 class _FakeLoader:
-    """Small data-loader stand-in exposing the fields SCAN-003 reads."""
+    """Small data-loader stand-in exposing the fields SCAN-003 reads.
+
+    The real ``DailyDataLoader`` has many methods for Dhan/cache work. JOB-001
+    tests do not need any of that because fake screeners return rows directly.
+    They only need the status fields that ``run_scan`` checks to decide whether
+    a run is SUCCESS or PARTIAL.
+    """
 
     def __init__(self, last_failures: list[dict[str, object]] | None = None) -> None:
         self.last_failures = list(last_failures or [])
@@ -92,7 +110,12 @@ def _definition(
     run,
     default_params: dict[str, Any] | None = None,
 ) -> ScreenerDefinition:
-    """Build registry definitions without importing real screener modules."""
+    """Build registry definitions without importing real screener modules.
+
+    ``ScreenerDefinition`` is the exact shape returned by the production
+    registry. Building it here lets the job runner exercise its real registry
+    contract while avoiding imports of AI/network-capable screeners in tests.
+    """
     return ScreenerDefinition(
         key=key,
         name=key.replace("_", " ").title(),
@@ -107,7 +130,11 @@ def _definition(
 
 
 def _fake_universe(symbol_prefix: str) -> pd.DataFrame:
-    """Create the tiny universe table passed into fake screeners."""
+    """Create the tiny universe table passed into fake screeners.
+
+    The columns mirror real universe CSVs closely enough that a future change in
+    job code cannot accidentally rely on a Streamlit-only shape.
+    """
     return pd.DataFrame(
         {
             "symbol": [f"{symbol_prefix}1", f"{symbol_prefix}2"],
@@ -120,7 +147,12 @@ def _fake_universe(symbol_prefix: str) -> pd.DataFrame:
 
 
 def _row_for(symbol: str) -> dict[str, object]:
-    """Return one deterministic shortlisted row for persistence checks."""
+    """Return one deterministic shortlisted row for persistence checks.
+
+    The keys follow ``BaseScanner``'s common result contract. That means the real
+    repository mapper can store typed columns (symbol/rating/date/close) and the
+    full raw JSON row just like it does for production screeners.
+    """
     return {
         "symbol": symbol,
         "rating": "BUY",
@@ -146,7 +178,12 @@ def test_run_daily_scan_uses_registry_universes_and_persists_history(
     job_session_factory,
     capsys,
 ):
-    """Run all defaults through the real service and query saved history."""
+    """Run all defaults through the real service and query saved history.
+
+    This is the most integration-like JOB-001 test. The fake registry/universe
+    keep it offline, but ``run_daily_scan`` still delegates to the actual
+    SCAN-003 ``run_scan`` service and the real storage repository.
+    """
     from backend.jobs.run_daily_scan import DEFAULT_DAILY_SCAN_KEYS, run_daily_scan
 
     loaded_universes: list[str] = []
@@ -154,6 +191,9 @@ def test_run_daily_scan_uses_registry_universes_and_persists_history(
 
     def make_run(key: str):
         def run(universe_df, _data_loader, params):
+            # Capture params inside the fake screener, not before the call. This
+            # proves the job runner copied defaults and added the 10-year date
+            # window before handing control to the screener.
             seen_params[key] = dict(params)
             return pd.DataFrame([_row_for(str(universe_df.iloc[0]["symbol"]))])
 
@@ -174,6 +214,8 @@ def test_run_daily_scan_uses_registry_universes_and_persists_history(
     }
 
     def load_universe(universe_key: str) -> pd.DataFrame:
+        # The job should not hardcode a universe per default. It should read the
+        # universe from each ScreenerDefinition, exactly as Streamlit does.
         loaded_universes.append(universe_key)
         return _fake_universe(universe_key.upper())
 
@@ -198,6 +240,8 @@ def test_run_daily_scan_uses_registry_universes_and_persists_history(
         assert params["end_date"] == date(2026, 6, 5)
 
     with Session(job_engine) as session:
+        # Query back through repository helpers instead of raw SQL. That proves
+        # the future history page can read the same rows the job created.
         runs = sorted(get_latest_scan_runs(session, limit=10), key=lambda run: run.screener_key)
         assert [run.screener_key for run in runs] == sorted(DEFAULT_DAILY_SCAN_KEYS)
         assert {run.universe_key for run in runs} == {"fno", "hemant_super_45"}
@@ -213,7 +257,12 @@ def test_run_daily_scan_uses_registry_universes_and_persists_history(
 
 
 def test_partial_scan_is_recorded_and_still_exits_zero(job_session_factory):
-    """A scan with symbol-level failures is useful history, not a fatal job."""
+    """A scan with symbol-level failures is useful history, not a fatal job.
+
+    Partial means "the scan ran and history captured the problem." That should
+    alert operators in history, but it should not make the scheduler think the
+    whole daily process crashed.
+    """
     from backend.jobs.run_daily_scan import run_daily_scan
 
     def run(universe_df, _data_loader, _params):
@@ -238,7 +287,11 @@ def test_partial_scan_is_recorded_and_still_exits_zero(job_session_factory):
 
 
 def test_failed_screener_is_recorded_and_exits_nonzero(job_session_factory, capsys):
-    """A full screener failure should fail the scheduled command safely."""
+    """A full screener failure should fail the scheduled command safely.
+
+    The fake exception includes an obvious secret marker. The assertion below is
+    a regression guard that the CLI prints the exception type, not the raw text.
+    """
     from backend.jobs.run_daily_scan import run_daily_scan
 
     def boom(_universe_df, _data_loader, _params):
@@ -264,7 +317,11 @@ def test_failed_screener_is_recorded_and_exits_nonzero(job_session_factory, caps
 
 
 def test_setup_failure_exits_nonzero_without_printing_raw_exception(capsys):
-    """Universe/load setup errors happen before run_scan can persist a row."""
+    """Universe/load setup errors happen before run_scan can persist a row.
+
+    Because no scan header exists yet, the only durable signal is the process
+    exit code and the operator summary. That summary must still be secret-safe.
+    """
     from backend.jobs.run_daily_scan import run_daily_scan
 
     summary = run_daily_scan(
@@ -291,7 +348,11 @@ def test_setup_failure_exits_nonzero_without_printing_raw_exception(capsys):
 
 
 def test_unknown_screener_exits_nonzero_and_continues_known_scans(job_session_factory):
-    """A bad configured key should not prevent later valid keys from running."""
+    """A bad configured key should not prevent later valid keys from running.
+
+    This mirrors how scheduled configs fail in real life: one typo should make
+    the job exit non-zero, but it should not waste the valid work that follows.
+    """
     from backend.jobs.run_daily_scan import run_daily_scan
 
     def run(universe_df, _data_loader, _params):
@@ -319,7 +380,12 @@ def test_unknown_screener_exits_nonzero_and_continues_known_scans(job_session_fa
 
 
 def test_missing_run_id_is_fatal_for_the_scheduled_job(capsys):
-    """The UI can be best-effort, but the daily job must know history failed."""
+    """The UI can be best-effort, but the daily job must know history failed.
+
+    ``run_id=None`` is the signal that SCAN-003 could not create/persist the
+    audit header. The in-memory rows might exist, but a daily job without
+    persisted history cannot support later comparison or replay tasks.
+    """
     from backend.jobs.run_daily_scan import run_daily_scan
 
     def fake_scan_runner(**_kwargs):
@@ -351,7 +417,12 @@ def test_missing_run_id_is_fatal_for_the_scheduled_job(capsys):
 
 
 def test_main_accepts_repeatable_screener_overrides():
-    """``--screener`` can run AI or custom screeners without JOB-002 config."""
+    """``--screener`` can run AI or custom screeners without JOB-002 config.
+
+    ``main`` is tested with a fake job runner so this stays a pure argparse
+    check. It proves the CLI surface without discovering real screeners or
+    needing Dhan credentials.
+    """
     from backend.jobs.run_daily_scan import DailyScanSummary, main
 
     seen_keys: list[str] = []
