@@ -133,3 +133,24 @@ def test_repository_orders_latest_runs_newest_first(session):
     assert [run.screener_key for run in get_latest_scan_runs(session, limit=1)] == [
         "knoxville"
     ]
+
+
+def test_repository_breaks_started_at_ties_by_id_descending(session):
+    """Runs sharing a started_at fall back to a deterministic newest-id-first order."""
+    from backend.storage.repository import create_scan_run, get_latest_scan_runs
+
+    # Two runs can land on the same started_at when a daily job fires back-to-back
+    # or in fast tests. Without the id tie-breaker the database is free to return
+    # same-timestamp rows in any order, which would make SCAN-004's history page
+    # flicker between refreshes.
+    same_started_at = dt.datetime(2026, 6, 1, tzinfo=dt.UTC)
+    earlier = create_scan_run(session, screener_key="envelope", universe_key="nifty_500")
+    later = create_scan_run(session, screener_key="knoxville", universe_key="nifty_100")
+    earlier.started_at = same_started_at
+    later.started_at = same_started_at
+    session.commit()
+
+    # ``later`` was inserted second, so it holds the higher primary key and must
+    # sort first under the id.desc() tie-breaker.
+    assert later.id > earlier.id
+    assert [run.id for run in get_latest_scan_runs(session)] == [later.id, earlier.id]

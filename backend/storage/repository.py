@@ -140,8 +140,17 @@ def get_latest_scan_runs(session: Session, limit: int = 50) -> list[ScanRun]:
 
     SCAN-004's history page will likely call this for its initial table. The
     default limit keeps the query bounded even after the app has months of runs.
+
+    Two runs created within the same millisecond (a daily job firing back-to-back,
+    or fast tests) can share a ``started_at`` value. Adding the primary key as a
+    tie-breaker keeps the newest-first order deterministic instead of leaving the
+    database free to return same-timestamp rows in any order.
     """
-    stmt = select(ScanRun).order_by(ScanRun.started_at.desc()).limit(limit)
+    stmt = (
+        select(ScanRun)
+        .order_by(ScanRun.started_at.desc(), ScanRun.id.desc())
+        .limit(limit)
+    )
     return list(session.scalars(stmt))
 
 
