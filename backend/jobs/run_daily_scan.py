@@ -1,8 +1,12 @@
-"""JOB-001 daily scan command.
+"""Headless daily scan command (JOB-001 set + JOB-002 config schedule).
 
-Run with:
+Run with the built-in deterministic set::
 
     python -m backend.jobs.run_daily_scan
+
+or with a YAML schedule of named scan batches (JOB-002)::
+
+    python -m backend.jobs.run_daily_scan --config config/daily_scans.yaml
 
 This module is intentionally small and boring. It does not know indicator math,
 Streamlit widgets, or database SQL. Instead, it wires together the existing
@@ -44,6 +48,11 @@ from backend.daily_data_loader import (
     history_start_date,
 )
 from backend.dhan_client import DhanDataClient
+from backend.jobs.daily_scan_config import (
+    DailyScanConfigError,
+    DailyScanEntry,
+    load_daily_scan_config,
+)
 from backend.scanning import ScanRunResult, ScanStatus, run_scan
 from backend.scanning.service import SessionFactory
 from backend.screener_registry import ScreenerDefinition, discover_screeners
@@ -128,6 +137,7 @@ class DailyScanSummary:
 def run_daily_scan(
     *,
     screener_keys: Sequence[str] | None = None,
+    scan_entries: Sequence[DailyScanEntry] | None = None,
     registry_loader: RegistryLoader = discover_screeners,
     universe_loader: UniverseLoader = load_universe,
     data_client_factory: DataClientFactory = DhanDataClient.from_env,
@@ -144,16 +154,57 @@ def run_daily_scan(
     network calls, Streamlit, or the developer's real SQLite database.
 
     High-level flow:
-    1. Discover the registry once.
-    2. For each selected key, load that screener's configured universe.
-    3. Build a Dhan-backed data loader (or a fake in tests).
-    4. Delegate the actual scan/persistence lifecycle to ``run_scan``.
-    5. Print one line per screener and return one summary exit code.
+    1. Decide the work list: JOB-002 ``scan_entries`` (from ``--config``) take
+       precedence; otherwise JOB-001's ``screener_keys`` (or the default set).
+    2. Skip disabled entries and bail out clearly if nothing is enabled.
+    3. Discover the registry once.
+    4. For each enabled entry, load its universe (config override or the
+       screener's configured default) and build a Dhan-backed data loader.
+    5. Delegate the actual scan/persistence lifecycle to ``run_scan``.
+    6. Print one line per screener and return one summary exit code.
     """
     out = output or sys.stdout
-    selected_keys = tuple(screener_keys or DEFAULT_DAILY_SCAN_KEYS)
     run_date = today or date.today()
     start_date = history_start_date(DEFAULT_HISTORY_YEARS_BACK, run_date)
+
+    # Normalize both entry points to one list of DailyScanEntry objects so the run
+    # loop below has a single shape to iterate. JOB-002 config entries take
+    # precedence; otherwise each JOB-001 --screener key (or default) becomes a
+    # trivially-enabled entry with no universe/params overrides.
+    if scan_entries is not None:
+        entries = list(scan_entries)
+    else:
+        entries = [
+            DailyScanEntry(name=key, screener_key=key)
+            for key in (screener_keys or DEFAULT_DAILY_SCAN_KEYS)
+        ]
+
+    # Disabled entries are skipped but still reported, so an operator can see at a
+    # glance that the schedule deliberately left them out.
+    for entry in entries:
+        if not entry.enabled:
+            print(
+                f"[daily-scan] SKIPPED screener={entry.screener_key} "
+                f"name={entry.name!r} (disabled)",
+                file=out,
+                flush=True,
+            )
+
+    enabled_entries = [entry for entry in entries if entry.enabled]
+    if not enabled_entries:
+        # Only reachable via --config: the default/--screener paths are always
+        # enabled. A scheduled job that would silently do nothing is treated as a
+        # configuration error so the scheduler's exit-code check notices it.
+        outcome = DailyScanOutcome(
+            screener_key="<config>",
+            fatal=True,
+            message=(
+                "No enabled scans in the config. "
+                "Set enabled: true on at least one entry."
+            ),
+        )
+        _print_outcome(out, outcome)
+        return DailyScanSummary(outcomes=[outcome])
 
     try:
         registry = registry_loader()
@@ -171,38 +222,38 @@ def run_daily_scan(
         return DailyScanSummary(outcomes=[outcome])
 
     print(
-        f"[daily-scan] Running {len(selected_keys)} screener(s) "
+        f"[daily-scan] Running {len(enabled_entries)} screener(s) "
         f"for data through {run_date.isoformat()}.",
         file=out,
         flush=True,
     )
 
     outcomes: list[DailyScanOutcome] = []
-    for screener_key in selected_keys:
-        definition = registry.get(screener_key)
+    for entry in enabled_entries:
+        definition = registry.get(entry.screener_key)
         if definition is None:
-            # Keep going after an unknown key. A future scheduled config may
-            # contain one typo and two valid screeners; running the valid work
-            # gives operators useful history while still returning exit 1.
+            # Keep going after an unknown key. A scheduled config may contain one
+            # typo and two valid screeners; running the valid work gives operators
+            # useful history while still returning exit 1.
             outcome = DailyScanOutcome(
-                screener_key=screener_key,
+                screener_key=entry.screener_key,
+                universe_key=entry.universe_key,
                 fatal=True,
                 message="Unknown screener key.",
             )
-            outcomes.append(outcome)
-            _print_outcome(out, outcome)
-            continue
-
-        outcome = _run_one_screener(
-            definition=definition,
-            universe_loader=universe_loader,
-            data_client_factory=data_client_factory,
-            data_loader_factory=data_loader_factory,
-            scan_runner=scan_runner,
-            session_factory=session_factory,
-            start_date=start_date,
-            end_date=run_date,
-        )
+        else:
+            outcome = _run_one_screener(
+                definition=definition,
+                universe_loader=universe_loader,
+                data_client_factory=data_client_factory,
+                data_loader_factory=data_loader_factory,
+                scan_runner=scan_runner,
+                session_factory=session_factory,
+                start_date=start_date,
+                end_date=run_date,
+                universe_key=entry.universe_key,
+                params_override=entry.params,
+            )
         outcomes.append(outcome)
         _print_outcome(out, outcome)
 
@@ -225,23 +276,47 @@ def main(
     ``job_runner`` is injectable for tests. That lets tests prove argument
     parsing without discovering real screeners or trying to create a Dhan client.
     """
+    out = output or sys.stdout
     parser = argparse.ArgumentParser(
         description="Run the scanner's configured daily screeners without Streamlit."
     )
-    parser.add_argument(
+    # --screener (JOB-001) and --config (JOB-002) are two ways to choose the same
+    # thing, so making them mutually exclusive turns "I passed both" into a clear
+    # argparse error instead of a silent precedence surprise.
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument(
         "--screener",
         dest="screener_keys",
         action="append",
         help=(
             "Run one screener key. Repeat to run multiple. "
-            "Defaults to the JOB-001 deterministic daily set."
+            "Defaults to the JOB-001 deterministic daily set. "
+            "Cannot be combined with --config."
+        ),
+    )
+    selection.add_argument(
+        "--config",
+        dest="config_path",
+        help=(
+            "Path to a YAML daily-scan schedule "
+            "(see config/daily_scans.example.yaml). Runs the enabled entries. "
+            "Cannot be combined with --screener."
         ),
     )
     args = parser.parse_args(argv)
-    summary = job_runner(
-        screener_keys=args.screener_keys or None,
-        output=output or sys.stdout,
-    )
+
+    if args.config_path:
+        try:
+            scan_entries = load_daily_scan_config(args.config_path)
+        except DailyScanConfigError as exc:
+            # A bad config is an operator error, not a crash: print one clear line
+            # and exit non-zero so a scheduler notices the misconfiguration. The
+            # message is our own (file path + reason), never a raw broker/DB token.
+            print(f"[daily-scan] Could not load config: {exc}", file=out, flush=True)
+            return 1
+        summary = job_runner(scan_entries=scan_entries, output=out)
+    else:
+        summary = job_runner(screener_keys=args.screener_keys or None, output=out)
     return summary.exit_code
 
 
@@ -255,6 +330,8 @@ def _run_one_screener(
     session_factory: SessionFactory,
     start_date: date,
     end_date: date,
+    universe_key: str | None = None,
+    params_override: Mapping[str, Any] | None = None,
 ) -> DailyScanOutcome:
     """Prepare one screener's inputs, run SCAN-003, and classify the outcome.
 
@@ -262,9 +339,16 @@ def _run_one_screener(
     failure) happen before ``run_scan`` can create a ``scan_runs`` row, so this
     helper turns them into fatal command outcomes. Once setup succeeds, the scan
     service owns the persistence lifecycle and returns a ``ScanRunResult``.
+
+    ``universe_key`` and ``params_override`` are JOB-002 config overrides. When a
+    config entry omits them (and for the default / --screener paths), the
+    screener's registry universe and default params are used, matching JOB-001.
+    An unknown override universe surfaces here as a clear setup failure, because
+    ``universe_loader`` raises ``KeyError("Unknown universe key: ...")``.
     """
+    resolved_universe = universe_key or definition.universe
     try:
-        universe_df = universe_loader(definition.universe)
+        universe_df = universe_loader(resolved_universe)
         data_loader = _make_data_loader(
             data_client_factory=data_client_factory,
             data_loader_factory=data_loader_factory,
@@ -275,21 +359,24 @@ def _run_one_screener(
         # secret-masked message. The detailed traceback still belongs in the logs.
         return DailyScanOutcome(
             screener_key=definition.key,
-            universe_key=definition.universe,
+            universe_key=resolved_universe,
             fatal=True,
             message=f"Setup failed. {redact_exception(exc)}",
         )
 
     params = dict(definition.default_params)
-    # Copy defaults before adding dates. Registry metadata is shared for the
-    # whole process; mutating it here would leak one run's dates into future runs
-    # or tests.
+    # Copy defaults before mutating. Registry metadata is shared for the whole
+    # process; mutating it here would leak one run's overrides/dates into future
+    # runs or tests. Apply config overrides first, then add the date window last
+    # so a config entry cannot accidentally override the run dates.
+    if params_override:
+        params.update(params_override)
     params.update({"start_date": start_date, "end_date": end_date})
 
     try:
         result = scan_runner(
             screener_key=definition.key,
-            universe_key=definition.universe,
+            universe_key=resolved_universe,
             run_callable=definition.run,
             universe_df=universe_df,
             data_loader=data_loader,
@@ -303,7 +390,7 @@ def _run_one_screener(
         # exceptions; redact_exception keeps it secret-safe like the rest.
         return DailyScanOutcome(
             screener_key=definition.key,
-            universe_key=definition.universe,
+            universe_key=resolved_universe,
             fatal=True,
             message=f"Scan service failed. {redact_exception(exc)}",
         )

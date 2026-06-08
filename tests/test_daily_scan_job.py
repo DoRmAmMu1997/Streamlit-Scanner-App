@@ -436,3 +436,267 @@ def test_main_accepts_repeatable_screener_overrides():
 
     assert exit_code == 0
     assert seen_keys == ["technical_analysis", "sixty_seven_ka_funda"]
+
+
+# ---------------------------------------------------------------------------
+# JOB-002: config-driven schedule (`--config`)
+# ---------------------------------------------------------------------------
+
+
+def test_config_run_skips_disabled_entries_and_runs_enabled(
+    job_session_factory,
+    capsys,
+):
+    """Disabled config entries are reported as skipped and never executed."""
+    from backend.jobs.daily_scan_config import DailyScanEntry
+    from backend.jobs.run_daily_scan import run_daily_scan
+
+    ran: list[str] = []
+
+    def run(universe_df, _data_loader, _params):
+        ran.append(str(universe_df.iloc[0]["symbol"]))
+        return pd.DataFrame([_row_for(str(universe_df.iloc[0]["symbol"]))])
+
+    summary = run_daily_scan(
+        scan_entries=[
+            DailyScanEntry(name="On", screener_key="enabled_one", enabled=True),
+            DailyScanEntry(name="Off", screener_key="disabled_one", enabled=False),
+        ],
+        registry_loader=lambda: {
+            "enabled_one": _definition("enabled_one", "fno", run),
+            "disabled_one": _definition("disabled_one", "fno", run),
+        },
+        universe_loader=lambda key: _fake_universe(key.upper()),
+        data_loader_factory=_FakeLoader,
+        session_factory=job_session_factory,
+        today=date(2026, 6, 5),
+    )
+
+    assert summary.exit_code == 0
+    assert [outcome.screener_key for outcome in summary.outcomes] == ["enabled_one"]
+    assert len(ran) == 1  # the disabled screener's run() was never called
+
+    output = capsys.readouterr().out
+    assert "SKIPPED" in output
+    assert "disabled_one" in output
+
+
+def test_config_entry_overrides_universe_and_params_reach_the_service():
+    """universe_key/params overrides flow into run_scan, merged over defaults."""
+    from backend.jobs.daily_scan_config import DailyScanEntry
+    from backend.jobs.run_daily_scan import run_daily_scan
+
+    captured: dict[str, object] = {}
+    loaded_universes: list[str] = []
+
+    def fake_scan_runner(**kwargs):
+        captured.update(kwargs)
+        return ScanRunResult(
+            status=ScanStatus.SUCCESS,
+            results=pd.DataFrame([_row_for("X")]),
+            run_id=1,
+        )
+
+    def load_universe(universe_key: str) -> pd.DataFrame:
+        loaded_universes.append(universe_key)
+        return _fake_universe(universe_key.upper())
+
+    summary = run_daily_scan(
+        scan_entries=[
+            DailyScanEntry(
+                name="Env override",
+                screener_key="envelope_knoxville_buy",
+                universe_key="hemant_super_45",
+                params={"percent": 9.0},
+            )
+        ],
+        registry_loader=lambda: {
+            "envelope_knoxville_buy": _definition(
+                "envelope_knoxville_buy",
+                "fno",  # registry default; the config overrides it below
+                lambda *_args: pd.DataFrame([_row_for("X")]),
+                default_params={"percent": 14.0, "ema_period": 200},
+            )
+        },
+        universe_loader=load_universe,
+        data_loader_factory=_FakeLoader,
+        scan_runner=fake_scan_runner,
+        today=date(2026, 6, 5),
+    )
+
+    assert summary.exit_code == 0
+    # The override universe is used, not the registry default "fno".
+    assert loaded_universes == ["hemant_super_45"]
+    assert captured["universe_key"] == "hemant_super_45"
+    # params: registry default kept, config value overrides, dates added last.
+    params = captured["params"]
+    assert params["ema_period"] == 200
+    assert params["percent"] == 9.0
+    assert params["start_date"] == date(2016, 6, 5)
+    assert params["end_date"] == date(2026, 6, 5)
+
+
+def test_config_unknown_screener_is_fatal_but_keeps_running_valid_entries(
+    job_session_factory,
+):
+    """A bad screener_key in the config behaves like a bad --screener key."""
+    from backend.jobs.daily_scan_config import DailyScanEntry
+    from backend.jobs.run_daily_scan import run_daily_scan
+
+    def run(universe_df, _data_loader, _params):
+        return pd.DataFrame([_row_for(str(universe_df.iloc[0]["symbol"]))])
+
+    summary = run_daily_scan(
+        scan_entries=[
+            DailyScanEntry(name="Typo", screener_key="missing_screener"),
+            DailyScanEntry(name="Good", screener_key="known_screener"),
+        ],
+        registry_loader=lambda: {
+            "known_screener": _definition("known_screener", "fno", run)
+        },
+        universe_loader=lambda key: _fake_universe(key.upper()),
+        data_loader_factory=_FakeLoader,
+        session_factory=job_session_factory,
+        today=date(2026, 6, 5),
+    )
+
+    assert summary.exit_code == 1
+    assert summary.outcomes[0].screener_key == "missing_screener"
+    assert summary.outcomes[0].fatal is True
+    assert summary.outcomes[0].message == "Unknown screener key."
+    assert summary.outcomes[1].status is ScanStatus.SUCCESS
+    assert summary.outcomes[1].run_id is not None
+
+
+def test_config_unknown_universe_is_fatal(capsys):
+    """An unknown universe_key override surfaces clearly via load_universe."""
+    from backend.jobs.daily_scan_config import DailyScanEntry
+    from backend.jobs.run_daily_scan import run_daily_scan
+
+    def load_universe(universe_key: str) -> pd.DataFrame:
+        # Mirror backend.universe_loader.load_universe's real error for a bad key.
+        raise KeyError(f"Unknown universe key: {universe_key}")
+
+    summary = run_daily_scan(
+        scan_entries=[
+            DailyScanEntry(
+                name="Bad universe",
+                screener_key="known_screener",
+                universe_key="not_a_universe",
+            )
+        ],
+        registry_loader=lambda: {
+            "known_screener": _definition(
+                "known_screener",
+                "fno",
+                lambda *_args: pd.DataFrame([_row_for("X")]),
+            )
+        },
+        universe_loader=load_universe,
+        data_loader_factory=_FakeLoader,
+        today=date(2026, 6, 5),
+    )
+
+    assert summary.exit_code == 1
+    outcome = summary.outcomes[0]
+    assert outcome.fatal is True
+    assert outcome.universe_key == "not_a_universe"  # the override is reported
+    output = capsys.readouterr().out
+    assert "Unknown universe key" in output
+
+
+def test_config_with_no_enabled_entries_exits_nonzero_with_clear_message(capsys):
+    """An all-disabled (or empty) schedule is a fatal misconfiguration."""
+    from backend.jobs.daily_scan_config import DailyScanEntry
+    from backend.jobs.run_daily_scan import run_daily_scan
+
+    summary = run_daily_scan(
+        scan_entries=[
+            DailyScanEntry(name="Off", screener_key="anything", enabled=False)
+        ],
+        # registry_loader must not even be needed: we fail before discovery.
+        registry_loader=lambda: (_ for _ in ()).throw(
+            AssertionError("registry should not load when nothing is enabled")
+        ),
+        today=date(2026, 6, 5),
+    )
+
+    assert summary.exit_code == 1
+    assert len(summary.outcomes) == 1
+    assert summary.outcomes[0].fatal is True
+    assert "No enabled scans" in capsys.readouterr().out
+
+
+def test_main_uses_config_file_when_config_is_present(tmp_path):
+    """`--config` loads the YAML and forwards parsed entries to the job runner."""
+    from backend.jobs.run_daily_scan import DailyScanSummary, main
+
+    config_path = tmp_path / "daily_scans.yaml"
+    config_path.write_text(
+        "daily_scans:\n"
+        "  - name: Enabled scan\n"
+        "    screener_key: bollinger_band_reversal\n"
+        "    enabled: true\n"
+        "  - name: Disabled scan\n"
+        "    screener_key: heikin_ashi_supertrend\n"
+        "    enabled: false\n",
+        encoding="utf-8",
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_job_runner(*, scan_entries=None, output=None, **_kwargs):
+        captured["scan_entries"] = scan_entries
+        return DailyScanSummary(outcomes=[])
+
+    exit_code = main(["--config", str(config_path)], job_runner=fake_job_runner)
+
+    assert exit_code == 0
+    entries = captured["scan_entries"]
+    assert [entry.screener_key for entry in entries] == [
+        "bollinger_band_reversal",
+        "heikin_ashi_supertrend",
+    ]
+    assert [entry.enabled for entry in entries] == [True, False]
+
+
+def test_main_without_config_preserves_default_screener_path():
+    """Without `--config`, the JOB-001 key path is used and no entries are passed."""
+    from backend.jobs.run_daily_scan import DailyScanSummary, main
+
+    captured: dict[str, object] = {}
+
+    def fake_job_runner(*, screener_keys=None, scan_entries=None, output=None, **_kw):
+        captured["screener_keys"] = screener_keys
+        captured["scan_entries"] = scan_entries
+        return DailyScanSummary(outcomes=[])
+
+    exit_code = main([], job_runner=fake_job_runner)
+
+    assert exit_code == 0
+    assert captured["screener_keys"] is None  # falls back to the default daily set
+    assert captured["scan_entries"] is None  # default path does not use config
+
+
+def test_main_rejects_config_combined_with_screener():
+    """`--config` and `--screener` are mutually exclusive (clear argparse error)."""
+    from backend.jobs.run_daily_scan import main
+
+    with pytest.raises(SystemExit):
+        main(["--config", "ignored.yaml", "--screener", "envelope"])
+
+
+def test_main_bad_config_exits_nonzero_and_does_not_run_the_job(tmp_path, capsys):
+    """A malformed config exits 1 with a clear line and never starts scanning."""
+    from backend.jobs.run_daily_scan import main
+
+    config_path = tmp_path / "broken.yaml"
+    config_path.write_text("daily_scans: [unclosed\n", encoding="utf-8")
+
+    def fail_runner(**_kwargs):
+        raise AssertionError("job runner must not run on a bad config")
+
+    exit_code = main(["--config", str(config_path)], job_runner=fail_runner)
+
+    assert exit_code == 1
+    assert "Could not load config" in capsys.readouterr().out

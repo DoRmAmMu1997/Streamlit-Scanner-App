@@ -1,0 +1,64 @@
+# Example daily scan schedule for the headless scanner job (JOB-002).
+#
+# Copy this file (for example to config/daily_scans.yaml), edit it for your
+# deployment, and point the daily scan command at it from cron / your scheduler:
+#
+#     python -m backend.jobs.run_daily_scan --config config/daily_scans.yaml
+#
+# Each entry under `daily_scans` describes one named scan batch:
+#
+#   name:         REQUIRED. Human label shown in the operator output.
+#   screener_key: REQUIRED. Must match a key from the screener registry
+#                 (the same keys you would pass to --screener).
+#   enabled:      OPTIONAL, defaults to true. Set false to keep an entry as a
+#                 documented example without running it.
+#   universe_key: OPTIONAL. Overrides the screener's default universe. Omit it to
+#                 use the universe declared in the screener's registry metadata.
+#   params:       OPTIONAL. Per-run overrides merged over the screener defaults.
+#   description:  OPTIONAL. Free-text note for operators.
+#
+# Behavior notes:
+#   - Disabled entries are skipped (and logged as skipped).
+#   - An unknown screener_key or universe_key, malformed YAML, or a config with
+#     no enabled entries all cause a non-zero exit so the scheduler notices.
+#   - `--config` and `--screener` cannot be combined.
+
+daily_scans:
+  # --- Deterministic, dependency-light screeners (safe to run every day) ---
+
+  - name: Bollinger Band Reversal (daily)
+    screener_key: bollinger_band_reversal
+    enabled: true
+    description: F&O mean-reversion gate. Uses the registry default universe (fno).
+
+  - name: Heikin Ashi Supertrend (daily)
+    screener_key: heikin_ashi_supertrend
+    enabled: true
+
+  - name: Envelope Knoxville Buy (daily)
+    screener_key: envelope_knoxville_buy
+    enabled: true
+    # Example of overriding the default universe and a screener parameter.
+    universe_key: hemant_super_45
+    params:
+      percent: 14.0
+
+  # --- AI-heavy screeners: OPT-IN ONLY ---
+  # These call the Claude Agent SDK (and SerpAPI, for 67 Ka Funda). They cost
+  # money / API quota and depend on optional external services, so they ship
+  # DISABLED. Enable them deliberately, and consider lowering max_ai_candidates
+  # to cap per-run cost.
+
+  - name: 67 Ka Funda (AI)
+    screener_key: sixty_seven_ka_funda
+    enabled: false
+    description: AI verifier over a 67% drawdown gate. Costs API calls; opt in.
+    params:
+      max_ai_candidates: 5
+
+  - name: Technical Analysis (AI)
+    screener_key: technical_analysis
+    enabled: false
+    description: AI confirmation of chart patterns. Costs API calls; opt in.
+    params:
+      max_ai_candidates: 5
