@@ -137,3 +137,91 @@ def test_secret_redaction_filter_masks_messages_args_and_tracebacks():
         assert secret not in output
     assert output.count(MASK) >= 3
     assert "RuntimeError" in output
+
+
+def test_redact_text_masks_quoted_and_json_secret_formats():
+    """Secrets inside JSON/dict error bodies are a common SDK error shape.
+
+    ``requests``/``httpx`` exceptions frequently carry a JSON ``response.text``
+    such as ``{"access_token": "..."}``. The key here is quoted, so it does not
+    look like a bare ``access_token=...`` assignment and would slip past an
+    assignment-only matcher. ``Invalid API key`` stays as the negative control.
+    """
+    raw = (
+        '{"password": "json-password-secret", "access_token": "json-token-secret"} '
+        "{'client_secret': 'repr-secret'} "
+        '"api_key":"tight-json-secret" '
+        "Invalid API key"
+    )
+
+    redacted = redact_text(raw)
+
+    for secret in (
+        "json-password-secret",
+        "json-token-secret",
+        "repr-secret",
+        "tight-json-secret",
+    ):
+        assert secret not in redacted
+    assert "Invalid API key" in redacted
+    assert redacted.count(MASK) >= 4
+
+
+def test_install_secret_redaction_filter_merges_secrets_without_stacking():
+    """A later install must add new secrets to the existing filter, not drop them.
+
+    The Streamlit app installs a redaction filter early (before OIDC secrets are
+    known) and again once ``st.secrets`` is available. The second call has to
+    teach the existing filter about those cookie/client secrets instead of being
+    a silent no-op, and it must not stack a second filter onto the logger.
+    """
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+
+    logger = logging.getLogger("tests.secret_redaction.merge")
+    logger.handlers = [handler]
+    logger.filters = []
+    logger.propagate = False
+    logger.setLevel(logging.INFO)
+
+    # First install knows nothing extra; the second adds an OIDC-style secret
+    # that lives outside DEPLOY-004 environment settings.
+    install_secret_redaction_filter(logger)
+    install_secret_redaction_filter(logger, extra_secrets=["oidc-cookie-secret"])
+
+    logger.warning("login failed for oidc-cookie-secret")
+    output = stream.getvalue()
+
+    assert sum(isinstance(f, SecretRedactionFilter) for f in logger.filters) == 1
+    assert sum(isinstance(f, SecretRedactionFilter) for f in handler.filters) == 1
+    assert "oidc-cookie-secret" not in output
+    assert MASK in output
+
+
+def test_secret_redaction_filter_masks_child_logger_records():
+    """Records from child loggers must be redacted at the parent's handler.
+
+    Most modules log through ``logging.getLogger(__name__)`` children that
+    propagate to a parent's handler. Installing the filter on both the parent
+    and its handlers is what keeps those propagated records safe, so this guards
+    the "redacted in logs" guarantee for the whole logger tree.
+    """
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(name)s:%(message)s"))
+
+    parent = logging.getLogger("tests.secret_redaction.tree")
+    parent.handlers = [handler]
+    parent.filters = []
+    parent.propagate = False
+    parent.setLevel(logging.INFO)
+    install_secret_redaction_filter(parent, extra_secrets=["child-oidc-secret"])
+
+    child = logging.getLogger("tests.secret_redaction.tree.child")
+    child.warning("boom child-oidc-secret api_key=child-token-secret")
+    output = stream.getvalue()
+
+    assert "child-oidc-secret" not in output
+    assert "child-token-secret" not in output
+    assert MASK in output

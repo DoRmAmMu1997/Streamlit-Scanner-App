@@ -855,10 +855,13 @@ def _configure_logging() -> None:
     path, where `launch_streamlit_from_plain_python` has its own setup.
     """
     root_logger = logging.getLogger()
+    # OIDC cookie/client secrets live in st.secrets (not env settings); the UI
+    # path masks them, so teach the logging filter the same values for parity.
+    oidc_secrets = auth_secret_values(st)
     if root_logger.handlers:
         # Some Python entry point already configured the root logger
         # (e.g. the CLI prefetch). Honor that rather than reconfiguring.
-        install_secret_redaction_filter(root_logger)
+        install_secret_redaction_filter(root_logger, extra_secrets=oidc_secrets)
         return
     # get_settings() validates LOG_LEVEL, so getattr is mostly defensive here:
     # if Python ever lacks a named level, keep the app quiet at WARNING.
@@ -868,7 +871,7 @@ def _configure_logging() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         stream=sys.stderr,
     )
-    install_secret_redaction_filter(root_logger)
+    install_secret_redaction_filter(root_logger, extra_secrets=oidc_secrets)
 
 
 # ---------------------------------------------------------------------------

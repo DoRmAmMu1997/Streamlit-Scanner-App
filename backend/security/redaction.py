@@ -32,8 +32,12 @@ _SECRET_NAME = (
     r"api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|"  # nosec B105
     r"token|client[_-]?secret|password|passwd|pwd|secret"
 )
+# ``sep`` allows an optional quote on each side of the ``:``/``=`` so quoted and
+# JSON/dict shapes like ``{"access_token": "..."}`` or ``'password': '...'`` are
+# masked too, not just bare ``access_token=...`` assignments. Such JSON error
+# bodies are a common shape in third-party SDK exceptions.
 _KEY_VALUE_RE = re.compile(
-    rf"(?i)\b(?P<key>{_SECRET_NAME})(?P<sep>\s*[:=]\s*[\"']?)"
+    rf"(?i)\b(?P<key>{_SECRET_NAME})(?P<sep>[\"']?\s*[:=]\s*[\"']?)"
     r"(?P<value>[^\"'\s&),;]+)"
 )
 _AUTHORIZATION_BEARER_RE = re.compile(
@@ -127,6 +131,23 @@ class SecretRedactionFilter(logging.Filter):
         super().__init__(name)
         self.extra_secrets = tuple(_clean_secret(value) for value in extra_secrets or ())
 
+    def add_secrets(self, extra_secrets: Iterable[str]) -> None:
+        """Teach an already-installed filter about additional secret values.
+
+        ``install_secret_redaction_filter`` is idempotent and reuses one filter
+        instance, so this lets a later install merge in secrets that were not
+        known at the first call (for example Streamlit OIDC values from
+        ``st.secrets``) instead of dropping them. Duplicates are ignored.
+        """
+        known = set(self.extra_secrets)
+        merged = list(self.extra_secrets)
+        for value in extra_secrets or ():
+            cleaned = _clean_secret(value)
+            if cleaned and cleaned not in known:
+                known.add(cleaned)
+                merged.append(cleaned)
+        self.extra_secrets = tuple(merged)
+
     def filter(self, record: logging.LogRecord) -> bool:
         """Mutate the log record in place and keep it enabled.
 
@@ -177,6 +198,11 @@ def install_secret_redaction_filter(
     redaction_filter = existing or SecretRedactionFilter(extra_secrets=extra_secrets)
     if existing is None:
         target.addFilter(redaction_filter)
+    elif extra_secrets:
+        # The filter is already installed, but a later call may know secrets the
+        # first one did not (e.g. OIDC values that load after initial logging
+        # setup). Merge them in rather than silently dropping the new values.
+        redaction_filter.add_secrets(extra_secrets)
 
     for handler in target.handlers:
         if _first_redaction_filter(handler.filters) is None:
