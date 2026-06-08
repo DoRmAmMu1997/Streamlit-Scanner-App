@@ -23,6 +23,7 @@ from typing import Any
 import requests
 
 from backend.config import get_settings
+from backend.security import redact_text
 
 
 class SerpApiSetupError(RuntimeError):
@@ -132,9 +133,9 @@ class SerpApiClient:
             payload = response.json()
         except requests.RequestException as exc:
             # A requests error can echo the full request URL — including the
-            # api_key query param — so scrub the key out of the message before it
-            # reaches logs or the UI. (app._redact_secrets is a second layer.)
-            detail = str(exc).replace(self.api_key, "***") if self.api_key else str(exc)
+            # api_key query param — so scrub through the same utility used by
+            # Streamlit errors and scanner failure details.
+            detail = redact_text(str(exc), extra_secrets=[self.api_key])
             raise SerpApiSearchError(f"SerpAPI request failed: {detail}") from exc
         except ValueError as exc:
             # response.json() raises ValueError/JSONDecodeError on a non-JSON body.
@@ -143,7 +144,8 @@ class SerpApiClient:
         # SerpAPI reports API-level problems (bad key, quota) in an "error" field
         # with HTTP 200, so check the body even though raise_for_status() passed.
         if isinstance(payload, dict) and payload.get("error"):
-            raise SerpApiSearchError(str(payload["error"]))
+            detail = redact_text(str(payload["error"]), extra_secrets=[self.api_key])
+            raise SerpApiSearchError(detail)
 
         organic = payload.get("organic_results", []) if isinstance(payload, dict) else []
         if not isinstance(organic, list):

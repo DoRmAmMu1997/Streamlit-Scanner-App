@@ -277,6 +277,32 @@ def test_load_universe_history_records_failures_without_crashing(tmp_path):
     assert "boom" in result.failures[0]["message"]
 
 
+def test_load_universe_history_redacts_failure_messages(tmp_path):
+    """Loader failure details are later shown in Streamlit run details."""
+
+    class SecretFailingClient:
+        """Fake client that simulates a broker exception echoing a token."""
+
+        def fetch_daily_candles(self, *args, **kwargs):
+            raise RuntimeError("Dhan failed with access_token=broker-token-secret")
+
+    loader = DailyDataLoader(
+        SecretFailingClient(),
+        cache_dir=tmp_path,
+        request_delay_seconds=0.0,
+    )
+
+    result = loader.load_universe_history(
+        mapped_universe(),
+        date(2026, 5, 1),
+        date(2026, 5, 11),
+    )
+
+    assert result.frames == {}
+    assert "broker-token-secret" not in result.failures[0]["message"]
+    assert "***REDACTED***" in result.failures[0]["message"]
+
+
 def test_circuit_breaker_skips_remaining_symbols_after_failure_limit(tmp_path):
     """Repeated Dhan failures should stop the batch from hammering the API."""
 

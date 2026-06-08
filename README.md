@@ -37,7 +37,7 @@ by default or Postgres) that is ready to record every run for later replay and a
 - Added the `hemant_super_good_200_union` universe and generated
   `data/universes/hemant_super_good_200_union.csv`.
 - Added tests for the shortlister, SerpAPI client, Claude verifier, screener
-  flow, universe generation, and secret redaction.
+  flow, universe generation, and centralized secret redaction.
 - Co-authored by: DoRmAmMu1997 <hemantdhamija@gmail.com> and Codex
   <codex@openai.com>.
 
@@ -218,8 +218,10 @@ network work happens up front in the terminal.
 
    Production fails clearly if `DATABASE_URL`, `DATA_DIR`, Dhan credentials, or
    an authorized/admin email is missing. It also rejects
-   `AUTH_REQUIRED=false`. Secret-like values are used for redaction and are
-   never printed in settings summaries or UI error text.
+   `AUTH_REQUIRED=false`. `backend.security.redaction` masks configured
+   secret-like values plus common token/API-key/password formats before text
+   reaches UI errors, scan failure details, or configured logs. Redaction is a
+   safety net only; do not paste real secrets into issues, screenshots, or PRs.
 
 5. **Add your DhanHQ credentials**
 
