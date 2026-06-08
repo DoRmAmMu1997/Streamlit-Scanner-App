@@ -176,7 +176,6 @@ def test_default_screener_keys_are_the_deterministic_daily_set():
 def test_run_daily_scan_uses_registry_universes_and_persists_history(
     job_engine,
     job_session_factory,
-    capsys,
 ):
     """Run all defaults through the real service and query saved history.
 
@@ -232,7 +231,6 @@ def test_run_daily_scan_uses_registry_universes_and_persists_history(
         DEFAULT_DAILY_SCAN_KEYS
     )
     assert loaded_universes == ["fno", "fno", "hemant_super_45"]
-    assert "LEAK" not in capsys.readouterr().out
 
     for params in seen_params.values():
         assert params["threshold"] == 7

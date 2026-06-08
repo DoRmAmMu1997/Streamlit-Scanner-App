@@ -29,6 +29,7 @@ in-memory rows when the database is temporarily unavailable.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -37,11 +38,16 @@ from typing import Any, TextIO
 
 import pandas as pd
 
-from backend.daily_data_loader import DailyDataLoader
+from backend.daily_data_loader import (
+    DailyDataLoader,
+    DEFAULT_HISTORY_YEARS_BACK,
+    history_start_date,
+)
 from backend.dhan_client import DhanDataClient
 from backend.scanning import ScanRunResult, ScanStatus, run_scan
 from backend.scanning.service import SessionFactory
 from backend.screener_registry import ScreenerDefinition, discover_screeners
+from backend.security import install_secret_redaction_filter, redact_exception
 from backend.storage.database import session_scope
 from backend.universe_loader import load_universe
 
@@ -61,11 +67,6 @@ DEFAULT_DAILY_SCAN_KEYS = (
 # Future history/comparison views can distinguish UI runs ("ui:email") from
 # scheduled runs ("job:daily_scan") without guessing from timestamps.
 TRIGGERED_BY = "job:daily_scan"
-
-# Keep the daily job aligned with app.py: screeners receive the full 10-year
-# candle cache window, while each screener's lookback metadata remains useful for
-# UI descriptions and strategy-specific defaults.
-HISTORY_YEARS_BACK = 10
 
 # These aliases make the injection points self-documenting. Production passes
 # the real functions by default; tests pass fakes with the same tiny contracts.
@@ -152,19 +153,19 @@ def run_daily_scan(
     out = output or sys.stdout
     selected_keys = tuple(screener_keys or DEFAULT_DAILY_SCAN_KEYS)
     run_date = today or date.today()
-    start_date = _scan_history_start_date(run_date)
+    start_date = history_start_date(DEFAULT_HISTORY_YEARS_BACK, run_date)
 
     try:
         registry = registry_loader()
     except Exception as exc:  # noqa: BLE001 - command boundary must become exit code
-        # Registry discovery happens before any individual screener can run. If
-        # it fails, the safest command behavior is one fatal synthetic outcome
-        # with only the exception type. Raw import errors can include local paths
-        # or config details we do not need to print.
+        # Registry discovery happens before any individual screener can run. If it
+        # fails, the safest command behavior is one fatal synthetic outcome.
+        # redact_exception keeps the exception type plus a secret-masked message,
+        # so import/config errors stay useful without leaking paths or tokens.
         outcome = DailyScanOutcome(
             screener_key="<registry>",
             fatal=True,
-            message=f"Could not discover screeners ({type(exc).__name__}).",
+            message=f"Could not discover screeners. {redact_exception(exc)}",
         )
         _print_outcome(out, outcome)
         return DailyScanSummary(outcomes=[outcome])
@@ -269,14 +270,14 @@ def _run_one_screener(
             data_loader_factory=data_loader_factory,
         )
     except Exception as exc:  # noqa: BLE001 - setup failures should become rows
-        # Do not print str(exc). Broker/DB/config exceptions can include tokens,
-        # URLs, or local paths. The exception type is enough for a scheduled-job
-        # summary; detailed traceback belongs in logs, not stdout.
+        # Broker/DB/config exceptions can include tokens, URLs, or local paths, so
+        # route them through redact_exception: it keeps the exception type and a
+        # secret-masked message. The detailed traceback still belongs in the logs.
         return DailyScanOutcome(
             screener_key=definition.key,
             universe_key=definition.universe,
             fatal=True,
-            message=f"Setup failed ({type(exc).__name__}).",
+            message=f"Setup failed. {redact_exception(exc)}",
         )
 
     params = dict(definition.default_params)
@@ -299,12 +300,12 @@ def _run_one_screener(
     except Exception as exc:  # noqa: BLE001 - unexpected service failure
         # run_scan normally converts screener and persistence failures into a
         # result object. This branch is only for unexpected service-boundary
-        # exceptions, and it follows the same secret-safe "type only" rule.
+        # exceptions; redact_exception keeps it secret-safe like the rest.
         return DailyScanOutcome(
             screener_key=definition.key,
             universe_key=definition.universe,
             fatal=True,
-            message=f"Scan service failed ({type(exc).__name__}).",
+            message=f"Scan service failed. {redact_exception(exc)}",
         )
 
     row_count = 0 if result.results is None else len(result.results)
@@ -355,20 +356,6 @@ def _make_data_loader(
     return DailyDataLoader(data_client_factory())
 
 
-def _scan_history_start_date(selected_date: date) -> date:
-    """Return the same 10-year candle window start date used by Streamlit scans."""
-    try:
-        return selected_date.replace(year=selected_date.year - HISTORY_YEARS_BACK)
-    except ValueError:
-        # Feb 29 minus whole years can land on a non-leap year. Match app.py and
-        # DailyDataLoader by falling back to Feb 28.
-        return selected_date.replace(
-            month=2,
-            day=28,
-            year=selected_date.year - HISTORY_YEARS_BACK,
-        )
-
-
 def _print_outcome(output: TextIO, outcome: DailyScanOutcome) -> None:
     """Print one concise, secret-safe status line for operators.
 
@@ -391,4 +378,16 @@ def _print_outcome(output: TextIO, outcome: DailyScanOutcome) -> None:
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised by --help verification
+    # Configure logging only when run as a script: tests call main() directly and
+    # should not inherit a process-wide logging config. run_scan and the data
+    # loader emit full diagnostic tracebacks via logger.exception(...); send those
+    # to stderr so stdout stays a clean operator summary, then install the SEC-002
+    # redaction filter (after basicConfig, so the root handler it just created is
+    # covered) to mask any secret-shaped text in those tracebacks.
+    logging.basicConfig(
+        level=logging.INFO,
+        stream=sys.stderr,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    install_secret_redaction_filter()
     raise SystemExit(main())
