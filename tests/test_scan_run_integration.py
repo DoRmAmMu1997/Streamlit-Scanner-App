@@ -33,11 +33,11 @@ from decimal import Decimal
 
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from backend.scanning import ScanStatus, run_scan
+from backend.storage.database import _make_engine
 from backend.storage.models import Base
 from backend.storage.repository import get_latest_scan_runs, get_scan_results
 
@@ -53,17 +53,11 @@ def integration_engine(tmp_path) -> Iterator[Engine]:
     what a scan service plus history query needs to prove.
     """
     db_path = tmp_path / "test_scan_history.db"
-    engine = create_engine(
-        f"sqlite:///{db_path}",
-        connect_args={"check_same_thread": False},
-        future=True,
-    )
-
-    @event.listens_for(engine, "connect")
-    def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
-        """Match the app's SQLite safety setting for parent/child rows."""
-        dbapi_connection.execute("PRAGMA foreign_keys=ON")
-
+    # Reuse the production engine factory so this integration test exercises the
+    # exact SQLite settings real scan history uses: foreign-key cascades plus the
+    # WAL/busy-timeout concurrency pragmas. tests/test_scan_storage_database.py
+    # uses the same factory.
+    engine = _make_engine(f"sqlite:///{db_path.as_posix()}")
     Base.metadata.create_all(engine)
     yield engine
     engine.dispose()
@@ -116,17 +110,22 @@ class _FakeDataLoader:
         self.last_rate_limit_retries = 0
 
 
-def test_full_scan_run_persists_results_and_history_can_be_queried(
-    integration_engine,
-    integration_session_factory,
-):
-    """Run the real scan service with fake inputs and query the saved history."""
-    fake_universe = pd.DataFrame(
+def _fake_universe() -> pd.DataFrame:
+    """A small offline universe shared by the integration tests."""
+    return pd.DataFrame(
         {
             "symbol": ["RELIANCE", "TCS", "INFY"],
             "company_name": ["Reliance Industries", "Tata Consultancy", "Infosys"],
         }
     )
+
+
+def test_full_scan_run_persists_results_and_history_can_be_queried(
+    integration_engine,
+    integration_session_factory,
+):
+    """Run the real scan service with fake inputs and query the saved history."""
+    fake_universe = _fake_universe()
     fake_loader = _FakeDataLoader()
     scan_params = {
         "start_date": date(2026, 1, 1),
@@ -192,6 +191,12 @@ def test_full_scan_run_persists_results_and_history_can_be_queried(
         "has_compute_callback": True,
     }
 
+    # The service must not mutate the caller's params (app.py reuses this dict to
+    # render charts after a scan); the compute callback run_scan injects must stay
+    # inside the copy it makes, never leaking back to the caller.
+    assert "compute_failure_callback" not in scan_params
+    assert callable(scan_params["progress_callback"])
+
     # Query through the public repository helpers, the same API a future history
     # page should use. This proves the scan was not merely returned in memory; it
     # was actually committed to the temporary database.
@@ -228,6 +233,8 @@ def test_full_scan_run_persists_results_and_history_can_be_queried(
             "observed_at": "2026-06-01",
         }
         assert rows[1].rating == "WATCH"
+        # Row 2 supplied signal_date as the string "2026-06-01"; confirm it parsed.
+        assert rows[1].signal_date == date(2026, 6, 1)
         assert rows[1].close_price == Decimal("3890.2500")
         assert rows[1].raw_result_json["extra_note"] == "kept in raw_result_json"
 
@@ -250,12 +257,7 @@ def test_partial_scan_run_persists_status_message_and_results(
     parent ``scan_runs`` row, while the usable shortlist still lives in
     ``scan_results``.
     """
-    fake_universe = pd.DataFrame(
-        {
-            "symbol": ["RELIANCE", "TCS", "INFY"],
-            "company_name": ["Reliance Industries", "Tata Consultancy", "Infosys"],
-        }
-    )
+    fake_universe = _fake_universe()
     fake_loader = _FakeDataLoader(
         last_failures=[
             {
@@ -356,12 +358,7 @@ def test_failed_scan_run_persists_secret_safe_error_and_no_results(
     can return a valid result table, so there should be a parent audit row but no
     child ``scan_results`` rows.
     """
-    fake_universe = pd.DataFrame(
-        {
-            "symbol": ["RELIANCE", "TCS"],
-            "company_name": ["Reliance Industries", "Tata Consultancy"],
-        }
-    )
+    fake_universe = _fake_universe()
     fake_loader = _FakeDataLoader()
 
     def failed_screener(_universe_df, _data_loader, _params):
@@ -407,3 +404,55 @@ def test_failed_scan_run_persists_secret_safe_error_and_no_results(
         assert "RuntimeError" in (saved_run.error_message or "")
         assert "SUPERSECRET" not in (saved_run.error_message or "")
         assert get_scan_results(session, saved_run.id) == []
+
+
+def test_scan_history_lists_multiple_runs(
+    integration_engine,
+    integration_session_factory,
+):
+    """Two scans should both persist and be queryable as scan history.
+
+    The single-run tests above prove one run is queryable. This proves the
+    history *list* a future SCAN-004 page will render accumulates multiple runs
+    through the real service, not just one.
+
+    The assertions are deliberately order-independent: ``get_latest_scan_runs``
+    sorts by ``started_at`` only, so two runs created microseconds apart can share
+    a timestamp and come back in either order. Asserting a strict newest-first
+    order here would be flaky; proving both runs are present is the durable
+    integration guarantee.
+    """
+
+    def _empty_screener(_universe_df, _data_loader, _params):
+        """A clean screener with an empty shortlist (SUCCESS, no result rows)."""
+        return pd.DataFrame()
+
+    common = dict(
+        universe_key="fake_universe",
+        run_callable=_empty_screener,
+        universe_df=_fake_universe(),
+        params={"start_date": date(2026, 1, 1), "end_date": date(2026, 6, 2)},
+        session_factory=integration_session_factory,
+    )
+    first = run_scan(
+        screener_key="first_screener",
+        data_loader=_FakeDataLoader(),
+        **common,
+    )
+    second = run_scan(
+        screener_key="second_screener",
+        data_loader=_FakeDataLoader(),
+        **common,
+    )
+
+    assert first.status is ScanStatus.SUCCESS
+    assert second.status is ScanStatus.SUCCESS
+    assert first.run_id != second.run_id
+
+    with Session(integration_engine) as session:
+        runs = get_latest_scan_runs(session, limit=5)
+        assert {run.id for run in runs} == {first.run_id, second.run_id}
+        assert {run.screener_key for run in runs} == {
+            "first_screener",
+            "second_screener",
+        }
