@@ -96,6 +96,22 @@ def test_serpapi_client_raises_on_network_error():
         SerpApiClient(api_key="secret", session=session).search("DEMO")
 
 
+def test_serpapi_client_redacts_api_key_from_network_error():
+    """Requests exceptions can include a URL with the SerpAPI key query param."""
+    session = _FakeSession(
+        requests.Timeout(
+            "GET https://serpapi.com/search?engine=google&api_key=serp-secret&q=DEMO"
+        )
+    )
+
+    with pytest.raises(SerpApiSearchError) as exc_info:
+        SerpApiClient(api_key="serp-secret", session=session).search("DEMO")
+
+    message = str(exc_info.value)
+    assert "serp-secret" not in message
+    assert "***REDACTED***" in message
+
+
 def test_serpapi_client_returns_empty_list_when_no_results():
     session = _FakeSession(_FakeResponse({"organic_results": []}))
 

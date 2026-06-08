@@ -136,14 +136,8 @@ def test_execute_screener_uses_ten_year_data_window_independent_of_lookback(monk
 def test_redact_secrets_masks_serpapi_and_agent_keys(monkeypatch):
     monkeypatch.setenv("SERPAPI_API_KEY", "serp-secret")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-secret")
-    monkeypatch.setattr(
-        app,
-        "get_dhan_credentials",
-        lambda required=False: SimpleNamespace(
-            client_code="client-secret",
-            access_token="token-secret",
-        ),
-    )
+    monkeypatch.setenv("DHAN_CLIENT_ID", "client-secret")
+    monkeypatch.setenv("DHAN_ACCESS_TOKEN", "token-secret")
 
     redacted = app._redact_secrets(
         "serp-secret anthropic-secret client-secret token-secret still-visible"
@@ -159,7 +153,6 @@ def test_redact_secrets_masks_serpapi_and_agent_keys(monkeypatch):
 
 def test_redact_secrets_masks_streamlit_auth_secrets(monkeypatch):
     """OIDC config values should be treated like broker/API secrets in errors."""
-    monkeypatch.setattr(app, "get_dhan_credentials", lambda required=False: None)
     monkeypatch.setattr(
         app,
         "st",
@@ -192,18 +185,55 @@ def test_redact_secrets_survives_settings_parse_errors(monkeypatch):
     # Simulate the exact failure mode we care about: settings parsing already
     # failed, and the app is trying to show that settings error to the user. The
     # redactor should degrade gracefully instead of raising a second SettingsError.
-    monkeypatch.setattr(
-        app,
-        "get_dhan_credentials",
-        lambda required=False: (_ for _ in ()).throw(app.SettingsError("bad")),
-    )
-    monkeypatch.setattr(
-        app,
-        "secret_values",
-        lambda: (_ for _ in ()).throw(app.SettingsError("bad")),
-    )
+    monkeypatch.setenv("LOG_LEVEL", "chatty")
 
     assert app._redact_secrets("Invalid LOG_LEVEL") == "Invalid LOG_LEVEL"
+
+
+def test_prefetch_redacts_dhan_setup_errors(monkeypatch, capsys):
+    """The terminal prefetch path should not print raw broker tokens."""
+
+    class _CleanupOnlyLoader:
+        """Tiny loader fake used before the real Dhan client is constructed."""
+
+        def __init__(self, client=None):
+            pass
+
+        def cleanup_legacy_cache_files(self):
+            return 0
+
+    def build_broken_dhan_client():
+        # This mimics an SDK/setup error echoing a credential in its message.
+        # The test asserts the terminal output sees only the redacted version.
+        raise RuntimeError("Dhan setup failed with access_token=broker-token-secret")
+
+    monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
+    monkeypatch.setattr(app, "refresh_universe_files", lambda: {})
+    monkeypatch.setattr(
+        app,
+        "union_of_mapped_universes",
+        lambda: pd.DataFrame(
+            [
+                {
+                    "symbol": "DEMO",
+                    "security_id": "1",
+                    "mapping_status": "mapped",
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(app, "DailyDataLoader", _CleanupOnlyLoader)
+    monkeypatch.setattr(
+        app,
+        "DhanDataClient",
+        SimpleNamespace(from_env=build_broken_dhan_client),
+    )
+
+    app.prefetch_data_assets()
+
+    output = capsys.readouterr().out
+    assert "broker-token-secret" not in output
+    assert "***REDACTED***" in output
 
 
 def test_main_requires_auth_before_discovering_screeners(monkeypatch):
@@ -332,7 +362,6 @@ def test_main_stops_before_runtime_dirs_when_production_settings_are_invalid(mon
     settings = get_settings(env={"APP_ENV": "production"})
 
     monkeypatch.setattr(app, "get_settings", lambda: settings)
-    monkeypatch.setattr(app, "secret_values", lambda: [])
     monkeypatch.setattr(
         app,
         "ensure_project_dirs",
