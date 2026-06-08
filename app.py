@@ -63,7 +63,11 @@ from backend.fundamentals import (
     FundamentalAgent,
     FundamentalsUsageLimitError,
 )
-from backend.daily_data_loader import DailyDataLoader
+from backend.daily_data_loader import (
+    DailyDataLoader,
+    DEFAULT_HISTORY_YEARS_BACK,
+    history_start_date,
+)
 from backend.dhan_client import DhanDataClient
 from backend.security import install_secret_redaction_filter, redact_text
 from backend.screener_registry import ScreenerDefinition, ScreenerRegistryError, discover_screeners
@@ -82,9 +86,10 @@ from backend.universe_loader import (
 
 
 # The CLI prefetch downloads ten years of daily candles for every stock in the
-# union of all universes. Keeping this constant here makes it easy to find and
-# tweak; the actual fetch loop is in `prefetch_data_assets()`.
-_PREFETCH_YEARS_BACK = 10
+# union of all universes. The window length is shared with the headless daily job
+# via DEFAULT_HISTORY_YEARS_BACK; the actual fetch loop is in
+# `prefetch_data_assets()`.
+_PREFETCH_YEARS_BACK = DEFAULT_HISTORY_YEARS_BACK
 
 
 logger = logging.getLogger(__name__)
@@ -124,16 +129,7 @@ def _scan_history_start_date(today: date | None = None) -> date:
     or secondary rule may need.
     """
     selected_date = today or date.today()
-    try:
-        return selected_date.replace(year=selected_date.year - _PREFETCH_YEARS_BACK)
-    except ValueError:
-        # Feb 29 minus whole calendar years can land on a non-leap year. Match
-        # DailyDataLoader.ensure_daily_history by falling back to Feb 28.
-        return selected_date.replace(
-            month=2,
-            day=28,
-            year=selected_date.year - _PREFETCH_YEARS_BACK,
-        )
+    return history_start_date(_PREFETCH_YEARS_BACK, selected_date)
 
 
 def prefetch_data_assets() -> None:

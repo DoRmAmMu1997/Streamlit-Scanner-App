@@ -29,6 +29,32 @@ from backend.security import redact_text
 logger = logging.getLogger(__name__)
 
 
+# Default candle-history window shared by the Streamlit prefetch/scan path and the
+# headless daily job. Keeping it (and the leap-safe "subtract whole years" math in
+# ``history_start_date``) in one place stops the three callers from drifting apart.
+DEFAULT_HISTORY_YEARS_BACK = 10
+
+
+def history_start_date(
+    years_back: int = DEFAULT_HISTORY_YEARS_BACK, today: date | None = None
+) -> date:
+    """Return ``today`` minus ``years_back`` whole years, safe for Feb 29.
+
+    ``date.replace(year=...)`` is the simplest way to subtract whole years, but it
+    raises ``ValueError`` on Feb 29 when the target year is not a leap year (for
+    example 2024-02-29 minus 10y lands on 2014-02-29, which does not exist). In
+    that case we fall back to Feb 28 so the cached candle window and every scan
+    caller agree on the same start date.
+    """
+    selected_date = today or date.today()
+    try:
+        return selected_date.replace(year=selected_date.year - int(years_back))
+    except ValueError:
+        return selected_date.replace(
+            month=2, day=28, year=selected_date.year - int(years_back)
+        )
+
+
 # A progress callback receives (completed_count, total_count, current_symbol).
 # The Streamlit UI uses this to drive st.progress(...) and a status line; tests
 # and CLI callers can pass None and skip the bookkeeping entirely.
@@ -293,7 +319,7 @@ class DailyDataLoader:
     def ensure_daily_history(
         self,
         instrument: Mapping[str, object] | pd.Series,
-        years_back: int = 10,
+        years_back: int = DEFAULT_HISTORY_YEARS_BACK,
         today: date | None = None,
     ) -> tuple[pd.DataFrame, str]:
         """Top up a single stock's cached parquet to cover today's data.
@@ -319,13 +345,7 @@ class DailyDataLoader:
             raise ValueError(f"{symbol} is missing security_id")
 
         today = today or date.today()
-        # `replace(year=...)` is the simplest way to subtract whole years. The
-        # Feb-29 guard handles the leap-day edge case: stepping back from
-        # 2024-02-29 by 10y lands on 2014-02-29, which doesn't exist.
-        try:
-            start = today.replace(year=today.year - int(years_back))
-        except ValueError:
-            start = today.replace(month=2, day=28, year=today.year - int(years_back))
+        start = history_start_date(int(years_back), today)
 
         path = self.cache_path(symbol, security_id)
         if not path.exists():

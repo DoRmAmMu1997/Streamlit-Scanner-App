@@ -8,8 +8,24 @@ from datetime import date, datetime
 
 import pandas as pd
 
-from backend.daily_data_loader import DailyDataLoader
+from backend.daily_data_loader import (
+    DEFAULT_HISTORY_YEARS_BACK,
+    DailyDataLoader,
+    history_start_date,
+)
 from backend.dhan_client import DhanRateLimitError
+
+
+def test_history_start_date_subtracts_years_and_handles_leap_day():
+    """The shared helper underpins both Streamlit scans and the headless job."""
+    # Normal date: subtract exactly ten calendar years.
+    assert history_start_date(DEFAULT_HISTORY_YEARS_BACK, date(2026, 6, 5)) == date(
+        2016, 6, 5
+    )
+    # Feb 29 minus ten years lands on a non-leap year, so fall back to Feb 28.
+    assert history_start_date(10, date(2024, 2, 29)) == date(2014, 2, 28)
+    # A custom window still works.
+    assert history_start_date(1, date(2020, 1, 15)) == date(2019, 1, 15)
 
 
 class FakeDhanClient:
