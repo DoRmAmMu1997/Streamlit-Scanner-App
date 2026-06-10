@@ -14,6 +14,7 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect
 
+from backend.storage import database
 from backend.storage.models import Base
 
 
@@ -83,6 +84,83 @@ def test_migration_matches_orm_metadata(monkeypatch, tmp_path: Path):
     orm_schema = _reflect_schema(orm_engine)
 
     assert migrated_schema == orm_schema
+
+
+def test_ensure_database_schema_creates_tables_and_short_circuits(monkeypatch, tmp_path: Path):
+    """The runtime bootstrap applies migrations once, then skips on later calls.
+
+    This guards the fix for the "no such table: scan_runs" startup bug: the app
+    and the daily CLI call ``ensure_database_schema()`` instead of relying on a
+    manual ``alembic upgrade head`` that fresh checkouts never ran.
+    """
+    db_path = tmp_path / "bootstrap.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
+    monkeypatch.setattr(database, "_schema_ensured", False, raising=False)
+
+    assert database.ensure_database_schema() is True
+
+    engine = create_engine(f"sqlite:///{db_path.as_posix()}", future=True)
+    assert set(inspect(engine).get_table_names()) == {
+        "alembic_version",
+        "scan_runs",
+        "scan_results",
+    }
+    engine.dispose()
+
+    # The second call must short-circuit on the per-process flag. Pointing the
+    # environment at an unusable URL proves no new migration run is attempted:
+    # if one were, it would fail loudly instead of returning True.
+    monkeypatch.setenv("DATABASE_URL", "driver://not-a-real-database")
+    assert database.ensure_database_schema() is True
+
+
+def test_ensure_database_schema_preserves_logging_configuration(monkeypatch, tmp_path: Path):
+    """The bootstrap must never re-run logging setup from alembic.ini.
+
+    ``migrations/env.py`` calls ``fileConfig`` when the alembic Config carries an
+    ini file name. That would replace the root logger's handlers — silently
+    discarding the SEC-002 secret-redaction filter installed by the app. The
+    helper builds its Config programmatically, so existing handlers and filters
+    must survive untouched.
+    """
+    db_path = tmp_path / "bootstrap-logging.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
+    monkeypatch.setattr(database, "_schema_ensured", False, raising=False)
+
+    root_logger = logging.getLogger()
+    marker_handler = logging.NullHandler()
+    marker_filter = logging.Filter("tests.schema.bootstrap.marker")
+    root_logger.addHandler(marker_handler)
+    root_logger.addFilter(marker_filter)
+    handlers_before = list(root_logger.handlers)
+    try:
+        assert database.ensure_database_schema() is True
+        assert root_logger.handlers == handlers_before
+        assert marker_filter in root_logger.filters
+    finally:
+        root_logger.removeHandler(marker_handler)
+        root_logger.removeFilter(marker_filter)
+
+
+def test_ensure_database_schema_returns_false_when_database_is_unusable(
+    monkeypatch, tmp_path: Path
+):
+    """Bootstrap failures degrade gracefully and stay retryable.
+
+    Scan persistence is best-effort in the UI ("continuing without history"), so
+    the bootstrap must warn-and-return rather than crash the app. The flag stays
+    unset on failure so a later call can retry once the environment is fixed.
+    """
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file where a directory is expected")
+    monkeypatch.setenv(
+        "DATABASE_URL",
+        f"sqlite:///{(blocker / 'impossible.db').as_posix()}",
+    )
+    monkeypatch.setattr(database, "_schema_ensured", False, raising=False)
+
+    assert database.ensure_database_schema() is False
+    assert database._schema_ensured is False
 
 
 def _reflect_schema(engine) -> dict[str, dict[str, object]]:

@@ -180,12 +180,16 @@ network work happens up front in the terminal.
    pip install -r requirements-optional.txt
    ```
 
-3. **Create the local scan-history database**
+3. **Create the local scan-history database** (optional)
 
    By default, persisted scan runs live in `data/scanner.db`, which is
    generated locally and git-ignored. `DATA_DIR` can point the whole runtime
    data folder somewhere else, and `DATABASE_URL` can point the app at Postgres
    or another SQLAlchemy-supported database in deployed environments.
+
+   The app and the daily scan command apply migrations automatically on
+   startup, so a fresh checkout needs no manual step. Running the upgrade
+   yourself is still useful to pre-provision a database or debug migrations:
 
    ```bash
    python -m alembic upgrade head
@@ -369,10 +373,11 @@ By default it runs the deterministic daily set:
 registry metadata, so F&O screeners run on `fno` and the Envelope + Knoxville
 screener runs on `hemant_super_45`.
 
-The command expects the normal runtime setup to exist first: run
-`python -m alembic upgrade head` so scan history tables are present, keep the
-universe CSVs under `DATA_DIR/universes`, and configure Dhan credentials so the
-daily data loader can fetch/cache candles. Local scan history defaults to
+The command expects the normal runtime setup to exist first: keep the
+universe CSVs under `DATA_DIR/universes` and configure Dhan credentials so the
+daily data loader can fetch/cache candles. Scan-history tables are created
+automatically — the command applies Alembic migrations on startup before any
+screener runs. Local scan history defaults to
 `data/scanner.db`; deployments can point `DATABASE_URL` at Postgres or another
 SQLAlchemy-supported database.
 
@@ -605,9 +610,10 @@ re-running today's data, universe, or model.
   then click a run to see its persisted results and download them as CSV. Failed
   runs show their full (secret-redacted) error message.
 
-> **Upgrading an existing checkout?** Run `python -m alembic upgrade head` once
-> so the database gains the `symbols_scanned` column. Runs recorded before the
-> upgrade show "—" in that column — the value was not stored back then.
+> **Upgrading an existing checkout?** The app applies migrations automatically
+> on startup, so the database gains the `symbols_scanned` column on first run.
+> Runs recorded before the upgrade show "—" in that column — the value was not
+> stored back then.
 
 The design is documented in
 [`docs/architecture/scan-run-persistence.md`](docs/architecture/scan-run-persistence.md).

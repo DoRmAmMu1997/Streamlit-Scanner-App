@@ -24,6 +24,7 @@ Public surface:
 from backend.storage.database import (
     SessionLocal,
     engine,
+    ensure_database_schema,
     get_database_url,
     init_db,
     session_scope,
@@ -48,6 +49,7 @@ __all__ = [
     "count_scan_results_for_runs",
     "create_scan_run",
     "engine",
+    "ensure_database_schema",
     "finish_scan_run",
     "get_database_url",
     "get_latest_scan_runs",

@@ -76,6 +76,7 @@ from backend.scanning import ScanStatus, run_scan
 from backend.storage import (
     ScanRun,
     count_scan_results_for_runs,
+    ensure_database_schema,
     get_latest_scan_runs,
     get_scan_results,
     list_distinct_screener_keys,
@@ -908,6 +909,13 @@ def main() -> None:
     # warnings inside BaseScanner.run() reach the terminal (or DEBUG logs in
     # SCANNER_DEBUG=1 mode).
     _configure_logging()
+
+    # Scan history needs the SCAN-002 schema. Applying migrations here (once
+    # per process, after logging so failures are formatted and redacted) means
+    # a fresh checkout's first scan persists history instead of warning
+    # "Could not create scan run header". Failure keeps the app usable:
+    # persistence is best-effort by design.
+    ensure_database_schema()
 
     st.set_page_config(page_title="Streamlit Scanner App", page_icon="📈", layout="wide")
     _inject_css()

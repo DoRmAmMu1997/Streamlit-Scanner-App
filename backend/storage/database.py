@@ -17,6 +17,8 @@ state across button clicks.
 
 from __future__ import annotations
 
+import logging
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -26,6 +28,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from backend.config import get_settings
 from backend.storage.models import Base
+
+logger = logging.getLogger(__name__)
 
 
 def get_database_url() -> str:
@@ -117,6 +121,59 @@ def init_db() -> None:
     local scripts that need a quick throwaway database.
     """
     Base.metadata.create_all(engine)
+
+
+# ``ensure_database_schema`` runs at most one real migration pass per process.
+# Streamlit re-runs ``main()`` on every widget interaction, and first-boot
+# sessions can arrive on worker threads, so the flag is guarded by a lock.
+_schema_ensured = False
+_schema_lock = threading.Lock()
+
+
+def ensure_database_schema() -> bool:
+    """Apply Alembic migrations to the configured database, once per process.
+
+    A fresh checkout has no ``scan_runs``/``scan_results`` tables until
+    ``alembic upgrade head`` runs, so every scan used to fail its history write
+    with "no such table: scan_runs". The app and the daily CLI call this on
+    startup instead of relying on that manual step. ``upgrade`` is idempotent:
+    an already-migrated database is a fast no-op.
+
+    The Alembic ``Config`` is built programmatically — without ``alembic.ini`` —
+    on purpose. ``migrations/env.py`` only calls ``logging.config.fileConfig``
+    when the config carries an ini file name, and that call would replace the
+    root logger's handlers, discarding the SEC-002 secret-redaction filter the
+    app installs. The database URL needs no plumbing either: env.py reads it
+    from ``get_database_url()``, the same source the engine above uses.
+
+    Returns ``True`` when the schema is ready. Failures are logged (the root
+    redaction filter masks any credentials in the URL) and return ``False``;
+    scan persistence stays best-effort, matching "continuing without history".
+    """
+    global _schema_ensured
+    with _schema_lock:
+        if _schema_ensured:
+            return True
+        try:
+            # Local imports keep alembic out of the app's hot import path; this
+            # module is imported by every scan-related page.
+            from alembic import command
+            from alembic.config import Config
+
+            from backend.config.settings import PROJECT_ROOT
+
+            config = Config()
+            config.set_main_option("script_location", str(PROJECT_ROOT / "migrations"))
+            command.upgrade(config, "head")
+        except Exception:  # noqa: BLE001 - startup must not crash on a DB issue.
+            logger.warning(
+                "Could not apply scan-history migrations; scans will continue "
+                "without persisted history.",
+                exc_info=True,
+            )
+            return False
+        _schema_ensured = True
+        return True
 
 
 @contextmanager

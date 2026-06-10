@@ -48,7 +48,7 @@ from backend.scanning import ScanRunResult, ScanStatus, run_scan
 from backend.scanning.service import SessionFactory
 from backend.screener_registry import ScreenerDefinition, discover_screeners
 from backend.security import install_secret_redaction_filter, redact_exception
-from backend.storage.database import session_scope
+from backend.storage.database import ensure_database_schema, session_scope
 from backend.universe_loader import load_universe
 
 
@@ -218,12 +218,14 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     job_runner: Callable[..., DailyScanSummary] = run_daily_scan,
+    schema_bootstrapper: Callable[[], bool] = ensure_database_schema,
     output: TextIO | None = None,
 ) -> int:
     """Parse CLI arguments and return an integer process exit code.
 
-    ``job_runner`` is injectable for tests. That lets tests prove argument
-    parsing without discovering real screeners or trying to create a Dhan client.
+    ``job_runner`` and ``schema_bootstrapper`` are injectable for tests. That
+    lets tests prove argument parsing and call ordering without discovering real
+    screeners, creating a Dhan client, or migrating a real database.
     """
     parser = argparse.ArgumentParser(
         description="Run the scanner's configured daily screeners without Streamlit."
@@ -238,6 +240,11 @@ def main(
         ),
     )
     args = parser.parse_args(argv)
+    # Apply scan-history migrations before any screener can try to persist a
+    # run. A fresh deployment otherwise has no scan_runs table and every
+    # outcome becomes "History was not persisted." If this fails, the existing
+    # missing-run_id contract below still exits 1 with that clear message.
+    schema_bootstrapper()
     summary = job_runner(
         screener_keys=args.screener_keys or None,
         output=output or sys.stdout,

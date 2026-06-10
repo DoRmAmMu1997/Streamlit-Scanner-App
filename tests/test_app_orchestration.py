@@ -256,6 +256,7 @@ def test_main_requires_auth_before_discovering_screeners(monkeypatch):
     monkeypatch.setattr(app, "discover_screeners", fail_if_discovered)
     monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
     monkeypatch.setattr(app, "_configure_logging", lambda: None)
+    monkeypatch.setattr(app, "ensure_database_schema", lambda: True)
     # Local development defaults AUTH_REQUIRED to false. This test is about the
     # guarded path, so opt in explicitly and then assert discovery never runs
     # before the auth gate stops the Streamlit rerun.
@@ -273,6 +274,56 @@ def test_main_requires_auth_before_discovering_screeners(monkeypatch):
 
     with pytest.raises(StopFromAuth):
         app.main()
+
+
+def test_main_bootstraps_scan_schema_before_the_auth_gate(monkeypatch):
+    """``main()`` must apply scan-history migrations on startup.
+
+    A fresh checkout has no ``scan_runs`` table until migrations run, so every
+    scan used to log "Could not create scan run header" and lose its history.
+    The bootstrap runs right after logging setup — before auth and any screener
+    work — so the very first scan of a new deployment persists normally.
+    """
+
+    class StopFromAuth(RuntimeError):
+        """Test-only signal that the auth gate stopped the Streamlit run."""
+
+        pass
+
+    calls: list[str] = []
+
+    def record_schema_bootstrap() -> bool:
+        calls.append("schema")
+        return True
+
+    def stop_at_auth(_st):
+        calls.append("auth")
+        raise StopFromAuth()
+
+    # raising=False keeps this a clean behavioral failure (not a setup error)
+    # while the bootstrap hook does not exist in app.py yet.
+    monkeypatch.setattr(
+        app, "ensure_database_schema", record_schema_bootstrap, raising=False
+    )
+    monkeypatch.setattr(app, "require_authorized_user", stop_at_auth)
+    monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
+    monkeypatch.setattr(app, "_configure_logging", lambda: None)
+    monkeypatch.setenv("AUTH_REQUIRED", "true")
+    monkeypatch.setattr(
+        app,
+        "st",
+        SimpleNamespace(
+            set_page_config=lambda **_kwargs: None,
+            markdown=lambda *_args, **_kwargs: None,
+            title=lambda *_args, **_kwargs: None,
+            caption=lambda *_args, **_kwargs: None,
+        ),
+    )
+
+    with pytest.raises(StopFromAuth):
+        app.main()
+
+    assert calls == ["schema", "auth"]
 
 
 def test_main_passes_authenticated_email_as_scan_trigger(monkeypatch):
@@ -319,6 +370,7 @@ def test_main_passes_authenticated_email_as_scan_trigger(monkeypatch):
     monkeypatch.setattr(app, "get_settings", lambda: settings)
     monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
     monkeypatch.setattr(app, "_configure_logging", lambda: None)
+    monkeypatch.setattr(app, "ensure_database_schema", lambda: True)
     monkeypatch.setattr(
         app,
         "require_authorized_user",
@@ -411,6 +463,7 @@ def test_main_skips_auth_gate_when_auth_not_required(monkeypatch):
     monkeypatch.setattr(app, "get_settings", lambda: settings)
     monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
     monkeypatch.setattr(app, "_configure_logging", lambda: None)
+    monkeypatch.setattr(app, "ensure_database_schema", lambda: True)
     monkeypatch.setattr(app, "require_authorized_user", lambda _st: auth_calls.append(1))
     monkeypatch.setattr(
         app,
