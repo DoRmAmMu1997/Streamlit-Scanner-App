@@ -235,13 +235,16 @@ def test_hemant_source_csvs_are_pinned_from_google_doc_snapshot():
 
     assert len(super_45) == 43
     assert len(good_45) == 43
-    assert len(good_200) == 261
+    # 262 = the original 261-symbol Google Doc snapshot + SUZLON, added on
+    # 2026-06-10 by user request. New additions append to the end of the pinned
+    # source list so the original ordering stays reviewable.
+    assert len(good_200) == 262
     assert super_45[-3:] == [
         "BAJAJ_AUTO",
         "UTLTRACEMCO",
         "AMBUJACEM",
     ]
-    assert good_200[-3:] == ["HDFCBANK", "SBIN", "BLS"]
+    assert good_200[-3:] == ["SBIN", "BLS", "SUZLON"]
 
 
 def test_refresh_universe_files_writes_requested_csvs(tmp_path):
