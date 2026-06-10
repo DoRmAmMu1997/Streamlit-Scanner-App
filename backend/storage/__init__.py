@@ -30,10 +30,12 @@ from backend.storage.database import (
 )
 from backend.storage.models import Base, ScanResult, ScanRun, ScanStatus
 from backend.storage.repository import (
+    count_scan_results_for_runs,
     create_scan_run,
     finish_scan_run,
     get_latest_scan_runs,
     get_scan_results,
+    list_distinct_screener_keys,
     save_scan_results,
 )
 
@@ -43,6 +45,7 @@ __all__ = [
     "ScanResult",
     "ScanRun",
     "ScanStatus",
+    "count_scan_results_for_runs",
     "create_scan_run",
     "engine",
     "finish_scan_run",
@@ -50,6 +53,7 @@ __all__ = [
     "get_latest_scan_runs",
     "get_scan_results",
     "init_db",
+    "list_distinct_screener_keys",
     "save_scan_results",
     "session_scope",
 ]

@@ -283,3 +283,31 @@ def test_run_scan_returns_results_even_when_persistence_fails():
     assert result.status is ScanStatus.SUCCESS
     assert list(result.results["symbol"]) == ["RELIANCE", "TCS"]
     assert result.run_id is None
+
+
+def test_run_scan_records_universe_size_as_symbols_scanned(db_engine, session_factory):
+    """SCAN-004: the run header stores how many symbols were handed to the screener.
+
+    The history page shows "symbols scanned" next to "shortlisted results" so a
+    user can tell "2 hits out of 3 candidates" from "2 hits out of 500". The
+    service is the only place that sees the universe frame, so it records the
+    size when it creates the audit header.
+    """
+
+    def screener_run(_universe_df, _data_loader, _params):
+        return _two_buy_rows()
+
+    result = run_scan(
+        screener_key="envelope",
+        universe_key="hemant_super_45",
+        run_callable=screener_run,
+        universe_df=pd.DataFrame({"symbol": ["RELIANCE", "TCS", "WIPRO"]}),
+        data_loader=_FakeLoader(),
+        params=_base_params(),
+        session_factory=session_factory,
+    )
+
+    assert result.run_id is not None
+    with Session(db_engine) as session:
+        runs = get_latest_scan_runs(session)
+        assert runs[0].symbols_scanned == 3

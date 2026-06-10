@@ -344,6 +344,9 @@ def test_main_passes_authenticated_email_as_scan_trigger(monkeypatch):
             subheader=lambda *_args, **_kwargs: None,
             write=lambda *_args, **_kwargs: None,
             info=lambda *_args, **_kwargs: None,
+            # SCAN-004 added a view switcher; staying on "Scanner" keeps this
+            # test focused on the scan-trigger wiring.
+            radio=lambda *_args, **_kwargs: "Scanner",
             error=lambda message: (_ for _ in ()).throw(AssertionError(message)),
         ),
     )
@@ -422,6 +425,9 @@ def test_main_skips_auth_gate_when_auth_not_required(monkeypatch):
             markdown=lambda *_args, **_kwargs: None,
             title=lambda *_args, **_kwargs: None,
             caption=lambda *_args, **_kwargs: None,
+            # SCAN-004 added a view switcher; staying on "Scanner" lets main()
+            # continue to the discovery call this test watches for.
+            radio=lambda *_args, **_kwargs: "Scanner",
         ),
     )
 

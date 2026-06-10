@@ -111,13 +111,13 @@ by default or Postgres) that is ready to record every run for later replay and a
   (`ALLOWED_EMAILS`) restricts who may use the app, with **admin identification**
   (`ADMIN_EMAILS`); in production the gate fails closed when SSO config or the
   allowlist is missing.
-- **Scan-run persistence (foundation)** — a SQLAlchemy `scan_runs` / `scan_results`
+- **Scan-run persistence + history page** — every scan (from the UI or the
+  headless daily job) is recorded into a SQLAlchemy `scan_runs` / `scan_results`
   schema (`backend/storage/`) with a local SQLite default (`data/scanner.db`) or
   Postgres via `DATABASE_URL`, managed by **Alembic** migrations and a small
-  repository API. It is built to capture a run's parameters, data snapshot, status,
-  and shortlisted rows for replay/audit. The schema, database, migrations, and
-  repository are in place and tested; the scan-service layer that writes records
-  during a live scan is the next step (until then the database stays empty).
+  repository API. A built-in **Scan history** view lists recent runs (status,
+  symbols scanned, shortlisted count, who triggered it, error state) with
+  screener/date/symbol filters and click-through to each run's persisted results.
 - **Tested** — a `pytest` suite covers the indicators, data loader, universe
   builder, screener registry, the screeners themselves, the auth gate, and the
   persistence layer — plus **golden-snapshot** tests that catch screener output
@@ -589,12 +589,25 @@ re-running today's data, universe, or model.
   `session_scope()` sessions; SQLite default at `data/scanner.db`, Postgres via
   `DATABASE_URL`) and `backend/storage/repository.py` (the only query/write
   helpers: `create_scan_run`, `save_scan_results`, `finish_scan_run`,
-  `get_latest_scan_runs`, `get_scan_results`). Schema changes are versioned with
+  `get_latest_scan_runs`, `get_scan_results`, `count_scan_results_for_runs`,
+  `list_distinct_screener_keys`). Schema changes are versioned with
   **Alembic** (`migrations/`, `alembic.ini`); create or upgrade the local database
   with `python -m alembic upgrade head` (setup step 3).
-- **Status** — the schema, database, migrations, and repository are in place and
-  covered by tests. Wiring the scan flow to record a run on every scan is the next
-  step (the scan-service layer); until then the database stays empty.
+- **Scan service (SCAN-003)** — `backend/scanning/run_scan(...)` wraps every scan
+  (Streamlit UI and the headless daily job alike) in the persistence lifecycle:
+  a RUNNING header before the screener executes, then results + a final
+  SUCCESS / PARTIAL / FAILED status. The header also records how many symbols the
+  universe contained (`symbols_scanned`).
+- **Scan history page (SCAN-004)** — switch the view radio at the top of the app
+  to **Scan history** to inspect previous runs: date/time, screener, universe,
+  status badge, symbols scanned, shortlisted count, trigger, and error state.
+  Filter by screener, started-date range, or symbol (exact, case-insensitive),
+  then click a run to see its persisted results and download them as CSV. Failed
+  runs show their full (secret-redacted) error message.
+
+> **Upgrading an existing checkout?** Run `python -m alembic upgrade head` once
+> so the database gains the `symbols_scanned` column. Runs recorded before the
+> upgrade show "—" in that column — the value was not stored back then.
 
 The design is documented in
 [`docs/architecture/scan-run-persistence.md`](docs/architecture/scan-run-persistence.md).
