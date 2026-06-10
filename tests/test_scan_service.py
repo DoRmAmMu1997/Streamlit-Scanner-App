@@ -8,6 +8,7 @@ fake screeners/loaders, so they never touch Streamlit, Dhan, or the real
 
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from datetime import date
 
@@ -16,6 +17,12 @@ import pytest
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 
+from backend.observability import (
+    EVENT_SCAN_COMPLETED,
+    EVENT_SCAN_FAILED,
+    EVENT_SCAN_STARTED,
+    EVENT_SYMBOL_SCAN_FAILED,
+)
 from backend.scanning import ScanStatus, run_scan
 from backend.storage.models import Base
 from backend.storage.repository import get_latest_scan_runs, get_scan_results
@@ -283,3 +290,103 @@ def test_run_scan_returns_results_even_when_persistence_fails():
     assert result.status is ScanStatus.SUCCESS
     assert list(result.results["symbol"]) == ["RELIANCE", "TCS"]
     assert result.run_id is None
+
+
+# ---------------------------------------------------------------------------
+# OBS-001 structured events
+# ---------------------------------------------------------------------------
+
+
+def _event_fields(caplog, event_name: str) -> list[dict]:
+    """Return the structured-fields dict for each captured log_event of this name.
+
+    ``log_event`` attaches the event name and its fields to the LogRecord, so the
+    test can read them straight off ``caplog.records`` without parsing text.
+    """
+    return [
+        getattr(record, "structured_fields", {})
+        for record in caplog.records
+        if getattr(record, "event", None) == event_name
+    ]
+
+
+def test_run_scan_emits_started_and_completed_events_with_run_id(
+    session_factory, caplog
+):
+    """A successful run emits scan_started and scan_completed, both tagged run_id."""
+
+    def screener_run(_universe_df, _data_loader, _params):
+        return _two_buy_rows()
+
+    with caplog.at_level(logging.INFO):
+        result = run_scan(
+            screener_key="envelope",
+            universe_key="hemant_super_45",
+            run_callable=screener_run,
+            universe_df=pd.DataFrame({"symbol": ["RELIANCE", "TCS"]}),
+            data_loader=_FakeLoader(),
+            params=_base_params(),
+            session_factory=session_factory,
+        )
+
+    started = _event_fields(caplog, EVENT_SCAN_STARTED)
+    completed = _event_fields(caplog, EVENT_SCAN_COMPLETED)
+    assert len(started) == 1
+    assert started[0]["run_id"] == result.run_id
+    assert started[0]["screener_key"] == "envelope"
+    assert started[0]["symbol_count"] == 2
+    assert len(completed) == 1
+    assert completed[0]["run_id"] == result.run_id
+    assert completed[0]["status"] == "success"
+    assert completed[0]["row_count"] == 2
+    assert "duration_seconds" in completed[0]
+
+
+def test_run_scan_emits_scan_failed_event_when_screener_raises(session_factory, caplog):
+    """A screener exception emits scan_failed (type only) and no scan_completed."""
+
+    def boom(_universe_df, _data_loader, _params):
+        raise RuntimeError("token=NOPE should not appear in any field")
+
+    with caplog.at_level(logging.INFO):
+        result = run_scan(
+            screener_key="envelope",
+            universe_key="hemant_super_45",
+            run_callable=boom,
+            universe_df=pd.DataFrame({"symbol": ["RELIANCE"]}),
+            data_loader=_FakeLoader(),
+            params=_base_params(),
+            session_factory=session_factory,
+        )
+
+    failed = _event_fields(caplog, EVENT_SCAN_FAILED)
+    assert len(failed) == 1
+    assert failed[0]["run_id"] == result.run_id
+    assert failed[0]["error_type"] == "RuntimeError"
+    # A failed run reports scan_failed instead of scan_completed.
+    assert _event_fields(caplog, EVENT_SCAN_COMPLETED) == []
+
+
+def test_run_scan_emits_symbol_scan_failed_per_failed_symbol(session_factory, caplog):
+    """Loader + compute failures each emit symbol_scan_failed with symbol + run_id."""
+
+    def screener_run(_universe_df, _data_loader, params):
+        params["compute_failure_callback"]({"symbol": "TCS", "message": "bad candles"})
+        return _two_buy_rows()
+
+    with caplog.at_level(logging.INFO):
+        result = run_scan(
+            screener_key="envelope",
+            universe_key="hemant_super_45",
+            run_callable=screener_run,
+            universe_df=pd.DataFrame({"symbol": ["RELIANCE", "TCS", "WIPRO"]}),
+            data_loader=_FakeLoader(
+                last_failures=[{"symbol": "WIPRO", "message": "timeout"}]
+            ),
+            params=_base_params(),
+            session_factory=session_factory,
+        )
+
+    symbol_events = _event_fields(caplog, EVENT_SYMBOL_SCAN_FAILED)
+    assert {event["symbol"] for event in symbol_events} == {"WIPRO", "TCS"}
+    assert all(event["run_id"] == result.run_id for event in symbol_events)

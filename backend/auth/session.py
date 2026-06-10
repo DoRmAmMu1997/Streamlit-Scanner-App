@@ -25,6 +25,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from backend.config import get_settings
+from backend.observability import EVENT_AUTH_DENIED, log_event
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +229,15 @@ def require_authorized_user(st_module: Any) -> AuthenticatedUser:
         # Record the denied attempt for the operator's own audit trail. Only the
         # email is logged — never the allowlist itself — so the log cannot leak
         # who else has access.
-        logger.warning("Access denied for %s: email is not on the allowlist", email)
+        # OBS-001: auth_denied records who was turned away (email only - never the
+        # allowlist itself) so operators can diagnose access problems.
+        log_event(
+            logger,
+            EVENT_AUTH_DENIED,
+            level=logging.WARNING,
+            email=email,
+            reason="not_on_allowlist",
+        )
         st_module.error(
             "You are not authorized to access this app. "
             "Ask the administrator to add your email to the allowlist."

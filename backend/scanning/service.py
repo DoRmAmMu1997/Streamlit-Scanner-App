@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
@@ -37,6 +38,13 @@ from typing import Any
 import pandas as pd
 from sqlalchemy.orm import Session
 
+from backend.observability import (
+    EVENT_SCAN_COMPLETED,
+    EVENT_SCAN_FAILED,
+    EVENT_SCAN_STARTED,
+    EVENT_SYMBOL_SCAN_FAILED,
+    log_event,
+)
 from backend.storage.database import session_scope
 from backend.storage.models import ScanRun, ScanStatus
 from backend.storage.repository import (
@@ -109,6 +117,8 @@ def run_scan(
     compute_failures: list[dict[str, Any]] = []
     run_params = dict(params)
     run_params["compute_failure_callback"] = compute_failures.append
+    # OBS-001: monotonic clock so scan_completed can report a wall-clock duration.
+    started_at = time.monotonic()
 
     # --- 1. Create the audit header before scanner execution -------------------
     # This is intentionally a short transaction. Long-running screeners should
@@ -122,8 +132,23 @@ def run_scan(
         session_factory=session_factory,
     )
 
+    # OBS-001: emit scan_started *after* the header so the event carries the run_id
+    # that ties every later event and persisted row back to this run.
+    log_event(
+        logger,
+        EVENT_SCAN_STARTED,
+        run_id=run_id,
+        screener_key=screener_key,
+        universe_key=universe_key,
+        triggered_by=triggered_by,
+        symbol_count=int(len(universe_df)) if universe_df is not None else 0,
+    )
+
     # --- 2. Run the screener (the primary job; independent of the database) -----
     error_message: str | None = None
+    # Track per-symbol load failures across the try/except so the observability
+    # events below can report them whether or not the screener itself raised.
+    loader_failures: list[dict[str, Any]] = []
     try:
         results = run_callable(universe_df, data_loader, run_params)
     except Exception as exc:
@@ -131,7 +156,18 @@ def run_scan(
         # message secret-free. A raw exception string could echo a token, URL, or
         # broker response body, while the exception class (RuntimeError, KeyError,
         # etc.) is useful and safe enough for the future history UI.
-        logger.exception("Screener %s raised during scan", screener_key)
+        # OBS-001: scan_failed carries the exception type + a redacted traceback
+        # (exc_info=True), never the raw message.
+        log_event(
+            logger,
+            EVENT_SCAN_FAILED,
+            level=logging.ERROR,
+            exc_info=True,
+            run_id=run_id,
+            screener_key=screener_key,
+            universe_key=universe_key,
+            error_type=type(exc).__name__,
+        )
         results = pd.DataFrame()
         status = ScanStatus.FAILED
         error_message = (
@@ -149,6 +185,38 @@ def run_scan(
             )
         else:
             status = ScanStatus.SUCCESS
+
+    # OBS-001: one symbol_scan_failed per failed symbol (load failures from the
+    # data loader, compute failures from the screener callback), each tagged with
+    # run_id + symbol so a single stock's failure is traceable. Both message
+    # sources were already redacted where they were produced.
+    for failure in (*loader_failures, *compute_failures):
+        log_event(
+            logger,
+            EVENT_SYMBOL_SCAN_FAILED,
+            level=logging.WARNING,
+            run_id=run_id,
+            symbol=failure.get("symbol"),
+            # Named ``error`` (not ``message``) so it stays a distinct JSON field
+            # and matches external_api_failed. Source messages are already redacted.
+            error=failure.get("message"),
+        )
+
+    # OBS-001: scan_completed marks a run that produced a frame (SUCCESS/PARTIAL);
+    # a FAILED run already emitted scan_failed above.
+    if status is not ScanStatus.FAILED:
+        log_event(
+            logger,
+            EVENT_SCAN_COMPLETED,
+            run_id=run_id,
+            screener_key=screener_key,
+            universe_key=universe_key,
+            status=status.value,
+            row_count=0 if results is None else int(len(results)),
+            loader_failures=len(loader_failures),
+            compute_failures=len(compute_failures),
+            duration_seconds=round(time.monotonic() - started_at, 3),
+        )
 
     # --- 3. Persist rows + final status best-effort ----------------------------
     # If the header could not be created, run_id is None and this becomes a no-op.

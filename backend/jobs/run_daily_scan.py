@@ -29,7 +29,6 @@ in-memory rows when the database is temporarily unavailable.
 from __future__ import annotations
 
 import argparse
-import logging
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -44,10 +43,11 @@ from backend.daily_data_loader import (
     history_start_date,
 )
 from backend.dhan_client import DhanDataClient
+from backend.observability import configure_logging
 from backend.scanning import ScanRunResult, ScanStatus, run_scan
 from backend.scanning.service import SessionFactory
 from backend.screener_registry import ScreenerDefinition, discover_screeners
-from backend.security import install_secret_redaction_filter, redact_exception
+from backend.security import redact_exception
 from backend.storage.database import session_scope
 from backend.universe_loader import load_universe
 
@@ -379,15 +379,9 @@ def _print_outcome(output: TextIO, outcome: DailyScanOutcome) -> None:
 
 if __name__ == "__main__":  # pragma: no cover - exercised by --help verification
     # Configure logging only when run as a script: tests call main() directly and
-    # should not inherit a process-wide logging config. run_scan and the data
-    # loader emit full diagnostic tracebacks via logger.exception(...); send those
-    # to stderr so stdout stays a clean operator summary, then install the SEC-002
-    # redaction filter (after basicConfig, so the root handler it just created is
-    # covered) to mask any secret-shaped text in those tracebacks.
-    logging.basicConfig(
-        level=logging.INFO,
-        stream=sys.stderr,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    install_secret_redaction_filter()
+    # should not inherit a process-wide logging config. OBS-001's configure_logging
+    # sets the level from LOG_LEVEL, renders JSON in production (text in
+    # development), and installs the SEC-002 redaction filter so the run_scan and
+    # data-loader diagnostics stay secret-safe.
+    configure_logging()
     raise SystemExit(main())

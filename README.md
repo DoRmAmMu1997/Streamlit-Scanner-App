@@ -390,6 +390,50 @@ status and run ids, but not raw secrets.
 
 ---
 
+## Observability & logging
+
+To make failures diagnosable in production (OBS-001), the app emits **named,
+structured log events** through `backend/observability`. Every entrypoint — the
+Streamlit UI, the `python app.py` prefetch, and the headless daily-scan job —
+configures logging the same way via `configure_logging()`.
+
+**Events** (each carries `run_id` and/or `symbol` where relevant):
+
+| Event | Level | Emitted when |
+| --- | --- | --- |
+| `scan_started` / `scan_completed` | INFO | a scan run starts / finishes (with `run_id`, status, row count, duration) |
+| `scan_failed` | ERROR | a screener raises (exception **type** only, never the raw message) |
+| `symbol_scan_failed` | WARNING | a single symbol fails to load or compute (`run_id` + `symbol`) |
+| `external_api_failed` | WARNING | a Dhan candle fetch fails for a `symbol` |
+| `auth_denied` | WARNING | a signed-in email is not on the allowlist (logs the email, never the allowlist) |
+| `data_refresh_started` / `data_refresh_completed` | INFO | the universe/candle prefetch starts / finishes |
+
+**Plain text vs JSON.** `LOG_FORMAT` controls rendering:
+
+- `auto` (default) — human-readable text in development, machine-readable **JSON
+  in production** (`APP_ENV=production`).
+- `json` / `text` — force one rendering regardless of environment (handy for
+  testing JSON locally or keeping a production console readable).
+
+```bash
+# One JSON object per line, ready for a log aggregator:
+LOG_FORMAT=json LOG_LEVEL=INFO python -m backend.jobs.run_daily_scan
+```
+
+```json
+{"timestamp": "2026-06-10T...", "level": "INFO", "logger": "backend.scanning.service", "event": "scan_completed", "message": "scan_completed", "run_id": 42, "screener_key": "envelope", "status": "success", "row_count": 5, "duration_seconds": 1.23}
+```
+
+**Levels.** Lifecycle events (`scan_started`/`scan_completed`, `data_refresh_*`)
+log at INFO; failure events log at WARNING/ERROR so they stay visible at the
+default `LOG_LEVEL=WARNING`. Set `LOG_LEVEL=INFO` to see the full event stream.
+
+**Secrets never leak.** Every rendered line (text or JSON, including exception
+tracebacks and structured field values) passes through the SEC-002 redaction
+filter / `redact_text`, so tokens, API keys, and database passwords are masked.
+
+---
+
 ## Project structure
 
 ```

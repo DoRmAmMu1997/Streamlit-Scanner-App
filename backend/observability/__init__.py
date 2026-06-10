@@ -1,0 +1,244 @@
+"""OBS-001 - structured, secret-safe logging for the scanner.
+
+Beginner note:
+"Observability" just means: when something breaks in production, can you tell
+*what* happened from the logs alone? A human reading a terminal is fine with
+free-text messages, but a deployed app usually ships its logs to a tool that can
+only help if each line is machine-readable. This module gives the app:
+
+1. **Named events.** Instead of ad-hoc messages, important moments get a stable
+   name like ``scan_started`` or ``external_api_failed``. You can search or alert
+   on the name without parsing English sentences.
+2. **Two renderings of the same event.** In development you get a readable line;
+   in production you get one JSON object per line. ``LOG_FORMAT`` (via settings)
+   chooses which - ``auto`` means JSON when ``APP_ENV`` is production.
+
+Two hard rules this module enforces:
+
+- **No secrets ever reach a log.** Every rendered line is passed through SEC-002's
+  ``redact_text`` before it leaves, so a token accidentally placed in a field is
+  masked.
+- **Context travels with the event.** Callers attach fields such as ``run_id`` and
+  ``symbol`` so a failure can be tied back to the exact scan or stock.
+
+Design note (why this file imports so little):
+This is a *leaf* utility. It imports only the standard library, the settings
+reader, and the redaction helper. It must never import the scan/loader/app modules
+that use it - that keeps the dependency direction one-way and avoids import cycles.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import sys
+from datetime import datetime, timezone
+from typing import Any, TextIO
+
+from backend.config import get_settings
+from backend.config.settings import AppSettings
+from backend.security import install_secret_redaction_filter, redact_text
+
+# ---------------------------------------------------------------------------
+# Event names
+# ---------------------------------------------------------------------------
+# One constant per OBS-001 event. Referencing a constant at the call site (instead
+# of typing the bare string) means a typo becomes an ImportError instead of a
+# silently un-searchable log line.
+EVENT_SCAN_STARTED = "scan_started"
+EVENT_SCAN_COMPLETED = "scan_completed"
+EVENT_SCAN_FAILED = "scan_failed"
+EVENT_SYMBOL_SCAN_FAILED = "symbol_scan_failed"
+EVENT_EXTERNAL_API_FAILED = "external_api_failed"
+EVENT_AUTH_DENIED = "auth_denied"
+EVENT_DATA_REFRESH_STARTED = "data_refresh_started"
+EVENT_DATA_REFRESH_COMPLETED = "data_refresh_completed"
+
+# The custom attributes we attach to each ``logging.LogRecord``. Kept as private
+# constants so ``log_event`` and both formatters agree on the exact names. Neither
+# collides with a built-in LogRecord attribute (which would make logging raise).
+_EVENT_ATTR = "event"
+_FIELDS_ATTR = "structured_fields"
+
+# The human-readable format used in development (matches the app's prior format).
+_TEXT_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+__all__ = [
+    "EVENT_SCAN_STARTED",
+    "EVENT_SCAN_COMPLETED",
+    "EVENT_SCAN_FAILED",
+    "EVENT_SYMBOL_SCAN_FAILED",
+    "EVENT_EXTERNAL_API_FAILED",
+    "EVENT_AUTH_DENIED",
+    "EVENT_DATA_REFRESH_STARTED",
+    "EVENT_DATA_REFRESH_COMPLETED",
+    "JsonEventFormatter",
+    "TextEventFormatter",
+    "configure_logging",
+    "log_event",
+]
+
+
+def log_event(
+    logger: logging.Logger,
+    event: str,
+    *,
+    level: int = logging.INFO,
+    exc_info: bool = False,
+    **fields: Any,
+) -> None:
+    """Emit one named, structured log event.
+
+    Beginner note:
+    Think of this as ``logger.info("scan_started")`` but with searchable context
+    bolted on. ``event`` is the stable name; ``fields`` are the key/value details
+    (for example ``run_id=42, symbol="RELIANCE"``). We attach both to the log
+    *record* via ``extra=`` so the formatter can render them from a single source
+    of truth - as ``key=value`` pairs in development, or as JSON keys in production.
+
+    Choosing ``level``:
+    - routine lifecycle events (``scan_started``/``scan_completed``,
+      ``data_refresh_*``) use ``logging.INFO``;
+    - failures (``scan_failed``, ``symbol_scan_failed``, ``external_api_failed``,
+      ``auth_denied``) use ``logging.WARNING``/``ERROR`` so they remain visible at
+      the default ``LOG_LEVEL=WARNING``.
+
+    Set ``exc_info=True`` inside an ``except`` block to capture a traceback; the
+    JSON formatter records the exception type and a redacted traceback.
+    """
+    logger.log(
+        level,
+        event,
+        exc_info=exc_info,
+        # These keys become attributes on the LogRecord. The formatters read them
+        # back by the same private names.
+        extra={_EVENT_ATTR: event, _FIELDS_ATTR: dict(fields)},
+    )
+
+
+class TextEventFormatter(logging.Formatter):
+    """Human-readable formatter for development.
+
+    Renders the normal ``time LEVEL logger: message`` line, then appends any
+    structured fields as ``key=value`` pairs so a developer watching the terminal
+    sees the same context the production JSON logs carry. The whole line is passed
+    through ``redact_text`` so a secret in a field can never reach the screen.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(_TEXT_FORMAT)
+
+    def format(self, record: logging.LogRecord) -> str:
+        base = super().format(record)
+        fields = getattr(record, _FIELDS_ATTR, None)
+        if fields:
+            extras = " ".join(f"{key}={value}" for key, value in fields.items())
+            base = f"{base} | {extras}"
+        # Redact the fully-rendered line. Fields are appended after the logging
+        # filter runs, so redacting here is what guarantees they stay secret-safe.
+        return redact_text(base)
+
+
+class JsonEventFormatter(logging.Formatter):
+    """Machine-readable JSON formatter for production.
+
+    Emits exactly one JSON object per log line: timestamp, level, logger name, the
+    event name (when present), the human message, and every structured field as a
+    top-level key. Exceptions add ``error_type`` and a ``traceback``. The finished
+    JSON string is passed through ``redact_text`` as a final safety net, so no
+    field value (or traceback) can leak a secret.
+
+    Beginner note:
+    This formatter also works for ordinary third-party log records (for example
+    SQLAlchemy warnings). Those simply have no ``event``/fields, so they serialize
+    as a plain ``{timestamp, level, logger, message}`` object.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload: dict[str, Any] = {
+            "timestamp": datetime.fromtimestamp(
+                record.created, tz=timezone.utc
+            ).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+        }
+
+        event = getattr(record, _EVENT_ATTR, None)
+        if event is not None:
+            payload["event"] = event
+        payload["message"] = record.getMessage()
+
+        fields = getattr(record, _FIELDS_ATTR, None)
+        if fields:
+            for key, value in fields.items():
+                # Never let a field overwrite a reserved key above; namespace the
+                # rare collision rather than silently dropping context.
+                payload[key if key not in payload else f"field_{key}"] = value
+
+        if record.exc_info:
+            exc_type = record.exc_info[0]
+            payload["error_type"] = exc_type.__name__ if exc_type else "Exception"
+            payload["traceback"] = self.formatException(record.exc_info)
+
+        serialized = json.dumps(payload, default=str)
+        return redact_text(serialized)
+
+
+def _use_json(settings: AppSettings) -> bool:
+    """Decide JSON vs text rendering for the given settings.
+
+    ``LOG_FORMAT=json``/``text`` force one rendering; the default ``auto`` follows
+    the environment (JSON in production, readable text in development).
+    """
+    mode = settings.log_format
+    if mode == "json":
+        return True
+    if mode == "text":
+        return False
+    return settings.is_production  # "auto"
+
+
+def configure_logging(
+    *,
+    settings: AppSettings | None = None,
+    extra_secrets: list[str] | None = None,
+    stream: TextIO | None = None,
+) -> None:
+    """Configure root logging once: leveled, secret-safe, JSON in production.
+
+    Beginner note:
+    Every entrypoint - the Streamlit app, the CLI prefetch, and the headless
+    daily-scan job - calls this instead of ``logging.basicConfig`` so they all log
+    the same way. It is *idempotent*: calling it again (for example on each
+    Streamlit rerun) refreshes the level and formatter but never stacks duplicate
+    handlers.
+
+    Steps:
+    1. Pick the formatter - JSON in production, readable text in development
+       (``LOG_FORMAT`` overrides via settings).
+    2. Ensure the root logger has exactly one stderr handler using that formatter.
+    3. Set the level from ``LOG_LEVEL``.
+    4. Install SEC-002's redaction filter (plus any ``extra_secrets`` the caller
+       knows about, such as Streamlit OIDC cookie values) so nothing secret leaks.
+    """
+    settings = settings or get_settings()
+    formatter: logging.Formatter = (
+        JsonEventFormatter() if _use_json(settings) else TextEventFormatter()
+    )
+
+    root = logging.getLogger()
+    if root.handlers:
+        # Another entrypoint already attached handlers (e.g. the CLI prefetch ran
+        # before Streamlit took over). Make our formatter authoritative so
+        # production still gets JSON, but do not add a second handler.
+        for handler in root.handlers:
+            handler.setFormatter(formatter)
+    else:
+        handler = logging.StreamHandler(stream or sys.stderr)
+        handler.setFormatter(formatter)
+        root.addHandler(handler)
+
+    # get_settings() validates LOG_LEVEL, so getattr is mostly defensive: if Python
+    # ever lacks a named level we keep the app quiet at WARNING rather than crash.
+    root.setLevel(getattr(logging, settings.log_level, logging.WARNING))
+    install_secret_redaction_filter(root, extra_secrets=extra_secrets)
