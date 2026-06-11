@@ -174,6 +174,14 @@ def prefetch_data_assets() -> None:
         # terminal so the user can fix it (often a transient network issue).
         logger.exception("Universe refresh failed during prefetch")
         print(f"[prefetch] WARNING: universe refresh failed: {_redact_secrets(str(exc))}", flush=True)
+        log_event(
+            logger,
+            EVENT_DATA_REFRESH_COMPLETED,
+            level=logging.ERROR,
+            status="failed",
+            phase="universe_refresh",
+            error_type=type(exc).__name__,
+        )
         return
     for key, path in written.items():
         display_name = UNIVERSE_CONFIG.get(key, {}).get("display_name", key)

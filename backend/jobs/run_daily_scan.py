@@ -33,7 +33,9 @@ in-memory rows when the database is temporarily unavailable.
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -52,7 +54,14 @@ from backend.jobs.daily_scan_config import (
     DailyScanEntry,
     load_daily_scan_config,
 )
-from backend.observability import configure_logging
+from backend.observability import (
+    EVENT_DAILY_JOB_COMPLETED,
+    EVENT_DAILY_JOB_CONFIG_INVALID,
+    EVENT_DAILY_JOB_CONFIG_LOADED,
+    EVENT_DAILY_JOB_STARTED,
+    configure_logging,
+    log_event,
+)
 from backend.scanning import ScanRunResult, ScanStatus, run_scan
 from backend.scanning.service import SessionFactory
 from backend.screener_registry import ScreenerDefinition, discover_screeners
@@ -64,10 +73,12 @@ from backend.storage.database import session_scope
 from backend.universe_loader import load_universe
 
 
-# JOB-002 will make scanner selection configurable. JOB-001 keeps the first
-# scheduled set in code so the command is useful immediately without introducing
-# a YAML parser or schedule format. These three screeners are deterministic and
-# already protected by TEST-001 golden snapshots, so they are safer defaults than
+logger = logging.getLogger(__name__)
+
+
+# JOB-001 keeps a useful built-in set while JOB-002 optionally replaces it with
+# named YAML entries. These three screeners are deterministic and already
+# protected by TEST-001 golden snapshots, so they are safer defaults than
 # AI-backed screeners that depend on optional external services.
 DEFAULT_DAILY_SCAN_KEYS = (
     "bollinger_band_reversal",
@@ -207,6 +218,13 @@ def run_daily_scan(
             ),
         )
         _print_outcome(out, outcome)
+        log_event(
+            logger,
+            EVENT_DAILY_JOB_CONFIG_INVALID,
+            level=logging.ERROR,
+            reason="no_enabled_scans",
+            entries_count=len(entries),
+        )
         return DailyScanSummary(outcomes=[outcome])
 
     try:
@@ -254,6 +272,7 @@ def run_daily_scan(
                 session_factory=session_factory,
                 start_date=start_date,
                 end_date=run_date,
+                scan_name=entry.name,
                 universe_key=entry.universe_key,
                 params_override=entry.params,
             )
@@ -307,6 +326,22 @@ def main(
         ),
     )
     args = parser.parse_args(argv)
+    started_at = time.monotonic()
+    selection_mode = (
+        "config"
+        if args.config_path
+        else "screeners"
+        if args.screener_keys
+        else "defaults"
+    )
+    safe_config_path = redact_text(args.config_path) if args.config_path else None
+    log_event(
+        logger,
+        EVENT_DAILY_JOB_STARTED,
+        selection_mode=selection_mode,
+        config_path=safe_config_path,
+        requested_screeners=len(args.screener_keys or []),
+    )
 
     if args.config_path:
         try:
@@ -325,10 +360,53 @@ def main(
                 file=out,
                 flush=True,
             )
+            log_event(
+                logger,
+                EVENT_DAILY_JOB_CONFIG_INVALID,
+                level=logging.ERROR,
+                config_path=safe_config_path,
+                error_type=type(exc).__name__,
+                reason=safe_message,
+            )
+            _log_daily_job_completed(
+                exit_code=1,
+                outcomes=[],
+                started_at=started_at,
+            )
             return 1
-        summary = job_runner(scan_entries=scan_entries, output=out)
+        log_event(
+            logger,
+            EVENT_DAILY_JOB_CONFIG_LOADED,
+            config_path=safe_config_path,
+            entries_count=len(scan_entries),
+            enabled_count=sum(entry.enabled for entry in scan_entries),
+            disabled_count=sum(not entry.enabled for entry in scan_entries),
+        )
+        runner_kwargs = {"scan_entries": scan_entries, "output": out}
     else:
-        summary = job_runner(screener_keys=args.screener_keys or None, output=out)
+        runner_kwargs = {
+            "screener_keys": args.screener_keys or None,
+            "output": out,
+        }
+    try:
+        summary = job_runner(**runner_kwargs)
+    except Exception as exc:
+        # The normal runner translates expected setup/scan problems into a
+        # DailyScanSummary. This boundary is for truly unexpected failures: emit
+        # the aggregate receipt, then re-raise so the scheduler still receives a
+        # non-zero process result and Python keeps the diagnostic traceback.
+        _log_daily_job_completed(
+            exit_code=1,
+            outcomes=[],
+            started_at=started_at,
+            error_type=type(exc).__name__,
+        )
+        raise
+    _log_daily_job_completed(
+        exit_code=summary.exit_code,
+        outcomes=summary.outcomes,
+        started_at=started_at,
+    )
     return summary.exit_code
 
 
@@ -342,6 +420,7 @@ def _run_one_screener(
     session_factory: SessionFactory,
     start_date: date,
     end_date: date,
+    scan_name: str | None = None,
     universe_key: str | None = None,
     params_override: Mapping[str, Any] | None = None,
 ) -> DailyScanOutcome:
@@ -389,6 +468,7 @@ def _run_one_screener(
         result = scan_runner(
             screener_key=definition.key,
             universe_key=resolved_universe,
+            scan_name=scan_name,
             run_callable=definition.run,
             universe_df=universe_df,
             data_loader=data_loader,
@@ -434,6 +514,47 @@ def _run_one_screener(
         row_count=row_count,
         fatal=fatal,
         message=message,
+    )
+
+
+def _log_daily_job_completed(
+    *,
+    exit_code: int,
+    outcomes: Sequence[DailyScanOutcome],
+    started_at: float,
+    error_type: str | None = None,
+) -> None:
+    """Emit the one aggregate event a scheduler can use as its final receipt.
+
+    Per-scan events explain individual failures. This event answers the broader
+    operational question: did the whole command finish successfully, and how
+    many scans landed in each final category?
+    """
+    fields: dict[str, object] = {
+        "exit_code": exit_code,
+        "scans_count": len(outcomes),
+        "success_count": sum(
+            outcome.status is ScanStatus.SUCCESS and not outcome.fatal
+            for outcome in outcomes
+        ),
+        "partial_count": sum(
+            outcome.status is ScanStatus.PARTIAL and not outcome.fatal
+            for outcome in outcomes
+        ),
+        "failed_count": sum(outcome.fatal for outcome in outcomes),
+        "results_count": sum(outcome.row_count for outcome in outcomes),
+        "duration_seconds": round(time.monotonic() - started_at, 3),
+    }
+    if error_type is not None:
+        # Normal completions do not need an ``error_type: null`` field. Add the
+        # key only for the unexpected-exception path where it carries meaning.
+        fields["error_type"] = error_type
+
+    log_event(
+        logger,
+        EVENT_DAILY_JOB_COMPLETED,
+        level=logging.INFO if exit_code == 0 else logging.ERROR,
+        **fields,
     )
 
 

@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from backend.observability import (
     EVENT_SCAN_COMPLETED,
     EVENT_SCAN_FAILED,
+    EVENT_SCAN_PARTIAL,
     EVENT_SCAN_STARTED,
     EVENT_SYMBOL_SCAN_FAILED,
 )
@@ -310,18 +311,41 @@ def _event_fields(caplog, event_name: str) -> list[dict]:
     ]
 
 
-def test_run_scan_emits_started_and_completed_events_with_run_id(
-    session_factory, caplog
+def test_run_scan_emits_started_and_completed_events_after_persistence(
+    db_engine, session_factory, caplog, monkeypatch
 ):
-    """A successful run emits scan_started and scan_completed, both tagged run_id."""
+    """A successful terminal event should describe an already-finished DB row.
+
+    This ordering matters in production: a log consumer may react immediately
+    to ``scan_completed``. Emitting it while the durable row still says RUNNING
+    would tell operators and automation two contradictory stories.
+    """
+    from backend.scanning import service
 
     def screener_run(_universe_df, _data_loader, _params):
         return _two_buy_rows()
+
+    statuses_when_completed: list[ScanStatus] = []
+    real_log_event = service.log_event
+
+    def observing_log_event(logger, event_name, **fields):
+        if event_name == EVENT_SCAN_COMPLETED:
+            with Session(db_engine) as session:
+                run = session.get(
+                    service.ScanRun,
+                    fields["run_id"],
+                )
+                assert run is not None
+                statuses_when_completed.append(run.status)
+        real_log_event(logger, event_name, **fields)
+
+    monkeypatch.setattr(service, "log_event", observing_log_event)
 
     with caplog.at_level(logging.INFO):
         result = run_scan(
             screener_key="envelope",
             universe_key="hemant_super_45",
+            scan_name="Daily Envelope",
             run_callable=screener_run,
             universe_df=pd.DataFrame({"symbol": ["RELIANCE", "TCS"]}),
             data_loader=_FakeLoader(),
@@ -334,12 +358,47 @@ def test_run_scan_emits_started_and_completed_events_with_run_id(
     assert len(started) == 1
     assert started[0]["run_id"] == result.run_id
     assert started[0]["screener_key"] == "envelope"
-    assert started[0]["symbol_count"] == 2
+    assert started[0]["scan_name"] == "Daily Envelope"
+    assert started[0]["symbols_scanned"] == 2
     assert len(completed) == 1
     assert completed[0]["run_id"] == result.run_id
     assert completed[0]["status"] == "success"
-    assert completed[0]["row_count"] == 2
+    assert completed[0]["results_count"] == 2
+    assert completed[0]["scan_name"] == "Daily Envelope"
     assert "duration_seconds" in completed[0]
+    assert statuses_when_completed == [ScanStatus.SUCCESS]
+
+
+def test_run_scan_emits_scan_partial_instead_of_scan_completed(
+    session_factory, caplog
+):
+    """Usable rows with symbol failures get their own terminal event."""
+
+    def screener_run(_universe_df, _data_loader, params):
+        params["compute_failure_callback"](
+            {"symbol": "TCS", "message": "bad candles"}
+        )
+        return _two_buy_rows()
+
+    with caplog.at_level(logging.INFO):
+        result = run_scan(
+            screener_key="envelope",
+            universe_key="hemant_super_45",
+            scan_name="Partial Envelope",
+            run_callable=screener_run,
+            universe_df=pd.DataFrame({"symbol": ["RELIANCE", "TCS"]}),
+            data_loader=_FakeLoader(),
+            params=_base_params(),
+            session_factory=session_factory,
+        )
+
+    partial = _event_fields(caplog, EVENT_SCAN_PARTIAL)
+    assert result.status is ScanStatus.PARTIAL
+    assert len(partial) == 1
+    assert partial[0]["run_id"] == result.run_id
+    assert partial[0]["scan_name"] == "Partial Envelope"
+    assert partial[0]["results_count"] == 2
+    assert _event_fields(caplog, EVENT_SCAN_COMPLETED) == []
 
 
 def test_run_scan_emits_scan_failed_event_when_screener_raises(session_factory, caplog):
@@ -363,6 +422,7 @@ def test_run_scan_emits_scan_failed_event_when_screener_raises(session_factory, 
     assert len(failed) == 1
     assert failed[0]["run_id"] == result.run_id
     assert failed[0]["error_type"] == "RuntimeError"
+    assert failed[0]["phase"] == "screener"
     # A failed run reports scan_failed instead of scan_completed.
     assert _event_fields(caplog, EVENT_SCAN_COMPLETED) == []
 
@@ -390,3 +450,74 @@ def test_run_scan_emits_symbol_scan_failed_per_failed_symbol(session_factory, ca
     symbol_events = _event_fields(caplog, EVENT_SYMBOL_SCAN_FAILED)
     assert {event["symbol"] for event in symbol_events} == {"WIPRO", "TCS"}
     assert all(event["run_id"] == result.run_id for event in symbol_events)
+
+
+def test_run_scan_emits_persistence_failure_without_false_completion(
+    session_factory, caplog
+):
+    """A database write failure must not be logged as a completed scan.
+
+    The first transaction creates the RUNNING header. The second transaction is
+    deliberately broken while saving results, and later transactions use the
+    real factory so the service can perform its best-effort FAILED stamp.
+    """
+    calls = 0
+
+    @contextmanager
+    def fail_result_persistence():
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("token=DATABASESECRET should stay hidden")
+        with session_factory() as session:
+            yield session
+
+    with caplog.at_level(logging.INFO):
+        result = run_scan(
+            screener_key="envelope",
+            universe_key="hemant_super_45",
+            run_callable=lambda *_args: _two_buy_rows(),
+            universe_df=pd.DataFrame({"symbol": ["RELIANCE", "TCS"]}),
+            data_loader=_FakeLoader(),
+            params=_base_params(),
+            session_factory=fail_result_persistence,
+        )
+
+    failed = _event_fields(caplog, EVENT_SCAN_FAILED)
+    assert result.status is ScanStatus.SUCCESS
+    assert result.run_id is not None
+    assert len(failed) == 1
+    assert failed[0]["phase"] == "persistence"
+    assert failed[0]["error_type"] == "RuntimeError"
+    assert "DATABASESECRET" not in str(failed[0])
+    assert _event_fields(caplog, EVENT_SCAN_COMPLETED) == []
+    assert _event_fields(caplog, EVENT_SCAN_PARTIAL) == []
+
+
+def test_run_scan_emits_header_failure_without_false_completion(caplog):
+    """A scan may still return rows when the audit header cannot be created."""
+
+    @contextmanager
+    def broken_factory():
+        raise RuntimeError("token=HEADERSECRET should stay hidden")
+        yield  # pragma: no cover - documents the context-manager shape
+
+    with caplog.at_level(logging.INFO):
+        result = run_scan(
+            screener_key="envelope",
+            universe_key="hemant_super_45",
+            run_callable=lambda *_args: _two_buy_rows(),
+            universe_df=pd.DataFrame({"symbol": ["RELIANCE", "TCS"]}),
+            data_loader=_FakeLoader(),
+            params=_base_params(),
+            session_factory=broken_factory,
+        )
+
+    failed = _event_fields(caplog, EVENT_SCAN_FAILED)
+    assert result.status is ScanStatus.SUCCESS
+    assert result.run_id is None
+    assert len(failed) == 1
+    assert failed[0]["phase"] == "create_header"
+    assert failed[0]["error_type"] == "RuntimeError"
+    assert "HEADERSECRET" not in str(failed[0])
+    assert _event_fields(caplog, EVENT_SCAN_COMPLETED) == []

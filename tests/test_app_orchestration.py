@@ -17,6 +17,7 @@ import pytest
 
 import app
 from backend.config.settings import get_settings
+from backend.observability import EVENT_DATA_REFRESH_COMPLETED
 from backend.scanning import ScanRunResult, ScanStatus
 from backend.screener_registry import ScreenerDefinition
 
@@ -234,6 +235,38 @@ def test_prefetch_redacts_dhan_setup_errors(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "broker-token-secret" not in output
     assert "***REDACTED***" in output
+
+
+def test_prefetch_universe_failure_emits_terminal_structured_event(
+    monkeypatch, caplog
+):
+    """Every refresh start should have a terminal event, including exceptions.
+
+    Without this event, production monitoring sees ``data_refresh_started`` and
+    cannot distinguish a still-running refresh from one that already failed.
+    """
+    monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
+    monkeypatch.setattr(
+        app,
+        "refresh_universe_files",
+        lambda: (_ for _ in ()).throw(
+            RuntimeError("token=UNIVERSESECRET should stay hidden")
+        ),
+    )
+
+    with caplog.at_level("INFO"):
+        app.prefetch_data_assets()
+
+    completed = [
+        getattr(record, "structured_fields", {})
+        for record in caplog.records
+        if getattr(record, "event", None) == EVENT_DATA_REFRESH_COMPLETED
+    ]
+    assert len(completed) == 1
+    assert completed[0]["status"] == "failed"
+    assert completed[0]["phase"] == "universe_refresh"
+    assert completed[0]["error_type"] == "RuntimeError"
+    assert "UNIVERSESECRET" not in str(completed[0])
 
 
 def test_main_requires_auth_before_discovering_screeners(monkeypatch):

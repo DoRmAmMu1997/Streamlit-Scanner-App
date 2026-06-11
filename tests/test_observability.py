@@ -27,8 +27,13 @@ import pytest
 from backend.config import get_settings
 from backend.config.settings import SettingsError
 from backend.observability import (
+    EVENT_DAILY_JOB_COMPLETED,
+    EVENT_DAILY_JOB_CONFIG_INVALID,
+    EVENT_DAILY_JOB_CONFIG_LOADED,
+    EVENT_DAILY_JOB_STARTED,
     EVENT_EXTERNAL_API_FAILED,
     EVENT_SCAN_FAILED,
+    EVENT_SCAN_PARTIAL,
     EVENT_SCAN_STARTED,
     JsonEventFormatter,
     TextEventFormatter,
@@ -36,6 +41,20 @@ from backend.observability import (
     configure_logging,
     log_event,
 )
+
+
+def test_required_daily_job_event_names_are_stable():
+    """The tech-lead event catalog should be importable without string literals.
+
+    Operators and log queries depend on these exact names. Keeping the assertion
+    close to the public constants makes an accidental rename fail loudly before
+    it silently breaks a production dashboard or alert.
+    """
+    assert EVENT_DAILY_JOB_STARTED == "daily_job_started"
+    assert EVENT_DAILY_JOB_CONFIG_LOADED == "daily_job_config_loaded"
+    assert EVENT_DAILY_JOB_CONFIG_INVALID == "daily_job_config_invalid"
+    assert EVENT_SCAN_PARTIAL == "scan_partial"
+    assert EVENT_DAILY_JOB_COMPLETED == "daily_job_completed"
 
 
 def _emit(

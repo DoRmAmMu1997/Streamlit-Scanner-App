@@ -33,6 +33,7 @@ import json
 import logging
 import sys
 from datetime import datetime, timezone
+from types import TracebackType
 from typing import Any, TextIO
 
 from backend.config import get_settings
@@ -47,8 +48,13 @@ from backend.security import install_secret_redaction_filter, redact_text
 # silently un-searchable log line.
 EVENT_SCAN_STARTED = "scan_started"
 EVENT_SCAN_COMPLETED = "scan_completed"
+EVENT_SCAN_PARTIAL = "scan_partial"
 EVENT_SCAN_FAILED = "scan_failed"
 EVENT_SYMBOL_SCAN_FAILED = "symbol_scan_failed"
+EVENT_DAILY_JOB_STARTED = "daily_job_started"
+EVENT_DAILY_JOB_CONFIG_LOADED = "daily_job_config_loaded"
+EVENT_DAILY_JOB_CONFIG_INVALID = "daily_job_config_invalid"
+EVENT_DAILY_JOB_COMPLETED = "daily_job_completed"
 EVENT_EXTERNAL_API_FAILED = "external_api_failed"
 EVENT_AUTH_DENIED = "auth_denied"
 EVENT_DATA_REFRESH_STARTED = "data_refresh_started"
@@ -63,15 +69,27 @@ _FIELDS_ATTR = "structured_fields"
 # The human-readable format used in development (matches the app's prior format).
 _TEXT_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
+# ``logging`` accepts either ``True`` (use the exception currently being handled)
+# or the explicit three-item tuple returned by ``sys.exc_info()``. The explicit
+# tuple lets a service finish persistence before it emits the terminal event while
+# still preserving the original, redacted traceback for operators.
+ExceptionInfo = tuple[type[BaseException], BaseException, TracebackType]
+
 __all__ = [
     "EVENT_SCAN_STARTED",
     "EVENT_SCAN_COMPLETED",
+    "EVENT_SCAN_PARTIAL",
     "EVENT_SCAN_FAILED",
     "EVENT_SYMBOL_SCAN_FAILED",
+    "EVENT_DAILY_JOB_STARTED",
+    "EVENT_DAILY_JOB_CONFIG_LOADED",
+    "EVENT_DAILY_JOB_CONFIG_INVALID",
+    "EVENT_DAILY_JOB_COMPLETED",
     "EVENT_EXTERNAL_API_FAILED",
     "EVENT_AUTH_DENIED",
     "EVENT_DATA_REFRESH_STARTED",
     "EVENT_DATA_REFRESH_COMPLETED",
+    "ExceptionInfo",
     "JsonEventFormatter",
     "TextEventFormatter",
     "configure_logging",
@@ -84,7 +102,7 @@ def log_event(
     event: str,
     *,
     level: int = logging.INFO,
-    exc_info: bool = False,
+    exc_info: bool | ExceptionInfo | None = False,
     **fields: Any,
 ) -> None:
     """Emit one named, structured log event.
