@@ -28,21 +28,27 @@ from backend.storage.models import ScanRun, ScanStatus
 
 def test_filter_kwargs_empty_widgets_mean_no_filters():
     """The default page state ("All", no dates, blank symbol) filters nothing."""
-    assert app._history_filter_kwargs("All", (), "") == {}
-    assert app._history_filter_kwargs(None, None, None) == {}
+    assert app._history_filter_kwargs("All", "All", "All", (), "All", "") == {}
+    assert app._history_filter_kwargs(None, None, None, None, None, None) == {}
 
 
 def test_filter_kwargs_maps_each_widget_to_its_repository_filter():
     """Each populated widget becomes exactly one repository kwarg."""
     kwargs = app._history_filter_kwargs(
         "envelope",
+        "nifty_500",
+        "failed",
         (dt.date(2026, 6, 1), dt.date(2026, 6, 5)),
+        "job:daily_scan",
         "  reliance  ",
     )
     assert kwargs == {
         "screener_key": "envelope",
+        "universe_key": "nifty_500",
+        "status": ScanStatus.FAILED,
         "started_from": dt.date(2026, 6, 1),
         "started_to": dt.date(2026, 6, 5),
+        "triggered_by": "job:daily_scan",
         # Whitespace is stripped; case is left to the repository's
         # case-insensitive comparison.
         "symbol": "reliance",
@@ -51,8 +57,29 @@ def test_filter_kwargs_maps_each_widget_to_its_repository_filter():
 
 def test_filter_kwargs_handles_partial_date_range():
     """st.date_input yields a 1-item tuple mid-selection; that means from-only."""
-    kwargs = app._history_filter_kwargs("All", (dt.date(2026, 6, 1),), "")
+    kwargs = app._history_filter_kwargs(
+        "All", "All", "All", (dt.date(2026, 6, 1),), "All", ""
+    )
     assert kwargs == {"started_from": dt.date(2026, 6, 1)}
+
+
+def test_filter_signature_changes_for_every_history_filter():
+    """Changing any filter must mint a fresh table-selection widget key."""
+    baseline = app._history_filter_signature("All", "All", "All", (), "All", "")
+    variants = [
+        app._history_filter_signature("envelope", "All", "All", (), "All", ""),
+        app._history_filter_signature("All", "nifty_500", "All", (), "All", ""),
+        app._history_filter_signature("All", "All", "failed", (), "All", ""),
+        app._history_filter_signature(
+            "All", "All", "All", (dt.date(2026, 6, 1),), "All", ""
+        ),
+        app._history_filter_signature(
+            "All", "All", "All", (), "job:daily_scan", ""
+        ),
+        app._history_filter_signature("All", "All", "All", (), "All", "RELIANCE"),
+    ]
+    assert all(signature != baseline for signature in variants)
+    assert len(set(variants)) == len(variants)
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +148,7 @@ def test_history_run_row_captures_every_page_column():
     assert row == {
         "run_id": 7,
         "started": "2026-06-10 09:00 UTC",
+        "finished": "2026-06-10 09:01 UTC",
         # Exactly one minute crosses the seconds/minutes display boundary.
         "duration": "1.0m",
         "screener": "envelope",
@@ -148,10 +176,11 @@ def test_history_runs_frame_formats_legacy_and_failed_rows():
         ),
     ]
 
-    frame = app._history_runs_frame(rows)
+    frame = app._history_runs_frame(rows, error_redactor=lambda text: text)
 
     assert list(frame.columns) == [
         "Started",
+        "Finished",
         "Screener",
         "Universe",
         "Status",
@@ -171,3 +200,28 @@ def test_history_runs_frame_formats_legacy_and_failed_rows():
     # Long messages are previewed in the table; the details view shows them fully.
     assert len(failed_row["Error"]) <= app._HISTORY_ERROR_PREVIEW_CHARS + 1
     assert failed_row["Error"].endswith("…")
+
+
+def test_history_error_is_redacted_before_preview_truncation():
+    """A long bare secret must not leak a prefix when the preview is shortened."""
+    secret = "S" * (app._HISTORY_ERROR_PREVIEW_CHARS + 30)
+    rows = [
+        app._history_run_row(
+            _make_run(
+                status=ScanStatus.FAILED,
+                error_message=f"Provider returned secret {secret}",
+            ),
+            shortlisted=0,
+        )
+    ]
+    redactor_inputs: list[str] = []
+
+    def exact_value_redactor(text: str) -> str:
+        redactor_inputs.append(text)
+        return text.replace(secret, "***REDACTED***")
+
+    frame = app._history_runs_frame(rows, error_redactor=exact_value_redactor)
+
+    assert redactor_inputs == [f"Provider returned secret {secret}"]
+    assert secret[: app._HISTORY_ERROR_PREVIEW_CHARS] not in frame.iloc[0]["Error"]
+    assert "***REDACTED***" in frame.iloc[0]["Error"]

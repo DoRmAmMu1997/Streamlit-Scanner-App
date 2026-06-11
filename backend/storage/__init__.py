@@ -37,6 +37,8 @@ from backend.storage.repository import (
     get_latest_scan_runs,
     get_scan_results,
     list_distinct_screener_keys,
+    list_distinct_triggered_by_values,
+    list_distinct_universe_keys,
     save_scan_results,
 )
 
@@ -56,6 +58,8 @@ __all__ = [
     "get_scan_results",
     "init_db",
     "list_distinct_screener_keys",
+    "list_distinct_triggered_by_values",
+    "list_distinct_universe_keys",
     "save_scan_results",
     "session_scope",
 ]

@@ -172,12 +172,28 @@ def _seed_history(session):
     from backend.storage.repository import create_scan_run, save_scan_results
 
     run_a = create_scan_run(
-        session, screener_key="envelope", universe_key="nifty_500", symbols_scanned=500
+        session,
+        screener_key="envelope",
+        universe_key="nifty_500",
+        symbols_scanned=500,
+        triggered_by="ui:analyst@example.com",
     )
     run_b = create_scan_run(
-        session, screener_key="knoxville", universe_key="nifty_100", symbols_scanned=100
+        session,
+        screener_key="knoxville",
+        universe_key="nifty_100",
+        symbols_scanned=100,
+        triggered_by="job:daily_scan",
     )
-    run_c = create_scan_run(session, screener_key="envelope", universe_key="nifty_500")
+    run_c = create_scan_run(
+        session,
+        screener_key="envelope",
+        universe_key="nifty_500",
+        triggered_by="ui:admin@example.com",
+    )
+    run_a.status = ScanStatus.SUCCESS
+    run_b.status = ScanStatus.PARTIAL
+    run_c.status = ScanStatus.FAILED
     run_a.started_at = dt.datetime(2026, 6, 1, 10, 0, tzinfo=dt.UTC)
     run_b.started_at = dt.datetime(2026, 6, 2, 10, 0, tzinfo=dt.UTC)
     run_c.started_at = dt.datetime(2026, 6, 3, 10, 0, tzinfo=dt.UTC)
@@ -233,7 +249,7 @@ def test_get_latest_scan_runs_symbol_filter_is_exact_and_case_insensitive(sessio
 
 
 def test_get_latest_scan_runs_combines_filters(session):
-    """Filters AND together: screener + date + symbol must all hold."""
+    """All history filters AND together so each selected constraint is honored."""
     from backend.storage.repository import get_latest_scan_runs
 
     run_a, _run_b, _run_c = _seed_history(session)
@@ -241,8 +257,11 @@ def test_get_latest_scan_runs_combines_filters(session):
     filtered = get_latest_scan_runs(
         session,
         screener_key="envelope",
+        universe_key="nifty_500",
+        status=ScanStatus.SUCCESS,
         started_from=dt.date(2026, 6, 1),
         started_to=dt.date(2026, 6, 1),
+        triggered_by="ui:analyst@example.com",
         symbol="TCS",
     )
     assert [run.id for run in filtered] == [run_a.id]
@@ -251,6 +270,26 @@ def test_get_latest_scan_runs_combines_filters(session):
     assert (
         get_latest_scan_runs(session, screener_key="knoxville", symbol="TCS") == []
     )
+
+
+def test_get_latest_scan_runs_filters_by_universe_status_and_trigger(session):
+    """The SCAN-004 dropdown filters map to exact persisted run metadata."""
+    from backend.storage.repository import get_latest_scan_runs
+
+    run_a, run_b, run_c = _seed_history(session)
+
+    assert [
+        run.id for run in get_latest_scan_runs(session, universe_key="nifty_500")
+    ] == [run_c.id, run_a.id]
+    assert [
+        run.id for run in get_latest_scan_runs(session, status=ScanStatus.PARTIAL)
+    ] == [run_b.id]
+    assert [
+        run.id
+        for run in get_latest_scan_runs(
+            session, triggered_by="ui:analyst@example.com"
+        )
+    ] == [run_a.id]
 
 
 def test_count_scan_results_for_runs_includes_zero_for_empty_runs(session):
@@ -291,3 +330,20 @@ def test_list_distinct_screener_keys_is_sorted_and_deduplicated(session):
     _seed_history(session)  # two envelope runs + one knoxville run
 
     assert list_distinct_screener_keys(session) == ["envelope", "knoxville"]
+
+
+def test_list_distinct_history_filter_values_are_sorted_and_deduplicated(session):
+    """Universe and trigger dropdowns should contain clean recorded values."""
+    from backend.storage.repository import (
+        list_distinct_triggered_by_values,
+        list_distinct_universe_keys,
+    )
+
+    _seed_history(session)
+
+    assert list_distinct_universe_keys(session) == ["nifty_100", "nifty_500"]
+    assert list_distinct_triggered_by_values(session) == [
+        "job:daily_scan",
+        "ui:admin@example.com",
+        "ui:analyst@example.com",
+    ]

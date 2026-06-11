@@ -328,11 +328,6 @@ def main(
         ),
     )
     args = parser.parse_args(argv)
-    # Apply scan-history migrations before any screener can try to persist a
-    # run. A fresh deployment otherwise has no scan_runs table and every
-    # outcome becomes "History was not persisted." If this fails, the existing
-    # missing-run_id contract below still exits 1 with that clear message.
-    schema_bootstrapper()
     started_at = time.monotonic()
     selection_mode = (
         "config"
@@ -349,6 +344,24 @@ def main(
         config_path=safe_config_path,
         requested_screeners=len(args.screener_keys or []),
     )
+
+    # A scheduled scan without its audit tables would spend broker/API capacity
+    # but leave no durable history. Stop before config loading or screener work
+    # when Alembic cannot prepare the schema, and still emit OBS-001's aggregate
+    # completion receipt for operators.
+    if not schema_bootstrapper():
+        print(
+            "[daily-scan] Database schema is unavailable; scan not started.",
+            file=out,
+            flush=True,
+        )
+        _log_daily_job_completed(
+            exit_code=1,
+            outcomes=[],
+            started_at=started_at,
+            error_type="SchemaBootstrapError",
+        )
+        return 1
 
     if args.config_path:
         try:

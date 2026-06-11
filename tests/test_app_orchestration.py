@@ -270,7 +270,7 @@ def test_prefetch_universe_failure_emits_terminal_structured_event(
 
 
 def test_main_requires_auth_before_discovering_screeners(monkeypatch):
-    """The main app must not discover or run screeners before auth succeeds."""
+    """The main app must not touch the DB or screeners before auth succeeds."""
 
     class StopFromAuth(RuntimeError):
         """Test-only signal that the auth gate stopped the Streamlit run."""
@@ -285,11 +285,14 @@ def test_main_requires_auth_before_discovering_screeners(monkeypatch):
     def fail_if_discovered():
         raise AssertionError("screener discovery must wait for authentication")
 
+    def fail_if_schema_bootstrapped():
+        raise AssertionError("schema bootstrap must wait for authentication")
+
     monkeypatch.setattr(app, "require_authorized_user", stop_at_auth)
     monkeypatch.setattr(app, "discover_screeners", fail_if_discovered)
     monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
     monkeypatch.setattr(app, "_configure_logging", lambda: None)
-    monkeypatch.setattr(app, "ensure_database_schema", lambda: True)
+    monkeypatch.setattr(app, "ensure_database_schema", fail_if_schema_bootstrapped)
     # Local development defaults AUTH_REQUIRED to false. This test is about the
     # guarded path, so opt in explicitly and then assert discovery never runs
     # before the auth gate stops the Streamlit rerun.
@@ -309,17 +312,11 @@ def test_main_requires_auth_before_discovering_screeners(monkeypatch):
         app.main()
 
 
-def test_main_bootstraps_scan_schema_before_the_auth_gate(monkeypatch):
-    """``main()`` must apply scan-history migrations on startup.
+def test_main_bootstraps_schema_after_auth_and_before_view_selection(monkeypatch):
+    """An authorized run applies migrations before rendering either app view."""
 
-    A fresh checkout has no ``scan_runs`` table until migrations run, so every
-    scan used to log "Could not create scan run header" and lose its history.
-    The bootstrap runs right after logging setup — before auth and any screener
-    work — so the very first scan of a new deployment persists normally.
-    """
-
-    class StopFromAuth(RuntimeError):
-        """Test-only signal that the auth gate stopped the Streamlit run."""
+    class StopAtView(RuntimeError):
+        """Test-only signal that execution reached the view selector."""
 
         pass
 
@@ -329,16 +326,16 @@ def test_main_bootstraps_scan_schema_before_the_auth_gate(monkeypatch):
         calls.append("schema")
         return True
 
-    def stop_at_auth(_st):
+    def authenticate(_st):
         calls.append("auth")
-        raise StopFromAuth()
+        return SimpleNamespace(email="person@example.com")
 
-    # raising=False keeps this a clean behavioral failure (not a setup error)
-    # while the bootstrap hook does not exist in app.py yet.
-    monkeypatch.setattr(
-        app, "ensure_database_schema", record_schema_bootstrap, raising=False
-    )
-    monkeypatch.setattr(app, "require_authorized_user", stop_at_auth)
+    def stop_at_view(*_args, **_kwargs):
+        calls.append("view")
+        raise StopAtView()
+
+    monkeypatch.setattr(app, "ensure_database_schema", record_schema_bootstrap)
+    monkeypatch.setattr(app, "require_authorized_user", authenticate)
     monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
     monkeypatch.setattr(app, "_configure_logging", lambda: None)
     monkeypatch.setenv("AUTH_REQUIRED", "true")
@@ -350,13 +347,14 @@ def test_main_bootstraps_scan_schema_before_the_auth_gate(monkeypatch):
             markdown=lambda *_args, **_kwargs: None,
             title=lambda *_args, **_kwargs: None,
             caption=lambda *_args, **_kwargs: None,
+            radio=stop_at_view,
         ),
     )
 
-    with pytest.raises(StopFromAuth):
+    with pytest.raises(StopAtView):
         app.main()
 
-    assert calls == ["schema", "auth"]
+    assert calls == ["auth", "schema", "view"]
 
 
 def test_main_passes_authenticated_email_as_scan_trigger(monkeypatch):

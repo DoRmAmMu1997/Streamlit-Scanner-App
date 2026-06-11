@@ -32,6 +32,7 @@ import hashlib
 import json
 import logging
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -86,6 +87,8 @@ from backend.storage import (
     get_latest_scan_runs,
     get_scan_results,
     list_distinct_screener_keys,
+    list_distinct_triggered_by_values,
+    list_distinct_universe_keys,
     session_scope,
 )
 from backend.universe_builder import (
@@ -929,13 +932,6 @@ def main() -> None:
     # SCANNER_DEBUG=1 mode).
     _configure_logging()
 
-    # Scan history needs the SCAN-002 schema. Applying migrations here (once
-    # per process, after logging so failures are formatted and redacted) means
-    # a fresh checkout's first scan persists history instead of warning
-    # "Could not create scan run header". Failure keeps the app usable:
-    # persistence is best-effort by design.
-    ensure_database_schema()
-
     st.set_page_config(page_title="Streamlit Scanner App", page_icon="📈", layout="wide")
     _inject_css()
     st.title("Streamlit Scanner App")
@@ -957,6 +953,12 @@ def main() -> None:
     authenticated_user: AuthenticatedUser | None = None
     if settings.auth_required:
         authenticated_user = require_authorized_user(st)
+
+    # Scan history needs the SCAN-002 schema. Apply migrations only after the
+    # authorization gate: opening an unauthenticated browser tab must not be
+    # enough to create a database connection or run DDL. This still happens
+    # before either app view reads or writes scan-history tables.
+    ensure_database_schema()
 
     # SCAN-004: one radio switches between the live scanner and the history
     # audit view. It sits after the auth gate (so history inherits the same
@@ -1076,13 +1078,16 @@ def _format_run_duration(
 
 def _history_filter_kwargs(
     screener_choice: str | None,
+    universe_choice: str | None,
+    status_choice: str | None,
     date_range: tuple[date, ...] | list[date] | None,
+    triggered_by_choice: str | None,
     symbol_text: str | None,
 ) -> dict[str, Any]:
     """Map raw widget values to ``get_latest_scan_runs`` keyword filters.
 
     Kept pure (no Streamlit) so tests can prove the mapping directly:
-    - "All" or empty screener choice means no screener filter;
+    - "All" or an empty dropdown choice means no filter for that field;
     - ``st.date_input`` hands back a 0-, 1-, or 2-item range while the user is
       mid-selection — 1 item means "from this day onward";
     - a blank/whitespace symbol means no symbol filter.
@@ -1090,15 +1095,47 @@ def _history_filter_kwargs(
     kwargs: dict[str, Any] = {}
     if screener_choice and screener_choice != "All":
         kwargs["screener_key"] = screener_choice
+    if universe_choice and universe_choice != "All":
+        kwargs["universe_key"] = universe_choice
+    if status_choice and status_choice != "All":
+        kwargs["status"] = ScanStatus(status_choice.lower())
     dates = tuple(date_range or ())
     if len(dates) >= 1 and dates[0] is not None:
         kwargs["started_from"] = dates[0]
     if len(dates) >= 2 and dates[1] is not None:
         kwargs["started_to"] = dates[1]
+    if triggered_by_choice and triggered_by_choice != "All":
+        kwargs["triggered_by"] = triggered_by_choice
     symbol = (symbol_text or "").strip()
     if symbol:
         kwargs["symbol"] = symbol
     return kwargs
+
+
+def _history_filter_signature(
+    screener_choice: str | None,
+    universe_choice: str | None,
+    status_choice: str | None,
+    date_range: tuple[date, ...] | list[date] | None,
+    triggered_by_choice: str | None,
+    symbol_text: str | None,
+) -> str:
+    """Return a compact widget-key suffix that changes with every filter.
+
+    Streamlit keeps table selections by widget key. Hashing all filter values
+    gives a newly filtered table fresh selection state, so row 2 from an old
+    result set cannot accidentally open row 2 from a different result set.
+    """
+    values = [
+        screener_choice,
+        universe_choice,
+        status_choice,
+        [value.isoformat() for value in tuple(date_range or ())],
+        triggered_by_choice,
+        (symbol_text or "").strip().upper(),
+    ]
+    payload = json.dumps(values, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def _history_run_row(run: ScanRun, shortlisted: int) -> dict[str, Any]:
@@ -1112,6 +1149,7 @@ def _history_run_row(run: ScanRun, shortlisted: int) -> dict[str, Any]:
     return {
         "run_id": int(run.id),
         "started": _format_utc_timestamp(run.started_at),
+        "finished": _format_utc_timestamp(run.finished_at),
         "duration": _format_run_duration(run.started_at, run.finished_at),
         "screener": run.screener_key,
         "universe": run.universe_key,
@@ -1123,18 +1161,30 @@ def _history_run_row(run: ScanRun, shortlisted: int) -> dict[str, Any]:
     }
 
 
-def _history_runs_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
+def _history_runs_frame(
+    rows: list[dict[str, Any]],
+    *,
+    error_redactor: Callable[[str], str],
+) -> pd.DataFrame:
     """Build the display DataFrame for the runs table.
 
-    Pure formatting only (no Streamlit, no redaction — the caller redacts the
-    error column with its session-aware helper). ``symbols_scanned`` may be
-    ``None`` for runs recorded before the SCAN-004 column existed; those show an
+    ``error_redactor`` receives the complete stored message before this helper
+    shortens it for the table. That order matters: truncating a long bare secret
+    first could leave a prefix that an exact-value redactor no longer recognizes.
+    ``symbols_scanned`` may be ``None`` for pre-SCAN-004 runs; those show an
     em-dash instead of a misleading zero.
     """
+    def error_preview(message: str) -> str:
+        safe_message = error_redactor(message)
+        if len(safe_message) > _HISTORY_ERROR_PREVIEW_CHARS:
+            return safe_message[:_HISTORY_ERROR_PREVIEW_CHARS] + "…"
+        return safe_message
+
     return pd.DataFrame(
         [
             {
                 "Started": row["started"],
+                "Finished": row["finished"],
                 "Screener": row["screener"],
                 "Universe": row["universe"],
                 "Status": _HISTORY_STATUS_BADGES.get(row["status"], row["status"]),
@@ -1145,11 +1195,7 @@ def _history_runs_frame(rows: list[dict[str, Any]]) -> pd.DataFrame:
                 ),
                 "Shortlisted": int(row["shortlisted"]),
                 "Triggered by": row["triggered_by"],
-                "Error": (
-                    row["error_message"][:_HISTORY_ERROR_PREVIEW_CHARS] + "…"
-                    if len(row["error_message"]) > _HISTORY_ERROR_PREVIEW_CHARS
-                    else row["error_message"]
-                ),
+                "Error": error_preview(row["error_message"]),
             }
             for row in rows
         ]
@@ -1169,12 +1215,14 @@ def _render_history_page() -> None:
         "job. Click a run to inspect its shortlisted results."
     )
 
-    # The screener filter offers the keys that actually appear in history, not
-    # the live registry: deleted screeners keep their history inspectable, and a
-    # broken screener module cannot take down this audit view.
+    # Populate filters from persisted history, not the live registry: deleted
+    # screeners and old universes remain inspectable, and a broken screener
+    # module cannot take down this read-only audit view.
     try:
         with session_scope() as session:
             screener_keys = list_distinct_screener_keys(session)
+            universe_keys = list_distinct_universe_keys(session)
+            triggered_by_values = list_distinct_triggered_by_values(session)
     except OperationalError:
         # The most common cause is a database that has never been migrated
         # (fresh checkout, or an old scanner.db missing the new column).
@@ -1193,6 +1241,22 @@ def _render_history_page() -> None:
             help="Only screeners that appear in recorded history are listed.",
         )
     with filter_col2:
+        universe_choice = st.selectbox(
+            "Universe",
+            ["All", *universe_keys],
+            key="history_universe_filter",
+            help="Only universes that appear in recorded history are listed.",
+        )
+    with filter_col3:
+        status_choice = st.selectbox(
+            "Status",
+            ["All", *[status.value for status in ScanStatus]],
+            format_func=lambda value: value if value == "All" else value.upper(),
+            key="history_status_filter",
+        )
+
+    filter_col4, filter_col5, filter_col6 = st.columns(3)
+    with filter_col4:
         # value=() starts the range empty, so the default view is simply "the
         # latest runs" with no date restriction.
         date_range = st.date_input(
@@ -1201,7 +1265,14 @@ def _render_history_page() -> None:
             key="history_date_filter",
             help="Pick one day or a range. Leave empty to show the latest runs.",
         )
-    with filter_col3:
+    with filter_col5:
+        triggered_by_choice = st.selectbox(
+            "Triggered by",
+            ["All", *triggered_by_values],
+            key="history_triggered_by_filter",
+            help="Filter UI and scheduled runs by their recorded audit identity.",
+        )
+    with filter_col6:
         symbol_text = st.text_input(
             "Symbol",
             key="history_symbol_filter",
@@ -1211,7 +1282,14 @@ def _render_history_page() -> None:
             ),
         )
 
-    filters = _history_filter_kwargs(screener_choice, date_range, symbol_text)
+    filters = _history_filter_kwargs(
+        screener_choice,
+        universe_choice,
+        status_choice,
+        date_range,
+        triggered_by_choice,
+        symbol_text,
+    )
     with session_scope() as session:
         runs = get_latest_scan_runs(session, limit=50, **filters)
         counts = count_scan_results_for_runs(session, [run.id for run in runs])
@@ -1228,15 +1306,19 @@ def _render_history_page() -> None:
             )
         return
 
-    frame = _history_runs_frame(rows)
-    # Redact here, not in the pure frame builder: _redact_secrets needs the
-    # Streamlit secrets context, mirroring how the scanner's failures table does it.
-    frame["Error"] = frame["Error"].map(_redact_secrets)
+    frame = _history_runs_frame(rows, error_redactor=_redact_secrets)
 
     # Key the table by the filter signature: changing any filter mints a fresh
     # widget, which discards a stale row selection that would otherwise point at
     # the wrong run in the re-filtered list.
-    signature = f"{screener_choice}|{tuple(date_range or ())}|{symbol_text.strip().upper()}"
+    signature = _history_filter_signature(
+        screener_choice,
+        universe_choice,
+        status_choice,
+        date_range,
+        triggered_by_choice,
+        symbol_text,
+    )
     table_state = st.dataframe(
         frame,
         width="stretch",
@@ -1266,15 +1348,17 @@ def _render_history_run_details(row: dict[str, Any], *, symbol_filter: str = "")
     st.subheader(f"Run #{row['run_id']} — {row['screener']}")
 
     with st.container(border=True):
-        col1, col2, col3, col4, col5 = st.columns(5)
+        col1, col2, col3 = st.columns(3)
         col1.metric("Status", _HISTORY_STATUS_BADGES.get(row["status"], row["status"]))
         col2.metric("Started", row["started"])
-        col3.metric("Duration", row["duration"])
-        col4.metric(
+        col3.metric("Finished", row["finished"])
+        col4, col5, col6 = st.columns(3)
+        col4.metric("Duration", row["duration"])
+        col5.metric(
             "Symbols scanned",
             "—" if row["symbols_scanned"] is None else int(row["symbols_scanned"]),
         )
-        col5.metric("Shortlisted", row["shortlisted"])
+        col6.metric("Shortlisted", row["shortlisted"])
         st.caption(
             f"Universe: `{row['universe']}` · Triggered by: `{row['triggered_by']}`"
         )

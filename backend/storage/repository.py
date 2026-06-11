@@ -144,8 +144,11 @@ def get_latest_scan_runs(
     limit: int = 50,
     *,
     screener_key: str | None = None,
+    universe_key: str | None = None,
+    status: ScanStatus | None = None,
     started_from: dt.date | None = None,
     started_to: dt.date | None = None,
+    triggered_by: str | None = None,
     symbol: str | None = None,
 ) -> list[ScanRun]:
     """Return the newest scan headers first, optionally filtered.
@@ -156,6 +159,8 @@ def get_latest_scan_runs(
 
     Filter semantics:
     - ``screener_key``: exact match on the registry key.
+    - ``universe_key``: exact match on the persisted universe key.
+    - ``status``: exact match on the typed ``ScanStatus`` enum.
     - ``started_from`` / ``started_to``: inclusive calendar-day range applied to
       ``started_at``. The comparison binds whole datetimes (start of from-day,
       start of the day after to-day) rather than wrapping ``started_at`` in a SQL
@@ -166,6 +171,8 @@ def get_latest_scan_runs(
       case-insensitive but exact ("RELI" does not match RELIANCE) because ticker
       symbols are short codes, not prose. Implemented as an EXISTS subquery so
       result rows are never loaded just to answer a yes/no question.
+    - ``triggered_by``: exact match on the audit identity (for example,
+      ``job:daily_scan`` or ``ui:person@example.com``).
 
     Two runs created within the same millisecond (a daily job firing back-to-back,
     or fast tests) can share a ``started_at`` value. Adding the primary key as a
@@ -175,6 +182,10 @@ def get_latest_scan_runs(
     stmt = select(ScanRun)
     if screener_key:
         stmt = stmt.where(ScanRun.screener_key == screener_key)
+    if universe_key:
+        stmt = stmt.where(ScanRun.universe_key == universe_key)
+    if status is not None:
+        stmt = stmt.where(ScanRun.status == status)
     if started_from is not None:
         stmt = stmt.where(
             ScanRun.started_at >= dt.datetime.combine(started_from, dt.time.min, dt.UTC)
@@ -186,6 +197,8 @@ def get_latest_scan_runs(
         stmt = stmt.where(
             ScanRun.started_at < dt.datetime.combine(next_day, dt.time.min, dt.UTC)
         )
+    if triggered_by:
+        stmt = stmt.where(ScanRun.triggered_by == triggered_by)
     if symbol and symbol.strip():
         wanted = symbol.strip().upper()
         stmt = stmt.where(
@@ -233,6 +246,23 @@ def list_distinct_screener_keys(session: Session) -> list[str]:
     to take down the audit view.
     """
     stmt = select(ScanRun.screener_key).distinct().order_by(ScanRun.screener_key.asc())
+    return list(session.scalars(stmt))
+
+
+def list_distinct_universe_keys(session: Session) -> list[str]:
+    """Return every universe key found in history, sorted and deduplicated."""
+    stmt = select(ScanRun.universe_key).distinct().order_by(ScanRun.universe_key.asc())
+    return list(session.scalars(stmt))
+
+
+def list_distinct_triggered_by_values(session: Session) -> list[str]:
+    """Return non-empty audit identities for the history trigger filter."""
+    stmt = (
+        select(ScanRun.triggered_by)
+        .where(ScanRun.triggered_by.is_not(None), ScanRun.triggered_by != "")
+        .distinct()
+        .order_by(ScanRun.triggered_by.asc())
+    )
     return list(session.scalars(stmt))
 
 

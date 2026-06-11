@@ -116,8 +116,9 @@ by default or Postgres) that is ready to record every run for later replay and a
   schema (`backend/storage/`) with a local SQLite default (`data/scanner.db`) or
   Postgres via `DATABASE_URL`, managed by **Alembic** migrations and a small
   repository API. A built-in **Scan history** view lists recent runs (status,
-  symbols scanned, shortlisted count, who triggered it, error state) with
-  screener/date/symbol filters and click-through to each run's persisted results.
+  started/finished timestamps, symbols scanned, shortlisted count, who triggered
+  it, error state) with screener/universe/status/date/trigger/symbol filters and
+  click-through to each run's persisted results.
 - **Tested** — a `pytest` suite covers the indicators, data loader, universe
   builder, screener registry, the screeners themselves, the auth gate, and the
   persistence layer — plus **golden-snapshot** tests that catch screener output
@@ -684,7 +685,8 @@ re-running today's data, universe, or model.
   `DATABASE_URL`) and `backend/storage/repository.py` (the only query/write
   helpers: `create_scan_run`, `save_scan_results`, `finish_scan_run`,
   `get_latest_scan_runs`, `get_scan_results`, `count_scan_results_for_runs`,
-  `list_distinct_screener_keys`). Schema changes are versioned with
+  `list_distinct_screener_keys`, `list_distinct_universe_keys`,
+  `list_distinct_triggered_by_values`). Schema changes are versioned with
   **Alembic** (`migrations/`, `alembic.ini`); create or upgrade the local database
   with `python -m alembic upgrade head` (setup step 3).
 - **Scan service (SCAN-003)** — `backend/scanning/run_scan(...)` wraps every scan
@@ -693,11 +695,12 @@ re-running today's data, universe, or model.
   SUCCESS / PARTIAL / FAILED status. The header also records how many symbols the
   universe contained (`symbols_scanned`).
 - **Scan history page (SCAN-004)** — switch the view radio at the top of the app
-  to **Scan history** to inspect previous runs: date/time, screener, universe,
-  status badge, symbols scanned, shortlisted count, trigger, and error state.
-  Filter by screener, started-date range, or symbol (exact, case-insensitive),
-  then click a run to see its persisted results and download them as CSV. Failed
-  runs show their full (secret-redacted) error message.
+  to **Scan history** to inspect previous runs: started/finished timestamps,
+  screener, universe, status badge, symbols scanned, shortlisted count, trigger,
+  and error state. Filter by screener, universe, status, started-date range,
+  trigger, or symbol (exact, case-insensitive), then click a run to see its
+  persisted results and download them as CSV. Failed runs show their full
+  (secret-redacted) error message.
 
 > **Upgrading an existing checkout?** The app applies migrations automatically
 > on startup, so the database gains the `symbols_scanned` column on first run.

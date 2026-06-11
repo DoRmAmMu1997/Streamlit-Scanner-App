@@ -487,6 +487,35 @@ def test_main_ensures_database_schema_before_running_the_job():
     assert calls == ["schema", "job"]
 
 
+def test_main_stops_before_running_job_when_schema_bootstrap_fails(capsys):
+    """A scheduled scan must not run when its audit tables are unavailable.
+
+    SCAN-004 makes persisted history part of the daily job's observable
+    contract. Returning ``False`` simulates an Alembic/bootstrap failure. The
+    command should explain that no scan started, exit non-zero, and never call
+    the injected job runner.
+    """
+    from backend.jobs.run_daily_scan import DailyScanSummary, main
+
+    calls: list[str] = []
+
+    def fake_job_runner(**_kwargs):
+        calls.append("job")
+        return DailyScanSummary(outcomes=[])
+
+    exit_code = main(
+        [],
+        job_runner=fake_job_runner,
+        schema_bootstrapper=lambda: False,
+    )
+
+    assert exit_code == 1
+    assert calls == []
+    output = capsys.readouterr().out.lower()
+    assert "schema" in output
+    assert "not started" in output
+
+
 # ---------------------------------------------------------------------------
 # JOB-002: config-driven schedule (`--config`)
 # ---------------------------------------------------------------------------
