@@ -481,8 +481,14 @@ def test_config_run_skips_disabled_entries_and_runs_enabled(
     assert "disabled_one" in output
 
 
-def test_config_entry_overrides_universe_and_params_reach_the_service():
-    """universe_key/params overrides flow into run_scan, merged over defaults."""
+def test_config_entry_overrides_universe_and_params_reach_the_service(capsys):
+    """Config overrides reach both the scan service and operator-facing outcome.
+
+    The resolved universe is more than an internal input: it is also printed in
+    scheduled-job output and exposed through ``DailyScanOutcome``. Keeping those
+    views aligned prevents an operator from seeing the registry default even
+    though the scan actually ran against the configured override.
+    """
     from backend.jobs.daily_scan_config import DailyScanEntry
     from backend.jobs.run_daily_scan import run_daily_scan
 
@@ -528,6 +534,8 @@ def test_config_entry_overrides_universe_and_params_reach_the_service():
     # The override universe is used, not the registry default "fno".
     assert loaded_universes == ["hemant_super_45"]
     assert captured["universe_key"] == "hemant_super_45"
+    assert summary.outcomes[0].universe_key == "hemant_super_45"
+    assert "universe=hemant_super_45" in capsys.readouterr().out
     # params: registry default kept, config value overrides, dates added last.
     params = captured["params"]
     assert params["ema_period"] == 200
@@ -700,3 +708,22 @@ def test_main_bad_config_exits_nonzero_and_does_not_run_the_job(tmp_path, capsys
 
     assert exit_code == 1
     assert "Could not load config" in capsys.readouterr().out
+
+
+def test_main_redacts_secret_shaped_text_from_config_load_errors(tmp_path, capsys):
+    """A config filename must not bypass the shared secret-redaction boundary.
+
+    Command-line paths are normally harmless, but schedulers can interpolate
+    environment values into arguments. This deliberately fake filename proves a
+    token-shaped value is masked before the config error reaches stdout.
+    """
+    from backend.jobs.run_daily_scan import main
+
+    missing_path = tmp_path / "token=SUPERSECRET.yaml"
+
+    exit_code = main(["--config", str(missing_path)])
+
+    assert exit_code == 1
+    output = capsys.readouterr().out
+    assert "token=***REDACTED***" in output
+    assert "SUPERSECRET" not in output

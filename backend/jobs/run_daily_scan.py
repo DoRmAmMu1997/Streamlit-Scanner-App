@@ -56,7 +56,11 @@ from backend.jobs.daily_scan_config import (
 from backend.scanning import ScanRunResult, ScanStatus, run_scan
 from backend.scanning.service import SessionFactory
 from backend.screener_registry import ScreenerDefinition, discover_screeners
-from backend.security import install_secret_redaction_filter, redact_exception
+from backend.security import (
+    install_secret_redaction_filter,
+    redact_exception,
+    redact_text,
+)
 from backend.storage.database import session_scope
 from backend.universe_loader import load_universe
 
@@ -312,7 +316,16 @@ def main(
             # A bad config is an operator error, not a crash: print one clear line
             # and exit non-zero so a scheduler notices the misconfiguration. The
             # message is our own (file path + reason), never a raw broker/DB token.
-            print(f"[daily-scan] Could not load config: {exc}", file=out, flush=True)
+            # The config path comes from command-line input. Although paths are
+            # normally harmless, a scheduler may interpolate an environment
+            # value into one. Reuse SEC-002 here so secret-shaped path fragments
+            # cannot bypass the normal CLI redaction boundary.
+            safe_message = redact_text(str(exc))
+            print(
+                f"[daily-scan] Could not load config: {safe_message}",
+                file=out,
+                flush=True,
+            )
             return 1
         summary = job_runner(scan_entries=scan_entries, output=out)
     else:
@@ -413,7 +426,10 @@ def _run_one_screener(
 
     return DailyScanOutcome(
         screener_key=definition.key,
-        universe_key=definition.universe,
+        # Report the universe that was actually scanned. When JOB-002 supplies
+        # an override, the registry default is no longer accurate for operator
+        # output or callers inspecting the structured outcome.
+        universe_key=resolved_universe,
         status=result.status,
         run_id=result.run_id,
         row_count=row_count,
