@@ -25,6 +25,11 @@ requests
 python-dotenv
 dhanhq
 
+# Scheduled jobs: YAML daily-scan schedule (JOB-002). backend/jobs/daily_scan_config
+# imports `yaml` directly to parse config/daily_scans.yaml, so PyYAML is declared
+# explicitly rather than relied on as someone else's transitive dependency.
+PyYAML
+
 # Fundamental analysis: screener.in scraper + Claude Agent SDK agent.
 # `claude-agent-sdk` runs the Check Fundamentals agent on your Claude
 # subscription (bundled Claude CLI login — no API key, no Node required).

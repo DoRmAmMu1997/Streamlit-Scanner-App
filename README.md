@@ -387,11 +387,100 @@ To run a custom set, repeat `--screener`:
 python -m backend.jobs.run_daily_scan --screener technical_analysis --screener envelope
 ```
 
+For a fixed, named schedule that cron or a hosting platform can run without long
+flag lists, point the command at a YAML config (JOB-002):
+
+```bash
+python -m backend.jobs.run_daily_scan --config config/daily_scans.yaml
+```
+
+Copy `config/daily_scans.example.yaml` and edit it. Each entry under
+`daily_scans` is one named scan batch:
+
+```yaml
+daily_scans:
+  - name: Bollinger Band Reversal (daily)
+    screener_key: bollinger_band_reversal
+    enabled: true
+
+  - name: Envelope Knoxville Buy (daily)
+    screener_key: envelope_knoxville_buy
+    enabled: true
+    universe_key: hemant_super_45   # optional; defaults to the screener's universe
+    params:                         # optional; merged over the screener defaults
+      percent: 14.0
+
+  - name: 67 Ka Funda (AI)
+    screener_key: sixty_seven_ka_funda
+    enabled: false                  # AI-heavy: opt in deliberately (see below)
+```
+
+Only `name` and `screener_key` are required; `enabled` defaults to `true`.
+Disabled entries are skipped (and logged as skipped). `--config` and `--screener`
+cannot be combined. A malformed YAML file, an unknown `screener_key` or
+`universe_key`, or a config with no enabled entries each exit non-zero so a
+scheduler notices the problem.
+
+> **AI-heavy jobs are opt-in.** The `sixty_seven_ka_funda` and
+> `technical_analysis` screeners call the Claude Agent SDK (and SerpAPI), so they
+> cost API quota and depend on optional external services. They ship **disabled**
+> in the example config; enable them deliberately and consider lowering
+> `max_ai_candidates` to cap per-run cost.
+
 Exit code `0` means every selected scan persisted history and finished
 `success` or `partial`. Exit code `1` means a fatal problem occurred, such as an
 unknown screener key, missing setup, a failed screener, or a scan whose results
 could not be written to `scan_runs` / `scan_results`. Operator summaries include
 status and run ids, but not raw secrets.
+
+---
+
+## Observability & logging
+
+To make failures diagnosable in production (OBS-001), the app emits **named,
+structured log events** through `backend/observability`. Every entrypoint — the
+Streamlit UI, the `python app.py` prefetch, and the headless daily-scan job —
+configures logging the same way via `configure_logging()`.
+
+**Events** carry searchable context such as `run_id`, `scan_name`,
+`screener_key`, `universe_key`, and `symbol` whenever that context is available:
+
+| Event | Level | Emitted when |
+| --- | --- | --- |
+| `daily_job_started` / `daily_job_completed` | INFO or ERROR | the headless command starts / finishes, including its aggregate exit code and outcome counts |
+| `daily_job_config_loaded` | INFO | a JOB-002 YAML schedule is valid, including enabled/disabled entry counts |
+| `daily_job_config_invalid` | ERROR | a schedule cannot be loaded or contains no enabled scans |
+| `scan_started` / `scan_completed` | INFO | a scan starts / successfully persists (with run context, result count, and duration) |
+| `scan_partial` | WARNING | a scan persists usable rows but one or more symbols fail to load or compute |
+| `scan_failed` | ERROR | screener, header, or result persistence fails (safe phase and exception **type**, never the raw message) |
+| `symbol_scan_failed` | WARNING | a single symbol fails to load or compute (run and screener context plus `symbol`) |
+| `external_api_failed` | WARNING | a Dhan candle fetch fails for a `symbol` |
+| `auth_denied` | WARNING | a signed-in email is not on the allowlist (logs the email, never the allowlist) |
+| `data_refresh_started` / `data_refresh_completed` | INFO or ERROR | the universe/candle prefetch starts / reaches a terminal success, skip, or failure state |
+
+**Plain text vs JSON.** `LOG_FORMAT` controls rendering:
+
+- `auto` (default) — human-readable text in development, machine-readable **JSON
+  in production** (`APP_ENV=production`).
+- `json` / `text` — force one rendering regardless of environment (handy for
+  testing JSON locally or keeping a production console readable).
+
+```bash
+# One JSON object per line, ready for a log aggregator:
+LOG_FORMAT=json LOG_LEVEL=INFO python -m backend.jobs.run_daily_scan
+```
+
+```json
+{"timestamp": "2026-06-10T...", "level": "INFO", "logger": "backend.scanning.service", "event": "scan_completed", "message": "scan_completed", "run_id": 42, "scan_name": "Daily Envelope", "screener_key": "envelope", "universe_key": "hemant_super_45", "status": "success", "results_count": 5, "duration_seconds": 1.23}
+```
+
+**Levels.** Routine lifecycle events log at INFO. Partial outcomes log at WARNING,
+and failures log at ERROR, so degraded and failed jobs remain visible at the
+default `LOG_LEVEL=WARNING`. Set `LOG_LEVEL=INFO` to see the full event stream.
+
+**Secrets never leak.** Every rendered line (text or JSON, including exception
+tracebacks and structured field values) passes through the SEC-002 redaction
+filter / `redact_text`, so tokens, API keys, and database passwords are masked.
 
 ---
 

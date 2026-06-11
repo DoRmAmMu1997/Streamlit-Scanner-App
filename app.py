@@ -71,6 +71,12 @@ from backend.daily_data_loader import (
 )
 from backend.dhan_client import DhanDataClient
 from backend.security import install_secret_redaction_filter, redact_text
+from backend.observability import (
+    EVENT_DATA_REFRESH_COMPLETED,
+    EVENT_DATA_REFRESH_STARTED,
+    configure_logging,
+    log_event,
+)
 from backend.screener_registry import ScreenerDefinition, ScreenerRegistryError, discover_screeners
 from backend.scanning import ScanStatus, run_scan
 from backend.storage import (
@@ -166,6 +172,10 @@ def prefetch_data_assets() -> None:
     install_secret_redaction_filter(logging.getLogger())
     ensure_project_dirs()
 
+    # OBS-001: mark the start of a data refresh. The matching data_refresh_completed
+    # events below report how it ended (ok / skipped / no credentials).
+    log_event(logger, EVENT_DATA_REFRESH_STARTED)
+
     print("[prefetch] Refreshing Dhan instrument master and universe CSVs...", flush=True)
     try:
         written = refresh_universe_files()
@@ -174,6 +184,14 @@ def prefetch_data_assets() -> None:
         # terminal so the user can fix it (often a transient network issue).
         logger.exception("Universe refresh failed during prefetch")
         print(f"[prefetch] WARNING: universe refresh failed: {_redact_secrets(str(exc))}", flush=True)
+        log_event(
+            logger,
+            EVENT_DATA_REFRESH_COMPLETED,
+            level=logging.ERROR,
+            status="failed",
+            phase="universe_refresh",
+            error_type=type(exc).__name__,
+        )
         return
     for key, path in written.items():
         display_name = UNIVERSE_CONFIG.get(key, {}).get("display_name", key)
@@ -185,6 +203,12 @@ def prefetch_data_assets() -> None:
     if union.empty:
         print("[prefetch] No mapped stocks found in any universe; skipping candle prefetch.", flush=True)
         print("[prefetch] Done. Launching Streamlit UI...", flush=True)
+        log_event(
+            logger,
+            EVENT_DATA_REFRESH_COMPLETED,
+            status="no_mapped_stocks",
+            universe_files=len(written),
+        )
         return
     print(f"[prefetch] Union contains {len(union)} unique mapped stocks.", flush=True)
 
@@ -208,6 +232,13 @@ def prefetch_data_assets() -> None:
             flush=True,
         )
         print("[prefetch] Done. Launching Streamlit UI...", flush=True)
+        log_event(
+            logger,
+            EVENT_DATA_REFRESH_COMPLETED,
+            status="no_credentials_candles_skipped",
+            universe_files=len(written),
+            mapped_symbols=len(union),
+        )
         return
 
     total = len(union)
@@ -230,6 +261,15 @@ def prefetch_data_assets() -> None:
     summary = ", ".join(f"{key}={value}" for key, value in sorted(status_counts.items()))
     print(f"[prefetch] Candle prefetch complete: {summary}.", flush=True)
     print("[prefetch] Done. Launching Streamlit UI...", flush=True)
+    # OBS-001: report the candle outcome so a boot-time/scheduled refresh can be
+    # monitored. status_counts are counts (downloaded/appended/failed), not secrets.
+    log_event(
+        logger,
+        EVENT_DATA_REFRESH_COMPLETED,
+        status="ok",
+        mapped_symbols=total,
+        candle_status_counts=dict(status_counts),
+    )
 
 
 def launch_streamlit_from_plain_python() -> None:
@@ -239,18 +279,10 @@ def launch_streamlit_from_plain_python() -> None:
     before the Streamlit browser tab opens. Without this handoff, `python
     app.py` would just print Streamlit warnings and never open the browser.
     """
-    # Basic logging setup so logger calls inside the prefetch reach the user.
-    # Streamlit configures its own handlers later; this only affects the
-    # short CLI prefetch window before `streamlit run` takes over.
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
-    )
-    # The prefetch phase logs before Streamlit starts. Installing the same
-    # filter here gives terminal users the same secret protection as the browser
-    # UI path.
-    install_secret_redaction_filter(logging.getLogger())
+    # OBS-001: configure structured, secret-safe logging for the CLI prefetch
+    # window (before `streamlit run` takes over). The same shared setup the
+    # Streamlit UI and the headless daily job use, so production gets JSON here too.
+    configure_logging()
 
     prefetch_data_assets()
 
@@ -860,24 +892,11 @@ def _configure_logging() -> None:
     means we do not stomp on a logger already configured by the CLI prefetch
     path, where `launch_streamlit_from_plain_python` has its own setup.
     """
-    root_logger = logging.getLogger()
-    # OIDC cookie/client secrets live in st.secrets (not env settings); the UI
-    # path masks them, so teach the logging filter the same values for parity.
-    oidc_secrets = auth_secret_values(st)
-    if root_logger.handlers:
-        # Some Python entry point already configured the root logger
-        # (e.g. the CLI prefetch). Honor that rather than reconfiguring.
-        install_secret_redaction_filter(root_logger, extra_secrets=oidc_secrets)
-        return
-    # get_settings() validates LOG_LEVEL, so getattr is mostly defensive here:
-    # if Python ever lacks a named level, keep the app quiet at WARNING.
-    level = getattr(logging, get_settings().log_level, logging.WARNING)
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stderr,
-    )
-    install_secret_redaction_filter(root_logger, extra_secrets=oidc_secrets)
+    # Delegate to the shared OBS-001 setup so the Streamlit UI, the CLI prefetch,
+    # and the headless daily job all log identically: structured events, JSON in
+    # production, secret-redacted. OIDC cookie/client secrets live in st.secrets
+    # (not env settings), so pass them as extra_secrets for the redaction filter.
+    configure_logging(extra_secrets=auth_secret_values(st))
 
 
 # ---------------------------------------------------------------------------

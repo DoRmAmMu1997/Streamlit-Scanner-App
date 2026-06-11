@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import sys
+import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
@@ -37,6 +39,15 @@ from typing import Any
 import pandas as pd
 from sqlalchemy.orm import Session
 
+from backend.observability import (
+    EVENT_SCAN_COMPLETED,
+    EVENT_SCAN_FAILED,
+    EVENT_SCAN_PARTIAL,
+    EVENT_SCAN_STARTED,
+    EVENT_SYMBOL_SCAN_FAILED,
+    ExceptionInfo,
+    log_event,
+)
 from backend.storage.database import session_scope
 from backend.storage.models import ScanRun, ScanStatus
 from backend.storage.repository import (
@@ -83,6 +94,7 @@ def run_scan(
     *,
     screener_key: str,
     universe_key: str,
+    scan_name: str | None = None,
     run_callable: RunCallable,
     universe_df: pd.DataFrame,
     data_loader: Any,
@@ -102,6 +114,11 @@ def run_scan(
     ``finish_scan_run`` happen afterward, once the screener has returned or
     failed. That mirrors how a job queue usually records "started" and "finished"
     events.
+
+    ``scan_name`` is optional human-readable context supplied by configured
+    headless jobs. The Streamlit UI can omit it because ``screener_key`` still
+    identifies the scan; JOB-002 passes its named YAML entry so production logs
+    distinguish two scheduled runs of the same screener.
     """
     # The service owns failure observation so it can decide SUCCESS vs PARTIAL and
     # so callers do not each have to wire a callback. Copy params first: we must
@@ -109,12 +126,14 @@ def run_scan(
     compute_failures: list[dict[str, Any]] = []
     run_params = dict(params)
     run_params["compute_failure_callback"] = compute_failures.append
+    # OBS-001: monotonic clock so scan_completed can report a wall-clock duration.
+    started_at = time.monotonic()
 
     # --- 1. Create the audit header before scanner execution -------------------
     # This is intentionally a short transaction. Long-running screeners should
     # never keep a database transaction open, but operators should still be able
     # to see that a run started even if it fails minutes later.
-    run_id = _create_run_header(
+    run_id, header_exc_info = _create_run_header(
         screener_key=screener_key,
         universe_key=universe_key,
         params=params,
@@ -125,8 +144,38 @@ def run_scan(
         session_factory=session_factory,
     )
 
+    # OBS-001: emit scan_started *after* the header so the event carries the run_id
+    # that ties every later event and persisted row back to this run.
+    log_event(
+        logger,
+        EVENT_SCAN_STARTED,
+        run_id=run_id,
+        scan_name=scan_name,
+        screener_key=screener_key,
+        universe_key=universe_key,
+        triggered_by=triggered_by,
+        symbols_scanned=int(len(universe_df)) if universe_df is not None else 0,
+    )
+    if header_exc_info is not None:
+        log_event(
+            logger,
+            EVENT_SCAN_FAILED,
+            level=logging.ERROR,
+            exc_info=header_exc_info,
+            run_id=None,
+            scan_name=scan_name,
+            screener_key=screener_key,
+            universe_key=universe_key,
+            phase="create_header",
+            error_type=header_exc_info[0].__name__,
+        )
+
     # --- 2. Run the screener (the primary job; independent of the database) -----
     error_message: str | None = None
+    screener_exc_info: ExceptionInfo | None = None
+    # Track per-symbol load failures across the try/except so the observability
+    # events below can report them whether or not the screener itself raised.
+    loader_failures: list[dict[str, Any]] = []
     try:
         results = run_callable(universe_df, data_loader, run_params)
     except Exception as exc:
@@ -134,7 +183,10 @@ def run_scan(
         # message secret-free. A raw exception string could echo a token, URL, or
         # broker response body, while the exception class (RuntimeError, KeyError,
         # etc.) is useful and safe enough for the future history UI.
-        logger.exception("Screener %s raised during scan", screener_key)
+        # Keep the original exception tuple until persistence has finished. That
+        # lets the terminal scan_failed event reflect durable state while still
+        # carrying the original traceback through the redacting formatter.
+        screener_exc_info = sys.exc_info()
         results = pd.DataFrame()
         status = ScanStatus.FAILED
         error_message = (
@@ -153,18 +205,78 @@ def run_scan(
         else:
             status = ScanStatus.SUCCESS
 
+    # OBS-001: one symbol_scan_failed per failed symbol (load failures from the
+    # data loader, compute failures from the screener callback), each tagged with
+    # run_id + symbol so a single stock's failure is traceable. Both message
+    # sources were already redacted where they were produced.
+    for failure in (*loader_failures, *compute_failures):
+        log_event(
+            logger,
+            EVENT_SYMBOL_SCAN_FAILED,
+            level=logging.WARNING,
+            run_id=run_id,
+            scan_name=scan_name,
+            screener_key=screener_key,
+            universe_key=universe_key,
+            symbol=failure.get("symbol"),
+            # Named ``error`` (not ``message``) so it stays a distinct JSON field
+            # and matches external_api_failed. Source messages are already redacted.
+            error=failure.get("message"),
+        )
+
     # --- 3. Persist rows + final status best-effort ----------------------------
     # If the header could not be created, run_id is None and this becomes a no-op.
     # The UI still receives the screener rows. If saving rows fails after the
     # header exists, we try to mark that run FAILED with a secret-safe persistence
     # message so the history table does not get stuck forever in RUNNING.
-    _persist_run_outcome(
+    persistence_exc_info = _persist_run_outcome(
         run_id=run_id,
         results=results,
         status=status,
         error_message=error_message,
         session_factory=session_factory,
     )
+
+    # --- 4. Emit terminal events after the durable write attempt ---------------
+    # A log consumer may react to scan_completed immediately, so success/partial
+    # events are emitted only when the corresponding database row was actually
+    # finalized. Persistence and header failures get their own scan_failed phase
+    # while the in-memory result remains available to the caller.
+    terminal_fields = {
+        "run_id": run_id,
+        "scan_name": scan_name,
+        "screener_key": screener_key,
+        "universe_key": universe_key,
+        "status": status.value,
+        "results_count": 0 if results is None else int(len(results)),
+        "loader_failures": len(loader_failures),
+        "compute_failures": len(compute_failures),
+        "duration_seconds": round(time.monotonic() - started_at, 3),
+    }
+    if screener_exc_info is not None:
+        log_event(
+            logger,
+            EVENT_SCAN_FAILED,
+            level=logging.ERROR,
+            exc_info=screener_exc_info,
+            phase="screener",
+            error_type=screener_exc_info[0].__name__,
+            **terminal_fields,
+        )
+    if persistence_exc_info is not None:
+        log_event(
+            logger,
+            EVENT_SCAN_FAILED,
+            level=logging.ERROR,
+            exc_info=persistence_exc_info,
+            phase="persistence",
+            error_type=persistence_exc_info[0].__name__,
+            **terminal_fields,
+        )
+    elif run_id is not None and status is ScanStatus.SUCCESS:
+        log_event(logger, EVENT_SCAN_COMPLETED, **terminal_fields)
+    elif run_id is not None and status is ScanStatus.PARTIAL:
+        log_event(logger, EVENT_SCAN_PARTIAL, level=logging.WARNING, **terminal_fields)
 
     return ScanRunResult(
         status=status,
@@ -183,7 +295,7 @@ def _create_run_header(
     triggered_by: str | None,
     symbols_scanned: int | None,
     session_factory: SessionFactory,
-) -> int | None:
+) -> tuple[int | None, ExceptionInfo | None]:
     """Create and commit the RUNNING ``scan_runs`` row before the screener runs.
 
     Beginner note:
@@ -209,14 +321,9 @@ def _create_run_header(
             # SQLAlchemy fills this value during flush, which create_scan_run()
             # performs for us; after the context manager exits, tests and callers
             # can use the id to fetch the same run in a new session.
-            return run.id
+            return run.id, None
     except Exception:
-        logger.warning(
-            "Could not create scan run header for %s; continuing without history.",
-            screener_key,
-            exc_info=True,
-        )
-        return None
+        return None, sys.exc_info()
 
 
 def _persist_run_outcome(
@@ -226,7 +333,7 @@ def _persist_run_outcome(
     status: ScanStatus,
     error_message: str | None,
     session_factory: SessionFactory,
-) -> None:
+) -> ExceptionInfo | None:
     """Save result rows and stamp the final status for an existing run header.
 
     This is separate from ``_create_run_header`` so the database transaction is
@@ -239,7 +346,7 @@ def _persist_run_outcome(
     something operators should be able to notice.
     """
     if run_id is None:
-        return
+        return None
 
     try:
         with session_factory() as session:
@@ -252,12 +359,10 @@ def _persist_run_outcome(
             save_scan_results(session, run, _result_rows(results))
             finish_scan_run(session, run, status=status, error_message=error_message)
     except Exception as exc:
-        logger.warning(
-            "Could not persist outcome for scan run %s; marking it failed if possible.",
-            run_id,
-            exc_info=True,
-        )
+        persistence_exc_info = sys.exc_info()
         _mark_run_failed_after_persistence_error(run_id, exc, session_factory)
+        return persistence_exc_info
+    return None
 
 
 def _mark_run_failed_after_persistence_error(
