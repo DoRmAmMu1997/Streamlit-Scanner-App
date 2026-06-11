@@ -113,6 +113,16 @@ def test_run_scan_success_persists_run_and_results(db_engine, session_factory):
     assert result.status is ScanStatus.SUCCESS
     assert result.run_id is not None
     assert list(result.results["symbol"]) == ["RELIANCE", "TCS"]
+    # PROV-001A normalizes only copies sent to persistence. Streamlit must keep
+    # receiving the exact legacy DataFrame produced by the screener.
+    assert "provenance_json" not in result.results.columns
+    assert list(result.results.columns) == [
+        "symbol",
+        "rating",
+        "signal_date",
+        "close",
+        "reason",
+    ]
 
     # Re-query the database to prove the run + results were written.
     with Session(db_engine) as session:
@@ -127,6 +137,24 @@ def test_run_scan_success_persists_run_and_results(db_engine, session_factory):
         assert "progress_callback" not in (runs[0].params_json or {})
         rows = get_scan_results(session, result.run_id)
         assert [r.symbol for r in rows] == ["RELIANCE", "TCS"]
+        assert rows[0].provenance_json == {
+            "screener_key": "envelope",
+            "screener_version": None,
+            "triggered_rules": [],
+            "indicator_values": {},
+            "params_snapshot": {
+                "start_date": "2016-06-02",
+                "end_date": "2026-06-02",
+                "period": 20,
+            },
+            "data_snapshot_date": "2026-06-02",
+            "source": None,
+            "notes": None,
+            "ai": None,
+        }
+        # The repository's raw audit copy receives the normalized persistence
+        # row, while the in-memory DataFrame above remains untouched.
+        assert rows[0].raw_result_json["provenance_json"] == rows[0].provenance_json
 
 
 def test_run_scan_creates_running_row_before_invoking_screener(

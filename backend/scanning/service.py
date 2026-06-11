@@ -48,6 +48,7 @@ from backend.observability import (
     ExceptionInfo,
     log_event,
 )
+from backend.scanning.result_contract import normalize_screener_row
 from backend.storage.database import session_scope
 from backend.storage.models import ScanRun, ScanStatus
 from backend.storage.repository import (
@@ -234,6 +235,9 @@ def run_scan(
         results=results,
         status=status,
         error_message=error_message,
+        screener_key=screener_key,
+        params=params,
+        data_snapshot_date=_as_date(params.get("end_date")),
         session_factory=session_factory,
     )
 
@@ -332,6 +336,9 @@ def _persist_run_outcome(
     results: pd.DataFrame,
     status: ScanStatus,
     error_message: str | None,
+    screener_key: str,
+    params: dict[str, Any],
+    data_snapshot_date: dt.date | None,
     session_factory: SessionFactory,
 ) -> ExceptionInfo | None:
     """Save result rows and stamp the final status for an existing run header.
@@ -356,7 +363,16 @@ def _persist_run_outcome(
             run = session.get(ScanRun, run_id)
             if run is None:
                 raise RuntimeError("scan run header disappeared before finish")
-            save_scan_results(session, run, _result_rows(results))
+            save_scan_results(
+                session,
+                run,
+                _result_rows(
+                    results,
+                    screener_key=screener_key,
+                    params=params,
+                    data_snapshot_date=data_snapshot_date,
+                ),
+            )
             finish_scan_run(session, run, status=status, error_message=error_message)
     except Exception as exc:
         persistence_exc_info = sys.exc_info()
@@ -405,11 +421,31 @@ def _params_snapshot(params: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in params.items() if not callable(value)}
 
 
-def _result_rows(results: pd.DataFrame) -> list[dict[str, Any]]:
-    """Convert the screener DataFrame into the row dicts the repository expects."""
+def _result_rows(
+    results: pd.DataFrame,
+    *,
+    screener_key: str,
+    params: dict[str, Any],
+    data_snapshot_date: dt.date | None,
+) -> list[dict[str, Any]]:
+    """Return normalized persistence copies of the screener's DataFrame rows.
+
+    ``normalize_screener_row`` recursively copies nested values. Provenance and
+    JSON conversions therefore affect only the dictionaries passed to storage;
+    ``ScanRunResult.results`` remains the exact DataFrame returned by the
+    screener for Streamlit to render.
+    """
     if results is None or results.empty:
         return []
-    return results.to_dict("records")
+    return [
+        normalize_screener_row(
+            row,
+            screener_key=screener_key,
+            params=params,
+            data_snapshot_date=data_snapshot_date,
+        )
+        for row in results.to_dict("records")
+    ]
 
 
 def _as_date(value: Any) -> dt.date | None:

@@ -41,7 +41,8 @@ the **design, the migration plan, and the model boundaries**.
 - Engine, `Session` factory, Alembic env + migration files, the real DB file → **SCAN-002 (Codex)**.
 - The scan service that *writes* runs/results → **SCAN-003**.
 - The history page that *reads* them → **SCAN-004**.
-- The provenance contract that fills `provenance_json` → **PROV-001**.
+- Populating strategy-specific deterministic provenance → **PROV-002**.
+- Full AI verdict/evidence provenance → **PROV-003**.
 - Populating `final_score` → **RANK-***. Audit log / user identity → **OBS-003 / AUTH-***.
 
 The starter models intentionally stop at "schema only" so this design can be reviewed and
@@ -213,7 +214,7 @@ Engine + Session (SCAN-002)     ← DATABASE_URL → SQLite (dev) / Postgres (pr
 **Rules this layering enforces:**
 - The UI and screeners never import the engine or write SQL; they go through the service /
   repository. This keeps Streamlit reruns from leaking database sessions.
-- **ORM models ≠ domain models.** PROV-001 / REFACTOR-003 define typed *domain* objects
+- **ORM models ≠ domain models.** PROV-001A defines typed *domain* objects
   (e.g. a `ScreenerResult` / `SignalProvenance` contract). Those are serialized into the
   `raw_result_json` / `provenance_json` columns — the JSON columns are the **seam** between
   the typed app layer and the stored rows, so the provenance contract can evolve without a
@@ -225,6 +226,27 @@ Engine + Session (SCAN-002)     ← DATABASE_URL → SQLite (dev) / Postgres (pr
 - **Scraped / AI text is untrusted evidence.** Whatever lands in `provenance_json` from an AI
   agent or a scraped page is stored as *evidence*, not as instructions — consistent with the
   app's existing prompt-injection posture (AI-003 / TEST-003).
+
+### 6.1 PROV-001A result normalization boundary
+
+`backend/scanning/result_contract.py` supplies the domain models anticipated
+above. It deliberately sits between flexible screener output and the repository:
+
+1. A screener returns its existing DataFrame.
+2. `backend.scanning.service` creates row dictionaries only for persistence.
+3. `normalize_screener_row(...)` copies each row, converts non-JSON values,
+   redacts credential-shaped data, and writes canonical `provenance_json`.
+4. The repository stores that normalized copy in `raw_result_json` and extracts
+   the same canonical provenance into `provenance_json`.
+5. The original DataFrame is returned unchanged to Streamlit.
+
+The v1 provenance envelope contains `screener_key`, optional
+`screener_version`, `triggered_rules`, scalar `indicator_values`,
+`params_snapshot`, `data_snapshot_date`, optional
+`deterministic | ai | hybrid` source, optional notes, and a deliberately small
+AI placeholder. Unknown existing provenance fields are preserved. This lets
+PROV-002 and PROV-003 add real evidence incrementally without another database
+migration or a flag-day conversion of all screeners.
 
 ---
 

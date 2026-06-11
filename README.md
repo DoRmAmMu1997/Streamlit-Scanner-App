@@ -694,6 +694,13 @@ re-running today's data, universe, or model.
   a RUNNING header before the screener executes, then results + a final
   SUCCESS / PARTIAL / FAILED status. The header also records how many symbols the
   universe contained (`symbols_scanned`).
+- **Typed result contract (PROV-001A)** —
+  `backend/scanning/result_contract.py` defines the small `ScreenerResult`,
+  `SignalProvenance`, `RuleCheck`, and placeholder `AIProvenance` domain models.
+  Before persistence, the scan service normalizes a copy of each legacy result
+  row into strict JSON and adds a canonical `provenance_json` payload. Existing
+  screener DataFrames are returned to Streamlit unchanged, so adopting the
+  contract does not require rewriting every screener.
 - **Scan history page (SCAN-004)** — switch the view radio at the top of the app
   to **Scan history** to inspect previous runs: started/finished timestamps,
   screener, universe, status badge, symbols scanned, shortlisted count, trigger,
@@ -709,6 +716,21 @@ re-running today's data, universe, or model.
 
 The design is documented in
 [`docs/architecture/scan-run-persistence.md`](docs/architecture/scan-run-persistence.md).
+
+### Result and provenance boundary
+
+`raw_result_json` is the complete, JSON-safe audit copy of the screener row,
+including strategy-specific columns. `provenance_json` is the standardized
+explanation envelope: screener identity/version, triggered rules, indicator
+values, parameters, data date, source category, notes, and an optional reserved
+AI metadata object. Legacy `provenance` and `rules` keys remain readable and are
+enriched rather than discarded.
+
+Only `symbol` is mandatory during this compatibility phase. Other common fields
+(`rating`, `signal_date`, `close`/`close_price`, and `reason`) remain optional so
+older and AI-assisted screeners continue to persist. Dates, `Decimal`, pandas,
+and NumPy values are converted to strict JSON; callable parameters are omitted,
+and credential-shaped values are redacted before result persistence.
 
 ## Adding your own screener
 
