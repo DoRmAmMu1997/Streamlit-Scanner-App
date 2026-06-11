@@ -154,3 +154,196 @@ def test_repository_breaks_started_at_ties_by_id_descending(session):
     # sort first under the id.desc() tie-breaker.
     assert later.id > earlier.id
     assert [run.id for run in get_latest_scan_runs(session)] == [later.id, earlier.id]
+
+
+# ---------------------------------------------------------------------------
+# SCAN-004: history-page filters, counts, and the symbols_scanned column
+# ---------------------------------------------------------------------------
+
+
+def _seed_history(session):
+    """Insert three runs across two screeners/days for filter tests.
+
+    Layout (all UTC):
+    - run_a: envelope on 2026-06-01, shortlists RELIANCE + TCS
+    - run_b: knoxville on 2026-06-02, shortlists WIPRO
+    - run_c: envelope on 2026-06-03, no results (a failed run)
+    """
+    from backend.storage.repository import create_scan_run, save_scan_results
+
+    run_a = create_scan_run(
+        session,
+        screener_key="envelope",
+        universe_key="nifty_500",
+        symbols_scanned=500,
+        triggered_by="ui:analyst@example.com",
+    )
+    run_b = create_scan_run(
+        session,
+        screener_key="knoxville",
+        universe_key="nifty_100",
+        symbols_scanned=100,
+        triggered_by="job:daily_scan",
+    )
+    run_c = create_scan_run(
+        session,
+        screener_key="envelope",
+        universe_key="nifty_500",
+        triggered_by="ui:admin@example.com",
+    )
+    run_a.status = ScanStatus.SUCCESS
+    run_b.status = ScanStatus.PARTIAL
+    run_c.status = ScanStatus.FAILED
+    run_a.started_at = dt.datetime(2026, 6, 1, 10, 0, tzinfo=dt.UTC)
+    run_b.started_at = dt.datetime(2026, 6, 2, 10, 0, tzinfo=dt.UTC)
+    run_c.started_at = dt.datetime(2026, 6, 3, 10, 0, tzinfo=dt.UTC)
+    save_scan_results(
+        session,
+        run_a,
+        [{"symbol": "RELIANCE", "rating": "BUY"}, {"symbol": "TCS", "rating": "BUY"}],
+    )
+    save_scan_results(session, run_b, [{"symbol": "WIPRO", "rating": "BUY"}])
+    session.commit()
+    return run_a, run_b, run_c
+
+
+def test_get_latest_scan_runs_filters_by_screener_key(session):
+    """The screener filter keeps only that screener's runs, newest first."""
+    from backend.storage.repository import get_latest_scan_runs
+
+    run_a, _run_b, run_c = _seed_history(session)
+
+    filtered = get_latest_scan_runs(session, screener_key="envelope")
+    assert [run.id for run in filtered] == [run_c.id, run_a.id]
+
+
+def test_get_latest_scan_runs_date_range_is_inclusive_on_both_ends(session):
+    """started_from/started_to are calendar days; both boundary days count."""
+    from backend.storage.repository import get_latest_scan_runs
+
+    run_a, run_b, run_c = _seed_history(session)
+
+    # The exact from/to days of the range must both be included.
+    filtered = get_latest_scan_runs(
+        session, started_from=dt.date(2026, 6, 1), started_to=dt.date(2026, 6, 2)
+    )
+    assert [run.id for run in filtered] == [run_b.id, run_a.id]
+
+    # A single from-day with no upper bound keeps everything from that day on.
+    filtered = get_latest_scan_runs(session, started_from=dt.date(2026, 6, 2))
+    assert [run.id for run in filtered] == [run_c.id, run_b.id]
+
+
+def test_get_latest_scan_runs_symbol_filter_is_exact_and_case_insensitive(session):
+    """The symbol filter matches whole symbols regardless of case, not prefixes."""
+    from backend.storage.repository import get_latest_scan_runs
+
+    run_a, _run_b, _run_c = _seed_history(session)
+
+    # Lowercase input still finds the run that shortlisted RELIANCE.
+    assert [run.id for run in get_latest_scan_runs(session, symbol="reliance")] == [
+        run_a.id
+    ]
+    # A prefix must NOT match: ticker symbols are codes, not prose.
+    assert get_latest_scan_runs(session, symbol="RELI") == []
+
+
+def test_get_latest_scan_runs_combines_filters(session):
+    """All history filters AND together so each selected constraint is honored."""
+    from backend.storage.repository import get_latest_scan_runs
+
+    run_a, _run_b, _run_c = _seed_history(session)
+
+    filtered = get_latest_scan_runs(
+        session,
+        screener_key="envelope",
+        universe_key="nifty_500",
+        status=ScanStatus.SUCCESS,
+        started_from=dt.date(2026, 6, 1),
+        started_to=dt.date(2026, 6, 1),
+        triggered_by="ui:analyst@example.com",
+        symbol="TCS",
+    )
+    assert [run.id for run in filtered] == [run_a.id]
+
+    # The same symbol under the wrong screener matches nothing.
+    assert (
+        get_latest_scan_runs(session, screener_key="knoxville", symbol="TCS") == []
+    )
+
+
+def test_get_latest_scan_runs_filters_by_universe_status_and_trigger(session):
+    """The SCAN-004 dropdown filters map to exact persisted run metadata."""
+    from backend.storage.repository import get_latest_scan_runs
+
+    run_a, run_b, run_c = _seed_history(session)
+
+    assert [
+        run.id for run in get_latest_scan_runs(session, universe_key="nifty_500")
+    ] == [run_c.id, run_a.id]
+    assert [
+        run.id for run in get_latest_scan_runs(session, status=ScanStatus.PARTIAL)
+    ] == [run_b.id]
+    assert [
+        run.id
+        for run in get_latest_scan_runs(
+            session, triggered_by="ui:analyst@example.com"
+        )
+    ] == [run_a.id]
+
+
+def test_count_scan_results_for_runs_includes_zero_for_empty_runs(session):
+    """Every requested run id appears in the counts, even with no results."""
+    from backend.storage.repository import count_scan_results_for_runs
+
+    run_a, run_b, run_c = _seed_history(session)
+
+    counts = count_scan_results_for_runs(session, [run_a.id, run_b.id, run_c.id])
+    assert counts == {run_a.id: 2, run_b.id: 1, run_c.id: 0}
+
+    # An empty request returns an empty mapping instead of querying.
+    assert count_scan_results_for_runs(session, []) == {}
+
+
+def test_create_scan_run_persists_symbols_scanned_and_defaults_to_none(session):
+    """symbols_scanned stores the universe size; older callers default to NULL."""
+    from backend.storage.repository import create_scan_run
+
+    with_count = create_scan_run(
+        session, screener_key="envelope", universe_key="nifty_500", symbols_scanned=500
+    )
+    without_count = create_scan_run(
+        session, screener_key="envelope", universe_key="nifty_500"
+    )
+    session.commit()
+
+    assert with_count.symbols_scanned == 500
+    # Pre-SCAN-004 rows (and callers that do not know the size) stay NULL; the
+    # history page renders that as an em-dash rather than a misleading zero.
+    assert without_count.symbols_scanned is None
+
+
+def test_list_distinct_screener_keys_is_sorted_and_deduplicated(session):
+    """The history filter dropdown gets each recorded screener exactly once."""
+    from backend.storage.repository import list_distinct_screener_keys
+
+    _seed_history(session)  # two envelope runs + one knoxville run
+
+    assert list_distinct_screener_keys(session) == ["envelope", "knoxville"]
+
+
+def test_list_distinct_history_filter_values_are_sorted_and_deduplicated(session):
+    """Universe and trigger dropdowns should contain clean recorded values."""
+    from backend.storage.repository import (
+        list_distinct_triggered_by_values,
+        list_distinct_universe_keys,
+    )
+
+    _seed_history(session)
+
+    assert list_distinct_universe_keys(session) == ["nifty_100", "nifty_500"]
+    assert list_distinct_triggered_by_values(session) == [
+        "job:daily_scan",
+        "ui:admin@example.com",
+        "ui:analyst@example.com",
+    ]

@@ -448,10 +448,72 @@ def test_main_accepts_repeatable_screener_overrides():
     exit_code = main(
         ["--screener", "technical_analysis", "--screener", "sixty_seven_ka_funda"],
         job_runner=fake_job_runner,
+        # A no-op bootstrapper keeps this argparse-focused test from migrating
+        # the developer's real DATABASE_URL database.
+        schema_bootstrapper=lambda: True,
     )
 
     assert exit_code == 0
     assert seen_keys == ["technical_analysis", "sixty_seven_ka_funda"]
+
+
+def test_main_ensures_database_schema_before_running_the_job():
+    """The CLI must apply migrations before any scan tries to persist history.
+
+    A fresh checkout has no ``scan_runs`` table until ``alembic upgrade head``
+    runs. The command bootstraps the schema itself so the very first scheduled
+    run records history instead of exiting 1 with "History was not persisted."
+    Both collaborators are injected fakes, so this stays a pure ordering check.
+    """
+    from backend.jobs.run_daily_scan import DailyScanSummary, main
+
+    calls: list[str] = []
+
+    def fake_schema_bootstrapper() -> bool:
+        calls.append("schema")
+        return True
+
+    def fake_job_runner(*, screener_keys=None, output=None, **_kwargs):
+        calls.append("job")
+        return DailyScanSummary(outcomes=[])
+
+    exit_code = main(
+        [],
+        job_runner=fake_job_runner,
+        schema_bootstrapper=fake_schema_bootstrapper,
+    )
+
+    assert exit_code == 0
+    assert calls == ["schema", "job"]
+
+
+def test_main_stops_before_running_job_when_schema_bootstrap_fails(capsys):
+    """A scheduled scan must not run when its audit tables are unavailable.
+
+    SCAN-004 makes persisted history part of the daily job's observable
+    contract. Returning ``False`` simulates an Alembic/bootstrap failure. The
+    command should explain that no scan started, exit non-zero, and never call
+    the injected job runner.
+    """
+    from backend.jobs.run_daily_scan import DailyScanSummary, main
+
+    calls: list[str] = []
+
+    def fake_job_runner(**_kwargs):
+        calls.append("job")
+        return DailyScanSummary(outcomes=[])
+
+    exit_code = main(
+        [],
+        job_runner=fake_job_runner,
+        schema_bootstrapper=lambda: False,
+    )
+
+    assert exit_code == 1
+    assert calls == []
+    output = capsys.readouterr().out.lower()
+    assert "schema" in output
+    assert "not started" in output
 
 
 # ---------------------------------------------------------------------------

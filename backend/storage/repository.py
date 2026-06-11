@@ -19,7 +19,7 @@ from collections.abc import Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from typing import Any, cast
 
-from sqlalchemy import select
+from sqlalchemy import exists, func, select
 from sqlalchemy.orm import Session
 
 from backend.storage.models import ScanResult, ScanRun, ScanStatus
@@ -35,6 +35,7 @@ def create_scan_run(
     app_version: str | None = None,
     git_commit_sha: str | None = None,
     triggered_by: str | None = None,
+    symbols_scanned: int | None = None,
 ) -> ScanRun:
     """Insert a ``scan_runs`` header row in the RUNNING state.
 
@@ -58,6 +59,9 @@ def create_scan_run(
         app_version=app_version,
         git_commit_sha=git_commit_sha,
         triggered_by=triggered_by,
+        # SCAN-004: universe size handed to the screener, shown on the history
+        # page. None means the caller did not know (or predates this column).
+        symbols_scanned=symbols_scanned,
     )
     session.add(run)
     session.flush()
@@ -135,21 +139,129 @@ def finish_scan_run(
     session.flush()
 
 
-def get_latest_scan_runs(session: Session, limit: int = 50) -> list[ScanRun]:
-    """Return the newest scan headers first.
+def get_latest_scan_runs(
+    session: Session,
+    limit: int = 50,
+    *,
+    screener_key: str | None = None,
+    universe_key: str | None = None,
+    status: ScanStatus | None = None,
+    started_from: dt.date | None = None,
+    started_to: dt.date | None = None,
+    triggered_by: str | None = None,
+    symbol: str | None = None,
+) -> list[ScanRun]:
+    """Return the newest scan headers first, optionally filtered.
 
-    SCAN-004's history page will likely call this for its initial table. The
-    default limit keeps the query bounded even after the app has months of runs.
+    The SCAN-004 history page calls this for its runs table. The default limit
+    keeps the query bounded even after the app has months of runs. Every filter
+    is optional; ``None`` means "do not filter on this".
+
+    Filter semantics:
+    - ``screener_key``: exact match on the registry key.
+    - ``universe_key``: exact match on the persisted universe key.
+    - ``status``: exact match on the typed ``ScanStatus`` enum.
+    - ``started_from`` / ``started_to``: inclusive calendar-day range applied to
+      ``started_at``. The comparison binds whole datetimes (start of from-day,
+      start of the day after to-day) rather than wrapping ``started_at`` in a SQL
+      date() function. Bound datetimes compare correctly against the naive-UTC
+      values SQLite stores and the aware values Postgres stores, and they leave
+      the column usable by an index.
+    - ``symbol``: keep only runs whose results contain this symbol. The match is
+      case-insensitive but exact ("RELI" does not match RELIANCE) because ticker
+      symbols are short codes, not prose. Implemented as an EXISTS subquery so
+      result rows are never loaded just to answer a yes/no question.
+    - ``triggered_by``: exact match on the audit identity (for example,
+      ``job:daily_scan`` or ``ui:person@example.com``).
 
     Two runs created within the same millisecond (a daily job firing back-to-back,
     or fast tests) can share a ``started_at`` value. Adding the primary key as a
     tie-breaker keeps the newest-first order deterministic instead of leaving the
     database free to return same-timestamp rows in any order.
     """
+    stmt = select(ScanRun)
+    if screener_key:
+        stmt = stmt.where(ScanRun.screener_key == screener_key)
+    if universe_key:
+        stmt = stmt.where(ScanRun.universe_key == universe_key)
+    if status is not None:
+        stmt = stmt.where(ScanRun.status == status)
+    if started_from is not None:
+        stmt = stmt.where(
+            ScanRun.started_at >= dt.datetime.combine(started_from, dt.time.min, dt.UTC)
+        )
+    if started_to is not None:
+        # Half-open upper bound: anything strictly before the next day's start.
+        # This keeps the full to-day inclusive without timestamp edge cases.
+        next_day = started_to + dt.timedelta(days=1)
+        stmt = stmt.where(
+            ScanRun.started_at < dt.datetime.combine(next_day, dt.time.min, dt.UTC)
+        )
+    if triggered_by:
+        stmt = stmt.where(ScanRun.triggered_by == triggered_by)
+    if symbol and symbol.strip():
+        wanted = symbol.strip().upper()
+        stmt = stmt.where(
+            exists().where(
+                ScanResult.run_id == ScanRun.id,
+                func.upper(ScanResult.symbol) == wanted,
+            )
+        )
+    stmt = stmt.order_by(ScanRun.started_at.desc(), ScanRun.id.desc()).limit(limit)
+    return list(session.scalars(stmt))
+
+
+def count_scan_results_for_runs(
+    session: Session, run_ids: Sequence[int]
+) -> dict[int, int]:
+    """Return ``{run_id: shortlisted-row count}`` for the given runs.
+
+    The history page needs a "shortlisted results" column for every visible run.
+    One grouped COUNT query answers that for the whole page; looping over
+    ``run.results`` instead would lazy-load every result row of every run (and
+    would crash on detached objects once the session closes).
+
+    Every requested id is present in the returned dict — runs with no results
+    map to 0 — so callers never need a ``.get(run_id, 0)`` fallback.
+    """
+    counts: dict[int, int] = {int(run_id): 0 for run_id in run_ids}
+    if not counts:
+        return counts
     stmt = (
-        select(ScanRun)
-        .order_by(ScanRun.started_at.desc(), ScanRun.id.desc())
-        .limit(limit)
+        select(ScanResult.run_id, func.count())
+        .where(ScanResult.run_id.in_(list(counts)))
+        .group_by(ScanResult.run_id)
+    )
+    for run_id, count in session.execute(stmt):
+        counts[int(run_id)] = int(count)
+    return counts
+
+
+def list_distinct_screener_keys(session: Session) -> list[str]:
+    """Return every screener key that appears in scan history, sorted.
+
+    The history page's screener filter uses this instead of the live screener
+    registry on purpose: a screener that was deleted or renamed last month still
+    has history worth inspecting, and a broken screener module must never be able
+    to take down the audit view.
+    """
+    stmt = select(ScanRun.screener_key).distinct().order_by(ScanRun.screener_key.asc())
+    return list(session.scalars(stmt))
+
+
+def list_distinct_universe_keys(session: Session) -> list[str]:
+    """Return every universe key found in history, sorted and deduplicated."""
+    stmt = select(ScanRun.universe_key).distinct().order_by(ScanRun.universe_key.asc())
+    return list(session.scalars(stmt))
+
+
+def list_distinct_triggered_by_values(session: Session) -> list[str]:
+    """Return non-empty audit identities for the history trigger filter."""
+    stmt = (
+        select(ScanRun.triggered_by)
+        .where(ScanRun.triggered_by.is_not(None), ScanRun.triggered_by != "")
+        .distinct()
+        .order_by(ScanRun.triggered_by.asc())
     )
     return list(session.scalars(stmt))
 

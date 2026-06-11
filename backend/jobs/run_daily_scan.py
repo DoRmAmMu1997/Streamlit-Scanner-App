@@ -69,7 +69,7 @@ from backend.security import (
     redact_exception,
     redact_text,
 )
-from backend.storage.database import session_scope
+from backend.storage.database import ensure_database_schema, session_scope
 from backend.universe_loader import load_universe
 
 
@@ -291,12 +291,14 @@ def main(
     argv: Sequence[str] | None = None,
     *,
     job_runner: Callable[..., DailyScanSummary] = run_daily_scan,
+    schema_bootstrapper: Callable[[], bool] = ensure_database_schema,
     output: TextIO | None = None,
 ) -> int:
     """Parse CLI arguments and return an integer process exit code.
 
-    ``job_runner`` is injectable for tests. That lets tests prove argument
-    parsing without discovering real screeners or trying to create a Dhan client.
+    ``job_runner`` and ``schema_bootstrapper`` are injectable for tests. That
+    lets tests prove argument parsing and call ordering without discovering real
+    screeners, creating a Dhan client, or migrating a real database.
     """
     out = output or sys.stdout
     parser = argparse.ArgumentParser(
@@ -342,6 +344,24 @@ def main(
         config_path=safe_config_path,
         requested_screeners=len(args.screener_keys or []),
     )
+
+    # A scheduled scan without its audit tables would spend broker/API capacity
+    # but leave no durable history. Stop before config loading or screener work
+    # when Alembic cannot prepare the schema, and still emit OBS-001's aggregate
+    # completion receipt for operators.
+    if not schema_bootstrapper():
+        print(
+            "[daily-scan] Database schema is unavailable; scan not started.",
+            file=out,
+            flush=True,
+        )
+        _log_daily_job_completed(
+            exit_code=1,
+            outcomes=[],
+            started_at=started_at,
+            error_type="SchemaBootstrapError",
+        )
+        return 1
 
     if args.config_path:
         try:

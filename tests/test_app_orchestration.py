@@ -270,7 +270,7 @@ def test_prefetch_universe_failure_emits_terminal_structured_event(
 
 
 def test_main_requires_auth_before_discovering_screeners(monkeypatch):
-    """The main app must not discover or run screeners before auth succeeds."""
+    """The main app must not touch the DB or screeners before auth succeeds."""
 
     class StopFromAuth(RuntimeError):
         """Test-only signal that the auth gate stopped the Streamlit run."""
@@ -285,10 +285,14 @@ def test_main_requires_auth_before_discovering_screeners(monkeypatch):
     def fail_if_discovered():
         raise AssertionError("screener discovery must wait for authentication")
 
+    def fail_if_schema_bootstrapped():
+        raise AssertionError("schema bootstrap must wait for authentication")
+
     monkeypatch.setattr(app, "require_authorized_user", stop_at_auth)
     monkeypatch.setattr(app, "discover_screeners", fail_if_discovered)
     monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
     monkeypatch.setattr(app, "_configure_logging", lambda: None)
+    monkeypatch.setattr(app, "ensure_database_schema", fail_if_schema_bootstrapped)
     # Local development defaults AUTH_REQUIRED to false. This test is about the
     # guarded path, so opt in explicitly and then assert discovery never runs
     # before the auth gate stops the Streamlit rerun.
@@ -306,6 +310,51 @@ def test_main_requires_auth_before_discovering_screeners(monkeypatch):
 
     with pytest.raises(StopFromAuth):
         app.main()
+
+
+def test_main_bootstraps_schema_after_auth_and_before_view_selection(monkeypatch):
+    """An authorized run applies migrations before rendering either app view."""
+
+    class StopAtView(RuntimeError):
+        """Test-only signal that execution reached the view selector."""
+
+        pass
+
+    calls: list[str] = []
+
+    def record_schema_bootstrap() -> bool:
+        calls.append("schema")
+        return True
+
+    def authenticate(_st):
+        calls.append("auth")
+        return SimpleNamespace(email="person@example.com")
+
+    def stop_at_view(*_args, **_kwargs):
+        calls.append("view")
+        raise StopAtView()
+
+    monkeypatch.setattr(app, "ensure_database_schema", record_schema_bootstrap)
+    monkeypatch.setattr(app, "require_authorized_user", authenticate)
+    monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
+    monkeypatch.setattr(app, "_configure_logging", lambda: None)
+    monkeypatch.setenv("AUTH_REQUIRED", "true")
+    monkeypatch.setattr(
+        app,
+        "st",
+        SimpleNamespace(
+            set_page_config=lambda **_kwargs: None,
+            markdown=lambda *_args, **_kwargs: None,
+            title=lambda *_args, **_kwargs: None,
+            caption=lambda *_args, **_kwargs: None,
+            radio=stop_at_view,
+        ),
+    )
+
+    with pytest.raises(StopAtView):
+        app.main()
+
+    assert calls == ["auth", "schema", "view"]
 
 
 def test_main_passes_authenticated_email_as_scan_trigger(monkeypatch):
@@ -352,6 +401,7 @@ def test_main_passes_authenticated_email_as_scan_trigger(monkeypatch):
     monkeypatch.setattr(app, "get_settings", lambda: settings)
     monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
     monkeypatch.setattr(app, "_configure_logging", lambda: None)
+    monkeypatch.setattr(app, "ensure_database_schema", lambda: True)
     monkeypatch.setattr(
         app,
         "require_authorized_user",
@@ -377,6 +427,9 @@ def test_main_passes_authenticated_email_as_scan_trigger(monkeypatch):
             subheader=lambda *_args, **_kwargs: None,
             write=lambda *_args, **_kwargs: None,
             info=lambda *_args, **_kwargs: None,
+            # SCAN-004 added a view switcher; staying on "Scanner" keeps this
+            # test focused on the scan-trigger wiring.
+            radio=lambda *_args, **_kwargs: "Scanner",
             error=lambda message: (_ for _ in ()).throw(AssertionError(message)),
         ),
     )
@@ -441,6 +494,7 @@ def test_main_skips_auth_gate_when_auth_not_required(monkeypatch):
     monkeypatch.setattr(app, "get_settings", lambda: settings)
     monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
     monkeypatch.setattr(app, "_configure_logging", lambda: None)
+    monkeypatch.setattr(app, "ensure_database_schema", lambda: True)
     monkeypatch.setattr(app, "require_authorized_user", lambda _st: auth_calls.append(1))
     monkeypatch.setattr(
         app,
@@ -455,6 +509,9 @@ def test_main_skips_auth_gate_when_auth_not_required(monkeypatch):
             markdown=lambda *_args, **_kwargs: None,
             title=lambda *_args, **_kwargs: None,
             caption=lambda *_args, **_kwargs: None,
+            # SCAN-004 added a view switcher; staying on "Scanner" lets main()
+            # continue to the discovery call this test watches for.
+            radio=lambda *_args, **_kwargs: "Scanner",
         ),
     )
 

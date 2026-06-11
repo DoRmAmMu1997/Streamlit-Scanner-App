@@ -24,16 +24,21 @@ Public surface:
 from backend.storage.database import (
     SessionLocal,
     engine,
+    ensure_database_schema,
     get_database_url,
     init_db,
     session_scope,
 )
 from backend.storage.models import Base, ScanResult, ScanRun, ScanStatus
 from backend.storage.repository import (
+    count_scan_results_for_runs,
     create_scan_run,
     finish_scan_run,
     get_latest_scan_runs,
     get_scan_results,
+    list_distinct_screener_keys,
+    list_distinct_triggered_by_values,
+    list_distinct_universe_keys,
     save_scan_results,
 )
 
@@ -43,13 +48,18 @@ __all__ = [
     "ScanResult",
     "ScanRun",
     "ScanStatus",
+    "count_scan_results_for_runs",
     "create_scan_run",
     "engine",
+    "ensure_database_schema",
     "finish_scan_run",
     "get_database_url",
     "get_latest_scan_runs",
     "get_scan_results",
     "init_db",
+    "list_distinct_screener_keys",
+    "list_distinct_triggered_by_values",
+    "list_distinct_universe_keys",
     "save_scan_results",
     "session_scope",
 ]

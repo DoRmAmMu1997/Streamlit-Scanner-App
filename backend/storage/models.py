@@ -152,6 +152,16 @@ class ScanRun(Base):
         String(100), nullable=False, index=True, comment="Universe key, e.g. 'nifty_500'"
     )
 
+    # SCAN-004: how many symbols the universe contained when the run started.
+    # "Scanned" means "handed to the screener" — the shortlisted count is derived
+    # from scan_results instead. Nullable because runs recorded before this column
+    # existed have no value; the history page shows those as "—".
+    symbols_scanned: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="Universe size handed to the screener; NULL for pre-SCAN-004 runs",
+    )
+
     # The exact screener parameters used (thresholds, lookback, max_symbols, ...).
     # Stored as JSON so any screener's parameter shape fits without a schema change.
     # This is half of "reproducibility": same params + same data snapshot = same result.

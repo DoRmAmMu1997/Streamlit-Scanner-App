@@ -138,6 +138,9 @@ def run_scan(
         universe_key=universe_key,
         params=params,
         triggered_by=triggered_by,
+        # SCAN-004: record the universe size so the history page can show how
+        # many symbols this run scanned (vs how many it shortlisted).
+        symbols_scanned=int(len(universe_df)) if universe_df is not None else None,
         session_factory=session_factory,
     )
 
@@ -290,6 +293,7 @@ def _create_run_header(
     universe_key: str,
     params: dict[str, Any],
     triggered_by: str | None,
+    symbols_scanned: int | None,
     session_factory: SessionFactory,
 ) -> tuple[int | None, ExceptionInfo | None]:
     """Create and commit the RUNNING ``scan_runs`` row before the screener runs.
@@ -311,6 +315,7 @@ def _create_run_header(
                 params=_params_snapshot(params),
                 data_snapshot_date=_as_date(params.get("end_date")),
                 triggered_by=triggered_by,
+                symbols_scanned=symbols_scanned,
             )
             # Read the flushed id before the context manager commits and closes.
             # SQLAlchemy fills this value during flush, which create_scan_run()
