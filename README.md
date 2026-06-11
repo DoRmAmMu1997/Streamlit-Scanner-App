@@ -382,6 +382,46 @@ To run a custom set, repeat `--screener`:
 python -m backend.jobs.run_daily_scan --screener technical_analysis --screener envelope
 ```
 
+For a fixed, named schedule that cron or a hosting platform can run without long
+flag lists, point the command at a YAML config (JOB-002):
+
+```bash
+python -m backend.jobs.run_daily_scan --config config/daily_scans.yaml
+```
+
+Copy `config/daily_scans.example.yaml` and edit it. Each entry under
+`daily_scans` is one named scan batch:
+
+```yaml
+daily_scans:
+  - name: Bollinger Band Reversal (daily)
+    screener_key: bollinger_band_reversal
+    enabled: true
+
+  - name: Envelope Knoxville Buy (daily)
+    screener_key: envelope_knoxville_buy
+    enabled: true
+    universe_key: hemant_super_45   # optional; defaults to the screener's universe
+    params:                         # optional; merged over the screener defaults
+      percent: 14.0
+
+  - name: 67 Ka Funda (AI)
+    screener_key: sixty_seven_ka_funda
+    enabled: false                  # AI-heavy: opt in deliberately (see below)
+```
+
+Only `name` and `screener_key` are required; `enabled` defaults to `true`.
+Disabled entries are skipped (and logged as skipped). `--config` and `--screener`
+cannot be combined. A malformed YAML file, an unknown `screener_key` or
+`universe_key`, or a config with no enabled entries each exit non-zero so a
+scheduler notices the problem.
+
+> **AI-heavy jobs are opt-in.** The `sixty_seven_ka_funda` and
+> `technical_analysis` screeners call the Claude Agent SDK (and SerpAPI), so they
+> cost API quota and depend on optional external services. They ship **disabled**
+> in the example config; enable them deliberately and consider lowering
+> `max_ai_candidates` to cap per-run cost.
+
 Exit code `0` means every selected scan persisted history and finished
 `success` or `partial`. Exit code `1` means a fatal problem occurred, such as an
 unknown screener key, missing setup, a failed screener, or a scan whose results
