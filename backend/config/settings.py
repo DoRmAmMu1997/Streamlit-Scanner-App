@@ -51,6 +51,9 @@ REQUEST_HEADERS = {
 
 _PRODUCTION_ENV_VALUES = {"prod", "production"}
 _VALID_LOG_LEVELS = {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG", "NOTSET"}
+# OBS-001 log rendering modes. "auto" picks JSON in production and readable text
+# in development; "json"/"text" force one rendering regardless of environment.
+_VALID_LOG_FORMATS = {"auto", "json", "text"}
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
 
@@ -103,6 +106,10 @@ class AppSettings:
     dhan_access_token: str
     log_level: str
     auth_required: bool
+    # OBS-001: how log lines are rendered. "auto" (default) => JSON in production,
+    # readable text in development. Defaulted so any future AppSettings(...) build
+    # that predates this field still works.
+    log_format: str = "auto"
     database_url_from_env: bool = False
     data_dir_from_env: bool = False
 
@@ -153,6 +160,7 @@ class AppSettings:
             "has_dhan_client_id": bool(self.dhan_client_id),
             "has_dhan_access_token": bool(self.dhan_access_token),
             "log_level": self.log_level,
+            "log_format": self.log_format,
             "auth_required": self.auth_required,
         }
 
@@ -249,6 +257,24 @@ def _parse_log_level(raw: str) -> str:
     return value
 
 
+def _parse_log_format(raw: str) -> str:
+    """Return a log rendering mode ('auto'/'json'/'text') or raise clearly.
+
+    Beginner note:
+    This is the OBS-001 sibling of ``_parse_log_level``. 'auto' (the default)
+    renders machine-readable JSON in production and human-readable text in
+    development. 'json' or 'text' force one rendering regardless of environment,
+    which is handy for testing JSON locally or keeping a prod console readable.
+    """
+    value = _clean_env_value(raw).lower() or "auto"
+    if value not in _VALID_LOG_FORMATS:
+        raise SettingsError(
+            f"Invalid LOG_FORMAT {value!r}. Expected one of: "
+            f"{', '.join(sorted(_VALID_LOG_FORMATS))}."
+        )
+    return value
+
+
 def _parse_email_set(raw: str) -> frozenset[str]:
     """Split a comma-separated email list into normalized lowercase values.
 
@@ -318,6 +344,7 @@ def get_settings(
         dhan_client_id=_env_value(source, "DHAN_CLIENT_ID", "DHAN_CLIENT_CODE"),
         dhan_access_token=_env_value(source, "DHAN_ACCESS_TOKEN"),
         log_level=_parse_log_level(log_level_raw),
+        log_format=_parse_log_format(_env_value(source, "LOG_FORMAT")),
         auth_required=_parse_bool(
             _env_value(source, "AUTH_REQUIRED"),
             default=app_env in _PRODUCTION_ENV_VALUES,

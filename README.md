@@ -430,6 +430,55 @@ status and run ids, but not raw secrets.
 
 ---
 
+## Observability & logging
+
+To make failures diagnosable in production (OBS-001), the app emits **named,
+structured log events** through `backend/observability`. Every entrypoint — the
+Streamlit UI, the `python app.py` prefetch, and the headless daily-scan job —
+configures logging the same way via `configure_logging()`.
+
+**Events** carry searchable context such as `run_id`, `scan_name`,
+`screener_key`, `universe_key`, and `symbol` whenever that context is available:
+
+| Event | Level | Emitted when |
+| --- | --- | --- |
+| `daily_job_started` / `daily_job_completed` | INFO or ERROR | the headless command starts / finishes, including its aggregate exit code and outcome counts |
+| `daily_job_config_loaded` | INFO | a JOB-002 YAML schedule is valid, including enabled/disabled entry counts |
+| `daily_job_config_invalid` | ERROR | a schedule cannot be loaded or contains no enabled scans |
+| `scan_started` / `scan_completed` | INFO | a scan starts / successfully persists (with run context, result count, and duration) |
+| `scan_partial` | WARNING | a scan persists usable rows but one or more symbols fail to load or compute |
+| `scan_failed` | ERROR | screener, header, or result persistence fails (safe phase and exception **type**, never the raw message) |
+| `symbol_scan_failed` | WARNING | a single symbol fails to load or compute (run and screener context plus `symbol`) |
+| `external_api_failed` | WARNING | a Dhan candle fetch fails for a `symbol` |
+| `auth_denied` | WARNING | a signed-in email is not on the allowlist (logs the email, never the allowlist) |
+| `data_refresh_started` / `data_refresh_completed` | INFO or ERROR | the universe/candle prefetch starts / reaches a terminal success, skip, or failure state |
+
+**Plain text vs JSON.** `LOG_FORMAT` controls rendering:
+
+- `auto` (default) — human-readable text in development, machine-readable **JSON
+  in production** (`APP_ENV=production`).
+- `json` / `text` — force one rendering regardless of environment (handy for
+  testing JSON locally or keeping a production console readable).
+
+```bash
+# One JSON object per line, ready for a log aggregator:
+LOG_FORMAT=json LOG_LEVEL=INFO python -m backend.jobs.run_daily_scan
+```
+
+```json
+{"timestamp": "2026-06-10T...", "level": "INFO", "logger": "backend.scanning.service", "event": "scan_completed", "message": "scan_completed", "run_id": 42, "scan_name": "Daily Envelope", "screener_key": "envelope", "universe_key": "hemant_super_45", "status": "success", "results_count": 5, "duration_seconds": 1.23}
+```
+
+**Levels.** Routine lifecycle events log at INFO. Partial outcomes log at WARNING,
+and failures log at ERROR, so degraded and failed jobs remain visible at the
+default `LOG_LEVEL=WARNING`. Set `LOG_LEVEL=INFO` to see the full event stream.
+
+**Secrets never leak.** Every rendered line (text or JSON, including exception
+tracebacks and structured field values) passes through the SEC-002 redaction
+filter / `redact_text`, so tokens, API keys, and database passwords are masked.
+
+---
+
 ## Project structure
 
 ```

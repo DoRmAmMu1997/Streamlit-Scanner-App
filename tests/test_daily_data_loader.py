@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from datetime import date, datetime
@@ -14,6 +15,7 @@ from backend.daily_data_loader import (
     history_start_date,
 )
 from backend.dhan_client import DhanRateLimitError
+from backend.observability import EVENT_EXTERNAL_API_FAILED
 
 
 def test_history_start_date_subtracts_years_and_handles_leap_day():
@@ -317,6 +319,27 @@ def test_load_universe_history_redacts_failure_messages(tmp_path):
     assert result.frames == {}
     assert "broker-token-secret" not in result.failures[0]["message"]
     assert "***REDACTED***" in result.failures[0]["message"]
+
+
+def test_load_universe_history_emits_external_api_failed_event(tmp_path, caplog):
+    """OBS-001: a failed Dhan fetch emits external_api_failed tagged with the symbol."""
+
+    class FailingClient:
+        def fetch_daily_candles(self, *args, **kwargs):
+            raise RuntimeError("boom")
+
+    loader = DailyDataLoader(FailingClient(), cache_dir=tmp_path, request_delay_seconds=0.0)
+
+    with caplog.at_level(logging.WARNING):
+        loader.load_universe_history(mapped_universe(), date(2026, 5, 1), date(2026, 5, 11))
+
+    events = [
+        getattr(record, "structured_fields", {})
+        for record in caplog.records
+        if getattr(record, "event", None) == EVENT_EXTERNAL_API_FAILED
+    ]
+    assert len(events) == 1
+    assert events[0]["symbol"] == "RELIANCE"
 
 
 def test_circuit_breaker_skips_remaining_symbols_after_failure_limit(tmp_path):

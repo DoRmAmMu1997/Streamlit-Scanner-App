@@ -20,6 +20,7 @@ import pandas as pd
 
 from backend.config import DAILY_CACHE_DIR, dhan_rate_limit_retry_delays, dhan_request_delay_seconds
 from backend.dhan_client import DhanDataClient, DhanRateLimitError
+from backend.observability import EVENT_EXTERNAL_API_FAILED, log_event
 from backend.security import redact_text
 
 
@@ -604,7 +605,16 @@ class DailyDataLoader:
                     # message is stored in ``last_failures`` and later rendered
                     # by Streamlit, so redact at the source.
                     safe_message = redact_text(str(exc))
-                    logger.warning("Failed to load history for %s: %s", symbol, safe_message)
+                    # OBS-001: external_api_failed ties a failed Dhan fetch to its
+                    # symbol. ``safe_message`` is already redacted just above.
+                    log_event(
+                        logger,
+                        EVENT_EXTERNAL_API_FAILED,
+                        level=logging.WARNING,
+                        symbol=symbol,
+                        security_id=row.get("security_id", ""),
+                        error=safe_message,
+                    )
                     failure = {
                         "symbol": symbol,
                         "security_id": row.get("security_id", ""),

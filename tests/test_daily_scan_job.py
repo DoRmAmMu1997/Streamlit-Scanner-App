@@ -23,6 +23,7 @@ SCAN-003 service/database path.
 
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from datetime import date
 from typing import Any
@@ -33,10 +34,25 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
+from backend.observability import (
+    EVENT_DAILY_JOB_COMPLETED,
+    EVENT_DAILY_JOB_CONFIG_INVALID,
+    EVENT_DAILY_JOB_CONFIG_LOADED,
+    EVENT_DAILY_JOB_STARTED,
+)
 from backend.scanning import ScanRunResult, ScanStatus
 from backend.screener_registry import ScreenerDefinition
 from backend.storage.models import Base
 from backend.storage.repository import get_latest_scan_runs, get_scan_results
+
+
+def _event_fields(caplog, event_name: str) -> list[dict]:
+    """Return structured fields for captured events with ``event_name``."""
+    return [
+        getattr(record, "structured_fields", {})
+        for record in caplog.records
+        if getattr(record, "event", None) == event_name
+    ]
 
 
 @pytest.fixture
@@ -534,6 +550,7 @@ def test_config_entry_overrides_universe_and_params_reach_the_service(capsys):
     # The override universe is used, not the registry default "fno".
     assert loaded_universes == ["hemant_super_45"]
     assert captured["universe_key"] == "hemant_super_45"
+    assert captured["scan_name"] == "Env override"
     assert summary.outcomes[0].universe_key == "hemant_super_45"
     assert "universe=hemant_super_45" in capsys.readouterr().out
     # params: registry default kept, config value overrides, dates added last.
@@ -613,31 +630,41 @@ def test_config_unknown_universe_is_fatal(capsys):
     assert "Unknown universe key" in output
 
 
-def test_config_with_no_enabled_entries_exits_nonzero_with_clear_message(capsys):
-    """An all-disabled (or empty) schedule is a fatal misconfiguration."""
+def test_config_with_no_enabled_entries_exits_nonzero_and_logs_invalid(
+    capsys, caplog
+):
+    """An all-disabled schedule is both a fatal result and a config event."""
     from backend.jobs.daily_scan_config import DailyScanEntry
     from backend.jobs.run_daily_scan import run_daily_scan
 
-    summary = run_daily_scan(
-        scan_entries=[
-            DailyScanEntry(name="Off", screener_key="anything", enabled=False)
-        ],
-        # registry_loader must not even be needed: we fail before discovery.
-        registry_loader=lambda: (_ for _ in ()).throw(
-            AssertionError("registry should not load when nothing is enabled")
-        ),
-        today=date(2026, 6, 5),
-    )
+    with caplog.at_level(logging.INFO):
+        summary = run_daily_scan(
+            scan_entries=[
+                DailyScanEntry(name="Off", screener_key="anything", enabled=False)
+            ],
+            # registry_loader must not even be needed: we fail before discovery.
+            registry_loader=lambda: (_ for _ in ()).throw(
+                AssertionError("registry should not load when nothing is enabled")
+            ),
+            today=date(2026, 6, 5),
+        )
 
     assert summary.exit_code == 1
     assert len(summary.outcomes) == 1
     assert summary.outcomes[0].fatal is True
     assert "No enabled scans" in capsys.readouterr().out
+    invalid = _event_fields(caplog, EVENT_DAILY_JOB_CONFIG_INVALID)
+    assert len(invalid) == 1
+    assert invalid[0]["reason"] == "no_enabled_scans"
 
 
-def test_main_uses_config_file_when_config_is_present(tmp_path):
-    """`--config` loads the YAML and forwards parsed entries to the job runner."""
-    from backend.jobs.run_daily_scan import DailyScanSummary, main
+def test_main_uses_config_file_and_emits_daily_job_lifecycle(tmp_path, caplog):
+    """A valid config emits start, loaded, and exactly one completion event."""
+    from backend.jobs.run_daily_scan import (
+        DailyScanOutcome,
+        DailyScanSummary,
+        main,
+    )
 
     config_path = tmp_path / "daily_scans.yaml"
     config_path.write_text(
@@ -655,9 +682,20 @@ def test_main_uses_config_file_when_config_is_present(tmp_path):
 
     def fake_job_runner(*, scan_entries=None, output=None, **_kwargs):
         captured["scan_entries"] = scan_entries
-        return DailyScanSummary(outcomes=[])
+        return DailyScanSummary(
+            outcomes=[
+                DailyScanOutcome(
+                    screener_key="bollinger_band_reversal",
+                    universe_key="fno",
+                    status=ScanStatus.SUCCESS,
+                    run_id=42,
+                    row_count=3,
+                )
+            ]
+        )
 
-    exit_code = main(["--config", str(config_path)], job_runner=fake_job_runner)
+    with caplog.at_level(logging.INFO):
+        exit_code = main(["--config", str(config_path)], job_runner=fake_job_runner)
 
     assert exit_code == 0
     entries = captured["scan_entries"]
@@ -667,9 +705,25 @@ def test_main_uses_config_file_when_config_is_present(tmp_path):
     ]
     assert [entry.enabled for entry in entries] == [True, False]
 
+    started = _event_fields(caplog, EVENT_DAILY_JOB_STARTED)
+    loaded = _event_fields(caplog, EVENT_DAILY_JOB_CONFIG_LOADED)
+    completed = _event_fields(caplog, EVENT_DAILY_JOB_COMPLETED)
+    assert len(started) == 1
+    assert started[0]["selection_mode"] == "config"
+    assert len(loaded) == 1
+    assert loaded[0]["entries_count"] == 2
+    assert loaded[0]["enabled_count"] == 1
+    assert loaded[0]["disabled_count"] == 1
+    assert len(completed) == 1
+    assert completed[0]["exit_code"] == 0
+    assert completed[0]["success_count"] == 1
+    assert completed[0]["partial_count"] == 0
+    assert completed[0]["failed_count"] == 0
+    assert "duration_seconds" in completed[0]
 
-def test_main_without_config_preserves_default_screener_path():
-    """Without `--config`, the JOB-001 key path is used and no entries are passed."""
+
+def test_main_without_config_preserves_default_path_and_logs_completion(caplog):
+    """The JOB-001 path also emits one start and one completion event."""
     from backend.jobs.run_daily_scan import DailyScanSummary, main
 
     captured: dict[str, object] = {}
@@ -679,11 +733,31 @@ def test_main_without_config_preserves_default_screener_path():
         captured["scan_entries"] = scan_entries
         return DailyScanSummary(outcomes=[])
 
-    exit_code = main([], job_runner=fake_job_runner)
+    with caplog.at_level(logging.INFO):
+        exit_code = main([], job_runner=fake_job_runner)
 
     assert exit_code == 0
     assert captured["screener_keys"] is None  # falls back to the default daily set
     assert captured["scan_entries"] is None  # default path does not use config
+    assert len(_event_fields(caplog, EVENT_DAILY_JOB_STARTED)) == 1
+    assert len(_event_fields(caplog, EVENT_DAILY_JOB_COMPLETED)) == 1
+
+
+def test_main_logs_completion_when_job_runner_raises(caplog):
+    """An unexpected crash still leaves one aggregate failure receipt."""
+    from backend.jobs.run_daily_scan import main
+
+    def boom(**_kwargs):
+        raise RuntimeError("token=RUNNERSECRET should stay hidden")
+
+    with caplog.at_level(logging.INFO), pytest.raises(RuntimeError):
+        main([], job_runner=boom)
+
+    completed = _event_fields(caplog, EVENT_DAILY_JOB_COMPLETED)
+    assert len(completed) == 1
+    assert completed[0]["exit_code"] == 1
+    assert completed[0]["error_type"] == "RuntimeError"
+    assert "RUNNERSECRET" not in str(completed[0])
 
 
 def test_main_rejects_config_combined_with_screener():
@@ -694,8 +768,10 @@ def test_main_rejects_config_combined_with_screener():
         main(["--config", "ignored.yaml", "--screener", "envelope"])
 
 
-def test_main_bad_config_exits_nonzero_and_does_not_run_the_job(tmp_path, capsys):
-    """A malformed config exits 1 with a clear line and never starts scanning."""
+def test_main_bad_config_logs_invalid_and_completes_without_running_job(
+    tmp_path, capsys, caplog
+):
+    """Malformed YAML produces structured failure and completion events."""
     from backend.jobs.run_daily_scan import main
 
     config_path = tmp_path / "broken.yaml"
@@ -704,13 +780,22 @@ def test_main_bad_config_exits_nonzero_and_does_not_run_the_job(tmp_path, capsys
     def fail_runner(**_kwargs):
         raise AssertionError("job runner must not run on a bad config")
 
-    exit_code = main(["--config", str(config_path)], job_runner=fail_runner)
+    with caplog.at_level(logging.INFO):
+        exit_code = main(["--config", str(config_path)], job_runner=fail_runner)
 
     assert exit_code == 1
     assert "Could not load config" in capsys.readouterr().out
+    invalid = _event_fields(caplog, EVENT_DAILY_JOB_CONFIG_INVALID)
+    completed = _event_fields(caplog, EVENT_DAILY_JOB_COMPLETED)
+    assert len(invalid) == 1
+    assert invalid[0]["error_type"] == "DailyScanConfigError"
+    assert len(completed) == 1
+    assert completed[0]["exit_code"] == 1
 
 
-def test_main_redacts_secret_shaped_text_from_config_load_errors(tmp_path, capsys):
+def test_main_redacts_secret_shaped_text_from_config_load_errors(
+    tmp_path, capsys, caplog
+):
     """A config filename must not bypass the shared secret-redaction boundary.
 
     Command-line paths are normally harmless, but schedulers can interpolate
@@ -721,9 +806,13 @@ def test_main_redacts_secret_shaped_text_from_config_load_errors(tmp_path, capsy
 
     missing_path = tmp_path / "token=SUPERSECRET.yaml"
 
-    exit_code = main(["--config", str(missing_path)])
+    with caplog.at_level(logging.INFO):
+        exit_code = main(["--config", str(missing_path)])
 
     assert exit_code == 1
     output = capsys.readouterr().out
     assert "token=***REDACTED***" in output
     assert "SUPERSECRET" not in output
+    invalid = _event_fields(caplog, EVENT_DAILY_JOB_CONFIG_INVALID)
+    assert len(invalid) == 1
+    assert "SUPERSECRET" not in str(invalid[0])

@@ -7,6 +7,7 @@ would have been called.
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -18,6 +19,7 @@ from backend.auth.session import (
     require_authenticated_user,
     require_authorized_user,
 )
+from backend.observability import EVENT_AUTH_DENIED
 
 
 class _StopCalled(RuntimeError):
@@ -347,6 +349,27 @@ def test_require_authorized_user_denies_unlisted_email(monkeypatch):
         require_authorized_user(fake_st)
 
     assert any("not authorized" in message.lower() for message in fake_st.errors)
+
+
+def test_require_authorized_user_emits_auth_denied_event(monkeypatch, caplog):
+    """OBS-001: a denied sign-in emits auth_denied carrying the offending email."""
+    monkeypatch.setenv("ALLOWED_EMAILS", "sunny@example.com")
+    monkeypatch.setenv("ADMIN_EMAILS", "")
+    monkeypatch.setenv("SCANNER_ENV", "production")
+    fake_st = _signed_in("intruder@example.com")
+
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(_StopCalled):
+            require_authorized_user(fake_st)
+
+    events = [
+        getattr(record, "structured_fields", {})
+        for record in caplog.records
+        if getattr(record, "event", None) == EVENT_AUTH_DENIED
+    ]
+    assert len(events) == 1
+    assert events[0]["email"] == "intruder@example.com"
+    assert events[0]["reason"] == "not_on_allowlist"
 
 
 def test_require_authorized_user_empty_allowlist_denies_in_production(monkeypatch):
