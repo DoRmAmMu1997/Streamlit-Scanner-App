@@ -3,7 +3,7 @@
 These tests prove the schema satisfies SCAN-001's acceptance criteria using a
 throwaway in-memory SQLite database — no real database file, no app wiring.
 
-They double as a **worked example for SCAN-002 (Codex)**: the `session` fixture
+They double as a **worked example for SCAN-002 (Codex)**: the `db_session` fixture
 below is exactly how to spin up a temporary SQLite database from the models
 (`create_engine("sqlite://")` + `Base.metadata.create_all`). Reuse this pattern
 for the repository/service tests in SCAN-002.
@@ -15,36 +15,13 @@ import datetime as dt
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import create_engine, event, select, text
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
 
-from backend.storage.models import Base, ScanResult, ScanRun, ScanStatus
+from backend.storage.models import ScanResult, ScanRun, ScanStatus
 
-
-@pytest.fixture
-def session():
-    """Yield a SQLAlchemy Session backed by a fresh in-memory SQLite database.
-
-    Beginner note: ``sqlite://`` (no path) is an in-memory database. SQLAlchemy
-    keeps it on a single shared connection for the test thread, so the tables we
-    create with ``Base.metadata.create_all`` are visible to the Session that
-    follows. The database vanishes when the engine is disposed — perfect test
-    isolation with zero cleanup on disk.
-    """
-    engine = create_engine("sqlite://", future=True)
-
-    # Turn on SQLite foreign-key enforcement so the FK's ON DELETE CASCADE can be
-    # exercised at the database level (SQLite leaves FK enforcement OFF by default).
-    # SCAN-002 should register the same listener on the real engine.
-    @event.listens_for(engine, "connect")
-    def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
-        dbapi_connection.execute("PRAGMA foreign_keys=ON")
-
-    Base.metadata.create_all(engine)
-    with Session(engine) as active_session:
-        yield active_session
-    engine.dispose()
+# The ``db_session`` fixture these tests use lives in tests/conftest.py,
+# shared with the other scan-history test modules.
 
 
 def _make_run(**overrides) -> ScanRun:
@@ -67,7 +44,7 @@ def _make_run(**overrides) -> ScanRun:
 # ---------------------------------------------------------------------------
 
 
-def test_round_trip_persists_run_and_both_result_kinds(session):
+def test_round_trip_persists_run_and_both_result_kinds(db_session):
     run = _make_run()
 
     # A deterministic screener result: provenance is triggered rules + indicators.
@@ -102,12 +79,12 @@ def test_round_trip_persists_run_and_both_result_kinds(session):
     )
 
     run.results.extend([deterministic, ai])
-    session.add(run)
-    session.commit()
+    db_session.add(run)
+    db_session.commit()
 
     # Re-query from the database (not the in-memory object) to prove it persisted.
-    session.expire_all()
-    loaded = session.scalars(select(ScanRun)).one()
+    db_session.expire_all()
+    loaded = db_session.scalars(select(ScanRun)).one()
 
     # Run header survived, including the JSON params and the default status.
     assert loaded.status is ScanStatus.RUNNING  # default applied on insert
@@ -136,27 +113,27 @@ def test_round_trip_persists_run_and_both_result_kinds(session):
 # ---------------------------------------------------------------------------
 
 
-def test_status_roundtrips_and_is_stored_as_its_lowercase_value(session):
+def test_status_roundtrips_and_is_stored_as_its_lowercase_value(db_session):
     run = _make_run(status=ScanStatus.PARTIAL, error_message="2 symbols failed")
-    session.add(run)
-    session.commit()
+    db_session.add(run)
+    db_session.commit()
 
     # As a Python object, status is the typed enum member.
-    session.expire_all()
-    loaded = session.scalars(select(ScanRun)).one()
+    db_session.expire_all()
+    loaded = db_session.scalars(select(ScanRun)).one()
     assert loaded.status is ScanStatus.PARTIAL
 
     # As a raw database value, it is the lowercase ``.value`` ("partial"),
     # NOT the Python name ("PARTIAL"). This is what values_callable guarantees,
     # and it keeps the stored data stable and human-readable.
-    raw_value = session.execute(text("SELECT status FROM scan_runs")).scalar_one()
+    raw_value = db_session.execute(text("SELECT status FROM scan_runs")).scalar_one()
     assert raw_value == "partial"
 
 
-def test_status_column_rejects_values_outside_scan_status_enum(session):
+def test_status_column_rejects_values_outside_scan_status_enum(db_session):
     """The database should reject typo statuses, not just the Python enum layer."""
     with pytest.raises(IntegrityError):
-        session.execute(
+        db_session.execute(
             text(
                 """
                 INSERT INTO scan_runs (started_at, status, screener_key, universe_key)
@@ -165,7 +142,7 @@ def test_status_column_rejects_values_outside_scan_status_enum(session):
             ),
             {"started_at": "2026-06-04 09:30:00"},
         )
-        session.commit()
+        db_session.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -173,15 +150,15 @@ def test_status_column_rejects_values_outside_scan_status_enum(session):
 # ---------------------------------------------------------------------------
 
 
-def test_close_price_is_exact_decimal(session):
+def test_close_price_is_exact_decimal(db_session):
     run = _make_run()
     # 0.07 has no exact binary float representation; Numeric must store it exactly.
     run.results.append(ScanResult(symbol="IDEA", close_price=Decimal("12.07")))
-    session.add(run)
-    session.commit()
+    db_session.add(run)
+    db_session.commit()
 
-    session.expire_all()
-    result = session.scalars(select(ScanResult)).one()
+    db_session.expire_all()
+    result = db_session.scalars(select(ScanResult)).one()
     assert isinstance(result.close_price, Decimal)
     assert result.close_price == Decimal("12.07")
 
@@ -191,19 +168,19 @@ def test_close_price_is_exact_decimal(session):
 # ---------------------------------------------------------------------------
 
 
-def test_deleting_run_cascades_to_results(session):
+def test_deleting_run_cascades_to_results(db_session):
     run = _make_run()
     run.results.extend(
         [ScanResult(symbol="RELIANCE"), ScanResult(symbol="TCS")]
     )
-    session.add(run)
-    session.commit()
-    assert session.scalar(select(text("count(*)")).select_from(ScanResult)) == 2
+    db_session.add(run)
+    db_session.commit()
+    assert db_session.scalar(select(text("count(*)")).select_from(ScanResult)) == 2
 
     # Deleting the parent must remove its children — the cascade="all, delete-orphan"
     # on ScanRun.results (and the DB-level ON DELETE CASCADE) prevents orphan rows.
-    session.delete(run)
-    session.commit()
+    db_session.delete(run)
+    db_session.commit()
 
-    assert session.scalar(select(text("count(*)")).select_from(ScanResult)) == 0
-    assert session.scalar(select(text("count(*)")).select_from(ScanRun)) == 0
+    assert db_session.scalar(select(text("count(*)")).select_from(ScanResult)) == 0
+    assert db_session.scalar(select(text("count(*)")).select_from(ScanRun)) == 0

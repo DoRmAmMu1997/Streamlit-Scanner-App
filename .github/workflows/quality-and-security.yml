@@ -8,9 +8,15 @@ on:
 
 jobs:
   verify:
-    name: Python quality and supply-chain checks
+    name: Python ${{ matrix.python-version }} quality and supply-chain checks
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the deployment target; 3.12 catches forward-compatibility
+        # drift before an interpreter upgrade is forced on us.
+        python-version: ["3.11", "3.12"]
 
     steps:
       - name: Check out repository
@@ -19,7 +25,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
           cache: pip
 
       - name: Install pinned direct dependencies
@@ -30,8 +36,11 @@ jobs:
           # two concepts separate makes dependency updates deliberate.
           python -m pip install -r requirements.txt -r requirements-dev.txt -c constraints.txt
 
-      - name: Run tests
-        run: python -m pytest -q
+      - name: Run tests with coverage gate
+        run: |
+          # The floor sits two points under the measured 86% so routine PRs
+          # don't fight the gate, while a large untested addition still fails.
+          python -m pytest -q --cov=backend --cov=screeners --cov-fail-under=84
 
       - name: Compile importable Python files
         run: python -m compileall -q app.py backend screeners tests
@@ -53,9 +62,9 @@ jobs:
           # a branch reviewers have to reason through manually.
           python -m bandit -r app.py backend screeners Dependencies -q
 
-      - name: Audit runtime dependency advisories
+      - name: Audit dependency advisories
         run: |
-          # pip-audit checks the runtime requirements against known PyPI
-          # advisories. Optional native accelerators stay outside this check
-          # because they are not required for the app to run.
-          python -m pip_audit -r requirements.txt
+          # pip-audit checks the runtime and developer requirements against
+          # known PyPI advisories. Optional native accelerators stay outside
+          # this check because they are not required for the app to run.
+          python -m pip_audit -r requirements.txt -r requirements-dev.txt
