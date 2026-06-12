@@ -443,6 +443,25 @@ structured log events** through `backend/observability`. Every entrypoint — th
 Streamlit UI, the `python app.py` prefetch, and the headless daily-scan job —
 configures logging the same way via `configure_logging()`.
 
+Admins also receive an **Admin health** view (OBS-002) in the app's top view
+selector. The page is available only when the authenticated email is listed in
+`ADMIN_EMAILS`; it repeats that admin check inside the renderer so an
+auth-disabled development session or a future direct caller cannot bypass the
+guard.
+
+The health snapshot reports the latest exact `SUCCESS` and `FAILED` scan runs,
+the newest generated universe/cache-file refresh, cached symbol count, latest
+candle date, unreadable cache files, cache/data sizes, disk free space, database
+query readiness, and passive Dhan/Claude Agent SDK/SerpAPI setup status. The
+snapshot is cached for 60 seconds to keep normal Streamlit reruns inexpensive.
+
+Provider readiness is intentionally **passive**: opening the page never calls
+Dhan, Claude, or SerpAPI and therefore never consumes quota. “Ready” means the
+required credentials are present or the local SDK is installed; the page says
+when sign-in/connectivity has not been live-tested. Database health failures
+show only the exception type, and persisted scan failure text passes through the
+same secret redactor used elsewhere in the app.
+
 **Events** carry searchable context such as `run_id`, `scan_name`,
 `screener_key`, `universe_key`, and `symbol` whenever that context is available:
 
@@ -658,15 +677,16 @@ CSV download is reached.
   (`st.login` / `st.user` / `st.logout`), configured in `.streamlit/secrets.toml`
   (setup step 6). The email claim is verified and lower-cased.
 - **Allowlist + admins (AUTH-002)** — `ALLOWED_EMAILS` decides who may use the
-  app; `ADMIN_EMAILS` are always allowed and flagged `is_admin` (reserved for
-  future admin-only features). Both are comma-separated and case/space-insensitive.
+  app; `ADMIN_EMAILS` are always allowed and flagged `is_admin`. Admins can open
+  the OBS-002 operational health view; scanner and history access remain
+  unchanged. Both lists are comma-separated and case/space-insensitive.
 - **Dev-permits / prod-fails-closed** — with an empty `ALLOWED_EMAILS`,
   development lets any signed-in Google user through when auth is enabled, but
   `APP_ENV=production` requires at least one allowed or admin email and cannot
   disable auth. Missing SSO config in production is a hard error, not a warning.
 
-Role-based feature gating (beyond `is_admin` identification) is intentionally out
-of scope for now.
+General role-based feature gating remains out of scope; OBS-002 uses only the
+existing admin flag for its narrowly scoped operational page.
 
 ---
 

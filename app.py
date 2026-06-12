@@ -65,6 +65,11 @@ from backend.fundamentals import (
     FundamentalAgent,
     FundamentalsUsageLimitError,
 )
+from backend.health import (
+    AdminHealthSnapshot,
+    ScanRunHealth,
+    collect_admin_health,
+)
 from backend.daily_data_loader import (
     DailyDataLoader,
     DEFAULT_HISTORY_YEARS_BACK,
@@ -964,15 +969,24 @@ def main() -> None:
     # audit view. It sits after the auth gate (so history inherits the same
     # protection) and before screener discovery on purpose: a broken screener
     # file must never prevent an operator from inspecting past runs.
+    view_options = ["Scanner", "Scan history"]
+    if authenticated_user is not None and getattr(
+        authenticated_user, "is_admin", False
+    ):
+        view_options.append("Admin health")
+
     view = st.radio(
         "View",
-        ("Scanner", "Scan history"),
+        tuple(view_options),
         horizontal=True,
         label_visibility="collapsed",
         key="main_view",
     )
     if view == "Scan history":
         _render_history_page()
+        return
+    if view == "Admin health":
+        _render_admin_health_page(authenticated_user)
         return
 
     try:
@@ -1016,6 +1030,169 @@ def main() -> None:
         return
 
     _render_scan_output(selected, cache)
+
+
+# ---------------------------------------------------------------------------
+# Admin health page (OBS-002)
+#
+# This page intentionally checks local readiness only. Provider status means
+# "configured/installed", not "a live request succeeded", so opening it never
+# spends quota or turns a third-party outage into a slow Streamlit rerun.
+# ---------------------------------------------------------------------------
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_admin_health_snapshot() -> AdminHealthSnapshot:
+    """Collect one health snapshot and reuse it for 60 seconds.
+
+    Streamlit reruns the script for every widget interaction. Without this small
+    cache, an operator clicking between views would repeatedly walk hundreds of
+    Parquet files and query scan history even though those values change slowly.
+    """
+    return collect_admin_health()
+
+
+def _format_health_scan(run: ScanRunHealth | None) -> str:
+    """Build a short run label that cannot overflow a three-column metric."""
+    if run is None:
+        return "No recorded run"
+    return f"Run #{run.run_id}"
+
+
+def _health_scan_context(run: ScanRunHealth | None) -> str | None:
+    """Return wrapping screener/universe context for a recorded health run."""
+    if run is None:
+        return None
+    return f"{run.screener_key} · {run.universe_key}"
+
+
+def _format_health_time(value: datetime | None) -> str:
+    """Render an optional UTC timestamp without exposing host locale details."""
+    if value is None:
+        return "No data"
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _format_bytes(value: int | None) -> str:
+    """Render byte counts in familiar binary units for the operator."""
+    if value is None:
+        return "Unavailable"
+    amount = float(max(value, 0))
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if amount < 1024 or unit == "TiB":
+            return f"{amount:.0f} {unit}" if unit == "B" else f"{amount:.1f} {unit}"
+        amount /= 1024
+    return f"{amount:.1f} TiB"
+
+
+def _render_admin_health_page(
+    authenticated_user: AuthenticatedUser | None,
+    *,
+    snapshot_loader: Callable[[], AdminHealthSnapshot] = _cached_admin_health_snapshot,
+) -> None:
+    """Render passive operational health for an explicitly authorized admin.
+
+    The main view selector hides this page from non-admins, but this function
+    repeats the authorization check. That second guard protects future callers,
+    direct function use, and development sessions where authentication is
+    disabled and ``authenticated_user`` is therefore ``None``.
+    """
+    if authenticated_user is None or not authenticated_user.is_admin:
+        st.error("Admin access is required to view operational health.")
+        return
+
+    try:
+        snapshot = snapshot_loader()
+    except Exception as exc:  # noqa: BLE001 - never render a raw health exception.
+        st.error(f"Could not collect health snapshot ({type(exc).__name__}).")
+        return
+    st.subheader("Admin health")
+    st.caption(
+        "Passive readiness from local scan history, generated data, cache files, "
+        "and provider configuration. External services are not contacted."
+    )
+
+    st.markdown("### Recent activity")
+    recent_columns = st.columns(3)
+    recent_columns[0].metric(
+        "Last successful scan",
+        _format_health_scan(snapshot.last_successful_scan),
+        help=(
+            _format_health_time(snapshot.last_successful_scan.finished_at)
+            if snapshot.last_successful_scan
+            else None
+        ),
+    )
+    recent_columns[1].metric(
+        "Last failed scan",
+        _format_health_scan(snapshot.last_failed_scan),
+        help=(
+            _format_health_time(snapshot.last_failed_scan.finished_at)
+            if snapshot.last_failed_scan
+            else None
+        ),
+    )
+    recent_columns[2].metric(
+        "Last data refresh",
+        _format_health_time(snapshot.last_data_refresh),
+    )
+    successful_context = _health_scan_context(snapshot.last_successful_scan)
+    failed_context = _health_scan_context(snapshot.last_failed_scan)
+    if successful_context:
+        recent_columns[0].caption(successful_context)
+    if failed_context:
+        recent_columns[1].caption(failed_context)
+
+    if snapshot.last_failed_scan and snapshot.last_failed_scan.error_message:
+        st.warning(
+            "Latest failed scan: "
+            f"{_redact_secrets(snapshot.last_failed_scan.error_message)}"
+        )
+
+    st.markdown("### Data and storage")
+    data_columns = st.columns(3)
+    data_columns[0].metric("Cached symbols", snapshot.cached_symbol_count)
+    data_columns[1].metric(
+        "Latest candle date",
+        (
+            snapshot.latest_candle_date.isoformat()
+            if snapshot.latest_candle_date
+            else "No candle data"
+        ),
+    )
+    data_columns[2].metric(
+        "Unreadable cache files",
+        snapshot.unreadable_cache_file_count,
+    )
+    storage_columns = st.columns(3)
+    storage_columns[0].metric("Daily cache size", _format_bytes(snapshot.cache_size_bytes))
+    storage_columns[1].metric("All data size", _format_bytes(snapshot.data_size_bytes))
+    storage_columns[2].metric("Disk free", _format_bytes(snapshot.disk_free_bytes))
+    if snapshot.unreadable_cache_file_count:
+        st.warning(
+            f"{snapshot.unreadable_cache_file_count} daily cache file(s) could "
+            "not be inspected. Refresh the affected cache before relying on its data."
+        )
+
+    st.markdown("### Service readiness")
+    service_rows = [
+        {
+            "Service": service.name,
+            "Status": service.status.upper(),
+            "Detail": service.detail,
+        }
+        for service in snapshot.services
+    ]
+    st.dataframe(
+        pd.DataFrame(service_rows),
+        width="stretch",
+        hide_index=True,
+    )
+    for service in snapshot.services:
+        if service.status == "unavailable":
+            st.error(f"{service.name}: {service.detail}")
 
 
 # ---------------------------------------------------------------------------
