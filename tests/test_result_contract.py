@@ -3,6 +3,11 @@
 Screeners still return flexible dictionaries and pandas DataFrames. These tests
 exercise the small compatibility layer that turns one legacy row into a
 JSON-safe persistence row without changing the caller's original data.
+
+Many values below look more complicated than a normal JSON example on purpose.
+Real DataFrame rows contain pandas timestamps, NumPy numbers, missing sentinels,
+and Decimal prices. Testing those concrete objects documents the boundary much
+more clearly than testing only strings and integers would.
 """
 
 from __future__ import annotations
@@ -39,7 +44,12 @@ def test_contract_is_available_from_the_scanning_package_surface():
 
 
 def _legacy_row() -> dict[str, object]:
-    """Return the smallest realistic row produced by existing screeners."""
+    """Return a realistic pre-contract row shared by compatibility tests.
+
+    ``close`` is intentionally used instead of the newer ``close_price`` name,
+    and the NumPy metric demonstrates that legacy strategy-specific columns are
+    retained rather than limited to the five common result fields.
+    """
     return {
         "symbol": "RELIANCE",
         "rating": "BUY",
@@ -140,6 +150,9 @@ def test_provenance_json_takes_precedence_when_both_legacy_keys_exist():
         "screener_version": "2",
     }
 
+    # Some transitional screeners may emit both names. Choosing one canonical
+    # source prevents two contradictory receipts from being merged silently,
+    # while raw-field preservation still keeps the legacy evidence auditable.
     normalized = normalize_screener_row(row, screener_key="envelope")
 
     assert normalized["provenance"] == {"triggered_rules": ["legacy_rule"]}
@@ -222,6 +235,10 @@ def test_normalization_does_not_mutate_the_input_or_nested_values():
     }
 
     normalized = normalize_screener_row(row, screener_key="envelope")
+
+    # Mutate the returned persistence tree deliberately. If normalization had
+    # made only a shallow copy, these changes would leak back into the nested
+    # lists/dictionaries still owned by the original DataFrame row.
     normalized["provenance_json"]["triggered_rules"].append("rule_two")
     normalized["provenance_json"]["indicator_values"]["rsi"] = 99
 

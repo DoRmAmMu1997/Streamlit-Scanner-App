@@ -240,6 +240,12 @@ above. It deliberately sits between flexible screener output and the repository:
    the same canonical provenance into `provenance_json`.
 5. The original DataFrame is returned unchanged to Streamlit.
 
+The word **copy** is important here. A pandas DataFrame is the live result that
+the UI may sort, display, chart, or export. The persistence copy is a separate
+tree of ordinary JSON values. Adding provenance to that tree cannot add columns
+to the UI's DataFrame or replace its pandas/NumPy values while the page is
+rendering.
+
 The v1 provenance envelope contains `screener_key`, optional
 `screener_version`, `triggered_rules`, scalar `indicator_values`,
 `params_snapshot`, `data_snapshot_date`, optional

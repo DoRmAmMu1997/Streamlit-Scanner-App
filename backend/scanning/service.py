@@ -347,6 +347,13 @@ def _persist_run_outcome(
     open only while we write, not while the screener computes candles. That keeps
     SQLite/Postgres locks short and makes long scans safer.
 
+    PROV-001A also passes the screener identity, original run parameters, and
+    market-data date into this final persistence step. Those values describe
+    the circumstances of the scan, so the normalizer can fill a useful
+    provenance envelope even when a legacy result row contains no provenance.
+    Normalization is intentionally delayed until here: earlier conversion could
+    change the DataFrame that Streamlit expects to receive unchanged.
+
     If result persistence fails, the returned ``ScanRunResult`` still reflects
     what happened in memory. The database row may be marked FAILED as a separate
     audit concern, because "the scan succeeded but history write failed" is still
@@ -437,6 +444,10 @@ def _result_rows(
     """
     if results is None or results.empty:
         return []
+
+    # ``to_dict("records")`` creates one ordinary mapping per DataFrame row.
+    # The normalizer then deep-copies nested content and enriches only these
+    # persistence records, never the DataFrame owned by the caller.
     return [
         normalize_screener_row(
             row,

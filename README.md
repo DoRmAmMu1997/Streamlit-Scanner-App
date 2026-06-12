@@ -726,6 +726,11 @@ values, parameters, data date, source category, notes, and an optional reserved
 AI metadata object. Legacy `provenance` and `rules` keys remain readable and are
 enriched rather than discarded.
 
+For a beginner-friendly analogy, `raw_result_json` is the complete worksheet a
+screener handed in, while `provenance_json` is the consistently labeled
+"show your work" section. Keeping both means new history features can read a
+stable explanation format without throwing away strategy-specific details.
+
 Only `symbol` is mandatory during this compatibility phase. Other common fields
 (`rating`, `signal_date`, `close`/`close_price`, and `reason`) remain optional so
 older and AI-assisted screeners continue to persist. Dates, `Decimal`, pandas,

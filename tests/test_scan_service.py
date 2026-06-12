@@ -92,7 +92,12 @@ def _two_buy_rows() -> pd.DataFrame:
 
 
 def test_run_scan_success_persists_run_and_results(db_engine, session_factory):
-    """A clean run is SUCCESS, returns its rows, and writes the run + results."""
+    """A successful scan persists normalized copies but returns legacy UI data.
+
+    This checks both sides of the service boundary. The caller receives the
+    original DataFrame shape, while a fresh database session sees the canonical
+    provenance generated immediately before persistence.
+    """
     params = _base_params()
     # A callback in the caller's params must be stripped before it is persisted.
     params["progress_callback"] = lambda *_a: None
@@ -137,6 +142,11 @@ def test_run_scan_success_persists_run_and_results(db_engine, session_factory):
         assert "progress_callback" not in (runs[0].params_json or {})
         rows = get_scan_results(session, result.run_id)
         assert [r.symbol for r in rows] == ["RELIANCE", "TCS"]
+
+        # This screener supplied no provenance, so the service fills a small,
+        # predictable envelope from run-level context. ``source`` stays None
+        # because orchestration cannot know whether arbitrary legacy logic was
+        # deterministic, AI-assisted, or hybrid.
         assert rows[0].provenance_json == {
             "screener_key": "envelope",
             "screener_version": None,

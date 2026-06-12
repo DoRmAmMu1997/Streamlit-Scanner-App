@@ -12,6 +12,15 @@ JSON-safe copy, and adds canonical ``provenance_json`` fields. The original row
 is never mutated, so Streamlit can continue rendering the exact DataFrame the
 screener returned.
 
+Beginner mental model:
+
+- a *result row* says what was found, such as the symbol, rating, and price;
+- *provenance* says how or why it was found, such as the rules and indicator
+  values that triggered;
+- ``raw_result_json`` keeps the complete normalized row for auditing, while the
+  separate ``provenance_json`` database column makes the explanation envelope
+  easy to find and evolve.
+
 Security note:
 Scan history is durable. A token accidentally placed in a parameter, result
 field, or provider message must not become a long-lived database secret.
@@ -33,6 +42,9 @@ from typing import Any, Literal, TypeAlias, cast
 from backend.security import MASK, redact_text
 
 
+# JSON has fewer built-in value types than Python. These aliases make that
+# boundary visible in type hints: a scalar cannot contain another collection,
+# while a JSONValue may recursively contain lists and string-keyed objects.
 JSONScalar: TypeAlias = str | int | float | bool | None
 JSONValue: TypeAlias = JSONScalar | list["JSONValue"] | dict[str, "JSONValue"]
 SignalSource: TypeAlias = Literal["deterministic", "ai", "hybrid"]
@@ -63,7 +75,12 @@ _SECRET_KEY_PARTS = frozenset(
 
 
 class ResultContractError(ValueError):
-    """Raised when a row cannot satisfy the minimal persisted result contract."""
+    """Raised when a row cannot satisfy the minimal persisted result contract.
+
+    This is intentionally narrower than a general serialization error. Legacy
+    rows may omit optional fields, but persistence cannot safely identify a row
+    without ``symbol`` and must not accept an invented provenance source.
+    """
 
 
 @dataclass(frozen=True)
@@ -95,7 +112,19 @@ class AIProvenance:
 
 @dataclass(frozen=True)
 class SignalProvenance:
-    """Machine-readable receipts explaining how one signal was produced."""
+    """Machine-readable receipts explaining how one signal was produced.
+
+    The fields are deliberately small and strategy-neutral:
+
+    - ``triggered_rules`` records named checks, optionally with pass/detail data;
+    - ``indicator_values`` stores the market measurements behind those checks;
+    - ``params_snapshot`` records the non-secret settings used for the run;
+    - ``data_snapshot_date`` identifies how current the input data was;
+    - ``source`` distinguishes deterministic, AI, and combined workflows.
+
+    Most fields have empty defaults so existing screeners can adopt the
+    contract gradually instead of all being rewritten in one release.
+    """
 
     screener_key: str
     screener_version: str | None = None
@@ -135,6 +164,25 @@ def normalize_screener_row(
 ) -> dict[str, Any]:
     """Return a secret-safe, JSON-safe copy with canonical signal provenance.
 
+    Args:
+        row: One mapping produced by a screener. It may use legacy fields and
+            may contain pandas, NumPy, date, or Decimal values.
+        screener_key: Stable registry key for the screener that produced the
+            row. This fills the canonical receipt even when the row itself does
+            not contain provenance yet.
+        params: Original scan parameters. Callables are omitted and
+            credential-like values are masked before they enter the receipt.
+        data_snapshot_date: Date represented by the market-data snapshot, often
+            the scan's ``end_date``.
+
+    Returns:
+        A new dictionary suitable for strict JSON persistence. The input
+        mapping and all nested values remain untouched.
+
+    Raises:
+        ResultContractError: If ``symbol`` is missing/blank or if an explicit
+            provenance ``source`` is outside the three supported categories.
+
     Compatibility rules:
 
     - every original top-level field is retained, although secret values are
@@ -155,27 +203,43 @@ def normalize_screener_row(
     if not isinstance(row, Mapping):
         raise ResultContractError("Screener result row must be a mapping.")
 
+    # Symbol is the only hard requirement because it is how a persisted result
+    # is identified in history. Calling ``str`` also accepts symbol-like scalar
+    # values while still rejecting None, NaN, NaT, and whitespace-only text.
     symbol = row.get("symbol")
     if _is_missing(symbol) or not str(symbol).strip():
         raise ResultContractError(
             "Screener result row requires a non-blank 'symbol'."
         )
 
+    # Build a wholly separate JSON-safe tree before adding canonical fields.
+    # This is the key immutability guarantee: editing the persistence payload
+    # later cannot change the DataFrame or nested dictionaries held by the UI.
     normalized = _json_safe_mapping(row)
     normalized["symbol"] = str(symbol).strip()
 
+    # A DataFrame with mixed rows commonly fills an absent dictionary cell with
+    # NumPy NaN. Treat all missing-like values as absent so a valid legacy
+    # ``provenance`` object still becomes the fallback.
     raw_provenance = row.get("provenance_json")
     if _is_missing(raw_provenance):
         raw_provenance = row.get("provenance")
     provenance = _provenance_mapping(raw_provenance)
 
+    # Do not guess the source. A legacy row may come from a deterministic,
+    # AI-assisted, or hybrid screener, and a wrong label would make the audit
+    # record less trustworthy than leaving the value unknown.
     raw_source = provenance.get("source")
     source = _normalize_source(raw_source)
 
+    # Earlier screeners used ``rules``. Copy those entries into the canonical
+    # field while retaining the old key in ``canonical`` below.
     raw_rules = provenance.get("triggered_rules")
     if raw_rules is None:
         raw_rules = provenance.get("rules", [])
 
+    # Indicator values are scalar in the v1 contract. The helper below converts
+    # NumPy and pandas scalar objects without importing either dependency here.
     raw_indicators = provenance.get("indicator_values")
     indicator_values = (
         {
@@ -186,6 +250,9 @@ def normalize_screener_row(
         else {}
     )
 
+    # An existing snapshot is authoritative because the screener may have
+    # recorded more precise settings. Otherwise use the run-level parameters
+    # supplied by the service, dropping callbacks and masking credentials.
     raw_params = provenance.get("params_snapshot")
     params_snapshot = (
         _json_safe_mapping(raw_params, drop_callables=True)
@@ -193,6 +260,8 @@ def normalize_screener_row(
         else _json_safe_mapping(params or {}, drop_callables=True)
     )
 
+    # Likewise, keep a row-specific date when present and use the scan date only
+    # as the compatibility default.
     raw_data_date = provenance.get("data_snapshot_date")
     if _is_missing(raw_data_date):
         raw_data_date = data_snapshot_date
@@ -221,7 +290,13 @@ def normalize_screener_row(
 
 
 def _provenance_mapping(value: Any) -> dict[str, Any]:
-    """Copy a provenance object into a mapping without rejecting legacy values."""
+    """Copy a provenance object into a mapping without rejecting legacy values.
+
+    Dataclasses are converted with ``asdict`` so callers can already use the new
+    typed models. Plain mappings continue to support old screeners, and unusual
+    scalar receipts are retained under ``legacy_value`` rather than causing the
+    whole scan-history write to fail.
+    """
     if value is None:
         return {}
     if isinstance(value, Mapping):
@@ -236,7 +311,12 @@ def _provenance_mapping(value: Any) -> dict[str, Any]:
 
 
 def _normalize_rules(value: Any) -> list[JSONValue]:
-    """Return rule names/checks as one JSON list while preserving useful detail."""
+    """Return rule names/checks as one JSON list while preserving useful detail.
+
+    A single string, one ``RuleCheck``, or an iterable of either are all
+    accepted. Normalizing them to a list gives readers one predictable shape in
+    the database without forcing legacy producers to change immediately.
+    """
     if _is_missing(value):
         return []
     if isinstance(value, str | Mapping) or (
@@ -251,7 +331,12 @@ def _normalize_rules(value: Any) -> list[JSONValue]:
 
 
 def _normalize_source(value: Any) -> SignalSource | None:
-    """Validate an explicitly supplied provenance source."""
+    """Validate an explicitly supplied provenance source.
+
+    Missing values remain ``None``. Explicit values are normalized for case and
+    whitespace, but an unknown label raises instead of silently rewriting audit
+    evidence into one of the supported categories.
+    """
     if _is_missing(value):
         return None
     normalized = str(value).strip().lower()
@@ -279,7 +364,12 @@ def _json_safe_mapping(
     *,
     drop_callables: bool = False,
 ) -> dict[str, JSONValue]:
-    """Recursively convert a mapping and mask credential-named values."""
+    """Recursively convert a mapping and mask credential-named values.
+
+    JSON object keys must be strings, so non-string keys are converted with
+    ``str``. Secret-looking keys are masked before their values are inspected,
+    which prevents an accidental token from surviving in a custom object.
+    """
     converted: dict[str, JSONValue] = {}
     for raw_key, raw_value in value.items():
         key = str(raw_key)
@@ -296,7 +386,13 @@ def _json_safe_mapping(
 
 
 def _json_safe(value: Any, *, drop_callables: bool = False) -> JSONValue:
-    """Convert common pandas/NumPy/Python values to strict JSON-compatible data."""
+    """Convert common pandas/NumPy/Python values to strict JSON-compatible data.
+
+    ``json.dumps(..., allow_nan=False)`` rejects NaN and infinity even though
+    pandas and NumPy use them frequently. Converting those values to ``None``
+    keeps the stored JSON standards-compliant and gives readers a conventional
+    representation for missing data.
+    """
     if _is_missing(value):
         return None
     if callable(value):
@@ -382,7 +478,14 @@ def _is_secret_key(key: str) -> bool:
 
 
 def _is_missing(value: Any) -> bool:
-    """Recognize scalar missing/non-finite values without importing pandas."""
+    """Recognize scalar missing/non-finite values without importing pandas.
+
+    Pandas/NumPy missing values do not all share one class. The helper handles
+    ordinary ``None`` and non-finite numbers first, recognizes pandas sentinel
+    class names, and finally uses the standard NaN property that a value is
+    unequal to itself. Collection types are excluded because their comparisons
+    can produce arrays instead of one Boolean answer.
+    """
     if value is None:
         return True
     if isinstance(value, Decimal):
