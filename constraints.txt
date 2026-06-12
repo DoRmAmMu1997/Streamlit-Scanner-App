@@ -33,3 +33,5 @@ pip-audit==2.10.0
 mypy==1.19.1
 types-requests==2.33.0.20260518
 types-PyYAML==6.0.12.20260518
+pytest-cov==7.1.0
+pre-commit==4.6.0
