@@ -22,7 +22,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, NoReturn
 
 from backend.config import get_settings
 from backend.observability import EVENT_AUTH_DENIED, log_event
@@ -425,7 +425,7 @@ def _normalize_email(value: Any) -> str:
     return _clean_value(value).lower()
 
 
-def _stop(st_module: Any) -> None:
+def _stop(st_module: Any) -> NoReturn:
     """Call st.stop() and guard against fakes that accidentally return."""
     st_module.stop()
     raise RuntimeError("Streamlit did not stop execution.")

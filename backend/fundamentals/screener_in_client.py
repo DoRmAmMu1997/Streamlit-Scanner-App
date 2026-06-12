@@ -28,7 +28,7 @@ import re
 import statistics
 import time
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -350,7 +350,8 @@ def _parse_table(soup: BeautifulSoup, section_id: str) -> list[dict[str, str]]:
             headers = [th.get_text(" ", strip=True) for th in head.find_all("th")]
 
         rows: list[dict[str, str]] = []
-        for tr in table.find("tbody").find_all("tr") if table.find("tbody") else []:
+        body = table.find("tbody")
+        for tr in body.find_all("tr") if body is not None else []:
             cells = [td.get_text(" ", strip=True) for td in tr.find_all(["td", "th"])]
             if not cells:
                 continue
@@ -571,7 +572,10 @@ def _fetch_peer_table(
         logger.warning("Refusing unsafe peer-table URL %s from page %s", absolute, base_url)
         return _clean_peer_rows(static_rows, limit=limit)
     try:
-        fragment = _fetch_html(absolute, session)
+        # `session` is None only on the unit-test seam, where `_fetch_html` is
+        # monkeypatched; the public path (fetch_company_data) always builds a
+        # real Session before parsing reaches this call.
+        fragment = _fetch_html(absolute, cast("requests.Session", session))
     except ScreenerInFetchError:
         logger.warning("Peer-table fetch failed for %s", absolute, exc_info=True)
         return _clean_peer_rows(static_rows, limit=limit)
@@ -617,7 +621,8 @@ def _extract_announcements(soup: BeautifulSoup, *, limit: int = 10) -> list[dict
         # Each announcement is typically an <a> wrapping the title + a small
         # timestamp + an optional summary snippet block.
         for link in announcements_card.find_all("a", href=True):
-            href = link["href"].strip()
+            # href is always a string attribute; str() satisfies bs4's union type.
+            href = str(link["href"]).strip()
             # Skip in-page tabs (#href) and obvious nav links.
             if not href or href.startswith("#"):
                 continue
@@ -697,7 +702,7 @@ def _extract_concalls(soup: BeautifulSoup, *, limit: int = 8) -> list[dict[str, 
                 label = link.get_text(" ", strip=True).lower()
                 if not label:
                     continue
-                link_by_label[label] = link["href"].strip()
+                link_by_label[label] = str(link["href"]).strip()
 
             items.append(
                 {

@@ -28,6 +28,7 @@ import pkgutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from types import ModuleType
+from typing import cast
 
 import pandas as pd
 
@@ -152,8 +153,10 @@ def validate_screener_module(module: ModuleType) -> ScreenerDefinition:
     else:
         # ---- Legacy module-based screener ----
         metadata = _validate_metadata(getattr(module, "SCREENER", None), module.__name__)
-        run_func = getattr(module, "run", None)
-        _validate_run_signature(run_func, module.__name__)
+        module_run = getattr(module, "run", None)
+        _validate_run_signature(module_run, module.__name__)
+        # _validate_run_signature raised unless this is a real callable.
+        run_func = cast("Callable", module_run)
 
         # `build_chart` is purely optional. We do not validate its signature so
         # screener authors are free to keep it minimal or accept extra kwargs.

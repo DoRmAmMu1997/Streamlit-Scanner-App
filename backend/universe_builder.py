@@ -13,6 +13,7 @@ import re
 from collections.abc import Iterable
 from datetime import date, datetime
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import requests
@@ -49,7 +50,9 @@ MANUAL_SYMBOL_ALIASES = {
 
 # One place to define every supported universe. Screeners refer to these keys
 # in their metadata, so keep keys stable once a screener uses them.
-UNIVERSE_CONFIG = {
+# Values mix strings (file_name/display_name/source_*) with lists (union_of),
+# so the value type is dict[str, Any] rather than dict[str, str].
+UNIVERSE_CONFIG: dict[str, dict[str, Any]] = {
     "nifty_100": {
         "file_name": "nifty_100.csv",
         "display_name": "NIFTY 100",

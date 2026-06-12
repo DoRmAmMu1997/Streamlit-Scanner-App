@@ -23,8 +23,9 @@ def test_ci_workflow_runs_quality_and_dependency_security_checks():
     assert "python -m pytest -q" in text
     assert "python -m compileall -q app.py backend screeners tests" in text
     assert "python -m ruff check app.py backend screeners Dependencies tests" in text
+    assert "python -m mypy" in text
     assert "python -m bandit -r app.py backend screeners Dependencies -q" in text
-    assert "python -m pip_audit -r requirements.txt" in text
+    assert "python -m pip_audit -r constraints.txt" in text
 
 
 def test_constraints_pin_direct_runtime_and_developer_dependencies():
@@ -47,10 +48,22 @@ def test_constraints_pin_direct_runtime_and_developer_dependencies():
         "ruff",
         "bandit",
         "pip-audit",
+        "mypy",
+        "types-requests",
+        "types-PyYAML",
     ]
 
     for name in required_names:
         assert re.search(rf"^{re.escape(name)}==", text, flags=re.IGNORECASE | re.MULTILINE), name
+
+
+def test_constraints_use_security_reviewed_dependency_versions():
+    """Known-vulnerable direct pins must not re-enter the installed environment."""
+    text = (ROOT / "constraints.txt").read_text(encoding="utf-8")
+
+    assert re.search(r"^python-dotenv==1\.2\.2$", text, flags=re.MULTILINE)
+    assert re.search(r"^lxml==6\.1\.0$", text, flags=re.MULTILINE)
+    assert re.search(r"^pytest==9\.0\.3$", text, flags=re.MULTILINE)
 
 
 def test_readme_documents_constraints_and_security_audit_commands():
@@ -60,5 +73,5 @@ def test_readme_documents_constraints_and_security_audit_commands():
     assert "pip install -r requirements.txt -c constraints.txt" in text
     assert "pip install -r requirements-dev.txt -c constraints.txt" in text
     assert "python -m bandit -r app.py backend screeners Dependencies -q" in text
-    assert "python -m pip_audit -r requirements.txt" in text
+    assert "python -m pip_audit -r constraints.txt" in text
     assert "requirements-optional.txt" in text

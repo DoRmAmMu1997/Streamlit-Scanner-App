@@ -549,7 +549,9 @@ def _log_daily_job_completed(
     operational question: did the whole command finish successfully, and how
     many scans landed in each final category?
     """
-    fields: dict[str, object] = {
+    # dict[str, Any] (not object) so `**fields` unpacks cleanly into
+    # log_event's typed keyword parameters.
+    fields: dict[str, Any] = {
         "exit_code": exit_code,
         "scans_count": len(outcomes),
         "success_count": sum(

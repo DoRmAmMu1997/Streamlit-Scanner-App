@@ -64,7 +64,9 @@ def hostname_resolves_public(hostname: str) -> bool:
         infos = socket.getaddrinfo(normalized, None)
     except socket.gaierror:
         return False
-    addresses = {info[4][0] for info in infos if info and info[4]}
+    # getaddrinfo's sockaddr tuples type the first element as `str | int`
+    # (AF_UNIX paths can be ints in the stubs); IP literals are always str.
+    addresses = {str(info[4][0]) for info in infos if info and info[4]}
     return bool(addresses) and all(_is_public_ip(address) for address in addresses)
 
 

@@ -35,7 +35,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 import streamlit as st
@@ -385,7 +385,7 @@ def _inject_css() -> None:
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def cache_summary(cache_dir: Path = DAILY_CACHE_DIR) -> dict[str, object]:
+def cache_summary(cache_dir: Path = DAILY_CACHE_DIR) -> dict[str, Any]:
     """Count cached candle files so the UI can show whether caching is active.
 
     The cache directory can contain hundreds of Parquet files. Streamlit reruns
@@ -419,7 +419,7 @@ def _universe_mtime(universe_key: str) -> str:
 
 
 @st.cache_data(ttl=30, show_spinner=False)
-def _cached_universe_status(universe_key: str) -> dict[str, object]:
+def _cached_universe_status(universe_key: str) -> dict[str, Any]:
     """Return one universe status with a short rerun-friendly cache.
 
     `universe_status(...)` touches the CSV on disk. Caching the result keeps the
@@ -621,7 +621,9 @@ def _render_fundamentals_panel(symbol: str | None) -> None:
 
     # Mode is symbol-deterministic: HS45/N100 → criteria (9), everything else
     # → universal (7). The button label and behavior adapt accordingly.
-    mode = "criteria" if _is_eligible_for_fundamentals(symbol) else "universal"
+    mode: Literal["criteria", "universal"] = (
+        "criteria" if _is_eligible_for_fundamentals(symbol) else "universal"
+    )
 
     st.divider()
     st.subheader("Fundamentals")
@@ -1432,11 +1434,11 @@ def _render_history_page() -> None:
 
     filter_col4, filter_col5, filter_col6 = st.columns(3)
     with filter_col4:
-        # value=() starts the range empty, so the default view is simply "the
+        # value=[] starts the range empty, so the default view is simply "the
         # latest runs" with no date restriction.
         date_range = st.date_input(
             "Started between",
-            value=(),
+            value=[],
             key="history_date_filter",
             help="Pick one day or a range. Leave empty to show the latest runs.",
         )
@@ -1569,7 +1571,7 @@ def _render_history_run_details(row: dict[str, Any], *, symbol_filter: str = "")
         # Mirror the repository's exact, case-insensitive match so the run list
         # and this detail table always agree on what "filtered by symbol" means.
         result_rows = [
-            r for r in result_rows if r["symbol"].strip().upper() == symbol_filter
+            r for r in result_rows if str(r["symbol"]).strip().upper() == symbol_filter
         ]
 
     if not result_rows:
@@ -2064,7 +2066,9 @@ def _render_results_with_chart(
     if selectbox_key not in st.session_state or st.session_state[selectbox_key] not in symbols:
         st.session_state[selectbox_key] = symbols[0]
     # A fresh table click wins — push it into the selectbox state pre-widget.
-    if table_changed and 0 <= current_row < len(symbols):
+    # (table_changed already implies current_row is not None; the explicit check
+    # repeats it so the type narrows here.)
+    if table_changed and current_row is not None and 0 <= current_row < len(symbols):
         st.session_state[selectbox_key] = symbols[current_row]
 
     chart_symbol = st.selectbox(

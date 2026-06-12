@@ -256,8 +256,13 @@ def _clean_secret(value: Any) -> str:
     return cleaned if len(cleaned) >= 4 else ""
 
 
-def _first_redaction_filter(filters: list[logging.Filter]) -> SecretRedactionFilter | None:
-    """Return the first existing redaction filter from a logger/handler list."""
+def _first_redaction_filter(filters: Iterable[object]) -> SecretRedactionFilter | None:
+    """Return the first existing redaction filter from a logger/handler list.
+
+    Typed as ``Iterable[object]`` because the stdlib types ``.filters`` as a mix
+    of ``Filter`` objects and bare callables; the isinstance check below is the
+    real contract.
+    """
     for item in filters:
         if isinstance(item, SecretRedactionFilter):
             return item

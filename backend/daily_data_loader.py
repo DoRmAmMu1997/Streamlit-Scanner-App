@@ -500,8 +500,16 @@ class DailyDataLoader:
         Python cannot forcibly kill a running SDK call, but `shutdown(wait=False)`
         lets the scanner move on instead of blocking the Streamlit run forever.
         """
+        client = self.client
+        if client is None:
+            # The documented "fail loudly" contract for cache-only loaders
+            # (see __init__): a clear error instead of an AttributeError.
+            raise RuntimeError(
+                "This DailyDataLoader was built without a Dhan client "
+                "(cache-only mode); it cannot fetch new candles."
+            )
         if self.fetch_timeout_seconds is None:
-            return self.client.fetch_daily_candles(
+            return client.fetch_daily_candles(
                 security_id=security_id,
                 exchange_segment=exchange_segment,
                 instrument_type=instrument_type,
@@ -511,7 +519,7 @@ class DailyDataLoader:
 
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         future = executor.submit(
-            self.client.fetch_daily_candles,
+            client.fetch_daily_candles,
             security_id=security_id,
             exchange_segment=exchange_segment,
             instrument_type=instrument_type,

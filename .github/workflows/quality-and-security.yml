@@ -39,6 +39,13 @@ jobs:
       - name: Run Ruff static checks
         run: python -m ruff check app.py backend screeners Dependencies tests
 
+      - name: Run mypy type checks
+        run: |
+          # Scope and strictness live in pyproject.toml ([tool.mypy]). Tests
+          # are deliberately excluded from this first adoption pass; expanding
+          # coverage there is a documented follow-up.
+          python -m mypy
+
       - name: Run Bandit security checks
         run: |
           # Bandit catches common Python security footguns, such as unsafe
@@ -46,9 +53,9 @@ jobs:
           # a branch reviewers have to reason through manually.
           python -m bandit -r app.py backend screeners Dependencies -q
 
-      - name: Audit runtime dependency advisories
+      - name: Audit pinned dependency advisories
         run: |
-          # pip-audit checks the runtime requirements against known PyPI
-          # advisories. Optional native accelerators stay outside this check
-          # because they are not required for the app to run.
-          python -m pip_audit -r requirements.txt
+          # Audit the exact direct versions installed above. Auditing the
+          # unconstrained requirements would resolve newer packages and could
+          # miss a vulnerability in the versions CI actually tested.
+          python -m pip_audit -r constraints.txt
