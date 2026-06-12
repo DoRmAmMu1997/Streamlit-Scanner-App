@@ -264,7 +264,7 @@ def build_technical_mcp_server(context: TechnicalToolContext):
     `backend/fundamentals/fundamental_agent.py`).
     """
     # Lazy import: only building the real server needs the SDK.
-    from claude_agent_sdk import create_sdk_mcp_server, tool  # type: ignore[import-not-found]
+    from claude_agent_sdk import create_sdk_mcp_server, tool  # type: ignore[import-not-found, unused-ignore]
 
     # No-argument tools: each one already knows which stock it is about because it
     # closes over `context`. The empty ``{}`` schema declares "takes no input".

@@ -435,8 +435,8 @@ class SixtySevenAgent:
         filesystem/bash tools.
         """
         try:
-            import claude_agent_sdk as claude_sdk  # type: ignore[import-not-found]
-            from claude_agent_sdk import (  # type: ignore[import-not-found]
+            import claude_agent_sdk as claude_sdk  # type: ignore[import-not-found, unused-ignore]
+            from claude_agent_sdk import (  # type: ignore[import-not-found, unused-ignore]
                 AssistantMessage,
                 ClaudeAgentOptions,
                 CLINotFoundError,

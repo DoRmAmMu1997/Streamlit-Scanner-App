@@ -80,7 +80,12 @@ def test_full_scan_run_persists_results_and_history_can_be_queried(
     file_db_engine,
     file_session_factory,
 ):
-    """Run the real scan service with fake inputs and query the saved history."""
+    """Prove legacy evidence survives canonical enrichment in real SQLite.
+
+    Unlike a mocked repository test, this exercises the complete service and
+    storage path. The old ``provenance`` object remains in the raw audit row,
+    while the dedicated provenance column gains stable contract keys.
+    """
     fake_universe = _fake_universe()
     fake_loader = _FakeDataLoader()
     scan_params = {
@@ -187,7 +192,30 @@ def test_full_scan_run_persists_results_and_history_can_be_queried(
         assert rows[0].provenance_json == {
             "rules": ["fake_breakout", "volume_confirmation"],
             "observed_at": "2026-06-01",
+            "screener_key": "fake_integration_screener",
+            "screener_version": None,
+            "triggered_rules": ["fake_breakout", "volume_confirmation"],
+            "indicator_values": {},
+            "params_snapshot": {
+                "start_date": "2026-01-01",
+                "end_date": "2026-06-02",
+                "min_score": "80.5",
+            },
+            "data_snapshot_date": "2026-06-02",
+            "source": None,
+            "notes": None,
+            "ai": None,
         }
+
+        # ``raw_result_json`` is the complete normalized screener row, so the
+        # author's original receipt remains visible exactly where legacy
+        # readers expect it. The added canonical envelope is stored alongside
+        # it and extracted into the dedicated provenance column.
+        assert rows[0].raw_result_json["provenance"] == {
+            "rules": ["fake_breakout", "volume_confirmation"],
+            "observed_at": "2026-06-01",
+        }
+        assert rows[0].raw_result_json["provenance_json"] == rows[0].provenance_json
         assert rows[1].rating == "WATCH"
         # Row 2 supplied signal_date as the string "2026-06-01"; confirm it parsed.
         assert rows[1].signal_date == date(2026, 6, 1)

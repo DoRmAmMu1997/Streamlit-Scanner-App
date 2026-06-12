@@ -267,3 +267,52 @@ def _first_redaction_filter(filters: Iterable[object]) -> SecretRedactionFilter 
         if isinstance(item, SecretRedactionFilter):
             return item
     return None
+
+
+# Canonical vocabulary for credential-shaped FIELD NAMES (mapping keys, column
+# names, form fields). The regexes above redact secret VALUES inside running
+# text; this set lets callers mask a value because of what its key is called.
+# Entries are written in normalized form: lowercase with separators removed,
+# which is how ``is_secret_key_name`` compares them.
+SECRET_KEY_NAME_PARTS = frozenset(
+    {
+        "accesstoken",
+        "apikey",
+        "authorization",
+        "authtoken",
+        "clientsecret",
+        "cookiesecret",
+        "databaseurl",
+        "passwd",
+        "password",
+        "pwd",
+        "refreshtoken",
+        "secret",
+        "token",
+    }
+)
+
+_SECRET_KEY_SUFFIXES = (
+    "apikey",
+    "accesstoken",
+    "authtoken",
+    "clientsecret",
+    "password",
+    "refreshtoken",
+)
+
+
+def is_secret_key_name(name: str) -> bool:
+    """Return True when a field name looks like it stores a credential.
+
+    Keeping this vocabulary next to the value-redaction patterns gives the app
+    ONE definition of "secret-looking" — a new secret name added here protects
+    log redaction and persisted scan history (PROV-001A) at the same time.
+    Comparison normalizes case and separators, so ``API-Key``, ``api_key``, and
+    ``ApiKey`` all match, and suffix checks catch names such as
+    ``dhan_access_token`` or ``serpapi_api_key``.
+    """
+    normalized = re.sub(r"[^a-z0-9]+", "", str(name).lower())
+    if normalized in SECRET_KEY_NAME_PARTS:
+        return True
+    return any(normalized.endswith(suffix) for suffix in _SECRET_KEY_SUFFIXES)
