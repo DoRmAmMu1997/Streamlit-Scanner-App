@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -19,7 +20,7 @@ from backend.universe_builder import UNIVERSE_CONFIG, universe_file_path
 REQUIRED_UNIVERSE_COLUMNS = ["symbol", "security_id", "exchange_segment", "instrument_type"]
 
 
-def list_known_universes() -> dict[str, dict[str, str]]:
+def list_known_universes() -> dict[str, dict[str, Any]]:
     """Return metadata for every universe the app currently understands."""
     return UNIVERSE_CONFIG
 
@@ -63,7 +64,7 @@ def mapped_only(universe_df: pd.DataFrame) -> pd.DataFrame:
     return universe_df.loc[universe_df["security_id"].astype(str).str.strip().ne("")].copy()
 
 
-def universe_status(universe_key: str, universe_dir: Path | str = UNIVERSE_DIR) -> dict[str, object]:
+def universe_status(universe_key: str, universe_dir: Path | str = UNIVERSE_DIR) -> dict[str, Any]:
     """Return row counts and freshness details for one universe CSV."""
     path = universe_file_path(universe_key, universe_dir)
     status = {

@@ -15,6 +15,7 @@ from __future__ import annotations
 import html as _html
 import json
 import math
+from typing import Any
 
 import pandas as pd
 
@@ -167,7 +168,8 @@ def _candle_series(frame: pd.DataFrame, ha: bool) -> dict:
 def _volume_series(frame: pd.DataFrame) -> dict:
     """Build a volume histogram series spec, colored by candle direction."""
     times = _iso_times(frame["timestamp"])
-    data = []
+    # Entries mix shapes: gap rows are {"time"} only, value rows add floats.
+    data: list[dict[str, Any]] = []
     for time, open_, close, volume in zip(
         times, frame["open"], frame["close"], frame["volume"], strict=False
     ):
@@ -193,7 +195,8 @@ def _volume_series(frame: pd.DataFrame) -> dict:
 def _line_series(timestamps, values, title: str, color: str, *, dash=None, width: int = 2) -> dict:
     """Build a line series spec. NaN values become whitespace gaps."""
     times = _iso_times(timestamps)
-    data = []
+    # Entries mix shapes: gap rows are {"time"} only, value rows add floats.
+    data: list[dict[str, Any]] = []
     for time, value in zip(times, values, strict=False):
         numeric = _num(value)
         if numeric is None:
@@ -241,8 +244,8 @@ def candlestick_with_volume(candles: pd.DataFrame, title: str, *, ha: bool = Fal
     if frame.empty:
         return _empty_spec(title)
 
-    price_pane = {"height": 430, "series": [_candle_series(frame, ha)], "price_lines": []}
-    volume_pane = {"height": 130, "series": [], "price_lines": []}
+    price_pane: dict[str, Any] = {"height": 430, "series": [_candle_series(frame, ha)], "price_lines": []}
+    volume_pane: dict[str, Any] = {"height": 130, "series": [], "price_lines": []}
     if "volume" in frame.columns:
         volume_pane["series"].append(_volume_series(frame))
     return {"title": title, "height": 620, "panes": [price_pane, volume_pane]}
@@ -260,8 +263,8 @@ def candlestick_volume_oscillator(candles: pd.DataFrame, title: str, *, ha: bool
     if frame.empty:
         return _empty_spec(title)
 
-    price_pane = {"height": 350, "series": [_candle_series(frame, ha)], "price_lines": []}
-    volume_pane = {"height": 110, "series": [], "price_lines": []}
+    price_pane: dict[str, Any] = {"height": 350, "series": [_candle_series(frame, ha)], "price_lines": []}
+    volume_pane: dict[str, Any] = {"height": 110, "series": [], "price_lines": []}
     if "volume" in frame.columns:
         volume_pane["series"].append(_volume_series(frame))
     oscillator_pane = {"height": 170, "series": [], "price_lines": []}
@@ -351,7 +354,9 @@ def add_supertrend_overlay(spec: dict, candles_for_st: pd.DataFrame, *,
     # Walk the bars and group them into contiguous runs of the same direction.
     # A run ends when the direction flips or the SuperTrend value is missing
     # (the ATR warm-up bars have no value and belong to no run).
-    runs: list[tuple[float, list]] = []
+    # The direction slot is None only transiently (gap rows reset it); runs are
+    # appended with the direction their points accumulated under.
+    runs: list[tuple[float | None, list]] = []
     run_direction: float | None = None
     run_points: list = []
     for timestamp, value, direction in zip(

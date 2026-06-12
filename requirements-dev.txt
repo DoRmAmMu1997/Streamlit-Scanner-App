@@ -6,3 +6,8 @@ pytest
 ruff
 bandit
 pip-audit
+# Static type checking (QUAL-002). The stub packages give mypy real types for
+# the requests/yaml call sites instead of treating those libraries as Any.
+mypy
+types-requests
+types-PyYAML

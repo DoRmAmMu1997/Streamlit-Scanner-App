@@ -18,7 +18,7 @@ from typing import Any
 try:
     from dotenv import load_dotenv
 except ImportError:  # pragma: no cover - handled by credential_status()
-    load_dotenv = None
+    load_dotenv = None  # type: ignore[assignment]
 
 
 # Resolve project paths from this file's location, not the user's current

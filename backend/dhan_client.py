@@ -184,6 +184,8 @@ class DhanDataClient:
             return
 
         credentials = credentials or get_dhan_credentials(required=True)
+        if credentials is None:  # pragma: no cover - required=True raises first
+            raise RuntimeError("Dhan credentials are not configured.")
         try:
             from dhanhq import DhanContext, dhanhq
         except ImportError as exc:  # pragma: no cover - depends on local package state

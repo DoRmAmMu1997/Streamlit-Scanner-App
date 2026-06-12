@@ -34,7 +34,7 @@ import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 from sqlalchemy.orm import Session
@@ -186,7 +186,7 @@ def run_scan(
         # Keep the original exception tuple until persistence has finished. That
         # lets the terminal scan_failed event reflect durable state while still
         # carrying the original traceback through the redacting formatter.
-        screener_exc_info = sys.exc_info()
+        screener_exc_info = _current_exc_info()
         results = pd.DataFrame()
         status = ScanStatus.FAILED
         error_message = (
@@ -242,7 +242,7 @@ def run_scan(
     # events are emitted only when the corresponding database row was actually
     # finalized. Persistence and header failures get their own scan_failed phase
     # while the in-memory result remains available to the caller.
-    terminal_fields = {
+    terminal_fields: dict[str, Any] = {
         "run_id": run_id,
         "scan_name": scan_name,
         "screener_key": screener_key,
@@ -287,6 +287,15 @@ def run_scan(
     )
 
 
+def _current_exc_info() -> ExceptionInfo:
+    """Return ``sys.exc_info()`` typed for use inside an ``except`` block.
+
+    Typeshed types ``sys.exc_info()`` as possibly the ``(None, None, None)``
+    triple; inside an active ``except`` it never is, so the cast is truthful.
+    """
+    return cast("ExceptionInfo", sys.exc_info())
+
+
 def _create_run_header(
     *,
     screener_key: str,
@@ -323,7 +332,7 @@ def _create_run_header(
             # can use the id to fetch the same run in a new session.
             return run.id, None
     except Exception:
-        return None, sys.exc_info()
+        return None, _current_exc_info()
 
 
 def _persist_run_outcome(
@@ -359,7 +368,7 @@ def _persist_run_outcome(
             save_scan_results(session, run, _result_rows(results))
             finish_scan_run(session, run, status=status, error_message=error_message)
     except Exception as exc:
-        persistence_exc_info = sys.exc_info()
+        persistence_exc_info = _current_exc_info()
         _mark_run_failed_after_persistence_error(run_id, exc, session_factory)
         return persistence_exc_info
     return None

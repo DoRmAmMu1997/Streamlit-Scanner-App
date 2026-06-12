@@ -23,6 +23,7 @@ def test_ci_workflow_runs_quality_and_dependency_security_checks():
     assert "python -m pytest -q" in text
     assert "python -m compileall -q app.py backend screeners tests" in text
     assert "python -m ruff check app.py backend screeners Dependencies tests" in text
+    assert "python -m mypy" in text
     assert "python -m bandit -r app.py backend screeners Dependencies -q" in text
     assert "python -m pip_audit -r requirements.txt" in text
 
@@ -47,6 +48,9 @@ def test_constraints_pin_direct_runtime_and_developer_dependencies():
         "ruff",
         "bandit",
         "pip-audit",
+        "mypy",
+        "types-requests",
+        "types-PyYAML",
     ]
 
     for name in required_names:
