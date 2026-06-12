@@ -16,7 +16,7 @@ def _candles(highs: list[float], closes: list[float]) -> pd.DataFrame:
             "timestamp": pd.date_range("2026-01-01", periods=len(highs), freq="D"),
             "open": closes,
             "high": highs,
-            "low": [min(high, close) - 1.0 for high, close in zip(highs, closes)],
+            "low": [min(high, close) - 1.0 for high, close in zip(highs, closes, strict=True)],
             "close": closes,
             "volume": [1000.0] * len(highs),
         }

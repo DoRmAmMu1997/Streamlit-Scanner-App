@@ -34,7 +34,7 @@ class _StopCalled(RuntimeError):
 class _FakeSidebar:
     """Minimal context manager for code that writes into ``with st.sidebar``."""
 
-    def __init__(self, owner: "_FakeStreamlit"):
+    def __init__(self, owner: _FakeStreamlit):
         self.owner = owner
 
     def __enter__(self):
@@ -358,9 +358,8 @@ def test_require_authorized_user_emits_auth_denied_event(monkeypatch, caplog):
     monkeypatch.setenv("SCANNER_ENV", "production")
     fake_st = _signed_in("intruder@example.com")
 
-    with caplog.at_level(logging.WARNING):
-        with pytest.raises(_StopCalled):
-            require_authorized_user(fake_st)
+    with caplog.at_level(logging.WARNING), pytest.raises(_StopCalled):
+        require_authorized_user(fake_st)
 
     events = [
         getattr(record, "structured_fields", {})

@@ -52,9 +52,7 @@ def normalize_daily_payload(data: Any) -> pd.DataFrame:
         # pandas can build a table from either:
         # - [{"open": 1, ...}, {"open": 2, ...}]
         # - {"open": [1, 2], "close": [3, 4], ...}
-        if isinstance(data, list):
-            df = pd.DataFrame(data)
-        elif isinstance(data, dict):
+        if isinstance(data, (list, dict)):
             df = pd.DataFrame(data)
         else:
             return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
@@ -197,7 +195,7 @@ class DhanDataClient:
         self.dhan = dhanhq(context)
 
     @classmethod
-    def from_env(cls) -> "DhanDataClient":
+    def from_env(cls) -> DhanDataClient:
         return cls(get_dhan_credentials(required=True))
 
     def fetch_daily_candles(

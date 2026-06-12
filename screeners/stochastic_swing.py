@@ -20,12 +20,13 @@ today" scan, so they are intentionally not implemented here. The informational
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pandas as pd
 
 from backend.charts import add_line_overlay, add_stochastic_overlay, candlestick_volume_oscillator
 from backend.indicators import ema, sma, stochastic
 from backend.scanner_base import BaseScanner
-
 
 # Fixed risk rules from the original strategy brief. They are not UI knobs, so
 # they live here as module constants rather than in `default_params`.
@@ -71,7 +72,7 @@ def _recent_cross_confirmation(
 class StochasticSwing(BaseScanner):
     """BUY/SELL when a Stochastic %K/%D cross aligns with SMA200 trend + EMA cross."""
 
-    SCREENER = {
+    SCREENER: ClassVar[dict] = {
         "key": "stochastic_swing",
         "name": "Stochastic Swing",
         "description": (
@@ -95,7 +96,7 @@ class StochasticSwing(BaseScanner):
         },
     }
 
-    EXTRA_RESULT_COLUMNS = [
+    EXTRA_RESULT_COLUMNS: ClassVar[list[str]] = [
         "sma200",
         "ema5",
         "stoch_k",

@@ -17,6 +17,8 @@ has fallen to the bottom of its envelope is a candidate for further analysis.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pandas as pd
 
 from backend.charts import add_envelope_overlay, candlestick_with_volume
@@ -27,7 +29,7 @@ from backend.scanner_base import BaseScanner
 class Envelope(BaseScanner):
     """BUY when the latest close is at or below the lower Envelope band."""
 
-    SCREENER = {
+    SCREENER: ClassVar[dict] = {
         "key": "envelope",
         "name": "Envelope",
         "description": (
@@ -49,7 +51,7 @@ class Envelope(BaseScanner):
         },
     }
 
-    EXTRA_RESULT_COLUMNS = [
+    EXTRA_RESULT_COLUMNS: ClassVar[list[str]] = [
         "env_basis",
         "env_lower",
         "env_upper",

@@ -14,8 +14,8 @@ from backend.universe_builder import (
     build_fno_universe,
     build_index_universe,
     build_symbol_list_universe,
-    load_symbol_list_csv,
     load_instrument_master,
+    load_symbol_list_csv,
     normalize_instrument_master_columns,
     refresh_universe_files,
 )

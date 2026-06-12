@@ -20,6 +20,8 @@ sustainable base or just falling further.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pandas as pd
 
 from backend.charts import add_line_overlay, candlestick_with_volume
@@ -29,7 +31,7 @@ from backend.scanner_base import BaseScanner
 class Week52LowCeyhun(BaseScanner):
     """BUY when close was within `proximity_pct` of the 52-week low in recent days."""
 
-    SCREENER = {
+    SCREENER: ClassVar[dict] = {
         "key": "week52_low_ceyhun",
         "name": "52 Week High/Low (Ceyhun)",
         "description": (
@@ -55,7 +57,7 @@ class Week52LowCeyhun(BaseScanner):
         },
     }
 
-    EXTRA_RESULT_COLUMNS = [
+    EXTRA_RESULT_COLUMNS: ClassVar[list[str]] = [
         "week52_low",
         "week52_high",
         "proximity_pct_at_signal",

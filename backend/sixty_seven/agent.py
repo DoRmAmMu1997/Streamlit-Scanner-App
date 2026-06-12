@@ -32,8 +32,9 @@ import json
 import logging
 import re
 import sys
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Any, Awaitable, Callable, Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -54,7 +55,6 @@ from backend.sixty_seven.search_client import (
     SerpApiSetupError,
 )
 from backend.sixty_seven.shortlister import DrawdownCandidate
-
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +150,7 @@ class SixtySevenVerdict(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def _approved_requires_all_core_flags(self) -> "SixtySevenVerdict":
+    def _approved_requires_all_core_flags(self) -> SixtySevenVerdict:
         # Invariant: an "approved" verdict is only honest when every checklist flag
         # passed; reject the (contradictory) combination at validation time.
         if self.approved:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import requests
 import pytest
+import requests
 
 from backend.sixty_seven.search_client import (
     SerpApiClient,

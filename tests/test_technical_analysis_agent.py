@@ -395,20 +395,20 @@ def _install_fake_sdk(monkeypatch, *, include_thinking: bool = True):
 
     verdict_json = json.dumps(_sample_verdict().model_dump(mode="json"))
 
-    async def query(*, prompt, options):  # noqa: ARG001 — signature must match
+    async def query(*, prompt, options):
         yield ResultMessage(verdict_json)
 
     # The agent now builds an in-process MCP tool server, so the fake SDK must
     # expose `tool` (a decorator) and `create_sdk_mcp_server`. The tools are never
     # actually invoked here — `query` returns the final JSON immediately — so
     # trivial stand-ins are enough.
-    def tool(name, description, schema):  # noqa: ARG001 — signature must match
+    def tool(name, description, schema):
         def _decorator(fn):
             return fn
 
         return _decorator
 
-    def create_sdk_mcp_server(*, name, version, tools):  # noqa: ARG001
+    def create_sdk_mcp_server(*, name, version, tools):
         return {"name": name, "version": version, "tools": tools}
 
     fake = types.ModuleType("claude_agent_sdk")

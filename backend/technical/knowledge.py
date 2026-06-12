@@ -22,7 +22,6 @@ Everything here is plain text. The matching machine-readable schema (the Pydanti
 
 from __future__ import annotations
 
-
 # ---------------------------------------------------------------------------
 # Role and analytical stance
 # ---------------------------------------------------------------------------

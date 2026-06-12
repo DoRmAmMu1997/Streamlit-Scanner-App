@@ -15,7 +15,6 @@ import pandas as pd
 from backend.config import UNIVERSE_DIR
 from backend.universe_builder import UNIVERSE_CONFIG, universe_file_path
 
-
 # These columns are the minimum needed to fetch daily candles from Dhan.
 REQUIRED_UNIVERSE_COLUMNS = ["symbol", "security_id", "exchange_segment", "instrument_type"]
 
@@ -123,7 +122,7 @@ def union_of_mapped_universes(universe_dir: Path | str = UNIVERSE_DIR) -> pd.Dat
             continue
 
     if not frames:
-        return pd.DataFrame(columns=REQUIRED_UNIVERSE_COLUMNS + ["mapping_status"])
+        return pd.DataFrame(columns=[*REQUIRED_UNIVERSE_COLUMNS, "mapping_status"])
 
     combined = pd.concat(frames, ignore_index=True)
     mapped = combined.loc[combined["mapping_status"].astype(str).str.lower() == "mapped"]

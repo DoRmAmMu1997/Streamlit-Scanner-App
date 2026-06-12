@@ -38,8 +38,9 @@ import json
 import logging
 import re
 import sys
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Any, Awaitable, Callable, Literal
+from typing import Any, Literal
 
 import pandas as pd
 from pydantic import BaseModel, Field, field_validator
@@ -58,7 +59,6 @@ from backend.technical.tools import (
     build_technical_mcp_server,
     resolve_params,
 )
-
 
 logger = logging.getLogger(__name__)
 

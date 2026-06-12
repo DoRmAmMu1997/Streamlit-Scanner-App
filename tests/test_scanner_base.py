@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from backend.scanner_base import BaseScanner, COMMON_RESULT_COLUMNS
+from backend.scanner_base import COMMON_RESULT_COLUMNS, BaseScanner
 
 
 class _SimpleScanner(BaseScanner):
