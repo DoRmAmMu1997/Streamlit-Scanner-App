@@ -22,10 +22,10 @@ def test_ci_workflow_runs_quality_and_dependency_security_checks():
     assert "pip install -r requirements.txt -r requirements-dev.txt -c constraints.txt" in text
     assert "python -m pytest -q" in text
     assert "--cov-fail-under=" in text
-    assert "python -m compileall -q app.py backend screeners tests" in text
-    assert "python -m ruff check app.py backend screeners Dependencies tests" in text
+    assert "python -m compileall -q app.py backend screeners ui tests" in text
+    assert "python -m ruff check app.py backend screeners ui Dependencies tests" in text
     assert "python -m mypy" in text
-    assert "python -m bandit -r app.py backend screeners Dependencies -q" in text
+    assert "python -m bandit -r app.py backend screeners ui Dependencies -q" in text
     assert "python -m pip_audit -r requirements.txt -r requirements-dev.txt" in text
 
 

@@ -8,6 +8,10 @@ import app
 from backend.auth.session import AuthenticatedUser
 from backend.health import AdminHealthSnapshot, ScanRunHealth, ServiceHealth
 
+# The health renderer lives in ui.health_page (REF-001); app re-exports it.
+# Streamlit fakes must be patched onto the module the renderer actually reads.
+from ui import health_page
+
 
 class _FakeColumn:
     """Record Streamlit metric calls without launching a browser."""
@@ -91,7 +95,7 @@ def _snapshot(*, failure_message: str | None = None) -> AdminHealthSnapshot:
 def test_health_renderer_rejects_non_admin_without_collecting(monkeypatch):
     """The renderer is a second guard even if orchestration is called directly."""
     fake_st = _FakeStreamlit()
-    monkeypatch.setattr(app, "st", fake_st)
+    monkeypatch.setattr(health_page, "st", fake_st)
 
     app._render_admin_health_page(
         AuthenticatedUser("person@example.com", "Person", is_admin=False),
@@ -114,7 +118,7 @@ def test_health_scan_metric_uses_short_run_label():
 def test_health_renderer_rejects_auth_disabled_session(monkeypatch):
     """A local auth bypass must not accidentally expose the admin page."""
     fake_st = _FakeStreamlit()
-    monkeypatch.setattr(app, "st", fake_st)
+    monkeypatch.setattr(health_page, "st", fake_st)
 
     app._render_admin_health_page(
         None,
@@ -129,7 +133,7 @@ def test_health_renderer_rejects_auth_disabled_session(monkeypatch):
 def test_health_renderer_exposes_only_snapshot_exception_type(monkeypatch):
     """Unexpected collector errors must not reveal paths, URLs, or credentials."""
     fake_st = _FakeStreamlit()
-    monkeypatch.setattr(app, "st", fake_st)
+    monkeypatch.setattr(health_page, "st", fake_st)
 
     app._render_admin_health_page(
         AuthenticatedUser("admin@example.com", "Admin", is_admin=True),
@@ -146,7 +150,7 @@ def test_health_renderer_exposes_only_snapshot_exception_type(monkeypatch):
 def test_health_renderer_redacts_stored_failure_text(monkeypatch):
     """Persisted scan errors can contain credentials and must be redacted."""
     fake_st = _FakeStreamlit()
-    monkeypatch.setattr(app, "st", fake_st)
+    monkeypatch.setattr(health_page, "st", fake_st)
     monkeypatch.setenv("DHAN_ACCESS_TOKEN", "broker-secret")
 
     app._render_admin_health_page(
