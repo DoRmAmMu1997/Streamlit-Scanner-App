@@ -33,14 +33,12 @@ from __future__ import annotations
 import datetime as dt
 import json
 import math
-import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, is_dataclass
 from decimal import Decimal
 from typing import Any, Literal, TypeAlias, cast
 
-from backend.security import MASK, redact_text
-
+from backend.security import MASK, is_secret_key_name, redact_text
 
 # JSON has fewer built-in value types than Python. These aliases make that
 # boundary visible in type hints: a scalar cannot contain another collection,
@@ -54,24 +52,6 @@ SignalSource: TypeAlias = Literal["deterministic", "ai", "hybrid"]
 MASKED_PARAMETER = MASK
 
 _SIGNAL_SOURCES = frozenset({"deterministic", "ai", "hybrid"})
-_SECRET_KEY_PARTS = frozenset(
-    {
-        "apikey",
-        "accesstoken",
-        "authtoken",
-        "authorization",
-        "clientsecret",
-        "cookie_secret",
-        "cookiesecret",
-        "databaseurl",
-        "password",
-        "passwd",
-        "pwd",
-        "refreshtoken",
-        "secret",
-        "token",
-    }
-)
 
 
 class ResultContractError(ValueError):
@@ -375,7 +355,7 @@ def _json_safe_mapping(
         key = str(raw_key)
         if drop_callables and callable(raw_value):
             continue
-        if _is_secret_key(key):
+        if is_secret_key_name(key):
             converted[key] = MASKED_PARAMETER
             continue
         converted[key] = cast(
@@ -457,24 +437,6 @@ def _optional_text(value: Any) -> str | None:
     if _is_missing(value):
         return None
     return cast(str, redact_text(str(value)))
-
-
-def _is_secret_key(key: str) -> bool:
-    """Recognize high-signal credential field names without masking normal data."""
-    normalized = re.sub(r"[^a-z0-9]+", "", key.lower())
-    if normalized in _SECRET_KEY_PARTS:
-        return True
-    return any(
-        normalized.endswith(suffix)
-        for suffix in (
-            "apikey",
-            "accesstoken",
-            "authtoken",
-            "clientsecret",
-            "password",
-            "refreshtoken",
-        )
-    )
 
 
 def _is_missing(value: Any) -> bool:

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import numpy as np
@@ -22,8 +22,8 @@ import pandas as pd
 import pytest
 
 from backend.scanning.result_contract import (
-    AIProvenance,
     MASKED_PARAMETER,
+    AIProvenance,
     ResultContractError,
     RuleCheck,
     ScreenerResult,
@@ -191,7 +191,7 @@ def test_dates_numpy_values_and_missing_values_become_strict_json():
     row = {
         "symbol": "INFY",
         "signal_date": pd.Timestamp("2026-06-10 15:30:00", tz="Asia/Kolkata"),
-        "python_datetime": datetime(2026, 6, 10, 10, 0, tzinfo=timezone.utc),
+        "python_datetime": datetime(2026, 6, 10, 10, 0, tzinfo=UTC),
         "numpy_int": np.int64(5),
         "numpy_float": np.float64(1.25),
         "missing": np.nan,
@@ -314,3 +314,28 @@ def test_secret_shaped_text_in_raw_rows_and_provenance_is_redacted(monkeypatch):
         "provenance-bearer-secret",
     ):
         assert secret not in rendered
+
+
+def test_normalize_screener_row_rejects_non_mapping_rows():
+    """A row must be a mapping; anything else is a programming error.
+
+    ``to_dict("records")`` always produces dictionaries, so a list or scalar
+    here means a caller bypassed the service path. Failing fast with the
+    contract error keeps that mistake visible instead of persisting garbage.
+    """
+    with pytest.raises(ResultContractError):
+        normalize_screener_row(["symbol", "TCS"], screener_key="demo")
+
+
+def test_normalize_screener_row_wraps_scalar_provenance_as_legacy_value():
+    """Old free-text receipts survive under an explicit compatibility key."""
+    normalized = normalize_screener_row(
+        {"symbol": "TCS", "provenance": "manual note from an old screener"},
+        screener_key="demo",
+    )
+
+    canonical = normalized["provenance_json"]
+    assert canonical["legacy_value"] == "manual note from an old screener"
+    # The canonical envelope is still filled alongside the preserved receipt.
+    assert canonical["screener_key"] == "demo"
+    assert canonical["triggered_rules"] == []

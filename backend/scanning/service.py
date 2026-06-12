@@ -48,7 +48,7 @@ from backend.observability import (
     ExceptionInfo,
     log_event,
 )
-from backend.scanning.result_contract import normalize_screener_row
+from backend.scanning.result_contract import ResultContractError, normalize_screener_row
 from backend.storage.database import session_scope
 from backend.storage.models import ScanRun, ScanStatus
 from backend.storage.repository import (
@@ -448,15 +448,40 @@ def _result_rows(
     # ``to_dict("records")`` creates one ordinary mapping per DataFrame row.
     # The normalizer then deep-copies nested content and enriches only these
     # persistence records, never the DataFrame owned by the caller.
-    return [
-        normalize_screener_row(
-            row,
-            screener_key=screener_key,
-            params=params,
-            data_snapshot_date=data_snapshot_date,
+    rows: list[dict[str, Any]] = []
+    skipped = 0
+    for index, row in enumerate(results.to_dict("records")):
+        try:
+            rows.append(
+                normalize_screener_row(
+                    row,
+                    screener_key=screener_key,
+                    params=params,
+                    data_snapshot_date=data_snapshot_date,
+                )
+            )
+        except ResultContractError as exc:
+            # One unusable row (typically a NaN symbol from a screener merge
+            # bug) must not erase history for every other result in the run.
+            # Skip it loudly; the in-memory DataFrame shown by Streamlit is
+            # unaffected, matching the per-symbol failure philosophy used by
+            # the scanner and the data loader.
+            skipped += 1
+            logger.warning(
+                "Skipping result row %d for %s; it cannot satisfy the result "
+                "contract: %s",
+                index,
+                screener_key,
+                exc,
+            )
+    if skipped and not rows:
+        # Every row failing is a systemic screener/contract problem, not one
+        # bad merge. Recording an empty-but-successful run would be misleading
+        # audit data, so keep the existing loud persistence-failure path.
+        raise ResultContractError(
+            f"All {skipped} result rows for {screener_key} failed the result contract."
         )
-        for row in results.to_dict("records")
-    ]
+    return rows
 
 
 def _as_date(value: Any) -> dt.date | None:
