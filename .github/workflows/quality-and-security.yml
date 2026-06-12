@@ -8,7 +8,11 @@ on:
 
 jobs:
   verify:
-    name: Python ${{ matrix.python-version }} quality and supply-chain checks
+    # Named "quality gates" rather than "supply-chain checks": most steps are
+    # quality gates (tests/lint/types), and a red run usually means a gate
+    # caught new code - not a dependency problem. The pip-audit step is the
+    # actual supply-chain check.
+    name: Python ${{ matrix.python-version }} quality gates
     runs-on: ubuntu-latest
     timeout-minutes: 35
     strategy:
