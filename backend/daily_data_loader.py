@@ -11,10 +11,10 @@ import concurrent.futures
 import logging
 import re
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Callable, Mapping
 
 import pandas as pd
 
@@ -22,7 +22,6 @@ from backend.config import DAILY_CACHE_DIR, dhan_rate_limit_retry_delays, dhan_r
 from backend.dhan_client import DhanDataClient, DhanRateLimitError
 from backend.observability import EVENT_EXTERNAL_API_FAILED, log_event
 from backend.security import redact_text
-
 
 # Module-level logger. Streamlit captures stderr, so logger output appears in the
 # terminal that runs the app. Keeping `getLogger(__name__)` instead of
@@ -702,7 +701,8 @@ class DailyDataLoader:
             # The legacy pattern has at least four parts and the LAST two must
             # both be 8-digit numeric date strings. That avoids accidentally
             # deleting a symbol that happens to legitimately contain numbers.
-            if len(parts) >= 4 and parts[-2].isdigit() and parts[-1].isdigit() and len(parts[-2]) == 8 and len(parts[-1]) == 8:
+            has_date_pair = parts[-2].isdigit() and parts[-1].isdigit() and len(parts[-2]) == 8 and len(parts[-1]) == 8
+            if len(parts) >= 4 and has_date_pair:
                 try:
                     path.unlink()
                     deleted += 1

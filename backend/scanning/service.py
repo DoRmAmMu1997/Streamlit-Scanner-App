@@ -140,7 +140,7 @@ def run_scan(
         triggered_by=triggered_by,
         # SCAN-004: record the universe size so the history page can show how
         # many symbols this run scanned (vs how many it shortlisted).
-        symbols_scanned=int(len(universe_df)) if universe_df is not None else None,
+        symbols_scanned=len(universe_df) if universe_df is not None else None,
         session_factory=session_factory,
     )
 
@@ -154,7 +154,7 @@ def run_scan(
         screener_key=screener_key,
         universe_key=universe_key,
         triggered_by=triggered_by,
-        symbols_scanned=int(len(universe_df)) if universe_df is not None else 0,
+        symbols_scanned=len(universe_df) if universe_df is not None else 0,
     )
     if header_exc_info is not None:
         log_event(
@@ -248,7 +248,7 @@ def run_scan(
         "screener_key": screener_key,
         "universe_key": universe_key,
         "status": status.value,
-        "results_count": 0 if results is None else int(len(results)),
+        "results_count": 0 if results is None else len(results),
         "loader_failures": len(loader_failures),
         "compute_failures": len(compute_failures),
         "duration_seconds": round(time.monotonic() - started_at, 3),

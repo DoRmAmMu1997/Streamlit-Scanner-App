@@ -20,6 +20,8 @@ at today?" and intentionally returns no SELL/HOLD rows.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pandas as pd
 
 from backend.charts import add_bollinger_overlay, candlestick_with_volume
@@ -30,7 +32,7 @@ from backend.scanner_base import BaseScanner
 class BollingerLowerBand(BaseScanner):
     """BUY when the latest close is at/near the lower Bollinger Band."""
 
-    SCREENER = {
+    SCREENER: ClassVar[dict] = {
         "key": "bollinger_lower_band",
         "name": "Bollinger Lower Band",
         "description": (
@@ -51,7 +53,7 @@ class BollingerLowerBand(BaseScanner):
         },
     }
 
-    EXTRA_RESULT_COLUMNS = [
+    EXTRA_RESULT_COLUMNS: ClassVar[list[str]] = [
         "bb_lower",
         "bb_middle",
         "bb_upper",
@@ -82,12 +84,9 @@ class BollingerLowerBand(BaseScanner):
         if close > lower_band * (1.0 + proximity_pct):
             return None
 
-        if lower_band == 0:
-            bb_distance_pct = 0.0
-        else:
-            # Positive means the close is above the lower band; negative means it
-            # closed beneath it. Easier to compare than raw rupees.
-            bb_distance_pct = (close - lower_band) / lower_band
+        # Positive means the close is above the lower band; negative means it
+        # closed beneath it. Easier to compare than raw rupees.
+        bb_distance_pct = 0.0 if lower_band == 0 else (close - lower_band) / lower_band
 
         reason = (
             f"Close {close:.2f} is {bb_distance_pct * 100:.2f}% from the lower "

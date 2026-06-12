@@ -90,7 +90,7 @@ def test_validate_screener_module_registers_build_chart_when_present():
     def run(universe_df, data_loader, params) -> pd.DataFrame:
         return pd.DataFrame()
 
-    def build_chart(candles, params):  # noqa: ANN001 - test stub only
+    def build_chart(candles, params):
         return "fig"
 
     module.run = run

@@ -355,10 +355,8 @@ def rank_levels(
         touch_positions = np.where(touch_mask)[0]
 
         # --- recency: bars since the most recent touch, exponentially decayed ---
-        if touch_positions.size:
-            last_touch_bars_ago = int(n - 1 - touch_positions[-1])
-        else:
-            last_touch_bars_ago = n  # never revisited inside the window
+        # Falls back to `n` when the level was never revisited inside the window.
+        last_touch_bars_ago = int(n - 1 - touch_positions[-1]) if touch_positions.size else n
         recency_score = 0.5 ** (last_touch_bars_ago / halflife)
 
         # --- touches: relative to the busiest level ---

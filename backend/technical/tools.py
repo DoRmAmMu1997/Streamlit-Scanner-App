@@ -47,7 +47,6 @@ from backend.technical.patterns import (
     detect_order_blocks,
 )
 
-
 # The in-process MCP server name and the fully-qualified tool names the agent is
 # allowed to call. The "mcp__<server>__<tool>" form is how the Claude Agent SDK
 # namespaces in-process tools (mirrors the fundamentals agent's allowed_tools).
@@ -124,7 +123,7 @@ class TechnicalToolContext:
         candles: pd.DataFrame,
         levels: list[dict],
         params: dict | None = None,
-    ) -> "TechnicalToolContext":
+    ) -> TechnicalToolContext:
         """Assemble the context: resample weekly + relevance-score both timeframes."""
         cfg = resolve_params(params)
 

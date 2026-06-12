@@ -43,9 +43,10 @@ import json
 import logging
 import re
 import sys
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Awaitable, Callable, Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -55,7 +56,6 @@ from backend.fundamentals.screener_in_client import (
     ScreenerInFetchError,
     fetch_company_data,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -697,10 +697,11 @@ def _describe_result_error(result: Any) -> str:
     server-side failure doesn't masquerade as a formatting problem.
     """
     errors = getattr(result, "errors", None)
-    if errors:
-        detail = "; ".join(str(error) for error in errors)
-    else:
-        detail = str(getattr(result, "result", "") or "")[:300]
+    detail = (
+        "; ".join(str(error) for error in errors)
+        if errors
+        else str(getattr(result, "result", "") or "")[:300]
+    )
     subtype = getattr(result, "subtype", "") or "unknown"
     status = getattr(result, "api_error_status", None)
     status_part = f" (HTTP {status})" if status else ""

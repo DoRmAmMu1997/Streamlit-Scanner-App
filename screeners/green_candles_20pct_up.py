@@ -23,6 +23,8 @@ most recent candle.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pandas as pd
 
 from backend.charts import candlestick_with_volume
@@ -79,7 +81,7 @@ def _latest_green_run(frame: pd.DataFrame, max_run: int) -> dict | None:
 class GreenCandles20PctUp(BaseScanner):
     """BUY when a fresh run of green candles has moved >= gain_threshold_pct."""
 
-    SCREENER = {
+    SCREENER: ClassVar[dict] = {
         "key": "green_candles_20pct_up",
         "name": "20% Up Green Candles (Lovevanshi)",
         "description": (
@@ -100,7 +102,7 @@ class GreenCandles20PctUp(BaseScanner):
         },
     }
 
-    EXTRA_RESULT_COLUMNS = [
+    EXTRA_RESULT_COLUMNS: ClassVar[list[str]] = [
         "run_length",
         "run_gain_pct",
         "run_low",

@@ -94,10 +94,9 @@ def test_session_scope_commits_and_rolls_back(monkeypatch, tmp_path: Path):
     with TestSessionLocal() as session:
         assert session.scalar(select(text("count(*)")).select_from(ScanRun)) == 1
 
-    with pytest.raises(RuntimeError, match="boom"):
-        with database.session_scope() as session:
-            session.add(_make_run())
-            raise RuntimeError("boom")
+    with pytest.raises(RuntimeError, match="boom"), database.session_scope() as session:
+        session.add(_make_run())
+        raise RuntimeError("boom")
 
     with TestSessionLocal() as session:
         assert session.scalar(select(text("count(*)")).select_from(ScanRun)) == 1

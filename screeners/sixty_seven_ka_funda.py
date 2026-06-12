@@ -15,6 +15,7 @@ step for that symbol rather than failing the whole scan.
 from __future__ import annotations
 
 import logging
+from typing import ClassVar
 
 import pandas as pd
 
@@ -28,7 +29,6 @@ from backend.sixty_seven.agent import SixtySevenVerdict, get_cached_agent
 from backend.sixty_seven.search_client import SerpApiSearchError, SerpApiSetupError
 from backend.sixty_seven.shortlister import DrawdownCandidate, shortlist_candidate
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -41,7 +41,7 @@ def _get_agent():
 class SixtySevenKaFunda(BaseScanner):
     """BUY only when the deterministic 67% gate and AI verifier both pass."""
 
-    SCREENER = {
+    SCREENER: ClassVar[dict] = {
         "key": "sixty_seven_ka_funda",
         "name": "67 Ka Funda (AI)",
         "description": (
@@ -60,7 +60,7 @@ class SixtySevenKaFunda(BaseScanner):
         },
     }
 
-    EXTRA_RESULT_COLUMNS = [
+    EXTRA_RESULT_COLUMNS: ClassVar[list[str]] = [
         "ath_price",
         "ath_date",
         "drawdown_pct",

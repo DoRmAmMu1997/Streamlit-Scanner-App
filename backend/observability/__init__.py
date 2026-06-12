@@ -32,7 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import TracebackType
 from typing import Any, TextIO
 
@@ -76,19 +76,19 @@ _TEXT_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 ExceptionInfo = tuple[type[BaseException], BaseException, TracebackType]
 
 __all__ = [
-    "EVENT_SCAN_STARTED",
-    "EVENT_SCAN_COMPLETED",
-    "EVENT_SCAN_PARTIAL",
-    "EVENT_SCAN_FAILED",
-    "EVENT_SYMBOL_SCAN_FAILED",
-    "EVENT_DAILY_JOB_STARTED",
-    "EVENT_DAILY_JOB_CONFIG_LOADED",
-    "EVENT_DAILY_JOB_CONFIG_INVALID",
-    "EVENT_DAILY_JOB_COMPLETED",
-    "EVENT_EXTERNAL_API_FAILED",
     "EVENT_AUTH_DENIED",
-    "EVENT_DATA_REFRESH_STARTED",
+    "EVENT_DAILY_JOB_COMPLETED",
+    "EVENT_DAILY_JOB_CONFIG_INVALID",
+    "EVENT_DAILY_JOB_CONFIG_LOADED",
+    "EVENT_DAILY_JOB_STARTED",
     "EVENT_DATA_REFRESH_COMPLETED",
+    "EVENT_DATA_REFRESH_STARTED",
+    "EVENT_EXTERNAL_API_FAILED",
+    "EVENT_SCAN_COMPLETED",
+    "EVENT_SCAN_FAILED",
+    "EVENT_SCAN_PARTIAL",
+    "EVENT_SCAN_STARTED",
+    "EVENT_SYMBOL_SCAN_FAILED",
     "ExceptionInfo",
     "JsonEventFormatter",
     "TextEventFormatter",
@@ -175,7 +175,7 @@ class JsonEventFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
             "timestamp": datetime.fromtimestamp(
-                record.created, tz=timezone.utc
+                record.created, tz=UTC
             ).isoformat(),
             "level": record.levelname,
             "logger": record.name,

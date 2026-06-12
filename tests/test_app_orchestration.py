@@ -26,7 +26,7 @@ class _FixedDate(real_date):
     """Freeze `date.today()` while keeping normal date arithmetic available."""
 
     @classmethod
-    def today(cls) -> "_FixedDate":
+    def today(cls) -> _FixedDate:
         return cls(2026, 6, 2)
 
 
@@ -74,7 +74,7 @@ class _FakeDataLoader:
 def test_scan_history_start_date_subtracts_calendar_years_and_handles_leap_day(monkeypatch):
     class LeapDay(real_date):
         @classmethod
-        def today(cls) -> "LeapDay":
+        def today(cls) -> LeapDay:
             return cls(2024, 2, 29)
 
     monkeypatch.setattr(app, "date", LeapDay)

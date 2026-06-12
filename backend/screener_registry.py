@@ -25,14 +25,13 @@ from __future__ import annotations
 import importlib
 import inspect
 import pkgutil
+from collections.abc import Callable
 from dataclasses import dataclass
 from types import ModuleType
-from typing import Callable
 
 import pandas as pd
 
 from backend.scanner_base import BaseScanner
-
 
 # Every screener must include these metadata fields in its SCREENER dict. They
 # tell the UI what to show and tell the backend which universe/lookback to use.

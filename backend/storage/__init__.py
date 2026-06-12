@@ -44,10 +44,10 @@ from backend.storage.repository import (
 
 __all__ = [
     "Base",
-    "SessionLocal",
     "ScanResult",
     "ScanRun",
     "ScanStatus",
+    "SessionLocal",
     "count_scan_results_for_runs",
     "create_scan_run",
     "engine",

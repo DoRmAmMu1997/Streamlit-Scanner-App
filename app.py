@@ -27,14 +27,13 @@ from __future__ import annotations
 # Streamlit's "magic" feature renders any top-level string expression as
 # `st.write(...)` content, which would push the page title below it. Keep
 # module documentation in `#` comments here.
-
 import hashlib
 import json
 import logging
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +43,11 @@ import streamlit.components.v1 as components
 from sqlalchemy.exc import OperationalError
 from streamlit.runtime.scriptrunner import get_script_run_ctx
 
+from backend.auth.session import (
+    AuthenticatedUser,
+    auth_secret_values,
+    require_authorized_user,
+)
 from backend.charts import render_chart_html
 from backend.config import (
     DAILY_CACHE_DIR,
@@ -55,31 +59,26 @@ from backend.config import (
     get_settings,
     validate_production_settings,
 )
-from backend.auth.session import (
-    AuthenticatedUser,
-    auth_secret_values,
-    require_authorized_user,
+from backend.daily_data_loader import (
+    DEFAULT_HISTORY_YEARS_BACK,
+    DailyDataLoader,
+    history_start_date,
 )
+from backend.dhan_client import DhanDataClient
 from backend.fundamentals import (
     AgentVerdict,
     FundamentalAgent,
     FundamentalsUsageLimitError,
 )
-from backend.daily_data_loader import (
-    DailyDataLoader,
-    DEFAULT_HISTORY_YEARS_BACK,
-    history_start_date,
-)
-from backend.dhan_client import DhanDataClient
-from backend.security import install_secret_redaction_filter, redact_text
 from backend.observability import (
     EVENT_DATA_REFRESH_COMPLETED,
     EVENT_DATA_REFRESH_STARTED,
     configure_logging,
     log_event,
 )
-from backend.screener_registry import ScreenerDefinition, ScreenerRegistryError, discover_screeners
 from backend.scanning import ScanStatus, run_scan
+from backend.screener_registry import ScreenerDefinition, ScreenerRegistryError, discover_screeners
+from backend.security import install_secret_redaction_filter, redact_text
 from backend.storage import (
     ScanRun,
     count_scan_results_for_runs,
@@ -102,7 +101,6 @@ from backend.universe_loader import (
     universe_file_path,
     universe_status,
 )
-
 
 # The CLI prefetch downloads ten years of daily candles for every stock in the
 # union of all universes. The window length is shared with the headless daily job
@@ -846,7 +844,7 @@ def _render_parameter_overrides(selected: ScreenerDefinition) -> None:
             key=f"reset_params_{selected.key}",
             help="Discard any parameter tweaks and use the screener's declared defaults.",
         ):
-            for param_key in defaults.keys():
+            for param_key in defaults:
                 state_key = _param_state_key(selected.key, param_key)
                 st.session_state.pop(state_key, None)
             st.rerun()
@@ -879,7 +877,7 @@ def _apply_param_overrides(selected: ScreenerDefinition, params: dict[str, Any])
     if desired. Only keys declared in the screener's `default_params` are
     pulled — that keeps random session_state values from leaking through.
     """
-    for param_key in (selected.default_params or {}).keys():
+    for param_key in selected.default_params or {}:
         state_key = _param_state_key(selected.key, param_key)
         if state_key in st.session_state:
             params[param_key] = st.session_state[state_key]
@@ -1053,8 +1051,8 @@ def _as_utc(value: datetime) -> datetime:
     naive values are stamped as the UTC they already are.
     """
     if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _format_utc_timestamp(value: datetime | None) -> str:

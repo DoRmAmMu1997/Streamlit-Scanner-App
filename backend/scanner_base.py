@@ -32,13 +32,13 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any, ClassVar
 
 import pandas as pd
 
 from backend.indicators import prepare_ohlc
 from backend.security import redact_text
-
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +72,8 @@ class BaseScanner(ABC):
     # Subclasses overwrite these. The base class uses placeholder values so
     # static type checkers do not complain; the registry validates real
     # values are present at discovery time.
-    SCREENER: dict = {}
-    EXTRA_RESULT_COLUMNS: list[str] = []
+    SCREENER: ClassVar[dict] = {}
+    EXTRA_RESULT_COLUMNS: ClassVar[list[str]] = []
 
     # ------------------------------------------------------------------
     # Public helpers used by the UI and the registry

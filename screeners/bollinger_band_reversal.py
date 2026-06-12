@@ -10,6 +10,8 @@ Flow in plain English:
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pandas as pd
 
 from backend.charts import add_bollinger_overlay, candlestick_with_volume
@@ -23,7 +25,7 @@ class BollingerBandReversal(BaseScanner):
     # Metadata picked up by the registry. The scanner runs across every mapped
     # symbol in the configured universe; there is no per-run cap on the number
     # of symbols scanned.
-    SCREENER = {
+    SCREENER: ClassVar[dict] = {
         "key": "bollinger_band_reversal",
         "name": "Bollinger Band Reversal",
         "description": "Shortlists F&O stocks with daily Bollinger Band(20, 2) rejection candles.",
@@ -35,7 +37,7 @@ class BollingerBandReversal(BaseScanner):
 
     # These extras are appended to the common schema in BaseScanner so the
     # output DataFrame has consistent leading columns across all screeners.
-    EXTRA_RESULT_COLUMNS = [
+    EXTRA_RESULT_COLUMNS: ClassVar[list[str]] = [
         "open",
         "high",
         "low",

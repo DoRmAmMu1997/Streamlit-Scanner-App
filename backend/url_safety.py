@@ -13,7 +13,6 @@ import ipaddress
 import socket
 from urllib.parse import urlparse
 
-
 _LOCALHOST_NAMES = {"localhost", "localhost.localdomain"}
 
 

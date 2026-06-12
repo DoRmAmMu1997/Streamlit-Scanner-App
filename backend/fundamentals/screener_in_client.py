@@ -36,7 +36,6 @@ from bs4 import BeautifulSoup
 
 from backend.url_safety import is_safe_http_url
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -356,7 +355,7 @@ def _parse_table(soup: BeautifulSoup, section_id: str) -> list[dict[str, str]]:
             if not cells:
                 continue
             if headers and len(headers) == len(cells):
-                rows.append(dict(zip(headers, cells)))
+                rows.append(dict(zip(headers, cells, strict=True)))
             else:
                 rows.append({str(idx): cell for idx, cell in enumerate(cells)})
         return rows
@@ -480,7 +479,7 @@ def _parse_peer_fragment_html(fragment_html: str) -> list[dict[str, str]]:
             if not cells:
                 continue
             if headers and len(headers) == len(cells):
-                rows.append(dict(zip(headers, cells)))
+                rows.append(dict(zip(headers, cells, strict=True)))
             else:
                 rows.append({str(idx): cell for idx, cell in enumerate(cells)})
         return rows
@@ -700,19 +699,13 @@ def _extract_concalls(soup: BeautifulSoup, *, limit: int = 8) -> list[dict[str, 
                     continue
                 link_by_label[label] = link["href"].strip()
 
-            def _get(*labels: str) -> str | None:
-                for label in labels:
-                    if label in link_by_label:
-                        return link_by_label[label]
-                return None
-
             items.append(
                 {
                     "month": month_text,
-                    "transcript_url": _get("transcript"),
-                    "ai_summary_url": _get("ai summary", "summary"),
-                    "ppt_url": _get("ppt", "notes"),
-                    "rec_url": _get("rec", "recording"),
+                    "transcript_url": _first_link(link_by_label, "transcript"),
+                    "ai_summary_url": _first_link(link_by_label, "ai summary", "summary"),
+                    "ppt_url": _first_link(link_by_label, "ppt", "notes"),
+                    "rec_url": _first_link(link_by_label, "rec", "recording"),
                 }
             )
             if len(items) >= limit:
@@ -721,6 +714,20 @@ def _extract_concalls(soup: BeautifulSoup, *, limit: int = 8) -> list[dict[str, 
     except Exception:  # noqa: BLE001
         logger.warning("Could not parse concalls section", exc_info=True)
         return []
+
+
+def _first_link(link_by_label: dict[str, str], *labels: str) -> str | None:
+    """Return the first link whose visible label matches any of ``labels``.
+
+    Takes the lookup dict as an explicit argument instead of closing over the
+    row loop's variable. The previous closure bound that loop variable late
+    (ruff B023): correct only as long as every call happened inside the same
+    iteration that built the dict, and silently wrong the moment a call moved.
+    """
+    for label in labels:
+        if label in link_by_label:
+            return link_by_label[label]
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -787,10 +794,7 @@ def _parse_company_page(
     # line is computed in JS, not present in the HTML). Same session guard as
     # peers: without a session (unit tests) it stays None and the agent falls
     # back to industry_pe.
-    if session is not None:
-        median_pe = _fetch_median_pe(soup, base_url=source_url, session=session)
-    else:
-        median_pe = None
+    median_pe = _fetch_median_pe(soup, base_url=source_url, session=session) if session is not None else None
     # Announcements + concalls live in the static HTML, no extra fetch needed.
     announcements = _extract_announcements(soup)
     concalls = _extract_concalls(soup)

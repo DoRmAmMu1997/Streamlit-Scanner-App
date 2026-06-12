@@ -33,12 +33,12 @@ from __future__ import annotations
 import json
 import math
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from numbers import Integral, Real
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Callable
 
 import pandas as pd
 import pytest
@@ -48,7 +48,6 @@ from screeners import (
     envelope_knoxville_buy,
     heikin_ashi_supertrend,
 )
-
 
 GOLDEN_DIR = Path(__file__).parent / "golden" / "screeners"
 

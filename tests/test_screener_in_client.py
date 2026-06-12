@@ -16,7 +16,6 @@ from backend.fundamentals.screener_in_client import (
     fetch_company_data,
 )
 
-
 # A trimmed-but-realistic snapshot of how screener.in lays out a company page.
 # The IDs (#top-ratios, #quarters, #profit-loss, #balance-sheet, #peers) and
 # the inner span.name / span.number markup all match what the live site uses.
@@ -254,6 +253,7 @@ _HTML_WITH_HTMX_AND_STATIC_PEERS = _HTML_WITH_STATIC_PEER_TABLE.replace(
 
 def test_extract_peers_url_finds_hx_get_attribute():
     from bs4 import BeautifulSoup
+
     from backend.fundamentals.screener_in_client import _extract_peers_url
 
     soup = BeautifulSoup(_HTML_WITH_PEER_PLACEHOLDER, "lxml")
@@ -264,6 +264,7 @@ def test_extract_peers_url_finds_hx_get_attribute():
 
 def test_extract_peers_url_falls_back_to_regex_scan():
     from bs4 import BeautifulSoup
+
     from backend.fundamentals.screener_in_client import _extract_peers_url
 
     # No hx-get attribute — the URL is hidden inside a <script> tag.
@@ -280,6 +281,7 @@ def test_extract_peers_url_falls_back_to_regex_scan():
 
 def test_extract_peers_url_returns_none_when_absent():
     from bs4 import BeautifulSoup
+
     from backend.fundamentals.screener_in_client import _extract_peers_url
 
     soup = BeautifulSoup("<html><body><p>No placeholder here.</p></body></html>", "lxml")
@@ -288,6 +290,7 @@ def test_extract_peers_url_returns_none_when_absent():
 
 def test_fetch_peer_table_follows_htmx_url_and_strips_median_row(monkeypatch):
     from bs4 import BeautifulSoup
+
     from backend.fundamentals import screener_in_client as module
 
     monkeypatch.setattr(module, "_fetch_html", lambda url, session: _PEERS_FRAGMENT_HTML)
@@ -308,6 +311,7 @@ def test_fetch_peer_table_follows_htmx_url_and_strips_median_row(monkeypatch):
 
 def test_fetch_peer_table_uses_static_table_when_htmx_url_missing():
     from bs4 import BeautifulSoup
+
     from backend.fundamentals import screener_in_client as module
 
     rows = module._fetch_peer_table(
@@ -324,8 +328,9 @@ def test_fetch_peer_table_uses_static_table_when_htmx_url_missing():
 
 def test_fetch_peer_table_falls_back_to_static_table_when_htmx_fetch_fails(monkeypatch):
     from bs4 import BeautifulSoup
-    from backend.fundamentals.screener_in_client import ScreenerInFetchError
+
     from backend.fundamentals import screener_in_client as module
+    from backend.fundamentals.screener_in_client import ScreenerInFetchError
 
     def boom(url, session):
         raise ScreenerInFetchError("simulated rate limit")
@@ -344,6 +349,7 @@ def test_fetch_peer_table_falls_back_to_static_table_when_htmx_fetch_fails(monke
 
 def test_fetch_peer_table_falls_back_to_static_table_when_htmx_fragment_empty(monkeypatch):
     from bs4 import BeautifulSoup
+
     from backend.fundamentals import screener_in_client as module
 
     monkeypatch.setattr(module, "_fetch_html", lambda url, session: "<div>no rows</div>")
@@ -361,6 +367,7 @@ def test_fetch_peer_table_falls_back_to_static_table_when_htmx_fragment_empty(mo
 def test_fetch_peer_table_caps_at_limit(monkeypatch):
     """Top-7 cap is honored even when the endpoint returns more rows."""
     from bs4 import BeautifulSoup
+
     from backend.fundamentals import screener_in_client as module
 
     # Build a fragment with 12 rows.
@@ -388,6 +395,7 @@ def test_fetch_peer_table_caps_at_limit(monkeypatch):
 
 def test_fetch_peer_table_soft_fails_when_url_missing(monkeypatch):
     from bs4 import BeautifulSoup
+
     from backend.fundamentals import screener_in_client as module
 
     # _fetch_html would not be called because _extract_peers_url returns None.
@@ -408,8 +416,9 @@ def test_fetch_peer_table_soft_fails_when_url_missing(monkeypatch):
 
 def test_fetch_peer_table_soft_fails_on_fetch_error(monkeypatch):
     from bs4 import BeautifulSoup
-    from backend.fundamentals.screener_in_client import ScreenerInFetchError
+
     from backend.fundamentals import screener_in_client as module
+    from backend.fundamentals.screener_in_client import ScreenerInFetchError
 
     def boom(url, session):
         raise ScreenerInFetchError("simulated rate limit")
@@ -433,6 +442,7 @@ def test_fetch_peer_table_rejects_absolute_private_peer_url(monkeypatch):
     section instead of fetching attacker-chosen infrastructure.
     """
     from bs4 import BeautifulSoup
+
     from backend.fundamentals import screener_in_client as module
 
     html = """
@@ -536,6 +546,7 @@ _HTML_WITH_DOCUMENTS = """
 
 def test_extract_announcements_returns_titles_and_links():
     from bs4 import BeautifulSoup
+
     from backend.fundamentals.screener_in_client import _extract_announcements
 
     soup = BeautifulSoup(_HTML_WITH_DOCUMENTS, "lxml")
@@ -552,6 +563,7 @@ def test_extract_announcements_returns_titles_and_links():
 def test_extract_announcements_caps_at_limit():
     """Even if the page lists 50 announcements, only the first `limit` are kept."""
     from bs4 import BeautifulSoup
+
     from backend.fundamentals.screener_in_client import _extract_announcements
 
     items_html = "".join(
@@ -571,6 +583,7 @@ def test_extract_announcements_caps_at_limit():
 
 def test_extract_announcements_soft_fails_when_section_missing():
     from bs4 import BeautifulSoup
+
     from backend.fundamentals.screener_in_client import _extract_announcements
 
     soup = BeautifulSoup("<html><body></body></html>", "lxml")
@@ -579,6 +592,7 @@ def test_extract_announcements_soft_fails_when_section_missing():
 
 def test_extract_concalls_picks_up_transcript_and_button_urls():
     from bs4 import BeautifulSoup
+
     from backend.fundamentals.screener_in_client import _extract_concalls
 
     soup = BeautifulSoup(_HTML_WITH_DOCUMENTS, "lxml")
@@ -607,6 +621,7 @@ def test_extract_concalls_picks_up_transcript_and_button_urls():
 
 def test_extract_concalls_caps_at_limit():
     from bs4 import BeautifulSoup
+
     from backend.fundamentals.screener_in_client import _extract_concalls
 
     rows_html = "".join(
@@ -658,6 +673,7 @@ _HTML_WITH_COMPANY_ID = """
 
 def test_extract_company_id_finds_numeric_id():
     from bs4 import BeautifulSoup
+
     from backend.fundamentals.screener_in_client import _extract_company_id
 
     soup = BeautifulSoup(_HTML_WITH_COMPANY_ID, "lxml")
@@ -666,6 +682,7 @@ def test_extract_company_id_finds_numeric_id():
 
 def test_extract_company_id_returns_none_when_absent():
     from bs4 import BeautifulSoup
+
     from backend.fundamentals.screener_in_client import _extract_company_id
 
     soup = BeautifulSoup("<html><body><p>no api urls here</p></body></html>", "lxml")
@@ -691,6 +708,7 @@ def test_median_of_pe_series_returns_none_on_empty_or_malformed():
 
 def test_fetch_median_pe_computes_median_from_chart_endpoint(monkeypatch):
     from bs4 import BeautifulSoup
+
     from backend.fundamentals import screener_in_client as module
 
     monkeypatch.setattr(module, "_fetch_html", lambda url, session: _PE_CHART_JSON)
@@ -707,6 +725,7 @@ def test_fetch_median_pe_computes_median_from_chart_endpoint(monkeypatch):
 
 def test_fetch_median_pe_soft_fails_when_company_id_missing(monkeypatch):
     from bs4 import BeautifulSoup
+
     from backend.fundamentals import screener_in_client as module
 
     # No company id on the page → _fetch_html must not be called.
@@ -723,6 +742,7 @@ def test_fetch_median_pe_soft_fails_when_company_id_missing(monkeypatch):
 
 def test_fetch_median_pe_soft_fails_on_fetch_error(monkeypatch):
     from bs4 import BeautifulSoup
+
     from backend.fundamentals import screener_in_client as module
 
     def boom(url, session):
@@ -737,6 +757,7 @@ def test_fetch_median_pe_soft_fails_on_fetch_error(monkeypatch):
 
 def test_fetch_median_pe_soft_fails_on_non_json(monkeypatch):
     from bs4 import BeautifulSoup
+
     from backend.fundamentals import screener_in_client as module
 
     monkeypatch.setattr(module, "_fetch_html", lambda url, session: "<html>not json</html>")

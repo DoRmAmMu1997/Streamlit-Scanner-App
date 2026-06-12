@@ -33,6 +33,7 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 import threading
+from typing import ClassVar
 
 import pandas as pd
 
@@ -56,7 +57,6 @@ from backend.technical.patterns import (
     detect_order_blocks,
 )
 from backend.technical.tools import DEFAULT_TOOL_PARAMS, resolve_params
-
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,7 @@ def _get_agent() -> TechnicalAnalysisAgent:
 class TechnicalAnalysis(BaseScanner):
     """BUY when price is at support or an AI-confirmed bullish setup is present."""
 
-    SCREENER = {
+    SCREENER: ClassVar[dict] = {
         "key": "technical_analysis",
         "name": "Technical Analysis (AI)",
         "description": (
@@ -136,7 +136,7 @@ class TechnicalAnalysis(BaseScanner):
         },
     }
 
-    EXTRA_RESULT_COLUMNS = [
+    EXTRA_RESULT_COLUMNS: ClassVar[list[str]] = [
         "pattern",
         "confirmed",
         "confidence",

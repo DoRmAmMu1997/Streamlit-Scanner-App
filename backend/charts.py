@@ -12,7 +12,6 @@ from __future__ import annotations
 # Why Lightweight Charts instead of Plotly: its price scale is natively
 # drag-to-scale (grab the right-edge price axis and drag to zoom the Y-axis),
 # which is the TradingView-style interaction the app needs and Plotly cannot do.
-
 import html as _html
 import json
 import math
@@ -20,7 +19,6 @@ import math
 import pandas as pd
 
 from backend.indicators import bollinger_bands, build_heikin_ashi, envelope, stochastic, supertrend
-
 
 # Pinned Lightweight Charts v5 version. Pinning an exact version keeps the
 # embedded JavaScript API stable; bump deliberately when upgrading.
@@ -145,7 +143,7 @@ def _candle_series(frame: pd.DataFrame, ha: bool) -> dict:
         lows, closes = frame["low"], frame["close"]
 
     data = []
-    for time, open_, high, low, close in zip(times, opens, highs, lows, closes):
+    for time, open_, high, low, close in zip(times, opens, highs, lows, closes, strict=False):
         values = (_num(open_), _num(high), _num(low), _num(close))
         if None in values:
             continue  # a candle needs all four values; skip incomplete rows
@@ -171,7 +169,7 @@ def _volume_series(frame: pd.DataFrame) -> dict:
     times = _iso_times(frame["timestamp"])
     data = []
     for time, open_, close, volume in zip(
-        times, frame["open"], frame["close"], frame["volume"]
+        times, frame["open"], frame["close"], frame["volume"], strict=False
     ):
         value = _num(volume)
         if value is None:
@@ -196,7 +194,7 @@ def _line_series(timestamps, values, title: str, color: str, *, dash=None, width
     """Build a line series spec. NaN values become whitespace gaps."""
     times = _iso_times(timestamps)
     data = []
-    for time, value in zip(times, values):
+    for time, value in zip(times, values, strict=False):
         numeric = _num(value)
         if numeric is None:
             data.append({"time": time})  # whitespace gap (e.g. indicator warm-up)
@@ -357,7 +355,7 @@ def add_supertrend_overlay(spec: dict, candles_for_st: pd.DataFrame, *,
     run_direction: float | None = None
     run_points: list = []
     for timestamp, value, direction in zip(
-        st_frame["timestamp"], st_frame["supertrend"], direction_series
+        st_frame["timestamp"], st_frame["supertrend"], direction_series, strict=False
     ):
         numeric = _num(value)
         sign = _num(direction)
