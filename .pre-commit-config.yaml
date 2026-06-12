@@ -16,7 +16,7 @@ repos:
       - id: ruff
         name: ruff check (no fixes)
         # Match the repository paths checked by Ruff in GitHub Actions.
-        files: ^(app\.py|backend/|screeners/|Dependencies/|tests/)
+        files: ^(app\.py|backend/|screeners/|ui/|Dependencies/|tests/)
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0

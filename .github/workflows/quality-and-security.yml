@@ -43,13 +43,13 @@ jobs:
         run: |
           # The floor sits two points under the measured 86% so routine PRs
           # don't fight the gate, while a large untested addition still fails.
-          python -m pytest -q --cov=backend --cov=screeners --cov-fail-under=84
+          python -m pytest -q --cov=backend --cov=screeners --cov=ui --cov-fail-under=84
 
       - name: Compile importable Python files
-        run: python -m compileall -q app.py backend screeners tests
+        run: python -m compileall -q app.py backend screeners ui tests
 
       - name: Run Ruff static checks
-        run: python -m ruff check app.py backend screeners Dependencies tests
+        run: python -m ruff check app.py backend screeners ui Dependencies tests
 
       - name: Run mypy type checks
         run: |
@@ -63,7 +63,7 @@ jobs:
           # Bandit catches common Python security footguns, such as unsafe
           # subprocess calls or insecure temp-file patterns, before they reach
           # a branch reviewers have to reason through manually.
-          python -m bandit -r app.py backend screeners Dependencies -q
+          python -m bandit -r app.py backend screeners ui Dependencies -q
 
       - name: Audit pinned dependency advisories
         run: |

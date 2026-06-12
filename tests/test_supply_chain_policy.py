@@ -25,13 +25,14 @@ def test_ci_workflow_runs_quality_and_dependency_security_checks():
     assert 'python-version: ["3.11", "3.12"]' in text
     assert "python -m pre_commit validate-config .pre-commit-config.yaml" in text
     assert (
-        "python -m pytest -q --cov=backend --cov=screeners --cov-fail-under=84"
+        "python -m pytest -q --cov=backend --cov=screeners --cov=ui "
+        "--cov-fail-under=84"
         in text
     )
-    assert "python -m compileall -q app.py backend screeners tests" in text
-    assert "python -m ruff check app.py backend screeners Dependencies tests" in text
+    assert "python -m compileall -q app.py backend screeners ui tests" in text
+    assert "python -m ruff check app.py backend screeners ui Dependencies tests" in text
     assert "python -m mypy" in text
-    assert "python -m bandit -r app.py backend screeners Dependencies -q" in text
+    assert "python -m bandit -r app.py backend screeners ui Dependencies -q" in text
     assert "python -m pip_audit -r constraints.txt" in text
     assert "python -m pip_audit -r requirements.txt -r requirements-dev.txt" not in text
 
@@ -55,7 +56,7 @@ def test_pre_commit_configuration_is_non_rewriting():
         "debug-statements",
     } <= hooks_by_id.keys()
     assert hooks_by_id["ruff"]["files"] == (
-        r"^(app\.py|backend/|screeners/|Dependencies/|tests/)"
+        r"^(app\.py|backend/|screeners/|ui/|Dependencies/|tests/)"
     )
     assert all("--fix" not in hook.get("args", []) for hook in hooks)
 
@@ -107,10 +108,13 @@ def test_readme_documents_local_quality_and_security_commands():
     assert "pip install -r requirements.txt -c constraints.txt" in text
     assert "pip install -r requirements-dev.txt -c constraints.txt" in text
     assert (
-        "python -m pytest -q --cov=backend --cov=screeners --cov-fail-under=84"
+        "python -m pytest -q --cov=backend --cov=screeners --cov=ui "
+        "--cov-fail-under=84"
         in text
     )
-    assert "python -m bandit -r app.py backend screeners Dependencies -q" in text
+    assert "python -m compileall -q app.py backend screeners ui tests" in text
+    assert "python -m ruff check app.py backend screeners ui Dependencies tests" in text
+    assert "python -m bandit -r app.py backend screeners ui Dependencies -q" in text
     assert "python -m pip_audit -r constraints.txt" in text
     assert "python -m pre_commit validate-config .pre-commit-config.yaml" in text
     assert "python -m pre_commit run --all-files" in text

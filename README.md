@@ -827,10 +827,10 @@ pip install -r requirements-dev.txt -c constraints.txt
 Run the full local verification set before publishing changes:
 
 ```bash
-python -m pytest -q --cov=backend --cov=screeners --cov-fail-under=84
-python -m compileall -q app.py backend screeners tests
-python -m ruff check app.py backend screeners Dependencies tests
-python -m bandit -r app.py backend screeners Dependencies -q
+python -m pytest -q --cov=backend --cov=screeners --cov=ui --cov-fail-under=84
+python -m compileall -q app.py backend screeners ui tests
+python -m ruff check app.py backend screeners ui Dependencies tests
+python -m bandit -r app.py backend screeners ui Dependencies -q
 python -m pip_audit -r constraints.txt
 python -m pre_commit validate-config .pre-commit-config.yaml
 python -m pre_commit run --all-files

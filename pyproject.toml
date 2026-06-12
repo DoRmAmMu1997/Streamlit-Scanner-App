@@ -38,7 +38,7 @@ external = ["BLE"]
 # CI runs 3.11; local development may run newer. Pinning the target version
 # keeps local runs honest about what CI will accept.
 python_version = "3.11"
-files = ["app.py", "backend", "screeners", "Dependencies"]
+files = ["app.py", "backend", "screeners", "ui", "Dependencies"]
 # First-adoption strictness: check function bodies everywhere (including
 # untyped ones) without yet *requiring* annotations on every def. Stricter
 # flags (disallow_untyped_defs) and tests/ coverage are deliberate follow-ups.
