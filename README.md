@@ -804,7 +804,7 @@ python -m pytest -q
 python -m compileall -q app.py backend screeners tests
 python -m ruff check app.py backend screeners Dependencies tests
 python -m bandit -r app.py backend screeners Dependencies -q
-python -m pip_audit -r requirements.txt
+python -m pip_audit -r constraints.txt
 ```
 
 Beginner note: `requirements-optional.txt` is intentionally separate. Those

@@ -53,9 +53,9 @@ jobs:
           # a branch reviewers have to reason through manually.
           python -m bandit -r app.py backend screeners Dependencies -q
 
-      - name: Audit runtime dependency advisories
+      - name: Audit pinned dependency advisories
         run: |
-          # pip-audit checks the runtime requirements against known PyPI
-          # advisories. Optional native accelerators stay outside this check
-          # because they are not required for the app to run.
-          python -m pip_audit -r requirements.txt
+          # Audit the exact direct versions installed above. Auditing the
+          # unconstrained requirements would resolve newer packages and could
+          # miss a vulnerability in the versions CI actually tested.
+          python -m pip_audit -r constraints.txt
