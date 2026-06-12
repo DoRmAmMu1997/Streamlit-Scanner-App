@@ -34,6 +34,37 @@ allowed-confusables = ["–", "∪"]
 # external-tool noqa rather than letting RUF100 delete the documentation.
 external = ["BLE"]
 
+[tool.mypy]
+# CI runs 3.11; local development may run newer. Pinning the target version
+# keeps local runs honest about what CI will accept.
+python_version = "3.11"
+files = ["app.py", "backend", "screeners", "Dependencies"]
+# First-adoption strictness: check function bodies everywhere (including
+# untyped ones) without yet *requiring* annotations on every def. Stricter
+# flags (disallow_untyped_defs) and tests/ coverage are deliberate follow-ups.
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+# Catch stale or mistyped suppressions throughout the checked application.
+# Optional packages differ between local machines and CI, so only those exact
+# import/assignment lines also suppress the environment-dependent unused-ignore.
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+# Third-party packages that ship no type stubs (and optional accelerators
+# that are not installed on CI). pandas is deliberately untyped here:
+# pandas-stubs would surface hundreds of new errors in this pandas-heavy
+# codebase and is its own future migration.
+module = [
+    "dhanhq.*",
+    "pandas.*",
+    "pandas_ta.*",
+    "pyarrow.*",
+    "pypdf.*",
+    "talib.*",
+]
+ignore_missing_imports = true
+
 [tool.ruff.lint.per-file-ignores]
 # B017: tests intentionally assert on bare Exception for defensive paths.
 # RUF012: test fakes use mutable class attributes as fixtures; ClassVar

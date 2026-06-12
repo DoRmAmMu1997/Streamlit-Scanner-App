@@ -24,14 +24,11 @@ SCAN-003 service/database path.
 from __future__ import annotations
 
 import logging
-from contextlib import contextmanager
 from datetime import date
 from typing import Any
 
 import pandas as pd
 import pytest
-from sqlalchemy import create_engine, event
-from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from backend.observability import (
@@ -42,7 +39,6 @@ from backend.observability import (
 )
 from backend.scanning import ScanRunResult, ScanStatus
 from backend.screener_registry import ScreenerDefinition
-from backend.storage.models import Base
 from backend.storage.repository import get_latest_scan_runs, get_scan_results
 
 
@@ -55,52 +51,9 @@ def _event_fields(caplog, event_name: str) -> list[dict]:
     ]
 
 
-@pytest.fixture
-def job_engine(tmp_path) -> Engine:
-    """Create a throwaway SQLite database for job-history assertions.
-
-    Beginner note:
-    The production command writes to whatever ``DATABASE_URL`` points at. Tests
-    use this temp database instead so a normal pytest run cannot pollute local
-    scan history.
-    """
-    engine = create_engine(
-        f"sqlite:///{(tmp_path / 'job-scan-history.db').as_posix()}",
-        connect_args={"check_same_thread": False},
-        future=True,
-    )
-
-    @event.listens_for(engine, "connect")
-    def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
-        """Match the app's SQLite parent/child safety setting."""
-        dbapi_connection.execute("PRAGMA foreign_keys=ON")
-
-    Base.metadata.create_all(engine)
-    yield engine
-    engine.dispose()
-
-
-@pytest.fixture
-def job_session_factory(job_engine):
-    """Return the transaction helper shape expected by ``run_scan``.
-
-    ``run_scan`` does not create SQLAlchemy sessions by hand; it asks for a
-    factory that behaves like ``backend.storage.database.session_scope``. This
-    fixture gives it the same commit-on-success / rollback-on-error behavior,
-    but against the temporary test engine.
-    """
-
-    @contextmanager
-    def factory():
-        with Session(job_engine) as session:
-            try:
-                yield session
-                session.commit()
-            except Exception:
-                session.rollback()
-                raise
-
-    return factory
+# The file-backed ``file_db_engine`` / ``file_session_factory`` fixtures these
+# tests use live in tests/conftest.py, so a normal pytest run cannot pollute
+# local scan history.
 
 
 class _FakeLoader:
@@ -190,8 +143,8 @@ def test_default_screener_keys_are_the_deterministic_daily_set():
 
 
 def test_run_daily_scan_uses_registry_universes_and_persists_history(
-    job_engine,
-    job_session_factory,
+    file_db_engine,
+    file_session_factory,
 ):
     """Run all defaults through the real service and query saved history.
 
@@ -238,7 +191,7 @@ def test_run_daily_scan_uses_registry_universes_and_persists_history(
         registry_loader=lambda: registry,
         universe_loader=load_universe,
         data_loader_factory=_FakeLoader,
-        session_factory=job_session_factory,
+        session_factory=file_session_factory,
         today=date(2026, 6, 5),
     )
 
@@ -253,7 +206,7 @@ def test_run_daily_scan_uses_registry_universes_and_persists_history(
         assert params["start_date"] == date(2016, 6, 5)
         assert params["end_date"] == date(2026, 6, 5)
 
-    with Session(job_engine) as session:
+    with Session(file_db_engine) as session:
         # Query back through repository helpers instead of raw SQL. That proves
         # the future history page can read the same rows the job created.
         runs = sorted(get_latest_scan_runs(session, limit=10), key=lambda run: run.screener_key)
@@ -270,7 +223,7 @@ def test_run_daily_scan_uses_registry_universes_and_persists_history(
         }
 
 
-def test_partial_scan_is_recorded_and_still_exits_zero(job_session_factory):
+def test_partial_scan_is_recorded_and_still_exits_zero(file_session_factory):
     """A scan with symbol-level failures is useful history, not a fatal job.
 
     Partial means "the scan ran and history captured the problem." That should
@@ -291,7 +244,7 @@ def test_partial_scan_is_recorded_and_still_exits_zero(job_session_factory):
         data_loader_factory=lambda: _FakeLoader(
             [{"symbol": "PARTIAL2", "message": "offline fixture failure"}]
         ),
-        session_factory=job_session_factory,
+        session_factory=file_session_factory,
         today=date(2026, 6, 5),
     )
 
@@ -300,7 +253,7 @@ def test_partial_scan_is_recorded_and_still_exits_zero(job_session_factory):
     assert summary.outcomes[0].fatal is False
 
 
-def test_failed_screener_is_recorded_and_exits_nonzero(job_session_factory, capsys):
+def test_failed_screener_is_recorded_and_exits_nonzero(file_session_factory, capsys):
     """A full screener failure should fail the scheduled command safely.
 
     The fake exception includes an obvious secret marker. The assertion below is
@@ -318,7 +271,7 @@ def test_failed_screener_is_recorded_and_exits_nonzero(job_session_factory, caps
         },
         universe_loader=lambda _key: _fake_universe("BROKEN"),
         data_loader_factory=_FakeLoader,
-        session_factory=job_session_factory,
+        session_factory=file_session_factory,
         today=date(2026, 6, 5),
     )
 
@@ -361,7 +314,7 @@ def test_setup_failure_exits_nonzero_without_printing_raw_exception(capsys):
     assert "LEAKME" not in output
 
 
-def test_unknown_screener_exits_nonzero_and_continues_known_scans(job_session_factory):
+def test_unknown_screener_exits_nonzero_and_continues_known_scans(file_session_factory):
     """A bad configured key should not prevent later valid keys from running.
 
     This mirrors how scheduled configs fail in real life: one typo should make
@@ -379,7 +332,7 @@ def test_unknown_screener_exits_nonzero_and_continues_known_scans(job_session_fa
         },
         universe_loader=lambda _key: _fake_universe("KNOWN"),
         data_loader_factory=_FakeLoader,
-        session_factory=job_session_factory,
+        session_factory=file_session_factory,
         today=date(2026, 6, 5),
     )
 
@@ -522,7 +475,7 @@ def test_main_stops_before_running_job_when_schema_bootstrap_fails(capsys):
 
 
 def test_config_run_skips_disabled_entries_and_runs_enabled(
-    job_session_factory,
+    file_session_factory,
     capsys,
 ):
     """Disabled config entries are reported as skipped and never executed."""
@@ -546,7 +499,7 @@ def test_config_run_skips_disabled_entries_and_runs_enabled(
         },
         universe_loader=lambda key: _fake_universe(key.upper()),
         data_loader_factory=_FakeLoader,
-        session_factory=job_session_factory,
+        session_factory=file_session_factory,
         today=date(2026, 6, 5),
     )
 
@@ -624,7 +577,7 @@ def test_config_entry_overrides_universe_and_params_reach_the_service(capsys):
 
 
 def test_config_unknown_screener_is_fatal_but_keeps_running_valid_entries(
-    job_session_factory,
+    file_session_factory,
 ):
     """A bad screener_key in the config behaves like a bad --screener key."""
     from backend.jobs.daily_scan_config import DailyScanEntry
@@ -643,7 +596,7 @@ def test_config_unknown_screener_is_fatal_but_keeps_running_valid_entries(
         },
         universe_loader=lambda key: _fake_universe(key.upper()),
         data_loader_factory=_FakeLoader,
-        session_factory=job_session_factory,
+        session_factory=file_session_factory,
         today=date(2026, 6, 5),
     )
 

@@ -1,0 +1,28 @@
+# Local commit-time checks (QUAL-003).
+#
+# Install once with:  pre-commit install
+# Run on demand with: pre-commit run --all-files
+#
+# Policy: hooks here only CHECK, never rewrite files. Auto-fixers are run
+# deliberately (`ruff check --fix`) so a commit never changes content the
+# author didn't review. CI remains the authoritative gate; these hooks just
+# catch the obvious failures before a push.
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Keep this rev aligned with the ruff pin in constraints.txt.
+    rev: v0.15.1
+    hooks:
+      - id: ruff
+        name: ruff check (no fixes)
+        # Match the repository paths checked by Ruff in GitHub Actions.
+        files: ^(app\.py|backend/|screeners/|Dependencies/|tests/)
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
+      - id: debug-statements

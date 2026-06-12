@@ -40,3 +40,8 @@ env/
 # OS noise.
 .DS_Store
 Thumbs.db
+
+# Coverage measurement artifacts (pytest-cov).
+.coverage
+.coverage.*
+htmlcov/

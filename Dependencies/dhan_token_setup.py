@@ -413,7 +413,8 @@ def main() -> None:
         # Surface a friendly identifier from the profile response so the
         # user knows their request landed on the right account.
         if isinstance(profile, dict):
-            data = profile.get("data") if isinstance(profile.get("data"), dict) else profile
+            payload = profile.get("data")
+            data = payload if isinstance(payload, dict) else profile
             client_id_back = data.get("dhanClientId") or data.get("clientId") or "?"
             print(f"OK: token validated. Client ID returned by DhanHQ = {client_id_back}")
 

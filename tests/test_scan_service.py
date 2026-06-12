@@ -13,8 +13,6 @@ from contextlib import contextmanager
 from datetime import date
 
 import pandas as pd
-import pytest
-from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 
 from backend.observability import (
@@ -25,43 +23,10 @@ from backend.observability import (
     EVENT_SYMBOL_SCAN_FAILED,
 )
 from backend.scanning import ScanStatus, run_scan
-from backend.storage.models import Base
 from backend.storage.repository import get_latest_scan_runs, get_scan_results
 
-
-@pytest.fixture
-def db_engine():
-    """An in-memory SQLite engine with the scan-history tables created."""
-    engine = create_engine("sqlite://", future=True)
-
-    @event.listens_for(engine, "connect")
-    def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
-        dbapi_connection.execute("PRAGMA foreign_keys=ON")
-
-    Base.metadata.create_all(engine)
-    yield engine
-    engine.dispose()
-
-
-@pytest.fixture
-def session_factory(db_engine):
-    """A transactional session factory bound to the in-memory engine.
-
-    Mirrors ``backend.storage.database.session_scope`` (commit on success, roll
-    back on error) but points at the test database instead of the real one.
-    """
-
-    @contextmanager
-    def factory():
-        with Session(db_engine) as session:
-            try:
-                yield session
-                session.commit()
-            except Exception:
-                session.rollback()
-                raise
-
-    return factory
+# The ``db_engine`` and ``session_factory`` fixtures these tests use live in
+# tests/conftest.py, shared with the other scan-history test modules.
 
 
 class _FakeLoader:

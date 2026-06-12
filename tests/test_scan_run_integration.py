@@ -26,63 +26,19 @@ by pytest for this test.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import date
 from decimal import Decimal
 
 import pandas as pd
-import pytest
-from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from backend.scanning import ScanStatus, run_scan
-from backend.storage.database import _make_engine
-from backend.storage.models import Base
 from backend.storage.repository import get_latest_scan_runs, get_scan_results
 
-
-@pytest.fixture
-def integration_engine(tmp_path) -> Iterator[Engine]:
-    """Create a throwaway SQLite database that behaves like local scan history.
-
-    Beginner note:
-    A file-backed temp DB is still fast, but it is closer to the real
-    ``data/scanner.db`` than an in-memory database. Separate SQLAlchemy sessions
-    can open separate connections and still see the same rows, which is exactly
-    what a scan service plus history query needs to prove.
-    """
-    db_path = tmp_path / "test_scan_history.db"
-    # Reuse the production engine factory so this integration test exercises the
-    # exact SQLite settings real scan history uses: foreign-key cascades plus the
-    # WAL/busy-timeout concurrency pragmas. tests/test_scan_storage_database.py
-    # uses the same factory.
-    engine = _make_engine(f"sqlite:///{db_path.as_posix()}")
-    Base.metadata.create_all(engine)
-    yield engine
-    engine.dispose()
-
-
-@pytest.fixture
-def integration_session_factory(integration_engine):
-    """Return the transaction helper that ``run_scan`` expects.
-
-    The production service defaults to ``backend.storage.database.session_scope``.
-    Tests inject this factory instead so the real service/repository code writes
-    to the temporary database above, never to the developer's local history file.
-    """
-
-    @contextmanager
-    def factory():
-        with Session(integration_engine) as session:
-            try:
-                yield session
-                session.commit()
-            except Exception:
-                session.rollback()
-                raise
-
-    return factory
+# The file-backed ``file_db_engine`` / ``file_session_factory`` fixtures these
+# tests use live in tests/conftest.py. They are built with the production
+# ``_make_engine`` factory on purpose: integration tests should exercise the
+# exact SQLite settings real scan history uses.
 
 
 class _FakeDataLoader:
@@ -121,8 +77,8 @@ def _fake_universe() -> pd.DataFrame:
 
 
 def test_full_scan_run_persists_results_and_history_can_be_queried(
-    integration_engine,
-    integration_session_factory,
+    file_db_engine,
+    file_session_factory,
 ):
     """Prove legacy evidence survives canonical enrichment in real SQLite.
 
@@ -183,7 +139,7 @@ def test_full_scan_run_persists_results_and_history_can_be_queried(
         data_loader=fake_loader,
         params=scan_params,
         triggered_by="ui:test@example.com",
-        session_factory=integration_session_factory,
+        session_factory=file_session_factory,
     )
 
     assert result.status is ScanStatus.SUCCESS
@@ -205,7 +161,7 @@ def test_full_scan_run_persists_results_and_history_can_be_queried(
     # Query through the public repository helpers, the same API a future history
     # page should use. This proves the scan was not merely returned in memory; it
     # was actually committed to the temporary database.
-    with Session(integration_engine) as session:
+    with Session(file_db_engine) as session:
         runs = get_latest_scan_runs(session, limit=5)
         assert len(runs) == 1
 
@@ -268,8 +224,8 @@ def test_full_scan_run_persists_results_and_history_can_be_queried(
 
 
 def test_partial_scan_run_persists_status_message_and_results(
-    integration_engine,
-    integration_session_factory,
+    file_db_engine,
+    file_session_factory,
 ):
     """A partial integration run should persist both usable rows and failures.
 
@@ -333,7 +289,7 @@ def test_partial_scan_run_persists_status_message_and_results(
         data_loader=fake_loader,
         params=scan_params,
         triggered_by="job:daily_scan",
-        session_factory=integration_session_factory,
+        session_factory=file_session_factory,
     )
 
     assert result.status is ScanStatus.PARTIAL
@@ -346,7 +302,7 @@ def test_partial_scan_run_persists_status_message_and_results(
     ]
     assert list(result.results["symbol"]) == ["RELIANCE"]
 
-    with Session(integration_engine) as session:
+    with Session(file_db_engine) as session:
         # Re-open a new Session on purpose. If the service only changed in-memory
         # objects and forgot to commit, this independent history query would see
         # nothing.
@@ -371,8 +327,8 @@ def test_partial_scan_run_persists_status_message_and_results(
 
 
 def test_failed_scan_run_persists_secret_safe_error_and_no_results(
-    integration_engine,
-    integration_session_factory,
+    file_db_engine,
+    file_session_factory,
 ):
     """A failed integration run should persist FAILED without leaking secrets.
 
@@ -406,7 +362,7 @@ def test_failed_scan_run_persists_secret_safe_error_and_no_results(
         data_loader=fake_loader,
         params={"start_date": date(2026, 1, 1), "end_date": date(2026, 6, 2)},
         triggered_by="job:daily_scan",
-        session_factory=integration_session_factory,
+        session_factory=file_session_factory,
     )
 
     assert result.status is ScanStatus.FAILED
@@ -417,7 +373,7 @@ def test_failed_scan_run_persists_secret_safe_error_and_no_results(
     assert "RuntimeError" in (result.error_message or "")
     assert "SUPERSECRET" not in (result.error_message or "")
 
-    with Session(integration_engine) as session:
+    with Session(file_db_engine) as session:
         runs = get_latest_scan_runs(session, limit=5)
         assert len(runs) == 1
 
@@ -435,8 +391,8 @@ def test_failed_scan_run_persists_secret_safe_error_and_no_results(
 
 
 def test_scan_history_lists_multiple_runs(
-    integration_engine,
-    integration_session_factory,
+    file_db_engine,
+    file_session_factory,
 ):
     """Two scans should both persist and be queryable as scan history.
 
@@ -460,7 +416,7 @@ def test_scan_history_lists_multiple_runs(
         run_callable=_empty_screener,
         universe_df=_fake_universe(),
         params={"start_date": date(2026, 1, 1), "end_date": date(2026, 6, 2)},
-        session_factory=integration_session_factory,
+        session_factory=file_session_factory,
     )
     first = run_scan(
         screener_key="first_screener",
@@ -477,7 +433,7 @@ def test_scan_history_lists_multiple_runs(
     assert second.status is ScanStatus.SUCCESS
     assert first.run_id != second.run_id
 
-    with Session(integration_engine) as session:
+    with Session(file_db_engine) as session:
         runs = get_latest_scan_runs(session, limit=5)
         assert {run.id for run in runs} == {first.run_id, second.run_id}
         assert {run.screener_key for run in runs} == {

@@ -409,8 +409,8 @@ class TechnicalAnalysisAgent:
         tools only (see `backend/technical/tools.py`).
         """
         try:
-            import claude_agent_sdk as claude_sdk  # type: ignore[import-not-found]
-            from claude_agent_sdk import (  # type: ignore[import-not-found]
+            import claude_agent_sdk as claude_sdk  # type: ignore[import-not-found, unused-ignore]
+            from claude_agent_sdk import (  # type: ignore[import-not-found, unused-ignore]
                 AssistantMessage,
                 ClaudeAgentOptions,
                 CLINotFoundError,

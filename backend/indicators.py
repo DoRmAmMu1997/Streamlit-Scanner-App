@@ -24,14 +24,14 @@ import pandas as pd
 try:
     import talib
 except ImportError:  # pragma: no cover - exercised only when TA-Lib is absent
-    talib = None
+    talib = None  # type: ignore[assignment, unused-ignore]
 
 # Optional accelerated backend #2: pandas_ta (pure Python).
 # Used for Heikin Ashi and SuperTrend, which TA-Lib does not provide.
 try:
     import pandas_ta
 except ImportError:  # pragma: no cover - exercised only when pandas_ta is absent
-    pandas_ta = None
+    pandas_ta = None  # type: ignore[assignment, unused-ignore]
 
 
 logger = logging.getLogger(__name__)
@@ -631,9 +631,9 @@ def stochastic(
                 np.asarray(close, dtype="float64"),
                 fastk_period=int(k_period),
                 slowk_period=int(k_smoothing),
-                slowk_matype=0,  # 0 = simple moving average smoothing
+                slowk_matype=0,  # type: ignore[arg-type, unused-ignore]  # 0 = SMA; local stubs want MA_Type
                 slowd_period=int(d_smoothing),
-                slowd_matype=0,
+                slowd_matype=0,  # type: ignore[arg-type, unused-ignore]
             )
             return pd.DataFrame(
                 {"stoch_k": stoch_k, "stoch_d": stoch_d},
@@ -693,7 +693,7 @@ def bollinger_bands(close: pd.Series, period: int = 20, std_multiplier: float = 
                 timeperiod=max(1, int(period)),
                 nbdevup=float(std_multiplier),
                 nbdevdn=float(std_multiplier),
-                matype=0,  # 0 = simple moving average for the middle band
+                matype=0,  # type: ignore[arg-type, unused-ignore]  # 0 = SMA; local stubs want MA_Type
             )
             return pd.DataFrame(
                 {"bb_middle": middle, "bb_upper": upper, "bb_lower": lower},
