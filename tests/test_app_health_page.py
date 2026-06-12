@@ -113,6 +113,7 @@ def test_health_scan_metric_uses_short_run_label():
 
     assert run is not None
     assert app._format_health_scan(run) == "Run #8"
+    assert app._health_scan_context(run) == "demo · nifty_100"
 
 
 def test_health_renderer_rejects_auth_disabled_session(monkeypatch):

@@ -225,3 +225,40 @@ def test_secret_redaction_filter_masks_child_logger_records():
     assert "child-oidc-secret" not in output
     assert "child-token-secret" not in output
     assert MASK in output
+
+
+def test_is_secret_key_name_recognizes_credential_field_names():
+    """Key-name detection lives here so the app has ONE secret vocabulary.
+
+    PROV-001A masks mapping keys that look like credentials before persisting
+    scan history. That vocabulary must be owned by this module — the same one
+    SEC-002 uses for value redaction — so a future secret name added here
+    protects every consumer at once instead of drifting apart per feature.
+    """
+    from backend.security.redaction import is_secret_key_name
+
+    for name in (
+        "api_key",
+        "API-Key",
+        "Authorization",
+        "access_token",
+        "client_secret",
+        "cookie_secret",
+        "DATABASE_URL",
+        "password",
+        "dhan_access_token",
+        "serpapi_api_key",
+        "broker password",
+    ):
+        assert is_secret_key_name(name), name
+
+    for name in (
+        "symbol",
+        "close_price",
+        "reason",
+        "screener_key",
+        "token_count",
+        "rating",
+        "data_snapshot_date",
+    ):
+        assert not is_secret_key_name(name), name

@@ -57,7 +57,12 @@ def _two_buy_rows() -> pd.DataFrame:
 
 
 def test_run_scan_success_persists_run_and_results(db_engine, session_factory):
-    """A clean run is SUCCESS, returns its rows, and writes the run + results."""
+    """A successful scan persists normalized copies but returns legacy UI data.
+
+    This checks both sides of the service boundary. The caller receives the
+    original DataFrame shape, while a fresh database session sees the canonical
+    provenance generated immediately before persistence.
+    """
     params = _base_params()
     # A callback in the caller's params must be stripped before it is persisted.
     params["progress_callback"] = lambda *_a: None
@@ -78,6 +83,16 @@ def test_run_scan_success_persists_run_and_results(db_engine, session_factory):
     assert result.status is ScanStatus.SUCCESS
     assert result.run_id is not None
     assert list(result.results["symbol"]) == ["RELIANCE", "TCS"]
+    # PROV-001A normalizes only copies sent to persistence. Streamlit must keep
+    # receiving the exact legacy DataFrame produced by the screener.
+    assert "provenance_json" not in result.results.columns
+    assert list(result.results.columns) == [
+        "symbol",
+        "rating",
+        "signal_date",
+        "close",
+        "reason",
+    ]
 
     # Re-query the database to prove the run + results were written.
     with Session(db_engine) as session:
@@ -92,6 +107,29 @@ def test_run_scan_success_persists_run_and_results(db_engine, session_factory):
         assert "progress_callback" not in (runs[0].params_json or {})
         rows = get_scan_results(session, result.run_id)
         assert [r.symbol for r in rows] == ["RELIANCE", "TCS"]
+
+        # This screener supplied no provenance, so the service fills a small,
+        # predictable envelope from run-level context. ``source`` stays None
+        # because orchestration cannot know whether arbitrary legacy logic was
+        # deterministic, AI-assisted, or hybrid.
+        assert rows[0].provenance_json == {
+            "screener_key": "envelope",
+            "screener_version": None,
+            "triggered_rules": [],
+            "indicator_values": {},
+            "params_snapshot": {
+                "start_date": "2016-06-02",
+                "end_date": "2026-06-02",
+                "period": 20,
+            },
+            "data_snapshot_date": "2026-06-02",
+            "source": None,
+            "notes": None,
+            "ai": None,
+        }
+        # The repository's raw audit copy receives the normalized persistence
+        # row, while the in-memory DataFrame above remains untouched.
+        assert rows[0].raw_result_json["provenance_json"] == rows[0].provenance_json
 
 
 def test_run_scan_creates_running_row_before_invoking_screener(
@@ -256,6 +294,86 @@ def test_run_scan_returns_results_even_when_persistence_fails():
     assert result.status is ScanStatus.SUCCESS
     assert list(result.results["symbol"]) == ["RELIANCE", "TCS"]
     assert result.run_id is None
+
+
+def test_run_scan_persists_good_rows_when_one_row_breaks_the_contract(
+    db_engine, session_factory, caplog
+):
+    """One malformed row must not erase scan history for the whole run.
+
+    A screener bug (for example a bad merge/reindex) can produce a single row
+    with a NaN symbol. That row can never be persisted under the PROV-001A
+    contract, but the other rows are perfectly good audit data. The service
+    skips the unusable row with a warning instead of failing the entire
+    ``save_scan_results`` write, matching the per-symbol failure philosophy
+    used by the scanner and the data loader.
+    """
+
+    def screener_run(_universe_df, _data_loader, _params):
+        frame = _two_buy_rows()
+        bad_row = {
+            "symbol": float("nan"),
+            "rating": "BUY",
+            "signal_date": "2026-06-01",
+            "close": 10.0,
+            "reason": "merge artifact",
+        }
+        return pd.concat([frame, pd.DataFrame([bad_row])], ignore_index=True)
+
+    with caplog.at_level(logging.WARNING, logger="backend.scanning.service"):
+        result = run_scan(
+            screener_key="envelope",
+            universe_key="hemant_super_45",
+            run_callable=screener_run,
+            universe_df=pd.DataFrame({"symbol": ["RELIANCE", "TCS", "BAD"]}),
+            data_loader=_FakeLoader(),
+            params=_base_params(),
+            session_factory=session_factory,
+        )
+
+    # The in-memory DataFrame for Streamlit keeps all three rows; only the
+    # persistence copies are filtered.
+    assert result.status is ScanStatus.SUCCESS
+    assert result.run_id is not None
+    assert len(result.results) == 3
+
+    with Session(db_engine) as session:
+        rows = get_scan_results(session, result.run_id)
+        assert [r.symbol for r in rows] == ["RELIANCE", "TCS"]
+    assert any("skipping" in record.message.lower() for record in caplog.records)
+
+
+def test_run_scan_treats_every_row_failing_the_contract_as_persistence_failure(
+    db_engine, session_factory
+):
+    """If no row at all can satisfy the contract, the failure must stay loud.
+
+    Recording an empty-but-successful run would be misleading audit data: the
+    screener clearly produced results, yet history would say nothing happened.
+    A systemic contract failure therefore still follows the existing
+    persistence-failure path (run marked FAILED, no result rows stored).
+    """
+
+    def screener_run(_universe_df, _data_loader, _params):
+        return pd.DataFrame([{"symbol": float("nan"), "rating": "BUY"}])
+
+    result = run_scan(
+        screener_key="envelope",
+        universe_key="hemant_super_45",
+        run_callable=screener_run,
+        universe_df=pd.DataFrame({"symbol": ["BAD"]}),
+        data_loader=_FakeLoader(),
+        params=_base_params(),
+        session_factory=session_factory,
+    )
+
+    # The caller still gets the in-memory results despite the history failure.
+    assert len(result.results) == 1
+    with Session(db_engine) as session:
+        runs = get_latest_scan_runs(session)
+        assert len(runs) == 1
+        assert runs[0].status is ScanStatus.FAILED
+        assert get_scan_results(session, runs[0].id) == []
 
 
 def test_run_scan_records_universe_size_as_symbols_scanned(db_engine, session_factory):

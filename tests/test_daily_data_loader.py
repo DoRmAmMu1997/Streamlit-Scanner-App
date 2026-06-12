@@ -8,6 +8,7 @@ import time
 from datetime import date, datetime
 
 import pandas as pd
+import pytest
 
 from backend.daily_data_loader import (
     DEFAULT_HISTORY_YEARS_BACK,
@@ -448,6 +449,31 @@ def test_ensure_daily_history_fresh_download(tmp_path):
     # The parquet file should now exist under the stable name.
     assert (tmp_path / "RELIANCE_2885.parquet").exists()
     assert len(frame) == 2
+
+
+def test_cache_only_loader_fails_clearly_when_history_needs_fetch(tmp_path):
+    """A cache-only loader should explain why it cannot fill a missing cache."""
+    loader = DailyDataLoader(
+        None,
+        cache_dir=tmp_path,
+        request_delay_seconds=0.0,
+    )
+    instrument = {
+        "symbol": "RELIANCE",
+        "security_id": "2885",
+        "exchange_segment": "NSE_EQ",
+        "instrument_type": "EQUITY",
+    }
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"built without a Dhan client.*cache-only mode",
+    ):
+        loader.ensure_daily_history(
+            instrument,
+            years_back=10,
+            today=date(2024, 1, 3),
+        )
 
 
 def test_ensure_daily_history_fresh_skips_api_when_cache_is_current(tmp_path):

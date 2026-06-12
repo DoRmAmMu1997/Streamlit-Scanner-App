@@ -97,4 +97,3 @@ def _decimal_column_config(results: pd.DataFrame) -> dict[str, Any]:
         for column in results.columns
         if pd.api.types.is_float_dtype(results[column])
     }
-

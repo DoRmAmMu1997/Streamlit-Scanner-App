@@ -48,6 +48,7 @@ from backend.observability import (
     ExceptionInfo,
     log_event,
 )
+from backend.scanning.result_contract import ResultContractError, normalize_screener_row
 from backend.storage.database import session_scope
 from backend.storage.models import ScanRun, ScanStatus
 from backend.storage.repository import (
@@ -234,6 +235,9 @@ def run_scan(
         results=results,
         status=status,
         error_message=error_message,
+        screener_key=screener_key,
+        params=params,
+        data_snapshot_date=_as_date(params.get("end_date")),
         session_factory=session_factory,
     )
 
@@ -341,6 +345,9 @@ def _persist_run_outcome(
     results: pd.DataFrame,
     status: ScanStatus,
     error_message: str | None,
+    screener_key: str,
+    params: dict[str, Any],
+    data_snapshot_date: dt.date | None,
     session_factory: SessionFactory,
 ) -> ExceptionInfo | None:
     """Save result rows and stamp the final status for an existing run header.
@@ -348,6 +355,13 @@ def _persist_run_outcome(
     This is separate from ``_create_run_header`` so the database transaction is
     open only while we write, not while the screener computes candles. That keeps
     SQLite/Postgres locks short and makes long scans safer.
+
+    PROV-001A also passes the screener identity, original run parameters, and
+    market-data date into this final persistence step. Those values describe
+    the circumstances of the scan, so the normalizer can fill a useful
+    provenance envelope even when a legacy result row contains no provenance.
+    Normalization is intentionally delayed until here: earlier conversion could
+    change the DataFrame that Streamlit expects to receive unchanged.
 
     If result persistence fails, the returned ``ScanRunResult`` still reflects
     what happened in memory. The database row may be marked FAILED as a separate
@@ -365,7 +379,16 @@ def _persist_run_outcome(
             run = session.get(ScanRun, run_id)
             if run is None:
                 raise RuntimeError("scan run header disappeared before finish")
-            save_scan_results(session, run, _result_rows(results))
+            save_scan_results(
+                session,
+                run,
+                _result_rows(
+                    results,
+                    screener_key=screener_key,
+                    params=params,
+                    data_snapshot_date=data_snapshot_date,
+                ),
+            )
             finish_scan_run(session, run, status=status, error_message=error_message)
     except Exception as exc:
         persistence_exc_info = _current_exc_info()
@@ -414,11 +437,60 @@ def _params_snapshot(params: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in params.items() if not callable(value)}
 
 
-def _result_rows(results: pd.DataFrame) -> list[dict[str, Any]]:
-    """Convert the screener DataFrame into the row dicts the repository expects."""
+def _result_rows(
+    results: pd.DataFrame,
+    *,
+    screener_key: str,
+    params: dict[str, Any],
+    data_snapshot_date: dt.date | None,
+) -> list[dict[str, Any]]:
+    """Return normalized persistence copies of the screener's DataFrame rows.
+
+    ``normalize_screener_row`` recursively copies nested values. Provenance and
+    JSON conversions therefore affect only the dictionaries passed to storage;
+    ``ScanRunResult.results`` remains the exact DataFrame returned by the
+    screener for Streamlit to render.
+    """
     if results is None or results.empty:
         return []
-    return results.to_dict("records")
+
+    # ``to_dict("records")`` creates one ordinary mapping per DataFrame row.
+    # The normalizer then deep-copies nested content and enriches only these
+    # persistence records, never the DataFrame owned by the caller.
+    rows: list[dict[str, Any]] = []
+    skipped = 0
+    for index, row in enumerate(results.to_dict("records")):
+        try:
+            rows.append(
+                normalize_screener_row(
+                    row,
+                    screener_key=screener_key,
+                    params=params,
+                    data_snapshot_date=data_snapshot_date,
+                )
+            )
+        except ResultContractError as exc:
+            # One unusable row (typically a NaN symbol from a screener merge
+            # bug) must not erase history for every other result in the run.
+            # Skip it loudly; the in-memory DataFrame shown by Streamlit is
+            # unaffected, matching the per-symbol failure philosophy used by
+            # the scanner and the data loader.
+            skipped += 1
+            logger.warning(
+                "Skipping result row %d for %s; it cannot satisfy the result "
+                "contract: %s",
+                index,
+                screener_key,
+                exc,
+            )
+    if skipped and not rows:
+        # Every row failing is a systemic screener/contract problem, not one
+        # bad merge. Recording an empty-but-successful run would be misleading
+        # audit data, so keep the existing loud persistence-failure path.
+        raise ResultContractError(
+            f"All {skipped} result rows for {screener_key} failed the result contract."
+        )
+    return rows
 
 
 def _as_date(value: Any) -> dt.date | None:

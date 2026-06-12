@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import time
 from datetime import date as real_date
+from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
@@ -23,7 +24,7 @@ from backend.screener_registry import ScreenerDefinition
 
 # Helpers that moved to ui/ (REF-001) read Streamlit and the chart renderer
 # from their own modules; fakes must be patched there, not onto app.
-from ui import chart_cache, common
+from ui import chart_cache, common, health_page, history_page
 
 
 class _FixedDate(real_date):
@@ -649,6 +650,74 @@ def test_universe_table_defers_status_loading_until_user_opts_in(monkeypatch):
     )
 
     app.render_universe_table()
+
+
+def test_app_reexports_helpers_from_extracted_ui_modules():
+    """Legacy ``app.<helper>`` imports should still reach the moved functions.
+
+    REF-001 moves implementation into small ``ui`` modules, but existing tests
+    and callers still import these helpers from ``app``. Identity checks make
+    that compatibility promise explicit instead of merely proving both names
+    happen to behave similarly today.
+    """
+    assert app._csv_safe is common._csv_safe
+    assert app._redact_secrets is common._redact_secrets
+    assert app._get_or_build_chart_payload is chart_cache._get_or_build_chart_payload
+    assert app._render_history_page is history_page._render_history_page
+    assert app._render_admin_health_page is health_page._render_admin_health_page
+
+
+def test_refresh_universes_clears_every_derived_cache_after_success(monkeypatch):
+    """A completed universe refresh must invalidate every dependent cache."""
+    clear_calls: list[str] = []
+    written = {"nifty_100": Path("data") / "nifty_100.csv"}
+
+    monkeypatch.setattr(app, "refresh_universe_files", lambda: written)
+    for name in (
+        "_universe_mtime",
+        "_cached_universe_status",
+        "_cached_all_universe_statuses",
+        "_eligible_symbols_set",
+    ):
+        monkeypatch.setattr(
+            app,
+            name,
+            SimpleNamespace(clear=lambda cache_name=name: clear_calls.append(cache_name)),
+        )
+
+    assert app.refresh_universes_and_invalidate() == written
+    assert clear_calls == [
+        "_universe_mtime",
+        "_cached_universe_status",
+        "_cached_all_universe_statuses",
+        "_eligible_symbols_set",
+    ]
+
+
+def test_refresh_universes_keeps_caches_when_refresh_fails(monkeypatch):
+    """A failed refresh must not discard still-usable cached universe state."""
+    clear_calls: list[str] = []
+
+    def fail_refresh():
+        raise RuntimeError("refresh failed")
+
+    monkeypatch.setattr(app, "refresh_universe_files", fail_refresh)
+    for name in (
+        "_universe_mtime",
+        "_cached_universe_status",
+        "_cached_all_universe_statuses",
+        "_eligible_symbols_set",
+    ):
+        monkeypatch.setattr(
+            app,
+            name,
+            SimpleNamespace(clear=lambda cache_name=name: clear_calls.append(cache_name)),
+        )
+
+    with pytest.raises(RuntimeError, match="refresh failed"):
+        app.refresh_universes_and_invalidate()
+
+    assert clear_calls == []
 
 
 def test_chart_payload_cache_reuses_html_until_cache_file_changes(monkeypatch, tmp_path):
