@@ -7,13 +7,12 @@ not depend on having a real PDF on disk.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Iterable
 
 from backend.fundamentals import pdf_reader
-
 
 # ---------------------------------------------------------------------------
 # _safe_filename
@@ -238,7 +237,7 @@ class _FakePdfPage:
     def __init__(self, text: str):
         self._text = text
 
-    def extract_text(self, **_kwargs):  # noqa: ANN001
+    def extract_text(self, **_kwargs):
         return self._text
 
 
@@ -363,7 +362,7 @@ def _concalls_fixture() -> list[dict]:
 def test_read_recent_concall_text_skips_rows_without_transcript_url(monkeypatch, tmp_path):
     captured_urls: list[str] = []
 
-    def fake_download(url, **kwargs):  # noqa: ANN001
+    def fake_download(url, **kwargs):
         captured_urls.append(url)
         path = tmp_path / "stub.pdf"
         path.write_bytes(b"%PDF-fake")
@@ -405,7 +404,7 @@ def test_read_recent_concall_text_truncates_long_transcripts(monkeypatch, tmp_pa
     monkeypatch.setattr(
         pdf_reader,
         "download_pdf",
-        lambda url, **kwargs: tmp_path / "stub.pdf",  # noqa: ARG005
+        lambda url, **kwargs: tmp_path / "stub.pdf",
     )
     # Make sure the stub file exists so extract_text doesn't short-circuit.
     (tmp_path / "stub.pdf").write_bytes(b"%PDF-fake")

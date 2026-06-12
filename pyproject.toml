@@ -1,0 +1,43 @@
+# Project-wide tool configuration.
+#
+# Beginner note:
+# This repo is an application, not a published package, so there is no
+# [project] build metadata here. The file exists to give the quality tools
+# (Ruff today, mypy in QUAL-002) one explicit, reviewable home. Without a
+# config file Ruff runs with its tiny default rule set (E4/E7/E9/F), which
+# silently skips import sorting, bug-prone patterns, and modernization checks.
+
+[tool.ruff]
+# Measured against this codebase: at 88 columns there are ~480 long lines, at
+# 120 there is 1. The code was written to a ~120-column style, so codifying
+# 120 keeps the lint signal about real problems instead of wrapping churn.
+line-length = 120
+# CI runs Python 3.11 (see .github/workflows/quality-and-security.yml).
+target-version = "py311"
+
+[tool.ruff.lint]
+# E/W   pycodestyle errors and warnings
+# F     pyflakes (undefined names, unused imports/variables)
+# I     import sorting
+# B     flake8-bugbear (likely bugs: mutable defaults, loop-var closures, ...)
+# UP    pyupgrade (modern 3.11+ syntax)
+# C4    comprehension correctness/efficiency
+# SIM   simplifiable code
+# RUF   Ruff-native checks (mutable class defaults, unused noqa, ...)
+select = ["E", "W", "F", "I", "B", "UP", "C4", "SIM", "RUF"]
+# Keep Ruff's ambiguous-Unicode checks enabled. These are the only two
+# confusable characters the project uses deliberately in formulas and prose;
+# every other look-alike character should continue to produce a lint warning.
+allowed-confusables = ["–", "∪"]
+# `# noqa: BLE001` comments document intentional broad-except blocks for a
+# stricter future rule set. BLE is not enabled yet, so tell Ruff the code is
+# external-tool noqa rather than letting RUF100 delete the documentation.
+external = ["BLE"]
+
+[tool.ruff.lint.per-file-ignores]
+# B017: tests intentionally assert on bare Exception for defensive paths.
+# RUF012: test fakes use mutable class attributes as fixtures; ClassVar
+# annotations there add noise without catching real bugs.
+# C408: `dict(key=value)` factory builders with `**overrides` merging are a
+# deliberate, readable test idiom here; literal-dict churn adds nothing.
+"tests/**" = ["B017", "C408", "RUF012"]

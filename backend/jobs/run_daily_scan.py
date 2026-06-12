@@ -44,8 +44,8 @@ from typing import Any, TextIO
 import pandas as pd
 
 from backend.daily_data_loader import (
-    DailyDataLoader,
     DEFAULT_HISTORY_YEARS_BACK,
+    DailyDataLoader,
     history_start_date,
 )
 from backend.dhan_client import DhanDataClient
@@ -71,7 +71,6 @@ from backend.security import (
 )
 from backend.storage.database import ensure_database_schema, session_scope
 from backend.universe_loader import load_universe
-
 
 logger = logging.getLogger(__name__)
 

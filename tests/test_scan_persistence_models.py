@@ -15,8 +15,8 @@ import datetime as dt
 from decimal import Decimal
 
 import pytest
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy import create_engine, event, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from backend.storage.models import Base, ScanResult, ScanRun, ScanStatus

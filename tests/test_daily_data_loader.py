@@ -636,6 +636,9 @@ def test_cleanup_legacy_cache_files_removes_only_date_suffixed_files(tmp_path):
     (tmp_path / "RELIANCE_2885.parquet").write_bytes(b"y")
     # A file that incidentally has digits in the symbol stays untouched too.
     (tmp_path / "20MICRONS_12345.parquet").write_bytes(b"z")
+    # A malformed one-part filename cannot contain the four legacy components.
+    # Cleanup must leave it alone instead of indexing past its split parts.
+    (tmp_path / "orphan.parquet").write_bytes(b"o")
 
     loader = DailyDataLoader(FakeDhanClient(), cache_dir=tmp_path, request_delay_seconds=0.0)
     removed = loader.cleanup_legacy_cache_files()
@@ -644,6 +647,7 @@ def test_cleanup_legacy_cache_files_removes_only_date_suffixed_files(tmp_path):
     assert not (tmp_path / "RELIANCE_2885_20150101_20250101.parquet").exists()
     assert (tmp_path / "RELIANCE_2885.parquet").exists()
     assert (tmp_path / "20MICRONS_12345.parquet").exists()
+    assert (tmp_path / "orphan.parquet").exists()
 
 
 def test_cleanup_stale_cache_files_removes_old_parquets_and_orphan_markers(tmp_path):

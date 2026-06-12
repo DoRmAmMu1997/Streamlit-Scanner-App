@@ -17,8 +17,8 @@ to the (expensive) Claude verifier in `backend/sixty_seven/agent.py`.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from typing import Mapping
 
 import pandas as pd
 

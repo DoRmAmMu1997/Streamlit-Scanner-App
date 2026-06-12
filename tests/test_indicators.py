@@ -387,7 +387,7 @@ def test_bullish_knoxville_divergences_returns_all_matches_and_wrapper_keeps_rec
 
 def _level_frame(lows: list[float], highs: list[float]) -> pd.DataFrame:
     """Build an OHLC frame from explicit low/high paths (open/close = midpoint)."""
-    mid = [(lo + hi) / 2.0 for lo, hi in zip(lows, highs)]
+    mid = [(lo + hi) / 2.0 for lo, hi in zip(lows, highs, strict=True)]
     return pd.DataFrame(
         {
             "timestamp": pd.date_range("2020-01-01", periods=len(lows), freq="D"),

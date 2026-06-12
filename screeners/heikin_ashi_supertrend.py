@@ -9,6 +9,8 @@ Flow in plain English:
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pandas as pd
 
 from backend.charts import add_supertrend_overlay, candlestick_with_volume
@@ -41,7 +43,7 @@ class HeikinAshiSupertrend(BaseScanner):
 
     # The scanner always processes every mapped row in the configured universe;
     # there is no per-run cap on the number of symbols scanned.
-    SCREENER = {
+    SCREENER: ClassVar[dict] = {
         "key": "heikin_ashi_supertrend",
         "name": "Heikin Ashi SuperTrend",
         "description": "Shortlists F&O stocks when daily Heikin Ashi close crosses SuperTrend(10, 2).",
@@ -51,7 +53,7 @@ class HeikinAshiSupertrend(BaseScanner):
         "default_params": {"atr_period": 10, "multiplier": 2.0},
     }
 
-    EXTRA_RESULT_COLUMNS = [
+    EXTRA_RESULT_COLUMNS: ClassVar[list[str]] = [
         "ha_open",
         "ha_high",
         "ha_low",

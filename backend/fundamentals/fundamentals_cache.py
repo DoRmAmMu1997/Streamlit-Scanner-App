@@ -29,7 +29,6 @@ from typing import Any
 
 from backend.config import FUNDAMENTALS_CACHE_DIR
 
-
 logger = logging.getLogger(__name__)
 
 

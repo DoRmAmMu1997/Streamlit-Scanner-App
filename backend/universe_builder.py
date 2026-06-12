@@ -8,11 +8,11 @@ IDs rather than just human-readable stock symbols.
 
 from __future__ import annotations
 
-from datetime import date, datetime
 import io
 import re
+from collections.abc import Iterable
+from datetime import date, datetime
 from pathlib import Path
-from typing import Iterable
 
 import pandas as pd
 import requests

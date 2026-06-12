@@ -57,7 +57,6 @@ import pandas as pd
 # double tops/bottoms, order blocks, and market structure.
 from backend.indicators import pivot_highs, pivot_lows
 
-
 # ---------------------------------------------------------------------------
 # Small shared helpers
 # ---------------------------------------------------------------------------
@@ -506,10 +505,7 @@ def detect_order_blocks(
             if start >= n:
                 continue
             seg = closes[start:]
-            if direction == "up":
-                hit = np.where(seg > levels[p])[0]
-            else:
-                hit = np.where(seg < levels[p])[0]
+            hit = np.where(seg > levels[p])[0] if direction == "up" else np.where(seg < levels[p])[0]
             if hit.size:
                 pos = start + int(hit[0])
                 if best is None or pos > best:

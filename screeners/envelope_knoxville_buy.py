@@ -29,6 +29,7 @@ Beginner glossary:
 from __future__ import annotations
 
 import math
+from typing import ClassVar
 
 import pandas as pd
 
@@ -40,7 +41,7 @@ from backend.scanner_base import BaseScanner
 class EnvelopeKnoxvilleBuy(BaseScanner):
     """BUY-only screener for lower-Envelope Knoxville setups and KD retests."""
 
-    SCREENER = {
+    SCREENER: ClassVar[dict] = {
         "key": "envelope_knoxville_buy",
         "name": "Envelope + Knoxville",
         "description": (
@@ -75,7 +76,7 @@ class EnvelopeKnoxvilleBuy(BaseScanner):
         },
     }
 
-    EXTRA_RESULT_COLUMNS = [
+    EXTRA_RESULT_COLUMNS: ClassVar[list[str]] = [
         "env_basis",
         "env_lower",
         "env_upper",
@@ -137,10 +138,7 @@ class EnvelopeKnoxvilleBuy(BaseScanner):
         if not all_divergences:
             return None
 
-        if lower_band == 0:
-            env_distance_pct = 0.0
-        else:
-            env_distance_pct = (close - lower_band) / lower_band
+        env_distance_pct = 0.0 if lower_band == 0 else (close - lower_band) / lower_band
 
         signal_recency = self.coerce_param(params, "signal_recency_bars", int)
         recent_divergence = None

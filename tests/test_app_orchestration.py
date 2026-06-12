@@ -26,7 +26,7 @@ class _FixedDate(real_date):
     """Freeze `date.today()` while keeping normal date arithmetic available."""
 
     @classmethod
-    def today(cls) -> "_FixedDate":
+    def today(cls) -> _FixedDate:
         return cls(2026, 6, 2)
 
 
@@ -74,7 +74,7 @@ class _FakeDataLoader:
 def test_scan_history_start_date_subtracts_calendar_years_and_handles_leap_day(monkeypatch):
     class LeapDay(real_date):
         @classmethod
-        def today(cls) -> "LeapDay":
+        def today(cls) -> LeapDay:
             return cls(2024, 2, 29)
 
     monkeypatch.setattr(app, "date", LeapDay)
@@ -355,6 +355,112 @@ def test_main_bootstraps_schema_after_auth_and_before_view_selection(monkeypatch
         app.main()
 
     assert calls == ["auth", "schema", "view"]
+
+
+def test_admin_health_view_is_available_and_returns_before_screener_discovery(
+    monkeypatch,
+):
+    """Admins can inspect health even when a screener module is broken."""
+
+    calls: list[str] = []
+
+    def choose_admin_health(_label, options, **_kwargs):
+        assert options == ("Scanner", "Scan history", "Admin health")
+        calls.append("view")
+        return "Admin health"
+
+    monkeypatch.setattr(
+        app,
+        "get_settings",
+        lambda: get_settings(env={"AUTH_REQUIRED": "true"}),
+    )
+    monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
+    monkeypatch.setattr(app, "_configure_logging", lambda: None)
+    monkeypatch.setattr(app, "ensure_database_schema", lambda: calls.append("schema"))
+    monkeypatch.setattr(
+        app,
+        "require_authorized_user",
+        lambda _st: app.AuthenticatedUser(
+            email="admin@example.com",
+            name="Admin",
+            is_admin=True,
+        ),
+    )
+    monkeypatch.setattr(
+        app,
+        "_render_admin_health_page",
+        lambda user: calls.append(f"health:{user.email}"),
+    )
+    monkeypatch.setattr(
+        app,
+        "discover_screeners",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("health view must return before screener discovery")
+        ),
+    )
+    monkeypatch.setattr(
+        app,
+        "st",
+        SimpleNamespace(
+            set_page_config=lambda **_kwargs: None,
+            markdown=lambda *_args, **_kwargs: None,
+            title=lambda *_args, **_kwargs: None,
+            caption=lambda *_args, **_kwargs: None,
+            radio=choose_admin_health,
+        ),
+    )
+
+    app.main()
+
+    assert calls == ["schema", "view", "health:admin@example.com"]
+
+
+def test_non_admin_cannot_select_admin_health(monkeypatch):
+    """The main selector must not advertise the admin-only operational page."""
+
+    class StopAtDiscovery(RuntimeError):
+        """Signal that the normal scanner path continued after view selection."""
+
+    def choose_scanner(_label, options, **_kwargs):
+        assert options == ("Scanner", "Scan history")
+        return "Scanner"
+
+    monkeypatch.setattr(
+        app,
+        "get_settings",
+        lambda: get_settings(env={"AUTH_REQUIRED": "true"}),
+    )
+    monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
+    monkeypatch.setattr(app, "_configure_logging", lambda: None)
+    monkeypatch.setattr(app, "ensure_database_schema", lambda: True)
+    monkeypatch.setattr(
+        app,
+        "require_authorized_user",
+        lambda _st: app.AuthenticatedUser(
+            email="person@example.com",
+            name="Person",
+            is_admin=False,
+        ),
+    )
+    monkeypatch.setattr(
+        app,
+        "discover_screeners",
+        lambda: (_ for _ in ()).throw(StopAtDiscovery()),
+    )
+    monkeypatch.setattr(
+        app,
+        "st",
+        SimpleNamespace(
+            set_page_config=lambda **_kwargs: None,
+            markdown=lambda *_args, **_kwargs: None,
+            title=lambda *_args, **_kwargs: None,
+            caption=lambda *_args, **_kwargs: None,
+            radio=choose_scanner,
+        ),
+    )
+
+    with pytest.raises(StopAtDiscovery):
+        app.main()
 
 
 def test_main_passes_authenticated_email_as_scan_trigger(monkeypatch):

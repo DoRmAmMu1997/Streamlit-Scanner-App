@@ -29,14 +29,14 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import requests
 
 from backend.config import FUNDAMENTALS_PDF_DIR
 from backend.url_safety import is_safe_http_url
-
 
 logger = logging.getLogger(__name__)
 

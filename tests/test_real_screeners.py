@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from backend.sixty_seven.agent import EvidenceItem, SixtySevenVerdict
+from backend.technical.technical_agent import TechnicalVerdict
 from screeners import (
     bollinger_band_reversal,
     bollinger_lower_band,
@@ -15,13 +17,11 @@ from screeners import (
     envelope_knoxville_buy,
     green_candles_20pct_up,
     heikin_ashi_supertrend,
-    stochastic_swing,
     sixty_seven_ka_funda,
+    stochastic_swing,
     technical_analysis,
     week52_low_ceyhun,
 )
-from backend.sixty_seven.agent import EvidenceItem, SixtySevenVerdict
-from backend.technical.technical_agent import TechnicalVerdict
 
 
 class FakeDataLoader:
@@ -384,8 +384,8 @@ def test_envelope_knoxville_buy_shortlists_old_kd_retest_without_envelope():
         96.0, 95.0, 94.0, 93.0,
     ]
     frames = {
-        "OLD": _env_knox_candles(base_path + [exactly_two_pct_up]),
-        "ABOVE": _env_knox_candles(base_path + [above_two_pct]),
+        "OLD": _env_knox_candles([*base_path, exactly_two_pct_up]),
+        "ABOVE": _env_knox_candles([*base_path, above_two_pct]),
     }
 
     result = envelope_knoxville_buy.run(
@@ -493,7 +493,7 @@ def test_week52_low_ceyhun_returns_buy_when_close_revisits_low():
     base = [100.0] * 8 + [90.0] + [100.0] * 4 + [91.5]
     frames = {
         "NEAR_LOW": _bollinger_candles(
-            open_values=[v for v in base],
+            open_values=list(base),
             high_values=[v + 1.0 for v in base],
             low_values=[v - 0.5 for v in base],
             close_values=base,

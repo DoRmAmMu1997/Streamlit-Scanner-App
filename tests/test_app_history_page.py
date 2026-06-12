@@ -20,7 +20,6 @@ import datetime as dt
 import app
 from backend.storage.models import ScanRun, ScanStatus
 
-
 # ---------------------------------------------------------------------------
 # _history_filter_kwargs: widget values -> repository keyword filters
 # ---------------------------------------------------------------------------

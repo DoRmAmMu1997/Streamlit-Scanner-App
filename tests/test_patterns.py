@@ -38,10 +38,10 @@ def _uptrend_frame() -> pd.DataFrame:
     order-block test).
     """
     closes = [100, 103, 106, 103, 100, 104, 110, 107, 104, 108, 114, 111, 108, 112, 118, 121, 124]
-    opens = [closes[0]] + closes[:-1]
+    opens = [closes[0], *closes[:-1]]
     rows = [
         (float(o), float(c + 1), float(c - 1), float(c), 1000.0)
-        for o, c in zip(opens, closes)
+        for o, c in zip(opens, closes, strict=True)
     ]
     return _frame(rows)
 
@@ -131,7 +131,7 @@ def _double_bottom_frame() -> pd.DataFrame:
     high = [57, 54, 48, 55, 58, 60, 57, 53, 48, 55, 59, 63, 65, 67, 69]
     low = [55, 52, 45, 52, 56, 58, 54, 50, 45, 52, 56, 60, 62, 64, 66]
     close = [56, 53, 47, 54, 57, 59, 55, 51, 47, 54, 58, 62, 64, 66, 68]
-    rows = [(c - 1, h, lo, c) for h, lo, c in zip(high, low, close)]
+    rows = [(c - 1, h, lo, c) for h, lo, c in zip(high, low, close, strict=True)]
     return _frame(rows)
 
 
