@@ -200,7 +200,7 @@ def _extract_with_pdfplumber(
 ) -> str:
     """Primary extractor — pure-Python, MIT, works for typeset PDFs."""
     try:
-        import pdfplumber  # type: ignore[import-untyped]
+        import pdfplumber  # type: ignore[import-untyped, unused-ignore]
     except ImportError:
         logger.warning("pdfplumber not installed; cannot extract PDF text")
         return ""
@@ -227,7 +227,7 @@ def _extract_with_pypdf(
 ) -> str:
     """Fallback extractor — ``pypdf`` if available, otherwise empty."""
     try:
-        from pypdf import PdfReader  # type: ignore[import-untyped]
+        from pypdf import PdfReader  # type: ignore[import-untyped, unused-ignore]
     except ImportError:
         return ""
 
