@@ -521,6 +521,24 @@ def dhan_request_delay_seconds() -> float:
     return parsed if parsed >= 0 else 0.5
 
 
+def dhan_fetch_workers() -> int:
+    """Read the Dhan candle-fetch worker count, defaulting to 1 (sequential).
+
+    1 keeps the loader's long-standing sequential behavior. Values above 1
+    enable parallel fetching with a shared request pacer (PERF-001); the cap
+    of 8 keeps a typo like "80" from turning the prefetch into a hammer.
+    """
+    load_environment()
+    raw_value = _clean_env_value(os.getenv("SCANNER_DHAN_FETCH_WORKERS"))
+    if not raw_value:
+        return 1
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        return 1
+    return min(8, max(1, parsed))
+
+
 def dhan_rate_limit_retry_delays() -> list[float]:
     """Read DH-904 retry backoff delays, defaulting to 2s, 5s, and 10s."""
     load_environment()

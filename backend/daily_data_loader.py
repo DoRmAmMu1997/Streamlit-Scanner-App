@@ -10,7 +10,9 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 import re
+import threading
 import time
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -18,7 +20,12 @@ from pathlib import Path
 
 import pandas as pd
 
-from backend.config import DAILY_CACHE_DIR, dhan_rate_limit_retry_delays, dhan_request_delay_seconds
+from backend.config import (
+    DAILY_CACHE_DIR,
+    dhan_fetch_workers,
+    dhan_rate_limit_retry_delays,
+    dhan_request_delay_seconds,
+)
 from backend.dhan_client import DhanDataClient, DhanRateLimitError
 from backend.observability import EVENT_EXTERNAL_API_FAILED, log_event
 from backend.security import redact_text
@@ -103,6 +110,56 @@ def _date_bounds(candles: pd.DataFrame) -> tuple[date | None, date | None]:
     return timestamps.min().date(), timestamps.max().date()
 
 
+class _RequestPacer:
+    """Enforce a minimum spacing between Dhan requests across worker threads.
+
+    The sequential loader pauses a fixed delay before each cache-miss fetch.
+    With worker threads, a per-thread pause would multiply the request rate by
+    the worker count. This pacer keeps ONE global schedule instead: each caller
+    reserves the next free slot under a lock, then sleeps outside the lock
+    until its slot arrives, so the broker sees at most one request per delay
+    window no matter how many workers are fetching.
+    """
+
+    def __init__(
+        self,
+        delay_seconds: float,
+        sleep_func: Callable[[float], None],
+        time_func: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.delay_seconds = max(0.0, float(delay_seconds))
+        self._sleep_func = sleep_func
+        self._time_func = time_func
+        self._lock = threading.Lock()
+        self._next_slot = 0.0
+
+    def wait(self) -> None:
+        """Block until this caller's reserved request slot arrives."""
+        if self.delay_seconds <= 0:
+            return
+        with self._lock:
+            now = self._time_func()
+            slot = max(now, self._next_slot)
+            self._next_slot = slot + self.delay_seconds
+        pause = slot - now
+        if pause > 0:
+            self._sleep_func(pause)
+
+
+@dataclass(frozen=True)
+class PrefetchOutcome:
+    """One streamed result from ``iter_ensure_universe_history``.
+
+    ``status`` is one of ``ensure_daily_history``'s cache statuses ("fresh",
+    "incremental", "fresh_download", "backfilled") or "failed", in which case
+    ``message`` carries a redacted error description.
+    """
+
+    symbol: str
+    status: str
+    message: str | None = None
+
+
 @dataclass
 class BatchLoadResult:
     """One batch fetch result: successful frames plus non-fatal failures."""
@@ -149,6 +206,7 @@ class DailyDataLoader:
         fetch_timeout_seconds: float | None = None,
         max_consecutive_failures: int | None = None,
         sleep_func: Callable[[float], None] = time.sleep,
+        fetch_workers: int | None = None,
     ):
         # The Dhan client is optional so cache-only callers (the legacy-file
         # cleanup step, the chart UI's `read_cached_history`) can build a loader
@@ -174,6 +232,14 @@ class DailyDataLoader:
         )
         self.max_consecutive_failures = max(0, int(max_consecutive_failures or 0))
         self.sleep_func = sleep_func
+        # PERF-001: 1 (the default) keeps the long-standing sequential path
+        # byte-identical. Values above 1 fetch with a thread pool while the
+        # shared pacer holds the global inter-request delay.
+        self.fetch_workers = (
+            dhan_fetch_workers() if fetch_workers is None else min(8, max(1, int(fetch_workers)))
+        )
+        self._pacer = _RequestPacer(self.request_delay_seconds, self.sleep_func)
+        self._stats_lock = threading.Lock()
         # These fields remember the last run for Streamlit status text. They are
         # not used for trading decisions.
         self.last_failures: list[dict[str, object]] = []
@@ -461,13 +527,20 @@ class DailyDataLoader:
         # The Stochastic data-fetch script uses a small pause between symbols so
         # it does not hammer Dhan. We apply that pause only for real cache misses,
         # never when reading local Parquet.
-        self._sleep(self.request_delay_seconds)
+        if self.fetch_workers <= 1:
+            # Sequential behavior, unchanged: a fixed pause before every fetch.
+            self._sleep(self.request_delay_seconds)
+        else:
+            # Parallel fetching: one shared schedule so the global request rate
+            # stays at the configured delay regardless of worker count.
+            self._pacer.wait()
 
         retry_index = 0
         while True:
             try:
-                self._api_attempts += 1
-                self.last_api_attempts = self._api_attempts
+                with self._stats_lock:
+                    self._api_attempts += 1
+                    self.last_api_attempts = self._api_attempts
                 return self._call_client_fetch(
                     security_id=security_id,
                     exchange_segment=exchange_segment,
@@ -480,8 +553,9 @@ class DailyDataLoader:
                     raise
                 delay = self.rate_limit_retry_delays[retry_index]
                 retry_index += 1
-                self._rate_limit_retries += 1
-                self.last_rate_limit_retries = self._rate_limit_retries
+                with self._stats_lock:
+                    self._rate_limit_retries += 1
+                    self.last_rate_limit_retries = self._rate_limit_retries
                 self._sleep(delay)
 
     def _call_client_fetch(
@@ -574,24 +648,94 @@ class DailyDataLoader:
         result = BatchLoadResult()
         rows = self._work_rows(universe_df, max_symbols)
         total = len(rows)
-        consecutive_failures = 0
 
+        if self.fetch_workers <= 1:
+            stream = self._iter_history_sequential(
+                rows, total, result, start_date, end_date, force_refresh, progress_callback
+            )
+        else:
+            stream = self._iter_history_parallel(
+                rows, total, result, start_date, end_date, force_refresh, progress_callback
+            )
+        yield from stream
+
+        result.api_attempts = self._api_attempts
+        result.rate_limit_retries = self._rate_limit_retries
+        self._remember(result)
+
+    def _breaker_item(
+        self, result: BatchLoadResult, row: dict, symbol: str, consecutive_failures: int
+    ) -> HistoryLoadItem:
+        """Record and build the failure item for a circuit-breaker skip."""
+        failure = {
+            "symbol": symbol,
+            "security_id": row.get("security_id", ""),
+            "message": (
+                "Dhan circuit breaker is open after "
+                f"{consecutive_failures} consecutive failure(s)."
+            ),
+        }
+        result.failures.append(failure)
+        return HistoryLoadItem(symbol=symbol, failure=failure)
+
+    def _failure_item(
+        self, result: BatchLoadResult, row: dict, symbol: str, exc: Exception
+    ) -> HistoryLoadItem:
+        """Record, log, and build the failure item for one fetch exception.
+
+        Dhan/HTTP exceptions can include request details. The message is stored
+        in ``last_failures`` and later rendered by Streamlit, so redact at the
+        source.
+        """
+        safe_message = redact_text(str(exc))
+        # OBS-001: external_api_failed ties a failed Dhan fetch to its symbol.
+        log_event(
+            logger,
+            EVENT_EXTERNAL_API_FAILED,
+            level=logging.WARNING,
+            symbol=symbol,
+            security_id=row.get("security_id", ""),
+            error=safe_message,
+        )
+        failure = {
+            "symbol": symbol,
+            "security_id": row.get("security_id", ""),
+            "message": safe_message,
+        }
+        result.failures.append(failure)
+        return HistoryLoadItem(symbol=symbol, failure=failure)
+
+    @staticmethod
+    def _notify_progress(
+        progress_callback: ProgressCallback | None, index: int, total: int, symbol: str
+    ) -> None:
+        """Invoke the UI progress callback without letting it break the scan."""
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(index, total, symbol)
+        except Exception:
+            logger.exception("Progress callback raised for %s", symbol)
+
+    def _iter_history_sequential(
+        self,
+        rows: list[dict],
+        total: int,
+        result: BatchLoadResult,
+        start_date: date | datetime | str,
+        end_date: date | datetime | str,
+        force_refresh: bool,
+        progress_callback: ProgressCallback | None,
+    ):
+        """The long-standing one-symbol-at-a-time path (fetch_workers == 1)."""
+        consecutive_failures = 0
         for index, row in enumerate(rows, start=1):
             symbol = str(row.get("symbol", "")).strip().upper() or "UNKNOWN"
             if self.max_consecutive_failures and consecutive_failures >= self.max_consecutive_failures:
                 # The circuit breaker protects the user and Dhan after repeated
                 # broker/API failures. We still yield a failure item per skipped
                 # symbol so progress and diagnostics stay complete.
-                failure = {
-                    "symbol": symbol,
-                    "security_id": row.get("security_id", ""),
-                    "message": (
-                        "Dhan circuit breaker is open after "
-                        f"{consecutive_failures} consecutive failure(s)."
-                    ),
-                }
-                result.failures.append(failure)
-                item = HistoryLoadItem(symbol=symbol, failure=failure)
+                item = self._breaker_item(result, row, symbol, consecutive_failures)
             else:
                 try:
                     candles, from_cache = self.get_daily_history(
@@ -608,38 +752,153 @@ class DailyDataLoader:
                     item = HistoryLoadItem(symbol=symbol, candles=candles, from_cache=from_cache)
                 except Exception as exc:
                     consecutive_failures += 1
-                    # Dhan/HTTP exceptions can include request details. This
-                    # message is stored in ``last_failures`` and later rendered
-                    # by Streamlit, so redact at the source.
-                    safe_message = redact_text(str(exc))
-                    # OBS-001: external_api_failed ties a failed Dhan fetch to its
-                    # symbol. ``safe_message`` is already redacted just above.
-                    log_event(
-                        logger,
-                        EVENT_EXTERNAL_API_FAILED,
-                        level=logging.WARNING,
-                        symbol=symbol,
-                        security_id=row.get("security_id", ""),
-                        error=safe_message,
-                    )
-                    failure = {
-                        "symbol": symbol,
-                        "security_id": row.get("security_id", ""),
-                        "message": safe_message,
-                    }
-                    result.failures.append(failure)
-                    item = HistoryLoadItem(symbol=symbol, failure=failure)
+                    item = self._failure_item(result, row, symbol, exc)
 
-            if progress_callback is not None:
-                try:
-                    progress_callback(index, total, symbol)
-                except Exception:
-                    logger.exception("Progress callback raised for %s", symbol)
+            self._notify_progress(progress_callback, index, total, symbol)
             yield item
 
-        result.api_attempts = self._api_attempts
-        result.rate_limit_retries = self._rate_limit_retries
-        self._remember(result)
+    def _iter_history_parallel(
+        self,
+        rows: list[dict],
+        total: int,
+        result: BatchLoadResult,
+        start_date: date | datetime | str,
+        end_date: date | datetime | str,
+        force_refresh: bool,
+        progress_callback: ProgressCallback | None,
+    ):
+        """Fetch with a worker pool while keeping the sequential contract.
+
+        Workers run ONLY ``get_daily_history`` (network + parquet I/O). Items
+        are consumed in submission order on the calling thread, so yields,
+        failure bookkeeping, log events, and the progress callback all happen
+        exactly where the sequential path runs them - Streamlit widgets in the
+        callback stay on the script thread.
+
+        Circuit-breaker semantics under parallelism: once the consecutive
+        failure threshold trips, no NEW work is submitted and queued-but-not-
+        started futures are cancelled, but fetches already in flight are
+        consumed normally (the request already happened; discarding the data
+        would help nobody). Rows never submitted yield breaker items, exactly
+        like the sequential path.
+        """
+        window = self.fetch_workers * 2
+        pending: deque[tuple[int, dict, str, concurrent.futures.Future]] = deque()
+        row_iter = enumerate(rows, start=1)
+        consecutive_failures = 0
+        breaker_tripped = False
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.fetch_workers) as executor:
+
+            def submit_next() -> bool:
+                try:
+                    index, row = next(row_iter)
+                except StopIteration:
+                    return False
+                symbol = str(row.get("symbol", "")).strip().upper() or "UNKNOWN"
+                future = executor.submit(
+                    self.get_daily_history,
+                    row,
+                    start_date=start_date,
+                    end_date=end_date,
+                    force_refresh=force_refresh,
+                )
+                pending.append((index, row, symbol, future))
+                return True
+
+            while len(pending) < window and submit_next():
+                pass
+
+            while pending:
+                index, row, symbol, future = pending.popleft()
+                if breaker_tripped and future.cancel():
+                    item = self._breaker_item(result, row, symbol, consecutive_failures)
+                else:
+                    try:
+                        candles, from_cache = future.result()
+                        consecutive_failures = 0
+                        if from_cache:
+                            result.cache_hits += 1
+                        else:
+                            result.cache_misses += 1
+                        item = HistoryLoadItem(
+                            symbol=symbol, candles=candles, from_cache=from_cache
+                        )
+                    except Exception as exc:
+                        consecutive_failures += 1
+                        item = self._failure_item(result, row, symbol, exc)
+                        if (
+                            self.max_consecutive_failures
+                            and consecutive_failures >= self.max_consecutive_failures
+                        ):
+                            breaker_tripped = True
+
+                if not breaker_tripped:
+                    submit_next()
+                self._notify_progress(progress_callback, index, total, symbol)
+                yield item
+
+            if breaker_tripped:
+                # Rows that were never submitted: same breaker items, same
+                # progress reporting, no API traffic.
+                for index, row in row_iter:
+                    symbol = str(row.get("symbol", "")).strip().upper() or "UNKNOWN"
+                    item = self._breaker_item(result, row, symbol, consecutive_failures)
+                    self._notify_progress(progress_callback, index, total, symbol)
+                    yield item
+
+    def iter_ensure_universe_history(
+        self,
+        rows: list[dict],
+        *,
+        years_back: int = DEFAULT_HISTORY_YEARS_BACK,
+        today: date | None = None,
+    ):
+        """Yield one ``PrefetchOutcome`` per universe row, parallel when configured.
+
+        This is the streaming engine behind the CLI prefetch. With
+        ``fetch_workers == 1`` it tops up one symbol at a time exactly like the
+        old app-level loop; with more workers it overlaps Dhan latency and
+        parquet I/O while the shared pacer keeps the global request rate at the
+        configured delay. Outcomes are always yielded in input order so the
+        terminal progress output stays stable and readable.
+        """
+        if self.fetch_workers <= 1:
+            for row in rows:
+                yield self._ensure_one_row(row, years_back, today)
+            return
+
+        window = self.fetch_workers * 2
+        pending: deque[concurrent.futures.Future] = deque()
+        row_iter = iter(rows)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.fetch_workers) as executor:
+
+            def submit_next() -> bool:
+                try:
+                    row = next(row_iter)
+                except StopIteration:
+                    return False
+                pending.append(executor.submit(self._ensure_one_row, row, years_back, today))
+                return True
+
+            while len(pending) < window and submit_next():
+                pass
+            while pending:
+                outcome = pending.popleft().result()
+                submit_next()
+                yield outcome
+
+    def _ensure_one_row(
+        self, row: dict, years_back: int, today: date | None
+    ) -> PrefetchOutcome:
+        """Run ``ensure_daily_history`` for one row, capturing a safe outcome."""
+        symbol = str(row.get("symbol", "?")).strip() or "?"
+        try:
+            _, status = self.ensure_daily_history(row, years_back=years_back, today=today)
+            return PrefetchOutcome(symbol=symbol, status=status)
+        except Exception as exc:
+            logger.exception("Prefetch failed for %s", symbol)
+            return PrefetchOutcome(symbol=symbol, status="failed", message=redact_text(str(exc)))
 
     def load_universe_history(
         self,
