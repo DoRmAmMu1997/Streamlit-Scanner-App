@@ -221,7 +221,10 @@ def normalize_screener_row(
     # Indicator values are scalar in the v1 contract. The helper below converts
     # NumPy and pandas scalar objects without importing either dependency here.
     raw_indicators = provenance.get("indicator_values")
-    indicator_values = (
+    # Declared as the wider JSON type: ``dict`` is invariant in its value type,
+    # so a ``dict[str, JSONScalar]`` would not be assignable into the canonical
+    # ``dict[str, JSONValue]`` envelope below even though every scalar fits.
+    indicator_values: dict[str, JSONValue] = (
         {
             str(key): _json_safe_scalar(value)
             for key, value in raw_indicators.items()
@@ -307,7 +310,7 @@ def _normalize_rules(value: Any) -> list[JSONValue]:
         items = list(value)
     else:
         items = [value]
-    return [cast(JSONValue, _json_safe(item)) for item in items]
+    return [_json_safe(item) for item in items]
 
 
 def _normalize_source(value: Any) -> SignalSource | None:
@@ -336,7 +339,7 @@ def _normalize_ai_placeholder(value: Any) -> dict[str, JSONValue] | None:
         return _json_safe_mapping(value)
     if is_dataclass(value) and not isinstance(value, type):
         return _json_safe_mapping(asdict(value))
-    return {"legacy_value": cast(JSONValue, _json_safe(value))}
+    return {"legacy_value": _json_safe(value)}
 
 
 def _json_safe_mapping(
@@ -358,10 +361,7 @@ def _json_safe_mapping(
         if is_secret_key_name(key):
             converted[key] = MASKED_PARAMETER
             continue
-        converted[key] = cast(
-            JSONValue,
-            _json_safe(raw_value, drop_callables=drop_callables),
-        )
+        converted[key] = _json_safe(raw_value, drop_callables=drop_callables)
     return converted
 
 
