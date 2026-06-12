@@ -183,7 +183,7 @@ def _to_number(text: str | None) -> float | None:
     """
     if text is None:
         return None
-    cleaned = text.replace(",", "").replace(" ", " ").strip()
+    cleaned = text.replace(",", "").replace("\u00a0", " ").strip()
     if not cleaned or cleaned in {"-", "--"}:
         return None
     match = _NUMBER_PATTERN.search(cleaned)

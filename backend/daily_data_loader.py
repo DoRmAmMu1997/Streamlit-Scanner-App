@@ -701,8 +701,17 @@ class DailyDataLoader:
             # The legacy pattern has at least four parts and the LAST two must
             # both be 8-digit numeric date strings. That avoids accidentally
             # deleting a symbol that happens to legitimately contain numbers.
-            has_date_pair = parts[-2].isdigit() and parts[-1].isdigit() and len(parts[-2]) == 8 and len(parts[-1]) == 8
-            if len(parts) >= 4 and has_date_pair:
+            # Keep the length check first: Python stops evaluating an `and`
+            # expression as soon as one condition is false, so short filenames
+            # never reach the `parts[-2]` and `parts[-1]` lookups.
+            has_date_pair = (
+                len(parts) >= 4
+                and parts[-2].isdigit()
+                and parts[-1].isdigit()
+                and len(parts[-2]) == 8
+                and len(parts[-1]) == 8
+            )
+            if has_date_pair:
                 try:
                     path.unlink()
                     deleted += 1

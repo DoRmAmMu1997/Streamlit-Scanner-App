@@ -25,9 +25,10 @@ target-version = "py311"
 # SIM   simplifiable code
 # RUF   Ruff-native checks (mutable class defaults, unused noqa, ...)
 select = ["E", "W", "F", "I", "B", "UP", "C4", "SIM", "RUF"]
-# The codebase deliberately uses em-dashes and middle-dots in docstrings and
-# UI strings; flagging them as "ambiguous unicode" is noise here.
-ignore = ["RUF001", "RUF002", "RUF003"]
+# Keep Ruff's ambiguous-Unicode checks enabled. These are the only two
+# confusable characters the project uses deliberately in formulas and prose;
+# every other look-alike character should continue to produce a lint warning.
+allowed-confusables = ["–", "∪"]
 # `# noqa: BLE001` comments document intentional broad-except blocks for a
 # stricter future rule set. BLE is not enabled yet, so tell Ruff the code is
 # external-tool noqa rather than letting RUF100 delete the documentation.
