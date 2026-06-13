@@ -10,7 +10,25 @@
     "low": 8.0,
     "bb_middle": 10.666667,
     "bb_upper": 12.552285,
-    "bb_lower": 8.781049
+    "bb_lower": 8.781049,
+    "provenance": {
+      "screener_key": "bollinger_band_reversal",
+      "screener_version": "1.0.0",
+      "triggered_rules": [
+        "low_pierced_lower_band",
+        "closed_green"
+      ],
+      "indicator_values": {
+        "open": 11.0,
+        "high": 12.0,
+        "low": 8.0,
+        "close": 12.0,
+        "bb_middle": 10.666667,
+        "bb_upper": 12.552285,
+        "bb_lower": 8.781049
+      },
+      "source": "deterministic"
+    }
   },
   {
     "symbol": "SELL",
@@ -23,6 +41,24 @@
     "low": 17.0,
     "bb_middle": 19.333333,
     "bb_upper": 21.218951,
-    "bb_lower": 17.447715
+    "bb_lower": 17.447715,
+    "provenance": {
+      "screener_key": "bollinger_band_reversal",
+      "screener_version": "1.0.0",
+      "triggered_rules": [
+        "high_pierced_upper_band",
+        "closed_red"
+      ],
+      "indicator_values": {
+        "open": 19.0,
+        "high": 22.0,
+        "low": 17.0,
+        "close": 18.0,
+        "bb_middle": 19.333333,
+        "bb_upper": 21.218951,
+        "bb_lower": 17.447715
+      },
+      "source": "deterministic"
+    }
   }
 ]

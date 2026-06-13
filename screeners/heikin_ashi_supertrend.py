@@ -114,6 +114,7 @@ class HeikinAshiSupertrend(BaseScanner):
         # not a separate SuperTrend direction-flip rule.
         if previous_ha_close <= previous_supertrend and latest_ha_close > latest_supertrend:
             rating = "BUY"
+            triggered_rules = ["ha_close_crossed_above_supertrend"]
             reason = (
                 f"Daily Heikin Ashi close ({latest_ha_close:.2f}) crossed above "
                 f"SuperTrend({atr_period}, {multiplier:g}) at {latest_supertrend:.2f}."
@@ -122,6 +123,7 @@ class HeikinAshiSupertrend(BaseScanner):
         # close below the line.
         elif previous_ha_close >= previous_supertrend and latest_ha_close < latest_supertrend:
             rating = "SELL"
+            triggered_rules = ["ha_close_crossed_below_supertrend"]
             reason = (
                 f"Daily Heikin Ashi close ({latest_ha_close:.2f}) crossed below "
                 f"SuperTrend({atr_period}, {multiplier:g}) at {latest_supertrend:.2f}."
@@ -144,6 +146,16 @@ class HeikinAshiSupertrend(BaseScanner):
             "previous_ha_close": previous_ha_close,
             "previous_supertrend": previous_supertrend,
             "reason": reason,
+            "provenance": self.build_provenance(
+                triggered_rules=triggered_rules,
+                indicator_values={
+                    "close": float(latest_ha["close"]),
+                    "ha_close": latest_ha_close,
+                    "supertrend": latest_supertrend,
+                    "previous_ha_close": previous_ha_close,
+                    "previous_supertrend": previous_supertrend,
+                },
+            ),
         }
 
     def build_chart(self, candles: pd.DataFrame, params: dict) -> dict:

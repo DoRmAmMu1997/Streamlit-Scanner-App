@@ -104,6 +104,16 @@ class BollingerLowerBand(BaseScanner):
             "bb_upper": float(latest["bb_upper"]),
             "bb_distance_pct": bb_distance_pct,
             "reason": reason,
+            "provenance": self.build_provenance(
+                triggered_rules=["close_within_proximity_of_lower_band"],
+                indicator_values={
+                    "close": close,
+                    "bb_lower": lower_band,
+                    "bb_middle": float(latest["bb_middle"]),
+                    "bb_upper": float(latest["bb_upper"]),
+                    "bb_distance_pct": bb_distance_pct,
+                },
+            ),
         }
 
     def build_chart(self, candles: pd.DataFrame, params: dict) -> dict:

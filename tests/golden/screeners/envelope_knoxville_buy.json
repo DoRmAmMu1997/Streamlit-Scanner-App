@@ -15,6 +15,26 @@
     "divergence_bars_ago": 3,
     "kd_retest_distance_pct": -0.128492,
     "rsi": 23.491028,
-    "momentum": -6.0
+    "momentum": -6.0,
+    "provenance": {
+      "screener_key": "envelope_knoxville_buy",
+      "screener_version": "1.0.0",
+      "triggered_rules": [
+        "close_near_lower_envelope_band",
+        "recent_bullish_knoxville_divergence"
+      ],
+      "indicator_values": {
+        "close": 78.0,
+        "env_basis": 88.2,
+        "env_lower": 79.38,
+        "env_distance_pct": -0.017385,
+        "divergence_price": 89.5,
+        "divergence_bars_ago": 3,
+        "kd_retest_distance_pct": -0.128492,
+        "rsi": 23.491028,
+        "momentum": -6.0
+      },
+      "source": "deterministic"
+    }
   }
 ]

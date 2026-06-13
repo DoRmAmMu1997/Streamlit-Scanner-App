@@ -208,6 +208,11 @@ class StochasticSwing(BaseScanner):
             rating = "BUY"
             stop = close * (1.0 - STOP_LOSS_PCT)
             target = close * (1.0 + TARGET_PCT)
+            triggered_rules = [
+                "close_above_sma200",
+                "stoch_k_crossed_above_d_from_oversold",
+                "fresh_ema5_sma200_bullish_cross",
+            ]
             reason = (
                 f"Stochastic %K ({latest_k:.1f}) crossed above %D ({latest_d:.1f}) "
                 f"from oversold; price {close:.2f} above SMA200 {sma200:.2f} with a "
@@ -217,6 +222,11 @@ class StochasticSwing(BaseScanner):
             rating = "SELL"
             stop = close * (1.0 + STOP_LOSS_PCT)
             target = close * (1.0 - TARGET_PCT)
+            triggered_rules = [
+                "close_below_sma200",
+                "stoch_k_crossed_below_d_from_overbought",
+                "fresh_ema5_sma200_bearish_cross",
+            ]
             reason = (
                 f"Stochastic %K ({latest_k:.1f}) crossed below %D ({latest_d:.1f}) "
                 f"from overbought; price {close:.2f} below SMA200 {sma200:.2f} with a "
@@ -241,6 +251,20 @@ class StochasticSwing(BaseScanner):
             "stop": stop,
             "target": target,
             "reason": reason,
+            "provenance": self.build_provenance(
+                triggered_rules=triggered_rules,
+                indicator_values={
+                    "close": close,
+                    "sma200": sma200,
+                    "ema5": ema5,
+                    "stoch_k": latest_k,
+                    "stoch_d": latest_d,
+                    "previous_stoch_k": prev_k,
+                    "previous_stoch_d": prev_d,
+                    "stop": stop,
+                    "target": target,
+                },
+            ),
         }
 
     def build_chart(self, candles: pd.DataFrame, params: dict) -> dict:

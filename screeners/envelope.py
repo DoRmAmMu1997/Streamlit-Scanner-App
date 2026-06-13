@@ -112,6 +112,16 @@ class Envelope(BaseScanner):
             "env_upper": float(bands["env_upper"].iloc[-1]),
             "pct_below_basis": pct_below_basis,
             "reason": reason,
+            "provenance": self.build_provenance(
+                triggered_rules=["close_at_or_below_lower_envelope_band"],
+                indicator_values={
+                    "close": latest_close,
+                    "env_basis": latest_basis,
+                    "env_lower": latest_lower,
+                    "env_upper": float(bands["env_upper"].iloc[-1]),
+                    "pct_below_basis": pct_below_basis,
+                },
+            ),
         }
 
     def build_chart(self, candles: pd.DataFrame, params: dict) -> dict:

@@ -11,7 +11,22 @@
     "ha_close": 15.0,
     "supertrend": 5.861111,
     "previous_ha_close": 5.0,
-    "previous_supertrend": 10.333333
+    "previous_supertrend": 10.333333,
+    "provenance": {
+      "screener_key": "heikin_ashi_supertrend",
+      "screener_version": "1.0.0",
+      "triggered_rules": [
+        "ha_close_crossed_above_supertrend"
+      ],
+      "indicator_values": {
+        "close": 15.0,
+        "ha_close": 15.0,
+        "supertrend": 5.861111,
+        "previous_ha_close": 5.0,
+        "previous_supertrend": 10.333333
+      },
+      "source": "deterministic"
+    }
   },
   {
     "symbol": "SELL",
@@ -25,6 +40,21 @@
     "ha_close": 10.0,
     "supertrend": 27.333333,
     "previous_ha_close": 30.0,
-    "previous_supertrend": 20.5
+    "previous_supertrend": 20.5,
+    "provenance": {
+      "screener_key": "heikin_ashi_supertrend",
+      "screener_version": "1.0.0",
+      "triggered_rules": [
+        "ha_close_crossed_below_supertrend"
+      ],
+      "indicator_values": {
+        "close": 10.0,
+        "ha_close": 10.0,
+        "supertrend": 27.333333,
+        "previous_ha_close": 30.0,
+        "previous_supertrend": 20.5
+      },
+      "source": "deterministic"
+    }
   }
 ]
