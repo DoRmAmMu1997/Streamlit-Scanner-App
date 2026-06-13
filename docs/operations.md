@@ -34,8 +34,13 @@ Register-ScheduledTask -TaskName "scanner-daily-scan" -Action $action -Trigger $
 
 ```cron
 # Weekdays at 18:30 IST, after market close + data settlement.
+CRON_TZ=Asia/Kolkata
 30 18 * * 1-5  cd /path/to/Streamlit-Scanner-App && python -m backend.jobs.run_daily_scan >> /var/log/scanner-daily.log 2>&1
 ```
+
+`CRON_TZ` is supported by common Linux cron implementations. If the scheduler
+does not support it, including the cron shipped with macOS, set the host timezone
+to `Asia/Kolkata` or translate 18:30 IST into the host timezone explicitly.
 
 Set `LOG_FORMAT=json` for scheduled runs if a log aggregator will read the
 output; the default "auto" already picks JSON when `APP_ENV=production`.
@@ -79,6 +84,10 @@ when more than one person reads scan history:
 DATABASE_URL=postgresql+psycopg://scanner:<password>@db-host:5432/scanner
 ```
 
+The normal pinned setup installs `psycopg[binary]`, which supplies the psycopg 3
+driver used by this URL. Deployment images should use the same
+`requirements.txt` plus `constraints.txt` install documented in the README.
+
 The schema is managed by Alembic; both the app and the daily job run
 `alembic upgrade head` equivalent automatically at startup. To pre-provision
 or debug: `python -m alembic upgrade head`.
@@ -115,11 +124,13 @@ no code changes are needed - settings are re-read at startup.
 The "Quality and security" workflow runs the same gates you can run locally:
 
 ```bash
+python -m pre_commit validate-config .pre-commit-config.yaml
 python -m pytest -q --cov=backend --cov=screeners --cov=ui --cov-fail-under=84
+python -m compileall -q app.py backend screeners ui tests
 python -m ruff check app.py backend screeners ui Dependencies tests
 python -m mypy
 python -m bandit -r app.py backend screeners ui Dependencies -q
-python -m pip_audit -r requirements.txt -r requirements-dev.txt
+python -m pip_audit -r constraints.txt
 ```
 
 These gates were ratcheted up over several PRs (QUAL-001/002/003, REF-001).

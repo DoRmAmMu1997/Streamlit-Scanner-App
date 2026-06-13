@@ -14,6 +14,15 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+CI_COMMANDS = (
+    "python -m pre_commit validate-config .pre-commit-config.yaml",
+    "python -m pytest -q --cov=backend --cov=screeners --cov=ui --cov-fail-under=84",
+    "python -m compileall -q app.py backend screeners ui tests",
+    "python -m ruff check app.py backend screeners ui Dependencies tests",
+    "python -m mypy",
+    "python -m bandit -r app.py backend screeners ui Dependencies -q",
+    "python -m pip_audit -r constraints.txt",
+)
 
 
 def test_ci_workflow_runs_quality_and_dependency_security_checks():
@@ -66,9 +75,14 @@ def test_constraints_pin_direct_runtime_and_developer_dependencies():
     text = (ROOT / "constraints.txt").read_text(encoding="utf-8")
     required_names = [
         "streamlit",
+        "authlib",
         "pandas",
         "numpy",
         "pyarrow",
+        "sqlalchemy",
+        "alembic",
+        "psycopg",
+        "psycopg-binary",
         "requests",
         "python-dotenv",
         "dhanhq",
@@ -101,6 +115,13 @@ def test_constraints_use_security_reviewed_dependency_versions():
     assert re.search(r"^pytest==9\.0\.3$", text, flags=re.MULTILINE)
 
 
+def test_runtime_requirements_install_the_documented_postgres_driver():
+    """The documented psycopg SQLAlchemy URL must work after normal setup."""
+    text = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+
+    assert re.search(r"^psycopg\[binary\]$", text, flags=re.IGNORECASE | re.MULTILINE)
+
+
 def test_readme_documents_local_quality_and_security_commands():
     """The README should teach users how to reproduce the CI checks locally."""
     text = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -119,3 +140,29 @@ def test_readme_documents_local_quality_and_security_commands():
     assert "python -m pre_commit validate-config .pre-commit-config.yaml" in text
     assert "python -m pre_commit run --all-files" in text
     assert "requirements-optional.txt" in text
+
+
+def test_operations_guide_matches_scheduler_database_and_ci_contracts():
+    """Operations guidance should remain executable and identical to CI."""
+    text = (ROOT / "docs" / "operations.md").read_text(encoding="utf-8")
+
+    assert "CRON_TZ=Asia/Kolkata" in text
+    assert "host timezone" in text.lower()
+    assert "`psycopg[binary]`" in text
+    for command in CI_COMMANDS:
+        assert command in text
+    assert "python -m pip_audit -r requirements.txt -r requirements-dev.txt" not in text
+
+
+def test_screener_guide_matches_registry_chart_golden_and_ci_contracts():
+    """The screener walkthrough should describe interfaces the repo really exposes."""
+    text = (ROOT / "docs" / "adding-a-screener.md").read_text(encoding="utf-8")
+
+    assert "the universe key exists in config" not in text
+    assert "does not validate the universe key" in text
+    assert 'std_multiplier=float(params.get("std_multiplier", 2.0))' in text
+    assert "`GoldenCase`" in text
+    assert "deterministic candle" in text
+    assert "series.isna().any()" not in text
+    for command in CI_COMMANDS:
+        assert command in text

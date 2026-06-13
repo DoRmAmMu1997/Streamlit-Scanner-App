@@ -63,9 +63,11 @@ marked PARTIAL), column normalization, and an empty-but-correctly-shaped
 DataFrame when nothing matches.
 
 What the registry validates at discovery time (`backend/screener_registry.py`):
-`SCREENER` has the required keys, `key` is unique, the universe key exists in
-config, and `run`'s signature matches. A broken screener file produces a clear
-sidebar error instead of taking down the app.
+`SCREENER` has the required keys, `key` is unique, and `run`'s signature
+matches. The registry does not validate the universe key; choose a key from
+`backend.universe_builder.UNIVERSE_CONFIG` so the loader can resolve it. A
+broken screener file produces a clear sidebar error instead of taking down the
+app.
 
 ## 2. Annotate class attributes with ClassVar
 
@@ -83,7 +85,12 @@ Implement `build_chart` only if the strategy benefits from a visual; return
         from backend.charts import add_bollinger_overlay, candlestick_with_volume
 
         spec = candlestick_with_volume(candles, title="My Screener")
-        add_bollinger_overlay(spec, candles, period=int(params.get("period", 20)))
+        add_bollinger_overlay(
+            spec,
+            candles,
+            period=int(params.get("period", 20)),
+            std_multiplier=float(params.get("std_multiplier", 2.0)),
+        )
         return spec
 ```
 
@@ -99,8 +106,10 @@ Two layers, both expected for a merged screener:
    small candle frame that should and should not trigger, run the screener
    through a fake loader, assert on the rows.
 2. **Golden snapshot** (`tests/test_screener_golden_outputs.py`, TEST-001):
-   add your screener key to the golden set. The first run with
-   `UPDATE_GOLDEN=1` writes a reference output; afterwards CI fails if the
+   import the screener module, build deterministic candle fixtures and params,
+   and append a `GoldenCase` to `_golden_cases()`. The first run with
+   `UPDATE_GOLDEN=1` writes its reference JSON under `tests/golden/screeners/`;
+   review that generated diff before committing it. Afterwards CI fails if the
    screener's output drifts unexpectedly. This is what lets refactors touch
    shared indicator code with confidence.
 
@@ -112,10 +121,13 @@ python -m pytest -q                                                      # alway
 ## 5. The pre-merge checklist
 
 ```bash
+python -m pre_commit validate-config .pre-commit-config.yaml
 python -m pytest -q --cov=backend --cov=screeners --cov=ui --cov-fail-under=84
+python -m compileall -q app.py backend screeners ui tests
 python -m ruff check app.py backend screeners ui Dependencies tests
 python -m mypy
 python -m bandit -r app.py backend screeners ui Dependencies -q
+python -m pip_audit -r constraints.txt
 ```
 
 These are the exact CI gates. If you forked your branch a while ago, merge
@@ -127,9 +139,10 @@ code (see docs/operations.md, "CI gates and the multi-branch workflow").
 - **Decimal vs float**: result rows may carry `Decimal` for money fields; the
   storage layer serializes them losslessly. Do indicator math in float, format
   at the edges.
-- **NaN warm-up rows**: indicators need warm-up candles; check
-  `series.isna().any()` before deciding a signal, or you will emit signals on
-  insufficient data.
+- **NaN warm-up rows**: indicators normally contain NaNs in their warm-up
+  prefix. First enforce the strategy's minimum history length, then check only
+  the latest indicator values used by the decision, for example
+  `if bands[["upper", "lower"]].iloc[-1].isna().any(): return None`.
 - **Don't fetch data yourself**: the loader injected into `run` is the only
   sanctioned data path - it owns caching, rate limits, and failure
   bookkeeping. A screener that opens its own HTTP connections will bypass the
