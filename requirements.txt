@@ -19,6 +19,9 @@ SQLAlchemy
 # Alembic is SQLAlchemy's migration tool. It creates/updates the physical
 # database tables from versioned migration files instead of ad-hoc create_all().
 alembic
+# Psycopg 3 is the PostgreSQL driver used by postgresql+psycopg:// URLs.
+# The binary extra provides a self-contained wheel for normal deployments.
+psycopg[binary]
 
 # Dhan API and environment loading.
 requests
