@@ -757,6 +757,26 @@ older and AI-assisted screeners continue to persist. Dates, `Decimal`, pandas,
 and NumPy values are converted to strict JSON; callable parameters are omitted,
 and credential-shaped values are redacted before result persistence.
 
+**Deterministic screener provenance (PROV-002).** Every screener now records
+*why* a stock shortlisted. `BaseScanner` exposes `build_provenance(...)`, and each
+`compute_signal` returns it under a reserved trailing `provenance` column:
+
+```python
+"provenance": self.build_provenance(
+    triggered_rules=["close_at_or_below_lower_envelope_band"],
+    indicator_values={"close": latest_close, "env_lower": latest_lower},
+    # source defaults to "deterministic"; AI-assisted screeners pass "ai"/"hybrid".
+)
+```
+
+The helper stamps the screener's `key` and `SCREENER_VERSION`, converts indicator
+values to plain JSON scalars, and the persistence layer folds it into
+`provenance_json` (filling run-level `params_snapshot`/`data_snapshot_date`). The
+column is dropped from the on-screen results table and the download CSV, so it is
+durable audit evidence without cluttering the UI. The two AI screeners label
+their rows `source="hybrid"` (gate + AI) or `"deterministic"` (gate-only
+fallback); capturing the AI model/prompt/evidence itself is reserved for PROV-003.
+
 ## Adding your own screener
 
 Create a new file in `screeners/`, for example `screeners/my_screener.py`,
@@ -781,7 +801,15 @@ class MyScanner(BaseScanner):
         frame = self.prepare_candles(candles)
         period = self.coerce_param(params, "period", int)
         # ... your strategy logic ...
-        return None  # or a dict matching the common + extra columns
+        return None  # or a dict of the common + extra columns, plus provenance:
+        # return {
+        #     "symbol": symbol, "rating": "BUY", "signal_date": ...,
+        #     "close": ..., "reason": ..., "my_indicator_value": ...,
+        #     "provenance": self.build_provenance(
+        #         triggered_rules=["my_rule_fired"],
+        #         indicator_values={"my_indicator_value": ...},
+        #     ),
+        # }
 
     def build_chart(self, candles, params):  # optional
         ...
