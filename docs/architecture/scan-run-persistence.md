@@ -41,7 +41,10 @@ the **design, the migration plan, and the model boundaries**.
 - Engine, `Session` factory, Alembic env + migration files, the real DB file → **SCAN-002 (Codex)**.
 - The scan service that *writes* runs/results → **SCAN-003**.
 - The history page that *reads* them → **SCAN-004**.
-- Populating strategy-specific deterministic provenance → **PROV-002**.
+- Populating strategy-specific deterministic provenance → **PROV-002** *(implemented:
+  screeners emit `triggered_rules` + `indicator_values` via
+  `BaseScanner.build_provenance`, carried on a reserved `provenance` row column and
+  normalized into `provenance_json`; the two AI screeners label `source` hybrid/deterministic)*.
 - Full AI verdict/evidence provenance → **PROV-003**.
 - Populating `final_score` → **RANK-***. Audit log / user identity → **OBS-003 / AUTH-***.
 

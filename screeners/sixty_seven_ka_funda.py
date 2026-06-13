@@ -114,6 +114,19 @@ class SixtySevenKaFunda(BaseScanner):
             "fall_reason_category": verdict.fall_reason_category,
             "confidence": int(verdict.confidence),
             "evidence_summary": evidence_summary,
+            # Deterministic drawdown gate + AI verifier => hybrid. The AI evidence
+            # itself (model, prompt, scraped text) is reserved for PROV-003.
+            "provenance": self.build_provenance(
+                triggered_rules=["drawdown_gate_passed", "ai_verdict_approved"],
+                indicator_values={
+                    "close": float(candidate.latest_close),
+                    "ath_price": float(candidate.ath_price),
+                    "drawdown_pct": float(candidate.drawdown_pct),
+                    "upside_to_ath_pct": float(candidate.upside_to_ath_pct),
+                    "confidence": int(verdict.confidence),
+                },
+                source="hybrid",
+            ),
         }
 
     def compute_signal(self, symbol: str, candles: pd.DataFrame, params: dict) -> dict | None:

@@ -68,6 +68,16 @@ logger = logging.getLogger(__name__)
 _AGENT_CACHE: dict[tuple[str, bool], TechnicalAnalysisAgent] = {}
 _AGENT_CACHE_LOCK = threading.Lock()
 
+# The boolean gate flags (the gate dict's keys excluding "nearest_support"). Used
+# to label which deterministic setups fired in PROV-002 provenance.
+_GATE_RULE_FLAGS = (
+    "at_support",
+    "fresh_breakout",
+    "double_bottom",
+    "bullish_fvg",
+    "order_block",
+)
+
 
 def _get_agent() -> TechnicalAnalysisAgent:
     """Return a cached technical agent for the configured Claude model + fast mode."""
@@ -351,6 +361,11 @@ class TechnicalAnalysis(BaseScanner):
         # gate support so the column is always populated.
         reported_level = float(verdict.key_levels[0]) if verdict.key_levels else nearest_level
 
+        gate_rules = [
+            f"gate_{flag}"
+            for flag in _GATE_RULE_FLAGS
+            if candidate["gate"].get(flag)
+        ]
         return {
             "symbol": symbol,
             "rating": "BUY",
@@ -362,10 +377,20 @@ class TechnicalAnalysis(BaseScanner):
             "trend": verdict.trend,
             "nearest_level": reported_level,
             "reason": verdict.reasoning,
+            # Gate + AI agreed, so this is a hybrid signal. AI evidence (model,
+            # prompt, scraped text) is intentionally out of scope until PROV-003.
+            "provenance": self.build_provenance(
+                triggered_rules=[*gate_rules, "ai_setup_qualified"],
+                indicator_values={
+                    "close": close,
+                    "nearest_level": reported_level,
+                    "confidence": int(verdict.confidence),
+                },
+                source="hybrid",
+            ),
         }
 
-    @staticmethod
-    def _gate_only_row(candidate: dict) -> dict | None:
+    def _gate_only_row(self, candidate: dict) -> dict | None:
         """Build a gate-only BUY row when the Claude Agent SDK is unavailable.
 
         Without the agent (not installed, or plan limit hit) we still surface a
@@ -403,6 +428,12 @@ class TechnicalAnalysis(BaseScanner):
             "reason": (
                 f"Gate: close {close:.2f} is {what}. AI confirmation unavailable "
                 "(Claude Agent SDK not ready); showing gate-only candidate."
+            ),
+            # No AI ran, so this fallback row is a purely deterministic gate hit.
+            "provenance": self.build_provenance(
+                triggered_rules=[f"gate_{pattern}", "ai_confirmation_unavailable"],
+                indicator_values={"close": close, "nearest_level": nearest_level},
+                source="deterministic",
             ),
         }
 

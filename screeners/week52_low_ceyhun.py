@@ -142,6 +142,16 @@ class Week52LowCeyhun(BaseScanner):
             "proximity_pct_at_signal": tightest_proximity,
             "days_since_signal": days_since_signal,
             "reason": reason,
+            "provenance": self.build_provenance(
+                triggered_rules=["close_within_proximity_of_52w_low_in_recent_window"],
+                indicator_values={
+                    "close": float(latest["close"]),
+                    "week52_low": float(rolling_low.iloc[-1]),
+                    "week52_high": float(rolling_high.iloc[-1]),
+                    "proximity_pct_at_signal": tightest_proximity,
+                    "days_since_signal": days_since_signal,
+                },
+            ),
         }
 
     def build_chart(self, candles: pd.DataFrame, params: dict) -> dict:

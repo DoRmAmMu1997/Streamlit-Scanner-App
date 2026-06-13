@@ -30,14 +30,18 @@ Beginner note on Abstract Base Classes (ABC):
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
+import math
 from abc import ABC, abstractmethod
-from collections.abc import Callable
-from typing import Any, ClassVar
+from collections.abc import Callable, Mapping, Sequence
+from decimal import Decimal
+from typing import Any, ClassVar, get_args
 
 import pandas as pd
 
 from backend.indicators import prepare_ohlc
+from backend.scanning.result_contract import SignalSource
 from backend.security import redact_text
 
 logger = logging.getLogger(__name__)
@@ -52,6 +56,50 @@ COMMON_RESULT_COLUMNS: list[str] = [
     "close",
     "reason",
 ]
+
+# PROV-002: every screener frame ends with a reserved column holding a per-row
+# provenance dict ("why this stock passed"). It is appended after each
+# screener's own extras so the leading/common columns the UI relies on keep
+# their meaning, and so golden-snapshot diffs show provenance trailing each row.
+PROVENANCE_COLUMN: str = "provenance"
+
+# The single source of truth for the provenance ``source`` categories is the
+# typed contract; deriving the runtime set from that ``Literal`` avoids a second
+# vocabulary that could drift from the normalizer's own validation.
+_VALID_SOURCES: frozenset[str] = frozenset(get_args(SignalSource))
+
+
+def _plain_scalar(value: Any) -> Any:
+    """Convert one indicator value to a builtin JSON-safe scalar.
+
+    Screeners compute with pandas/NumPy, so ``indicator_values`` commonly holds
+    ``np.float64``/``np.int64``/``Decimal``/dates and the occasional NaN. The
+    golden snapshots serialize the *raw* result frame, so these must already be
+    plain ``int``/``float``/``str``/``bool``/``None`` here (NaN and infinity
+    become ``None``) for ``json.dumps(..., allow_nan=False)`` and cross-platform
+    determinism.
+    """
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, Decimal):
+        return float(value) if value.is_finite() else None
+    if isinstance(value, dt.datetime | dt.date):
+        return value.isoformat()
+    if isinstance(value, str):
+        return value
+    # NumPy/pandas scalars expose ``.item()``; recurse so the branches above
+    # still catch NaN/infinity in the unwrapped builtin value.
+    item_method = getattr(value, "item", None)
+    if callable(item_method):
+        try:
+            return _plain_scalar(item_method())
+        except (TypeError, ValueError):
+            pass
+    return value
 
 
 class BaseScanner(ABC):
@@ -75,19 +123,24 @@ class BaseScanner(ABC):
     SCREENER: ClassVar[dict] = {}
     EXTRA_RESULT_COLUMNS: ClassVar[list[str]] = []
 
+    # PROV-002: bump this when a strategy's rule logic changes so historical
+    # provenance stays interpretable. It is stamped onto every row the screener
+    # emits via ``build_provenance`` below.
+    SCREENER_VERSION: ClassVar[str] = "1.0.0"
+
     # ------------------------------------------------------------------
     # Public helpers used by the UI and the registry
     # ------------------------------------------------------------------
 
     @property
     def result_columns(self) -> list[str]:
-        """Common columns first, then the screener's extras."""
+        """Common columns first, the screener's extras, then ``provenance`` last."""
         # Deduplicate while preserving order. A screener that accidentally
         # lists "symbol" again in EXTRA_RESULT_COLUMNS should not produce a
         # duplicate column in the output DataFrame.
         seen = set()
         ordered: list[str] = []
-        for column in (*COMMON_RESULT_COLUMNS, *self.EXTRA_RESULT_COLUMNS):
+        for column in (*COMMON_RESULT_COLUMNS, *self.EXTRA_RESULT_COLUMNS, PROVENANCE_COLUMN):
             if column in seen:
                 continue
             seen.add(column)
@@ -133,6 +186,50 @@ class BaseScanner(ABC):
                 f"and has no default in SCREENER['default_params']"
             )
         return cast(params.get(key, defaults.get(key)))
+
+    def build_provenance(
+        self,
+        *,
+        triggered_rules: Sequence[str],
+        indicator_values: Mapping[str, Any],
+        source: SignalSource = "deterministic",
+        notes: str | None = None,
+    ) -> dict[str, Any]:
+        """Build the per-row provenance dict for the reserved ``provenance`` column.
+
+        PROV-002: a screener states *why* a row shortlisted — the rule names that
+        fired and the indicator values behind them. This helper stamps the
+        screener's identity (``screener_key`` from ``SCREENER`` and
+        ``SCREENER_VERSION``) so each ``compute_signal`` only declares its own
+        rules, and converts indicator values to plain JSON-safe scalars so the
+        raw result frame stays serializable (see ``_plain_scalar``).
+
+        ``params_snapshot`` and ``data_snapshot_date`` are intentionally left out:
+        the persistence normalizer fills those from run-level context, and keeping
+        them off the row keeps golden snapshots free of run-date-dependent values.
+        ``source`` defaults to "deterministic" because this helper is for
+        rule-based screeners; AI-assisted screeners pass "ai" or "hybrid".
+        """
+        if source not in _VALID_SOURCES:
+            allowed = ", ".join(sorted(_VALID_SOURCES))
+            raise ValueError(
+                f"build_provenance source must be one of: {allowed}; got {source!r}."
+            )
+        provenance: dict[str, Any] = {
+            "screener_key": str(self.SCREENER.get("key", type(self).__name__)),
+            "screener_version": self.SCREENER_VERSION,
+            "triggered_rules": [str(rule) for rule in triggered_rules],
+            "indicator_values": {
+                str(name): _plain_scalar(value)
+                for name, value in indicator_values.items()
+            },
+            "source": source,
+        }
+        if notes is not None:
+            # Defense in depth: a stray token in a hand-written note must not
+            # become durable scan history. redact_text is the app-wide masker.
+            provenance["notes"] = redact_text(notes)
+        return provenance
 
     # ------------------------------------------------------------------
     # The strategy hook every subclass must implement

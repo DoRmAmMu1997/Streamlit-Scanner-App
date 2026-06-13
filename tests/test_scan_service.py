@@ -22,6 +22,7 @@ from backend.observability import (
     EVENT_SCAN_STARTED,
     EVENT_SYMBOL_SCAN_FAILED,
 )
+from backend.scanner_base import BaseScanner
 from backend.scanning import ScanStatus, run_scan
 from backend.storage.repository import get_latest_scan_runs, get_scan_results
 
@@ -632,3 +633,72 @@ def test_run_scan_emits_header_failure_without_false_completion(caplog):
     assert failed[0]["error_type"] == "RuntimeError"
     assert "HEADERSECRET" not in str(failed[0])
     assert _event_fields(caplog, EVENT_SCAN_COMPLETED) == []
+
+
+class _ProvenanceScanner(BaseScanner):
+    """A minimal screener that emits PROV-002 provenance via the base helper."""
+
+    SCREENER = {
+        "key": "envelope",
+        "name": "Provenance Demo",
+        "description": "Test-only screener that records provenance.",
+        "universe": "test",
+        "timeframe": "daily",
+        "lookback_days": 10,
+        "default_params": {},
+    }
+
+    def compute_signal(self, symbol, candles, params):
+        return {
+            "symbol": symbol,
+            "rating": "BUY",
+            "signal_date": "2026-06-01",
+            "close": 80.0,
+            "reason": "at/below the lower envelope band",
+            "provenance": self.build_provenance(
+                triggered_rules=["close_at_or_below_lower_envelope_band"],
+                indicator_values={"close": 80.0, "env_lower": 82.5},
+            ),
+        }
+
+
+def test_run_scan_persists_screener_provenance_end_to_end(db_engine, session_factory):
+    """A screener's provenance must reach scan_results.provenance_json intact.
+
+    This is the whole PROV-002 contract through the real service + repository: a
+    row carrying a ``build_provenance`` dict is normalized and stored as the
+    canonical envelope, while the UI DataFrame keeps the raw provenance column.
+    """
+    scanner = _ProvenanceScanner()
+
+    def screener_run(_universe_df, _data_loader, _params):
+        # Build the frame exactly as BaseScanner.run would (one compute_signal row
+        # selected down to result_columns), without needing a candle-backed loader.
+        row = scanner.compute_signal("DISCOUNT", pd.DataFrame(), _params)
+        return pd.DataFrame([row], columns=scanner.result_columns)
+
+    result = run_scan(
+        screener_key="envelope",
+        universe_key="hemant_super_45",
+        run_callable=screener_run,
+        universe_df=pd.DataFrame({"symbol": ["DISCOUNT"]}),
+        data_loader=_FakeLoader(),
+        params={**_base_params(), "max_symbols": None},
+        session_factory=session_factory,
+    )
+
+    assert result.status is ScanStatus.SUCCESS
+    # The UI frame keeps the raw provenance column (only the display path drops it).
+    assert "provenance" in result.results.columns
+
+    with Session(db_engine) as session:
+        rows = get_scan_results(session, result.run_id)
+        assert [r.symbol for r in rows] == ["DISCOUNT"]
+        provenance = rows[0].provenance_json
+        assert provenance["source"] == "deterministic"
+        assert provenance["screener_key"] == "envelope"
+        assert provenance["screener_version"] == "1.0.0"
+        assert provenance["triggered_rules"] == ["close_at_or_below_lower_envelope_band"]
+        assert provenance["indicator_values"]["env_lower"] == 82.5
+        # Run-level context the screener did not set is filled by the normalizer.
+        assert provenance["data_snapshot_date"] == "2026-06-02"

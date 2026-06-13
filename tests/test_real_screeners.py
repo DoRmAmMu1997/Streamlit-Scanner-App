@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import time
 from datetime import date
 from types import SimpleNamespace
@@ -592,6 +593,14 @@ def test_envelope_fires_when_close_is_below_lower_band():
     assert row["close"] <= row["env_lower"]
     # With 14% bands, being at/below the lower band means >= 14% below the basis.
     assert row["pct_below_basis"] >= 0.14
+    # PROV-002: a deterministic screener records its rule and indicator values,
+    # and the whole receipt is JSON-serializable for persistence.
+    provenance = row["provenance"]
+    assert provenance["source"] == "deterministic"
+    assert provenance["screener_key"] == envelope.SCREENER["key"]
+    assert provenance["triggered_rules"] == ["close_at_or_below_lower_envelope_band"]
+    assert provenance["indicator_values"]["env_lower"] == row["env_lower"]
+    json.dumps(provenance, allow_nan=False)
 
 
 def test_envelope_skips_when_close_is_near_the_basis():
@@ -660,6 +669,12 @@ def test_green_candles_fires_on_a_20pct_all_green_run():
     assert row["rating"] == "BUY"
     assert row["run_length"] == 6
     assert row["run_gain_pct"] > 0.20
+    # PROV-002: rule name + key indicator values travel with the row.
+    provenance = row["provenance"]
+    assert provenance["source"] == "deterministic"
+    assert provenance["triggered_rules"] == ["green_run_gain_above_threshold"]
+    assert provenance["indicator_values"]["run_length"] == 6
+    json.dumps(provenance, allow_nan=False)
 
 
 def test_green_candles_skips_when_latest_candle_is_red():
@@ -824,6 +839,13 @@ def test_technical_analysis_gate_admits_at_support_and_calls_agent(monkeypatch):
     assert row["rating"] == "BUY"
     assert row["pattern"] == "at_support"
     assert row["reason"] == "Price is basing at the 90 major support."
+    # PROV-002: a gate+AI agreement is a hybrid signal carrying the fired gate
+    # rule and the AI-qualified marker.
+    provenance = row["provenance"]
+    assert provenance["source"] == "hybrid"
+    assert provenance["screener_key"] == technical_analysis.SCREENER["key"]
+    assert "gate_at_support" in provenance["triggered_rules"]
+    assert "ai_setup_qualified" in provenance["triggered_rules"]
     # The candidate reached the agent exactly once.
     assert stub.calls == 1
     assert list(result.columns) == [
@@ -837,6 +859,7 @@ def test_technical_analysis_gate_admits_at_support_and_calls_agent(monkeypatch):
         "confidence",
         "trend",
         "nearest_level",
+        "provenance",
     ]
 
 
@@ -910,6 +933,11 @@ def test_technical_analysis_degrades_when_agent_unavailable(monkeypatch):
     assert row["pattern"] == "at_support"
     assert bool(row["confirmed"]) is False
     assert "unavailable" in row["reason"].lower()
+    # PROV-002: the gate-only fallback is purely deterministic and says so.
+    provenance = row["provenance"]
+    assert provenance["source"] == "deterministic"
+    assert "gate_at_support" in provenance["triggered_rules"]
+    assert "ai_confirmation_unavailable" in provenance["triggered_rules"]
     assert list(result.columns) == [
         "symbol",
         "rating",
@@ -921,6 +949,7 @@ def test_technical_analysis_degrades_when_agent_unavailable(monkeypatch):
         "confidence",
         "trend",
         "nearest_level",
+        "provenance",
     ]
 
 

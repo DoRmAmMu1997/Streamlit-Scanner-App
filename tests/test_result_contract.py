@@ -93,6 +93,32 @@ def test_typed_models_describe_the_common_result_and_provenance_contract():
     }
 
 
+def test_screener_result_carries_the_reserved_final_score_field():
+    """PROV-001 lists final_score in the contract; RANK-* will populate it.
+
+    The DB column and repository mapping already exist; this closes the typed
+    contract so the dataclass matches the documented shape. It stays optional and
+    defaults to None because no screener computes a composite score yet.
+    """
+    assert ScreenerResult(symbol="TCS").final_score is None
+    scored = ScreenerResult(symbol="TCS", final_score=Decimal("82.50"))
+    assert scored.final_score == Decimal("82.50")
+    assert asdict(scored)["final_score"] == Decimal("82.50")
+
+
+def test_normalize_keeps_final_score_as_a_json_safe_top_level_field():
+    """A row's final_score must survive normalization for the repository to store."""
+    normalized = normalize_screener_row(
+        {"symbol": "TCS", "final_score": Decimal("82.50")},
+        screener_key="demo",
+    )
+
+    # Decimal becomes a lossless string in the JSON copy; the repository parses it
+    # back through _as_decimal into the typed numeric column.
+    assert normalized["final_score"] == "82.50"
+    json.dumps(normalized, allow_nan=False)
+
+
 def test_legacy_row_gains_canonical_provenance_without_losing_raw_fields():
     """A row with no provenance should remain recognizable and gain defaults."""
     normalized = normalize_screener_row(

@@ -132,6 +132,10 @@ class ScreenerResult:
     signal_date: dt.date | dt.datetime | str | None = None
     close_price: Decimal | int | float | str | None = None
     reason: str | None = None
+    # The composite rank score from a future RANK-* ticket. The database column
+    # and repository mapping already exist; this keeps the typed contract aligned
+    # with the documented PROV-001 shape. It stays ``None`` until ranking lands.
+    final_score: Decimal | int | float | str | None = None
     provenance: SignalProvenance | None = None
 
 
