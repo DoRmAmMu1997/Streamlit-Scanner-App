@@ -276,18 +276,24 @@ def prefetch_data_assets() -> None:
 
     total = len(union)
     status_counts: dict[str, int] = {}
-    for index, row in enumerate(union.to_dict("records"), start=1):
-        symbol = str(row.get("symbol", "?")).strip() or "?"
-        try:
-            _, status = loader.ensure_daily_history(row, years_back=_PREFETCH_YEARS_BACK)
-            status_counts[status] = status_counts.get(status, 0) + 1
-            print(f"[prefetch] {index:>4}/{total}  {symbol:<14}  {status}", flush=True)
-        except Exception as exc:
-            logger.exception("Prefetch failed for %s", symbol)
+    # The loader streams outcomes in input order; with SCANNER_DHAN_FETCH_WORKERS
+    # above 1 it overlaps Dhan latency and parquet I/O behind the scenes
+    # (PERF-001) while this loop's terminal output stays identical.
+    outcomes = loader.iter_ensure_universe_history(
+        union.to_dict("records"), years_back=_PREFETCH_YEARS_BACK
+    )
+    for index, outcome in enumerate(outcomes, start=1):
+        if outcome.status == "failed":
             status_counts["failed"] = status_counts.get("failed", 0) + 1
             print(
-                f"[prefetch] {index:>4}/{total}  {symbol:<14}  FAILED  "
-                f"{_redact_secrets(str(exc))}",
+                f"[prefetch] {index:>4}/{total}  {outcome.symbol:<14}  FAILED  "
+                f"{outcome.message or ''}",
+                flush=True,
+            )
+        else:
+            status_counts[outcome.status] = status_counts.get(outcome.status, 0) + 1
+            print(
+                f"[prefetch] {index:>4}/{total}  {outcome.symbol:<14}  {outcome.status}",
                 flush=True,
             )
 

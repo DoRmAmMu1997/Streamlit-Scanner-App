@@ -24,6 +24,10 @@ SQLAlchemy==2.0.50
 # Keep Alembic pinned with SQLAlchemy so local migrations and CI use the same
 # migration behavior every time.
 alembic==1.18.4
+# `psycopg[binary]` installs both distributions; pin each one so CI and
+# deployments use the same PostgreSQL driver implementation.
+psycopg==3.3.4
+psycopg-binary==3.3.4
 
 # Developer and CI verification tools.
 pytest==9.0.3

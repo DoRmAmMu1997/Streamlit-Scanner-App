@@ -56,7 +56,7 @@ flowchart TD
 ### `backend/daily_data_loader.py`
 | Symbol | Contract |
 |---|---|
-| `DailyDataLoader(client, cache_dir, request_delay_seconds, rate_limit_retry_delays, fetch_timeout_seconds, max_consecutive_failures, sleep_func)` | `client=None` ⇒ cache-only mode (fetches fail loudly). |
+| `DailyDataLoader(client, cache_dir, request_delay_seconds, rate_limit_retry_delays, fetch_timeout_seconds, max_consecutive_failures, fetch_workers, sleep_func)` | `client=None` ⇒ cache-only mode (fetches fail loudly). `fetch_workers` (1–8, default 1 via `SCANNER_DHAN_FETCH_WORKERS`) opts into parallel fetch behind a shared `_RequestPacer` (PERF-001). |
 | `.read_cached_history(symbol, security_id)` | Disk-only read (chart UI path); empty frame if missing/corrupt. |
 | `.get_daily_history(instrument, start, end, force_refresh=False)` | `(frame, served_from_cache)`; **cache hit only when the file covers the entire requested range.** |
 | `.ensure_daily_history(instrument, years_back=10, today=None)` | `(frame, status)` where status ∈ `fresh`/`incremental`/`fresh_download`/`backfilled`. The prefetch engine. |
@@ -78,7 +78,8 @@ flowchart TD
 | **Optional wall-clock timeout via worker thread** | The SDK exposes no timeout; a thread + `future.result(timeout)` lets a stuck call not freeze the Streamlit run (Python can't kill it, but `shutdown(wait=False)` moves on). | Block forever — frozen UI. |
 | **`client=None` cache-only mode fails loudly on fetch** | Chart UI / cleanup can build a loader without creds, but a real fetch attempt raises a clear error not `AttributeError`. | Silent no-op — confusing empty results. |
 | **Circuit breaker (`max_consecutive_failures`)** | Protects the user and Dhan after repeated broker errors; still yields a failure item per skipped symbol for complete diagnostics. | Keep hammering — quota burn / hang. |
-| **Streaming `iter_universe_history`** | Strategy can compute per-symbol without holding the whole universe in memory (perf-001). | Batch-only — memory pressure on large universes. |
+| **Streaming `iter_universe_history`** | Strategy can compute per-symbol without holding the whole universe in memory. | Batch-only — memory pressure on large universes. |
+| **Opt-in parallel fetch + shared `_RequestPacer` (PERF-001)** | `fetch_workers>1` overlaps slow Dhan I/O, but one global pacer keeps the inter-request delay identical regardless of worker count — so parallelism never raises the actual Dhan request rate. Default stays 1 (sequential). | Per-worker delay — would multiply the global rate and risk DH-904. |
 | **Timestamps stored as IST-naive** | Matches local CSV conventions; avoids tz surprises in tables/charts. | Keep tz-aware UTC — display friction here. |
 
 ## 5. Failure modes / degradation
@@ -90,7 +91,7 @@ flowchart TD
 
 ## 6. Configuration & dependencies
 
-`DHAN_CLIENT_ID`/`DHAN_ACCESS_TOKEN` (via [configuration.md](configuration.md)); pacing knobs `SCANNER_DHAN_REQUEST_DELAY_SECONDS`, `SCANNER_DHAN_RATE_LIMIT_RETRY_DELAYS`. External: `dhanhq` SDK, `pandas`/`pyarrow`. Cache dir `DATA_DIR/cache/daily`.
+`DHAN_CLIENT_ID`/`DHAN_ACCESS_TOKEN` (via [configuration.md](configuration.md)); pacing/concurrency knobs `SCANNER_DHAN_REQUEST_DELAY_SECONDS`, `SCANNER_DHAN_RATE_LIMIT_RETRY_DELAYS`, `SCANNER_DHAN_FETCH_WORKERS` (PERF-001, default 1). External: `dhanhq` SDK, `pandas`/`pyarrow`. Cache dir `DATA_DIR/cache/daily`.
 
 ## 7. Testing
 

@@ -233,8 +233,17 @@ network work happens up front in the terminal.
    Copy the template and fill in your details:
 
    ```bash
-   cp Dependencies/.env.example Dependencies/.env
+   cp Dependencies/.env.example Dependencies/.env          # macOS/Linux/Git Bash
    ```
+
+   ```powershell
+   Copy-Item Dependencies\.env.example Dependencies\.env   # Windows PowerShell
+   ```
+
+   > Why is this folder called `Dependencies/`? Historical accident — it holds
+   > credentials and setup helpers, not Python packages (those live in
+   > `requirements*.txt`). It keeps the name because renaming would break
+   > every existing local `.env` setup for zero functional gain.
 
    Open `Dependencies/.env` and set `DHAN_CLIENT_ID`, `DHAN_API_KEY`, and
    `DHAN_API_SECRET` (from web.dhan.co → My Profile → DhanHQ Trading APIs).
@@ -350,7 +359,11 @@ Local development skips Google SSO unless `AUTH_REQUIRED=true` is set. When
 auth is required, only allow-listed or admin emails (see step 7) may proceed
 past sign-in before scanner controls, results, charts, or CSV downloads load.
 
-> **First run is slow.** It backfills ~10 years of candles for ~500 stocks.
+> **First run is slow** — expect roughly 10–30 minutes depending on your
+> connection: it backfills ~10 years of candles for ~500 stocks at a polite
+> request pace. Setting `SCANNER_DHAN_FETCH_WORKERS=4` in `Dependencies/.env`
+> overlaps download latency with disk writes **without** increasing the
+> request rate Dhan sees (see [docs/operations.md](docs/operations.md)).
 > Every later run only fetches the days added since you last ran it, so it is
 > fast.
 
@@ -515,7 +528,10 @@ Streamlit Scanner App/
 ├── constraints.txt              # Verified direct dependency pins
 ├── alembic.ini                  # Alembic config for scan-history migrations
 ├── migrations/                  # Alembic migration scripts (scan-history schema)
-├── docs/architecture/           # Architecture docs: HLD + per-component LLDs (start at README.md)
+├── docs/                        # Project documentation
+│   ├── operations.md            # Operations / runbook guide
+│   ├── adding-a-screener.md     # Screener authoring walkthrough
+│   └── architecture/            # HLD + per-component LLDs + 2026-06 audit register (start at README.md)
 ├── backend/                     # Data + infrastructure (no strategy logic)
 │   ├── auth/                    # Streamlit OIDC login/session gate
 │   ├── config/                  # Runtime settings package + legacy exports
@@ -777,6 +793,10 @@ and NumPy values are converted to strict JSON; callable parameters are omitted,
 and credential-shaped values are redacted before result persistence.
 
 ## Adding your own screener
+
+> The complete walkthrough — including golden tests, chart hooks, registry
+> validation, and the pre-merge checklist — lives in
+> [docs/adding-a-screener.md](docs/adding-a-screener.md). The short version:
 
 Create a new file in `screeners/`, for example `screeners/my_screener.py`,
 containing a subclass of [`BaseScanner`](backend/scanner_base.py):

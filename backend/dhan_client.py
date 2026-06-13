@@ -8,6 +8,8 @@ timestamp, open, high, low, close, volume.
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Callable
 from datetime import date, datetime
 from typing import Any
 
@@ -177,6 +179,10 @@ class DhanDataClient:
     """Small wrapper around the DhanHQ SDK used by scanner backends."""
 
     def __init__(self, credentials: DhanCredentials | None = None, raw_client: Any | None = None):
+        self._raw_client_lock = threading.Lock()
+        self._thread_local = threading.local()
+        self._sdk_client_factory: Callable[[], Any] | None = None
+
         if raw_client is not None:
             # Tests pass a fake client here so they can verify our code without
             # making real network calls to Dhan.
@@ -186,6 +192,15 @@ class DhanDataClient:
         credentials = credentials or get_dhan_credentials(required=True)
         if credentials is None:  # pragma: no cover - required=True raises first
             raise RuntimeError("Dhan credentials are not configured.")
+        self._sdk_client_factory = lambda: self._build_sdk_client(credentials)
+        # Preserve the long-standing public attribute for callers that inspect
+        # the wrapper, while worker threads obtain their own SDK transport.
+        self.dhan = self._sdk_client_factory()
+        self._thread_local.dhan = self.dhan
+
+    @staticmethod
+    def _build_sdk_client(credentials: DhanCredentials) -> Any:
+        """Create one authenticated SDK client and its private HTTP session."""
         try:
             from dhanhq import DhanContext, dhanhq
         except ImportError as exc:  # pragma: no cover - depends on local package state
@@ -194,7 +209,18 @@ class DhanDataClient:
         # Modern dhanhq versions authenticate through a DhanContext object. We
         # keep that SDK detail here instead of scattering it across screeners.
         context = DhanContext(credentials.client_code, credentials.access_token)
-        self.dhan = dhanhq(context)
+        return dhanhq(context)
+
+    def _client_for_current_thread(self) -> Any:
+        """Return this thread's SDK client or the injected compatibility client."""
+        if self._sdk_client_factory is None:
+            return self.dhan
+
+        client = getattr(self._thread_local, "dhan", None)
+        if client is None:
+            client = self._sdk_client_factory()
+            self._thread_local.dhan = client
+        return client
 
     @classmethod
     def from_env(cls) -> DhanDataClient:
@@ -211,11 +237,19 @@ class DhanDataClient:
         """Fetch and normalize daily candles for one Dhan security ID."""
         # security_id is sent as a string because Dhan's SDK/docs accept string
         # identifiers, and CSV-loaded IDs naturally arrive as strings.
-        response = self.dhan.historical_daily_data(
-            security_id=str(security_id),
-            exchange_segment=str(exchange_segment),
-            instrument_type=str(instrument_type),
-            from_date=_format_date(from_date),
-            to_date=_format_date(to_date),
-        )
+        client = self._client_for_current_thread()
+        request = {
+            "security_id": str(security_id),
+            "exchange_segment": str(exchange_segment),
+            "instrument_type": str(instrument_type),
+            "from_date": _format_date(from_date),
+            "to_date": _format_date(to_date),
+        }
+        if self._sdk_client_factory is None:
+            # Injected clients have no documented concurrency contract. Keep
+            # the compatibility seam safe by serializing only the network call.
+            with self._raw_client_lock:
+                response = client.historical_daily_data(**request)
+        else:
+            response = client.historical_daily_data(**request)
         return normalize_daily_response(response)
