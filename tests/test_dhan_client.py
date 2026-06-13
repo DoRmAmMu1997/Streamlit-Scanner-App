@@ -2,10 +2,36 @@
 
 from __future__ import annotations
 
+import concurrent.futures
+import sys
+import threading
+import time
+from types import SimpleNamespace
+
 import pandas as pd
 import pytest
 
-from backend.dhan_client import DhanRateLimitError, normalize_daily_payload, normalize_daily_response
+from backend.config import DhanCredentials
+from backend.dhan_client import (
+    DhanDataClient,
+    DhanRateLimitError,
+    normalize_daily_payload,
+    normalize_daily_response,
+)
+
+
+def _successful_daily_response():
+    return {
+        "status": "success",
+        "data": {
+            "start_Time": ["2026-05-10"],
+            "open": [100.0],
+            "high": [110.0],
+            "low": [95.0],
+            "close": [108.0],
+            "volume": [12345.0],
+        },
+    }
 
 
 def test_normalize_daily_response_accepts_dict_of_arrays():
@@ -91,3 +117,92 @@ def test_normalize_daily_response_raises_rate_limit_for_error_type_text():
 
     with pytest.raises(DhanRateLimitError):
         normalize_daily_response(response)
+
+
+def test_production_client_uses_one_sdk_transport_per_worker_thread(monkeypatch):
+    """Each concurrent worker should own its own Dhan SDK HTTP transport."""
+    first_wave = threading.Barrier(3)
+    created_clients = []
+
+    class FakeDhanContext:
+        def __init__(self, client_code, access_token):
+            self.client_code = client_code
+            self.access_token = access_token
+
+    class FakeSdkClient:
+        def __init__(self, context):
+            self.context = context
+            self.thread_ids: set[int] = set()
+            created_clients.append(self)
+
+        def historical_daily_data(self, **kwargs):
+            self.thread_ids.add(threading.get_ident())
+            first_wave.wait(timeout=5)
+            return _successful_daily_response()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "dhanhq",
+        SimpleNamespace(DhanContext=FakeDhanContext, dhanhq=FakeSdkClient),
+    )
+    client = DhanDataClient(DhanCredentials("client-code", "access-token"))
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        frames = list(
+            executor.map(
+                lambda security_id: client.fetch_daily_candles(
+                    security_id,
+                    "NSE_EQ",
+                    "EQUITY",
+                    "2026-05-10",
+                    "2026-05-11",
+                ),
+                ("1", "2", "3"),
+            )
+        )
+
+    used_clients = [sdk_client for sdk_client in created_clients if sdk_client.thread_ids]
+    assert all(not frame.empty for frame in frames)
+    assert client.dhan is created_clients[0]
+    assert len(used_clients) == 3
+    assert all(len(sdk_client.thread_ids) == 1 for sdk_client in used_clients)
+
+
+def test_injected_raw_client_calls_are_serialized():
+    """The compatibility raw-client seam must not be called concurrently."""
+
+    class ConcurrencyProbeClient:
+        def __init__(self):
+            self._state_lock = threading.Lock()
+            self.active_calls = 0
+            self.max_active_calls = 0
+
+        def historical_daily_data(self, **kwargs):
+            with self._state_lock:
+                self.active_calls += 1
+                self.max_active_calls = max(self.max_active_calls, self.active_calls)
+            time.sleep(0.02)
+            with self._state_lock:
+                self.active_calls -= 1
+            return _successful_daily_response()
+
+    raw_client = ConcurrencyProbeClient()
+    client = DhanDataClient(raw_client=raw_client)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        frames = list(
+            executor.map(
+                lambda security_id: client.fetch_daily_candles(
+                    security_id,
+                    "NSE_EQ",
+                    "EQUITY",
+                    "2026-05-10",
+                    "2026-05-11",
+                ),
+                ("1", "2", "3", "4"),
+            )
+        )
+
+    assert client.dhan is raw_client
+    assert all(not frame.empty for frame in frames)
+    assert raw_client.max_active_calls == 1
