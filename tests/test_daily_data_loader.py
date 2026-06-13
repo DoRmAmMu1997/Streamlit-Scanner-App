@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import os
 import threading
@@ -741,6 +742,52 @@ class AlwaysFailDhanClient:
         raise RuntimeError("persistent broker failure")
 
 
+class RateLimitOncePerSecurityClient:
+    """Rate-limit each security once, then return candles on its retry."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.attempts: dict[str, int] = {}
+
+    def fetch_daily_candles(
+        self, security_id, exchange_segment, instrument_type, from_date, to_date
+    ):
+        with self._lock:
+            self.attempts[security_id] = self.attempts.get(security_id, 0) + 1
+            attempt = self.attempts[security_id]
+        if attempt == 1:
+            raise DhanRateLimitError("DH-904 Rate_Limit")
+        return candle_frame()
+
+
+class CountingPacer:
+    """Thread-safe pacer probe that records every reserved request slot."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.calls = 0
+
+    def wait(self) -> None:
+        with self._lock:
+            self.calls += 1
+
+
+class FailFailThenSuccessClient:
+    """Force two failures and an already-running success to finish together."""
+
+    def __init__(self):
+        self._first_wave = threading.Barrier(3)
+
+    def fetch_daily_candles(
+        self, security_id, exchange_segment, instrument_type, from_date, to_date
+    ):
+        if security_id in {"1", "2", "3"}:
+            self._first_wave.wait(timeout=5)
+        if security_id in {"1", "2"}:
+            raise RuntimeError(f"boom for {security_id}")
+        return candle_frame()
+
+
 def test_request_pacer_enforces_global_spacing():
     """Each wait() reserves the next slot; only the first request is unpaced."""
     clock = {"now": 100.0}
@@ -764,6 +811,38 @@ def test_request_pacer_zero_delay_never_sleeps():
     pacer.wait()
     pacer.wait()
     assert sleeps == []
+
+
+def test_parallel_rate_limit_retries_reserve_a_pacer_slot_for_every_attempt(tmp_path):
+    """Concurrent DH-904 retries must pass through the shared pacer again."""
+    client = RateLimitOncePerSecurityClient()
+    loader = DailyDataLoader(
+        client,
+        cache_dir=tmp_path,
+        request_delay_seconds=0.0,
+        rate_limit_retry_delays=[0.0],
+        fetch_workers=2,
+    )
+    pacer = CountingPacer()
+    loader._pacer = pacer
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(
+                loader._fetch_with_rate_limit_retries,
+                security_id,
+                "NSE_EQ",
+                "EQUITY",
+                "2026-05-10",
+                "2026-05-11",
+            )
+            for security_id in ("1", "2")
+        ]
+        frames = [future.result() for future in futures]
+
+    assert all(not frame.empty for frame in frames)
+    assert client.attempts == {"1": 2, "2": 2}
+    assert pacer.calls == sum(client.attempts.values())
 
 
 def test_parallel_iter_matches_sequential_output(tmp_path):
@@ -844,6 +923,38 @@ def test_parallel_circuit_breaker_stops_new_submissions(tmp_path):
     assert client.calls + len(breaker_items) == len(symbols)
     assert client.calls < len(symbols)
     assert breaker_items, "breaker should have skipped at least the unsubmitted rows"
+    assert all(
+        "after 2 consecutive failure(s)" in str(item.failure["message"])
+        for item in breaker_items
+    )
+
+
+def test_parallel_breaker_messages_keep_the_failure_count_that_tripped_it(tmp_path):
+    """An in-flight success must not rewrite the breaker's recorded threshold."""
+    symbols = [f"SYM{i:02d}" for i in range(1, 9)]
+    loader = DailyDataLoader(
+        FailFailThenSuccessClient(),
+        cache_dir=tmp_path,
+        request_delay_seconds=0.0,
+        max_consecutive_failures=2,
+        fetch_workers=3,
+    )
+
+    items = list(
+        loader.iter_universe_history(
+            mapped_universe_many(symbols),
+            "2026-05-10",
+            "2026-05-11",
+        )
+    )
+
+    breaker_messages = [
+        str(item.failure["message"])
+        for item in items
+        if item.failure is not None and "circuit breaker" in str(item.failure["message"])
+    ]
+    assert breaker_messages
+    assert all("after 2 consecutive failure(s)" in message for message in breaker_messages)
 
 
 def test_iter_ensure_universe_history_parallel_keeps_order_and_redacts(tmp_path, monkeypatch):

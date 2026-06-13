@@ -530,13 +530,14 @@ class DailyDataLoader:
         if self.fetch_workers <= 1:
             # Sequential behavior, unchanged: a fixed pause before every fetch.
             self._sleep(self.request_delay_seconds)
-        else:
-            # Parallel fetching: one shared schedule so the global request rate
-            # stays at the configured delay regardless of worker count.
-            self._pacer.wait()
 
         retry_index = 0
         while True:
+            if self.fetch_workers > 1:
+                # Every network attempt, including a DH-904 retry, reserves a
+                # slot on the one shared schedule. Otherwise workers that wake
+                # from the same backoff can retry in a burst.
+                self._pacer.wait()
             try:
                 with self._stats_lock:
                     self._api_attempts += 1
@@ -787,6 +788,7 @@ class DailyDataLoader:
         row_iter = enumerate(rows, start=1)
         consecutive_failures = 0
         breaker_tripped = False
+        breaker_failure_count = 0
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=self.fetch_workers) as executor:
 
@@ -812,7 +814,7 @@ class DailyDataLoader:
             while pending:
                 index, row, symbol, future = pending.popleft()
                 if breaker_tripped and future.cancel():
-                    item = self._breaker_item(result, row, symbol, consecutive_failures)
+                    item = self._breaker_item(result, row, symbol, breaker_failure_count)
                 else:
                     try:
                         candles, from_cache = future.result()
@@ -828,10 +830,12 @@ class DailyDataLoader:
                         consecutive_failures += 1
                         item = self._failure_item(result, row, symbol, exc)
                         if (
-                            self.max_consecutive_failures
+                            not breaker_tripped
+                            and self.max_consecutive_failures
                             and consecutive_failures >= self.max_consecutive_failures
                         ):
                             breaker_tripped = True
+                            breaker_failure_count = consecutive_failures
 
                 if not breaker_tripped:
                     submit_next()
@@ -843,7 +847,7 @@ class DailyDataLoader:
                 # progress reporting, no API traffic.
                 for index, row in row_iter:
                     symbol = str(row.get("symbol", "")).strip().upper() or "UNKNOWN"
-                    item = self._breaker_item(result, row, symbol, consecutive_failures)
+                    item = self._breaker_item(result, row, symbol, breaker_failure_count)
                     self._notify_progress(progress_callback, index, total, symbol)
                     yield item
 
