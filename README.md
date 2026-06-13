@@ -515,7 +515,7 @@ Streamlit Scanner App/
 ├── constraints.txt              # Verified direct dependency pins
 ├── alembic.ini                  # Alembic config for scan-history migrations
 ├── migrations/                  # Alembic migration scripts (scan-history schema)
-├── docs/architecture/           # Design docs (scan-run persistence, handoffs)
+├── docs/architecture/           # Architecture docs: HLD + per-component LLDs (start at README.md)
 ├── backend/                     # Data + infrastructure (no strategy logic)
 │   ├── auth/                    # Streamlit OIDC login/session gate
 │   ├── config/                  # Runtime settings package + legacy exports
@@ -529,6 +529,13 @@ Streamlit Scanner App/
 │   ├── indicators.py            # Indicators (TA-Lib/pandas_ta + fallbacks)
 │   ├── url_safety.py            # Shared guardrails for server-side fetches
 │   ├── charts.py                # Lightweight Charts chart-spec builders
+│   ├── health.py                # Passive admin health snapshot (OBS-002)
+│   ├── scanning/                # Scan lifecycle + provenance (SCAN-003 / PROV-001A)
+│   │   ├── service.py          # run_scan: create -> run -> save -> finish
+│   │   └── result_contract.py  # Typed result/provenance normalization
+│   ├── observability/           # Structured, secret-safe logging (OBS-001)
+│   ├── security/                # Secret redaction filter (SEC-002)
+│   │   └── redaction.py        # redact_text / SecretRedactionFilter / is_secret_key_name
 │   ├── fundamentals/            # Check Fundamentals subsystem
 │   │   ├── screener_in_client.py# requests + BS4 scraper (peers via HTMX,
 │   │   │                        # announcements, concall metadata)
@@ -537,7 +544,10 @@ Streamlit Scanner App/
 │   │   ├── fundamentals_cache.py# On-disk JSON cache (data + verdict)
 │   │   └── fundamental_agent.py # Claude Agent SDK agent + Pydantic schemas
 │   ├── technical/               # Technical Analysis (AI) subsystem
-│   │   └── technical_agent.py  # Claude Agent SDK agent + TechnicalVerdict
+│   │   ├── technical_agent.py  # Claude Agent SDK agent + TechnicalVerdict
+│   │   ├── patterns.py         # FVG / double / order-block / market-structure detectors
+│   │   ├── knowledge.py        # Externalized agent prompt knowledge
+│   │   └── tools.py            # In-process MCP tools (level_map / price_patterns / market_structure)
 │   ├── sixty_seven/             # 67 Ka Funda (AI) subsystem
 │   │   ├── shortlister.py      # Deterministic 67% drawdown gate
 │   │   ├── search_client.py    # SerpAPI Google search client
@@ -557,6 +567,11 @@ Streamlit Scanner App/
 │   ├── green_candles_20pct_up.py
 │   ├── technical_analysis.py    # AI screener: pivot gate + technical agent
 │   └── sixty_seven_ka_funda.py  # AI screener: 67% drawdown gate + verifier
+├── ui/                          # Streamlit UI pages + shared display helpers
+│   ├── common.py               # Shared helpers (emoji badges, CSV-safe, redaction)
+│   ├── chart_cache.py          # Per-session rendered-chart cache
+│   ├── history_page.py         # Scan history view (SCAN-004)
+│   └── health_page.py          # Admin health view (OBS-002)
 ├── Dependencies/
 │   ├── .env.example             # Credential template (copy to .env)
 │   └── dhan_token_setup.py      # One-time OAuth token helper
@@ -573,6 +588,10 @@ Streamlit Scanner App/
 
 The boundary is deliberate: **strategy logic lives in `screeners/`**, and
 **data/broker plumbing lives in `backend/`**.
+
+> **Architecture docs:** for a full design reference, see
+> [`docs/architecture/`](docs/architecture/README.md) — a high-level design of the
+> whole system plus a low-level design for each subsystem (with Mermaid diagrams).
 
 ---
 
@@ -802,8 +821,9 @@ module-level contract (`SCREENER` dict + `run(...)` function) if you prefer
 to write a screener as plain module functions.
 
 Supported universe keys are `nifty_100`, `nifty_500`, `fno`,
-`hemant_super_45`, `hemant_good_45`, `hemant_good_200`, and the composite
-`hemant_super_good_union` (the deduped union of Hemant Super 45 and Good 45).
+`hemant_super_45`, `hemant_good_45`, `hemant_good_200`, and the composites
+`hemant_super_good_union` (Hemant Super 45 ∪ Good 45) and
+`hemant_super_good_200_union` (Hemant Super 45 ∪ Good 45 ∪ Good 200), both deduped.
 The Hemant lists live in `data/universes/` alongside the other universe CSVs
 and are mapped to Dhan cash-equity IDs when universe files are refreshed; the
 union is assembled from those same source lists at refresh time.
