@@ -23,12 +23,15 @@ import pytest
 
 from backend.scanning.result_contract import (
     MASKED_PARAMETER,
+    AIEvaluationRecord,
     AIProvenance,
+    EvidenceReference,
     ResultContractError,
     RuleCheck,
     ScreenerResult,
     SignalProvenance,
     normalize_screener_row,
+    normalize_secret_safe_json,
 )
 
 
@@ -41,6 +44,16 @@ def test_contract_is_available_from_the_scanning_package_surface():
     assert scanning.RuleCheck is RuleCheck
     assert scanning.AIProvenance is AIProvenance
     assert scanning.normalize_screener_row is normalize_screener_row
+
+
+def _valid_provenance(**overrides) -> dict[str, object]:
+    provenance: dict[str, object] = {
+        "triggered_rules": ["test_rule"],
+        "indicator_values": {"rsi_14": Decimal("31.80")},
+        "source": "deterministic",
+    }
+    provenance.update(overrides)
+    return provenance
 
 
 def _legacy_row() -> dict[str, object]:
@@ -57,13 +70,27 @@ def _legacy_row() -> dict[str, object]:
         "close": Decimal("1234.5678"),
         "reason": "oversold reversal",
         "extra_metric": np.int64(7),
+        "provenance": _valid_provenance(),
     }
 
 
 def test_typed_models_describe_the_common_result_and_provenance_contract():
     """The public dataclasses should be useful without requiring a screener rewrite."""
     rule = RuleCheck(name="close_below_band", passed=True, detail="close <= lower band")
-    ai = AIProvenance(model_name="future-model", prompt_version="future-prompt-v1")
+    evidence = EvidenceReference(
+        source_label="annual report",
+        sanitized_url="https://example.com/report",
+        sha256="a" * 64,
+    )
+    ai = AIProvenance(
+        model_name="future-model",
+        prompt_version="future-prompt-v1",
+        prompt_sha256="b" * 64,
+        generated_at=datetime(2026, 6, 13, 8, 0, tzinfo=UTC),
+        cache_hit=False,
+        evidence_references=[evidence],
+        input_context_hash="c" * 64,
+    )
     provenance = SignalProvenance(
         screener_key="envelope",
         screener_version="1.2.3",
@@ -90,6 +117,20 @@ def test_typed_models_describe_the_common_result_and_provenance_contract():
     assert asdict(provenance)["ai"] == {
         "model_name": "future-model",
         "prompt_version": "future-prompt-v1",
+        "prompt_sha256": "b" * 64,
+        "generated_at": datetime(2026, 6, 13, 8, 0, tzinfo=UTC),
+        "cache_hit": False,
+        "verdict": None,
+        "confidence": None,
+        "decision_reason": None,
+        "evidence_references": [
+            {
+                "source_label": "annual report",
+                "sanitized_url": "https://example.com/report",
+                "sha256": "a" * 64,
+            }
+        ],
+        "input_context_hash": "c" * 64,
     }
 
 
@@ -109,7 +150,11 @@ def test_screener_result_carries_the_reserved_final_score_field():
 def test_normalize_keeps_final_score_as_a_json_safe_top_level_field():
     """A row's final_score must survive normalization for the repository to store."""
     normalized = normalize_screener_row(
-        {"symbol": "TCS", "final_score": Decimal("82.50")},
+        {
+            "symbol": "TCS",
+            "final_score": Decimal("82.50"),
+            "provenance": _valid_provenance(),
+        },
         screener_key="demo",
     )
 
@@ -119,30 +164,13 @@ def test_normalize_keeps_final_score_as_a_json_safe_top_level_field():
     json.dumps(normalized, allow_nan=False)
 
 
-def test_legacy_row_gains_canonical_provenance_without_losing_raw_fields():
-    """A row with no provenance should remain recognizable and gain defaults."""
-    normalized = normalize_screener_row(
-        _legacy_row(),
-        screener_key="envelope",
-        params={"period": 20},
-        data_snapshot_date=date(2026, 6, 11),
-    )
+def test_row_without_mapping_provenance_is_rejected():
+    """Every shortlisted row must carry an auditable mapping receipt."""
+    row = _legacy_row()
+    row.pop("provenance")
 
-    assert normalized["symbol"] == "RELIANCE"
-    assert normalized["close"] == "1234.5678"
-    assert normalized["extra_metric"] == 7
-    assert normalized["provenance_json"] == {
-        "screener_key": "envelope",
-        "screener_version": None,
-        "triggered_rules": [],
-        "indicator_values": {},
-        "params_snapshot": {"period": 20},
-        "data_snapshot_date": "2026-06-11",
-        "source": None,
-        "notes": None,
-        "ai": None,
-    }
-    json.dumps(normalized, allow_nan=False)
+    with pytest.raises(ResultContractError, match="mapping provenance"):
+        normalize_screener_row(row, screener_key="envelope")
 
 
 def test_existing_provenance_is_enriched_and_legacy_rules_are_normalized():
@@ -173,6 +201,8 @@ def test_provenance_json_takes_precedence_when_both_legacy_keys_exist():
         "triggered_rules": [
             RuleCheck(name="canonical_rule", passed=True, detail="confirmed")
         ],
+        "indicator_values": {"score": 1},
+        "source": "deterministic",
         "screener_version": "2",
     }
 
@@ -192,7 +222,11 @@ def test_missing_dataframe_provenance_json_falls_back_to_legacy_provenance():
     """A mixed DataFrame commonly represents an absent dict cell as NumPy NaN."""
     row = _legacy_row()
     row["provenance_json"] = np.nan
-    row["provenance"] = {"rules": ["legacy_rule"], "source": "deterministic"}
+    row["provenance"] = {
+        "rules": ["legacy_rule"],
+        "indicator_values": {"score": 1},
+        "source": "deterministic",
+    }
 
     normalized = normalize_screener_row(row, screener_key="envelope")
 
@@ -203,7 +237,11 @@ def test_missing_dataframe_provenance_json_falls_back_to_legacy_provenance():
 def test_close_price_alias_and_optional_common_fields_remain_legacy_compatible():
     """Only symbol is mandatory; a future normalized row may use close_price."""
     normalized = normalize_screener_row(
-        {"symbol": "TCS", "close_price": Decimal("3890.25")},
+        {
+            "symbol": "TCS",
+            "close_price": Decimal("3890.25"),
+            "provenance": _valid_provenance(),
+        },
         screener_key="minimal",
     )
 
@@ -226,6 +264,7 @@ def test_dates_numpy_values_and_missing_values_become_strict_json():
         "negative_infinity": np.float64("-inf"),
         "nested": [Decimal("7.25"), np.float32(2.5), np.nan],
         "set_value": {"beta", "alpha"},
+        "provenance": _valid_provenance(),
     }
 
     normalized = normalize_screener_row(row, screener_key="json_types")
@@ -258,6 +297,7 @@ def test_normalization_does_not_mutate_the_input_or_nested_values():
     row["provenance"] = {
         "rules": nested_rules,
         "indicator_values": nested_indicators,
+        "source": "deterministic",
     }
 
     normalized = normalize_screener_row(row, screener_key="envelope")
@@ -299,7 +339,7 @@ def test_parameter_snapshot_drops_callables_and_masks_credentials(monkeypatch):
     }
 
     normalized = normalize_screener_row(
-        {"symbol": "WIPRO"},
+        {"symbol": "WIPRO", "provenance": _valid_provenance()},
         screener_key="secret_safe",
         params=params,
     )
@@ -327,6 +367,8 @@ def test_secret_shaped_text_in_raw_rows_and_provenance_is_redacted(monkeypatch):
         "provider_message": "configured-broker-secret",
         "provenance": {
             "notes": "Authorization: Bearer provenance-bearer-secret",
+            "triggered_rules": ["provider_checked"],
+            "indicator_values": {"score": 1},
             "source": "ai",
         },
     }
@@ -353,15 +395,155 @@ def test_normalize_screener_row_rejects_non_mapping_rows():
         normalize_screener_row(["symbol", "TCS"], screener_key="demo")
 
 
-def test_normalize_screener_row_wraps_scalar_provenance_as_legacy_value():
-    """Old free-text receipts survive under an explicit compatibility key."""
+def test_normalize_screener_row_rejects_scalar_provenance():
+    """Free-text provenance cannot satisfy the structured audit contract."""
+    with pytest.raises(ResultContractError, match="mapping provenance"):
+        normalize_screener_row(
+            {"symbol": "TCS", "provenance": "manual note from an old screener"},
+            screener_key="demo",
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("triggered_rules", [], "triggered_rules"),
+        ("indicator_values", {}, "indicator_values"),
+        ("indicator_values", {"nested": {"value": 1}}, "scalar"),
+        ("indicator_values", {"array": np.array([1, 2])}, "strict JSON"),
+        ("indicator_values", {"custom": object()}, "strict JSON"),
+    ],
+)
+def test_strict_provenance_rejects_missing_or_non_scalar_evidence(field, value, message):
+    provenance = _valid_provenance()
+    provenance[field] = value
+
+    with pytest.raises(ResultContractError, match=message):
+        normalize_screener_row(
+            {"symbol": "TCS", "provenance": provenance},
+            screener_key="demo",
+        )
+
+
+def test_indicator_values_preserve_decimal_and_normalize_supported_scalars():
     normalized = normalize_screener_row(
-        {"symbol": "TCS", "provenance": "manual note from an old screener"},
+        {
+            "symbol": "TCS",
+            "provenance": _valid_provenance(
+                indicator_values={
+                    "decimal": Decimal("0.1000000000000000001"),
+                    "date": date(2026, 6, 13),
+                    "numpy": np.int64(7),
+                }
+            ),
+        },
         screener_key="demo",
     )
 
-    canonical = normalized["provenance_json"]
-    assert canonical["legacy_value"] == "manual note from an old screener"
-    # The canonical envelope is still filled alongside the preserved receipt.
-    assert canonical["screener_key"] == "demo"
-    assert canonical["triggered_rules"] == []
+    assert normalized["provenance_json"]["indicator_values"] == {
+        "decimal": "0.1000000000000000001",
+        "date": "2026-06-13",
+        "numpy": 7,
+    }
+    json.dumps(normalized, allow_nan=False)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), np.inf])
+def test_indicator_values_reject_non_finite_numbers(value):
+    with pytest.raises(ResultContractError, match="finite"):
+        normalize_screener_row(
+            {
+                "symbol": "TCS",
+                "provenance": _valid_provenance(
+                    indicator_values={"invalid_number": value}
+                ),
+            },
+            screener_key="demo",
+        )
+
+
+def test_public_json_normalizer_recurses_drops_callables_and_redacts_secrets(monkeypatch):
+    monkeypatch.setenv("DHAN_ACCESS_TOKEN", "configured-secret")
+    normalized = normalize_secret_safe_json(
+        {
+            "as_of": date(2026, 6, 13),
+            "amount": Decimal("1.2300"),
+            "callback": lambda: None,
+            "nested": {
+                "api_key": "raw-secret",
+                "message": "token=inline-secret",
+                "configured": "configured-secret",
+                "callbacks": [1, lambda: None, 2],
+            },
+        }
+    )
+
+    assert normalized == {
+        "as_of": "2026-06-13",
+        "amount": "1.2300",
+        "nested": {
+            "api_key": MASKED_PARAMETER,
+            "message": "token=***REDACTED***",
+            "configured": "***REDACTED***",
+            "callbacks": [1, 2],
+        },
+    }
+    json.dumps(normalized, allow_nan=False)
+
+
+def test_public_json_normalizer_rejects_custom_objects_and_arrays():
+    with pytest.raises(TypeError, match="Unsupported JSON value type"):
+        normalize_secret_safe_json({"custom": object()})
+
+    with pytest.raises(TypeError, match="Unsupported JSON value type"):
+        normalize_secret_safe_json({"array": np.array([1, 2])})
+
+
+def test_normalize_screener_row_wraps_unsupported_values_as_contract_errors():
+    with pytest.raises(ResultContractError, match="strict JSON"):
+        normalize_screener_row(
+            {
+                "symbol": "TCS",
+                "custom": object(),
+                "provenance": _valid_provenance(),
+            },
+            screener_key="demo",
+        )
+
+
+def test_ai_evaluation_domain_types_are_json_normalizable():
+    provenance = AIProvenance(
+        model_name="gpt-test",
+        prompt_version="v3",
+        prompt_sha256="b" * 64,
+        generated_at=datetime(2026, 6, 13, 8, 0, tzinfo=UTC),
+        cache_hit=True,
+        verdict="BUY",
+        confidence=Decimal("8.75"),
+        decision_reason="Evidence confirms the setup.",
+        evidence_references=[
+            EvidenceReference(
+                source_label="exchange filing",
+                sanitized_url="https://example.com/filing",
+                sha256="a" * 64,
+            )
+        ],
+    )
+    record = AIEvaluationRecord(
+        symbol="TCS",
+        signal_date=date(2026, 6, 13),
+        outcome="approved",
+        verdict="BUY",
+        confidence=Decimal("8.75"),
+        decision_reason="Evidence confirms the setup.",
+        provenance=provenance,
+        validated_verdict_json={"risk": "medium"},
+    )
+
+    normalized = normalize_secret_safe_json(asdict(record))
+    assert normalized["confidence"] == "8.75"
+    assert normalized["provenance"]["verdict"] == "BUY"
+    assert normalized["provenance"]["confidence"] == "8.75"
+    assert normalized["provenance"]["decision_reason"] == "Evidence confirms the setup."
+    assert normalized["provenance"]["generated_at"] == "2026-06-13T08:00:00+00:00"
+    json.dumps(normalized, allow_nan=False)

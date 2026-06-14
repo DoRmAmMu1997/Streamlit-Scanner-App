@@ -37,8 +37,10 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, is_dataclass
 from decimal import Decimal
 from typing import Any, Literal, TypeAlias, cast
+from urllib.parse import urlsplit, urlunsplit
 
 from backend.security import MASK, is_secret_key_name, redact_text
+from backend.url_safety import is_safe_http_url
 
 # JSON has fewer built-in value types than Python. These aliases make that
 # boundary visible in type hints: a scalar cannot contain another collection,
@@ -46,12 +48,15 @@ from backend.security import MASK, is_secret_key_name, redact_text
 JSONScalar: TypeAlias = str | int | float | bool | None
 JSONValue: TypeAlias = JSONScalar | list["JSONValue"] | dict[str, "JSONValue"]
 SignalSource: TypeAlias = Literal["deterministic", "ai", "hybrid"]
+AIEvaluationOutcome: TypeAlias = Literal["approved", "rejected", "error"]
 
 # Exporting a domain-specific name keeps callers/tests independent from the
 # redaction module's implementation while still using its consistent mask.
 MASKED_PARAMETER = MASK
 
 _SIGNAL_SOURCES = frozenset({"deterministic", "ai", "hybrid"})
+_AI_EVALUATION_OUTCOMES = frozenset({"approved", "rejected", "error"})
+_DROP = object()
 
 
 class ResultContractError(ValueError):
@@ -77,17 +82,43 @@ class RuleCheck:
 
 
 @dataclass(frozen=True)
+class EvidenceReference:
+    """One durable evidence pointer without storing fetched document contents."""
+
+    source_label: str
+    sanitized_url: str | None
+    sha256: str
+
+
+@dataclass(frozen=True)
 class AIProvenance:
-    """Reserved metadata for a later AI-provenance ticket.
+    """Reproducible metadata for one AI verdict."""
 
-    PROV-001A deliberately does not inspect prompts, model output, scraped
-    evidence, or agent behavior. These two optional identifiers merely reserve
-    a typed location that PROV-003 can expand without changing the outer result
-    contract.
-    """
+    model_name: str
+    prompt_version: str
+    prompt_sha256: str
+    generated_at: dt.datetime
+    cache_hit: bool
+    evidence_references: list[EvidenceReference] = field(default_factory=list)
+    input_context_hash: str | None = None
+    verdict: str | None = None
+    confidence: Decimal | int | float | str | None = None
+    decision_reason: str | None = None
 
-    model_name: str | None = None
-    prompt_version: str | None = None
+
+@dataclass(frozen=True)
+class AIEvaluationRecord:
+    """Callback payload captured for later durable AI-evaluation persistence."""
+
+    symbol: str
+    signal_date: dt.date | None
+    outcome: AIEvaluationOutcome
+    verdict: str | None
+    confidence: Decimal | int | float | str | None
+    decision_reason: str | None
+    provenance: AIProvenance
+    validated_verdict_json: Mapping[str, JSONValue] = field(default_factory=dict)
+    created_at: dt.datetime = field(default_factory=lambda: dt.datetime.now(dt.UTC))
 
 
 @dataclass(frozen=True)
@@ -225,26 +256,16 @@ def normalize_screener_row(
     # Indicator values are scalar in the v1 contract. The helper below converts
     # NumPy and pandas scalar objects without importing either dependency here.
     raw_indicators = provenance.get("indicator_values")
-    # Declared as the wider JSON type: ``dict`` is invariant in its value type,
-    # so a ``dict[str, JSONScalar]`` would not be assignable into the canonical
-    # ``dict[str, JSONValue]`` envelope below even though every scalar fits.
-    indicator_values: dict[str, JSONValue] = (
-        {
-            str(key): _json_safe_scalar(value)
-            for key, value in raw_indicators.items()
-        }
-        if isinstance(raw_indicators, Mapping)
-        else {}
-    )
+    indicator_values = normalize_indicator_values(raw_indicators)
 
     # An existing snapshot is authoritative because the screener may have
     # recorded more precise settings. Otherwise use the run-level parameters
     # supplied by the service, dropping callbacks and masking credentials.
     raw_params = provenance.get("params_snapshot")
     params_snapshot = (
-        _json_safe_mapping(raw_params, drop_callables=True)
+        _json_safe_mapping(raw_params)
         if isinstance(raw_params, Mapping)
-        else _json_safe_mapping(params or {}, drop_callables=True)
+        else _json_safe_mapping(params or {})
     )
 
     # Likewise, keep a row-specific date when present and use the scan date only
@@ -264,7 +285,7 @@ def normalize_screener_row(
                 provenance.get("screener_version")
             ),
             "triggered_rules": _normalize_rules(raw_rules),
-            "indicator_values": indicator_values,
+            "indicator_values": cast(dict[str, JSONValue], indicator_values),
             "params_snapshot": params_snapshot,
             "data_snapshot_date": _json_safe(raw_data_date),
             "source": source,
@@ -273,28 +294,24 @@ def normalize_screener_row(
         }
     )
     normalized["provenance_json"] = canonical
+    try:
+        json.dumps(normalized, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ResultContractError(
+            "Screener result row is not strict JSON serializable."
+        ) from exc
     return cast(dict[str, Any], normalized)
 
 
 def _provenance_mapping(value: Any) -> dict[str, Any]:
-    """Copy a provenance object into a mapping without rejecting legacy values.
-
-    Dataclasses are converted with ``asdict`` so callers can already use the new
-    typed models. Plain mappings continue to support old screeners, and unusual
-    scalar receipts are retained under ``legacy_value`` rather than causing the
-    whole scan-history write to fail.
-    """
-    if value is None:
-        return {}
+    """Return the required provenance mapping or raise a contract error."""
     if isinstance(value, Mapping):
         return dict(value)
     if is_dataclass(value) and not isinstance(value, type):
         return asdict(value)
-
-    # An old or experimental screener may have stored a plain text receipt.
-    # Preserve it under an explicit compatibility key instead of crashing the
-    # entire scan or pretending that it follows the new structure.
-    return {"legacy_value": value}
+    raise ResultContractError(
+        "Screener result row requires mapping provenance."
+    )
 
 
 def _normalize_rules(value: Any) -> list[JSONValue]:
@@ -305,7 +322,7 @@ def _normalize_rules(value: Any) -> list[JSONValue]:
     the database without forcing legacy producers to change immediately.
     """
     if _is_missing(value):
-        return []
+        raise ResultContractError("Provenance requires non-empty triggered_rules.")
     if isinstance(value, str | Mapping) or (
         is_dataclass(value) and not isinstance(value, type)
     ):
@@ -314,10 +331,28 @@ def _normalize_rules(value: Any) -> list[JSONValue]:
         items = list(value)
     else:
         items = [value]
-    return [_json_safe(item) for item in items]
+    normalized = [_json_safe(item) for item in items]
+    if not normalized:
+        raise ResultContractError("Provenance requires non-empty triggered_rules.")
+    for rule in normalized:
+        if isinstance(rule, str):
+            if not rule.strip():
+                raise ResultContractError(
+                    "Provenance triggered_rules cannot contain blank names."
+                )
+        elif isinstance(rule, dict):
+            if not str(rule.get("name", "")).strip():
+                raise ResultContractError(
+                    "Structured triggered_rules require a non-blank name."
+                )
+        else:
+            raise ResultContractError(
+                "Provenance triggered_rules must be names or RuleCheck mappings."
+            )
+    return normalized
 
 
-def _normalize_source(value: Any) -> SignalSource | None:
+def _normalize_source(value: Any) -> SignalSource:
     """Validate an explicitly supplied provenance source.
 
     Missing values remain ``None``. Explicit values are normalized for case and
@@ -325,7 +360,7 @@ def _normalize_source(value: Any) -> SignalSource | None:
     evidence into one of the supported categories.
     """
     if _is_missing(value):
-        return None
+        raise ResultContractError("Provenance requires a valid source.")
     normalized = str(value).strip().lower()
     if normalized not in _SIGNAL_SOURCES:
         allowed = ", ".join(sorted(_SIGNAL_SOURCES))
@@ -336,40 +371,71 @@ def _normalize_source(value: Any) -> SignalSource | None:
 
 
 def _normalize_ai_placeholder(value: Any) -> dict[str, JSONValue] | None:
-    """Keep optional AI identifiers without implementing AI evidence handling."""
+    """Normalize optional typed or mapping AI provenance."""
     if _is_missing(value):
         return None
     if isinstance(value, Mapping):
         return _json_safe_mapping(value)
     if is_dataclass(value) and not isinstance(value, type):
         return _json_safe_mapping(asdict(value))
-    return {"legacy_value": _json_safe(value)}
+    raise ResultContractError("AI provenance must be a mapping or AIProvenance.")
 
 
-def _json_safe_mapping(
-    value: Mapping[Any, Any],
-    *,
-    drop_callables: bool = False,
-) -> dict[str, JSONValue]:
+def normalize_secret_safe_json(value: Any) -> JSONValue:
+    """Return recursively JSON-compatible, callable-free, secret-safe data.
+
+    This is the public persistence boundary for both run parameters and durable
+    result/evaluation payloads. Mapping keys that look credential-related are
+    masked, strings use the application redactor, Decimal remains lossless text,
+    dates use ISO-8601, NumPy/pandas scalars unwrap through ``item()``, and
+    non-finite numbers become JSON null.
+    """
+    normalized = _normalize_json(value)
+    return None if normalized is _DROP else cast(JSONValue, normalized)
+
+
+def normalize_indicator_values(value: Any) -> dict[str, JSONScalar]:
+    """Validate and normalize the required scalar indicator evidence mapping."""
+    if not isinstance(value, Mapping) or not value:
+        raise ResultContractError(
+            "Provenance requires non-empty scalar indicator_values."
+        )
+    return {
+        str(key): _json_safe_scalar(item)
+        for key, item in value.items()
+    }
+
+
+def sanitize_evidence_url(value: Any) -> str | None:
+    """Return a redacted HTTP(S) URL without credentials, query, or fragment."""
+    if _is_missing(value):
+        return None
+    safe_text = cast(str, redact_text(str(value).strip()))
+    if not is_safe_http_url(safe_text):
+        return None
+    parsed = urlsplit(safe_text)
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc, parsed.path, "", ""))
+
+
+def _json_safe_mapping(value: Mapping[Any, Any]) -> dict[str, JSONValue]:
     """Recursively convert a mapping and mask credential-named values.
 
     JSON object keys must be strings, so non-string keys are converted with
     ``str``. Secret-looking keys are masked before their values are inspected,
     which prevents an accidental token from surviving in a custom object.
     """
-    converted: dict[str, JSONValue] = {}
-    for raw_key, raw_value in value.items():
-        key = str(raw_key)
-        if drop_callables and callable(raw_value):
-            continue
-        if is_secret_key_name(key):
-            converted[key] = MASKED_PARAMETER
-            continue
-        converted[key] = _json_safe(raw_value, drop_callables=drop_callables)
-    return converted
+    try:
+        normalized = normalize_secret_safe_json(value)
+    except TypeError as exc:
+        raise ResultContractError(
+            "Screener result row is not strict JSON serializable."
+        ) from exc
+    if not isinstance(normalized, dict):
+        raise TypeError("mapping normalization did not produce a JSON object")
+    return normalized
 
 
-def _json_safe(value: Any, *, drop_callables: bool = False) -> JSONValue:
+def _json_safe(value: Any) -> JSONValue:
     """Convert common pandas/NumPy/Python values to strict JSON-compatible data.
 
     ``json.dumps(..., allow_nan=False)`` rejects NaN and infinity even though
@@ -377,10 +443,16 @@ def _json_safe(value: Any, *, drop_callables: bool = False) -> JSONValue:
     keeps the stored JSON standards-compliant and gives readers a conventional
     representation for missing data.
     """
+    normalized = _normalize_json(value)
+    return None if normalized is _DROP else cast(JSONValue, normalized)
+
+
+def _normalize_json(value: Any) -> JSONValue | object:
+    """Internal recursive implementation with a sentinel for dropped callables."""
     if _is_missing(value):
         return None
     if callable(value):
-        return None
+        return _DROP
     if isinstance(value, str):
         return cast(str, redact_text(value))
     if isinstance(value, bool):
@@ -394,46 +466,97 @@ def _json_safe(value: Any, *, drop_callables: bool = False) -> JSONValue:
     if isinstance(value, dt.datetime | dt.date):
         return value.isoformat()
     if is_dataclass(value) and not isinstance(value, type):
-        return _json_safe_mapping(asdict(value), drop_callables=drop_callables)
+        return _normalize_json(asdict(value))
     if isinstance(value, Mapping):
-        return _json_safe_mapping(value, drop_callables=drop_callables)
+        converted: dict[str, JSONValue] = {}
+        for raw_key, raw_value in value.items():
+            key = str(raw_key)
+            if is_secret_key_name(key):
+                converted[key] = MASKED_PARAMETER
+                continue
+            item = _normalize_json(raw_value)
+            if item is _DROP:
+                continue
+            converted[key] = cast(JSONValue, item)
+        return converted
     if isinstance(value, list | tuple):
-        return [
-            _json_safe(item, drop_callables=drop_callables)
-            for item in value
-            if not (drop_callables and callable(item))
-        ]
+        items: list[JSONValue] = []
+        for raw_item in value:
+            item = _normalize_json(raw_item)
+            if item is not _DROP:
+                items.append(cast(JSONValue, item))
+        return items
     if isinstance(value, set | frozenset):
-        items = [
-            _json_safe(item, drop_callables=drop_callables)
-            for item in value
-            if not (drop_callables and callable(item))
-        ]
+        items = []
+        for raw_item in value:
+            item = _normalize_json(raw_item)
+            if item is not _DROP:
+                items.append(cast(JSONValue, item))
         return sorted(items, key=_json_sort_key)
 
     # NumPy and pandas scalar objects expose ``item()``. Converting through that
     # method avoids importing NumPy into the runtime module solely for type
     # checks, while recursive handling still catches NaN and infinity.
+    if type(value).__name__ == "ndarray":
+        raise TypeError("Unsupported JSON value type: ndarray")
     item_method = getattr(value, "item", None)
-    if callable(item_method):
+    if _is_numpy_or_pandas_value(value) and callable(item_method):
         try:
-            return _json_safe(item_method(), drop_callables=drop_callables)
+            return _normalize_json(item_method())
         except (TypeError, ValueError):
             pass
 
-    # Flexible raw rows occasionally contain custom scalar-like values. Keeping
-    # a redacted text representation is more useful than aborting a full scan.
-    return cast(str, redact_text(str(value)))
+    raise TypeError(f"Unsupported JSON value type: {type(value).__name__}")
 
 
 def _json_safe_scalar(value: Any) -> JSONScalar:
-    """Convert an indicator value while keeping the canonical field scalar-only."""
-    converted = _json_safe(value)
-    if isinstance(converted, dict | list):
-        # Nested indicator structures do not fit the v1 contract. Serialize them
-        # as stable JSON text instead of silently dropping evidence.
-        return json.dumps(converted, sort_keys=True, separators=(",", ":"))
-    return converted
+    """Convert one supported indicator scalar or reject richer objects."""
+    if isinstance(value, Mapping | list | tuple | set | frozenset):
+        raise ResultContractError(
+            "Provenance indicator_values must contain scalar values."
+        )
+    if type(value).__name__ == "ndarray":
+        raise ResultContractError(
+            "Provenance indicator_values must contain scalar values."
+        )
+    if isinstance(value, Decimal) and not value.is_finite():
+        raise ResultContractError(
+            "Provenance indicator_values must contain finite numbers."
+        )
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ResultContractError(
+            "Provenance indicator_values must contain finite numbers."
+        )
+    if _is_missing(value):
+        return None
+    if isinstance(
+        value,
+        str | bool | int | float | Decimal | dt.datetime | dt.date,
+    ):
+        return cast(JSONScalar, _json_safe(value))
+
+    item_method = getattr(value, "item", None)
+    if _is_numpy_or_pandas_value(value) and callable(item_method):
+        try:
+            unwrapped = item_method()
+        except (TypeError, ValueError) as exc:
+            raise ResultContractError(
+                "Provenance indicator_values must contain scalar values."
+            ) from exc
+        if unwrapped is value:
+            raise ResultContractError(
+                "Provenance indicator_values must contain scalar values."
+            )
+        return _json_safe_scalar(unwrapped)
+
+    raise ResultContractError(
+        "Provenance indicator_values must contain scalar values."
+    )
+
+
+def _is_numpy_or_pandas_value(value: Any) -> bool:
+    """Recognize supported third-party scalar families without importing them."""
+    return type(value).__module__.partition(".")[0] in {"numpy", "pandas"}
 
 
 def _optional_text(value: Any) -> str | None:

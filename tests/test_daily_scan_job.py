@@ -128,6 +128,11 @@ def _row_for(symbol: str) -> dict[str, object]:
         "signal_date": date(2026, 6, 5),
         "close": 123.45,
         "reason": "fake daily job signal",
+        "provenance": {
+            "triggered_rules": ["fake_daily_job_signal"],
+            "indicator_values": {"close": 123.45},
+            "source": "deterministic",
+        },
     }
 
 

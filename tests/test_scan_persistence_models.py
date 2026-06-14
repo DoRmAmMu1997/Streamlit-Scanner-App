@@ -18,7 +18,7 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
-from backend.storage.models import ScanResult, ScanRun, ScanStatus
+from backend.storage.models import AIEvaluation, ScanResult, ScanRun, ScanStatus
 
 # The ``db_session`` fixture these tests use lives in tests/conftest.py,
 # shared with the other scan-history test modules.
@@ -184,3 +184,31 @@ def test_deleting_run_cascades_to_results(db_session):
 
     assert db_session.scalar(select(text("count(*)")).select_from(ScanResult)) == 0
     assert db_session.scalar(select(text("count(*)")).select_from(ScanRun)) == 0
+
+
+def test_ai_evaluation_round_trip_and_run_delete_cascade(db_session):
+    run = _make_run()
+    run.ai_evaluations.append(
+        AIEvaluation(
+            symbol="TCS",
+            signal_date=dt.date(2026, 6, 13),
+            outcome="approved",
+            verdict_label="BUY",
+            confidence=Decimal("0.9300"),
+            model_name="gpt-test",
+            prompt_version="v1",
+            validated_verdict_json={"rating": "BUY"},
+            provenance_json={"prompt_sha256": "a" * 64},
+            created_at=dt.datetime(2026, 6, 13, 8, 0, tzinfo=dt.UTC),
+        )
+    )
+    db_session.add(run)
+    db_session.commit()
+
+    loaded = db_session.scalars(select(AIEvaluation)).one()
+    assert loaded.run_id == run.id
+    assert loaded.confidence == Decimal("0.9300")
+
+    db_session.delete(run)
+    db_session.commit()
+    assert db_session.scalar(select(text("count(*)")).select_from(AIEvaluation)) == 0

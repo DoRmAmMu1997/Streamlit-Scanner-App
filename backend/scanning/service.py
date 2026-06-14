@@ -54,6 +54,7 @@ from backend.storage.models import ScanRun, ScanStatus
 from backend.storage.repository import (
     create_scan_run,
     finish_scan_run,
+    save_ai_evaluations,
     save_scan_results,
 )
 
@@ -73,7 +74,7 @@ class ScanRunResult:
     """Structured outcome of one scan, returned to the caller.
 
     ``status`` is SUCCESS (every symbol fine), PARTIAL (usable rows but some
-    symbols failed), or FAILED (the screener raised before producing results).
+    symbols failed), or FAILED (computation or durable finalization failed).
     ``results`` is the screener's DataFrame, unchanged, so the UI renders exactly
     as it did before persistence existed. ``run_id`` is the database id when a
     run header was created, or ``None`` when persistence was unavailable.
@@ -88,6 +89,7 @@ class ScanRunResult:
     results: pd.DataFrame
     run_id: int | None = None
     compute_failures: list[dict[str, Any]] = field(default_factory=list)
+    rejected_result_rows: int = 0
     error_message: str | None = None
 
 
@@ -125,8 +127,10 @@ def run_scan(
     # so callers do not each have to wire a callback. Copy params first: we must
     # never mutate the caller's dict because the UI reuses it for charts later.
     compute_failures: list[dict[str, Any]] = []
+    ai_evaluations: list[Any] = []
     run_params = dict(params)
     run_params["compute_failure_callback"] = compute_failures.append
+    run_params["ai_evaluation_callback"] = ai_evaluations.append
     # OBS-001: monotonic clock so scan_completed can report a wall-clock duration.
     started_at = time.monotonic()
 
@@ -206,6 +210,25 @@ def run_scan(
         else:
             status = ScanStatus.SUCCESS
 
+    emitted_rejected_rows = sum(
+        1
+        for failure in compute_failures
+        if failure.get("phase") == "result_contract"
+    )
+    normalized_rows, persistence_rejected_rows = _result_rows(
+        results,
+        screener_key=screener_key,
+        params=params,
+        data_snapshot_date=_as_date(params.get("end_date")),
+    )
+    rejected_result_rows = emitted_rejected_rows + persistence_rejected_rows
+    if rejected_result_rows:
+        rejection_message = (
+            f"{rejected_result_rows} result row(s) failed the result contract."
+        )
+        status = ScanStatus.PARTIAL if normalized_rows else ScanStatus.FAILED
+        error_message = _combine_error_messages(error_message, rejection_message)
+
     # OBS-001: one symbol_scan_failed per failed symbol (load failures from the
     # data loader, compute failures from the screener callback), each tagged with
     # run_id + symbol so a single stock's failure is traceable. Both message
@@ -232,14 +255,21 @@ def run_scan(
     # message so the history table does not get stuck forever in RUNNING.
     persistence_exc_info = _persist_run_outcome(
         run_id=run_id,
-        results=results,
+        normalized_rows=normalized_rows,
+        ai_evaluations=ai_evaluations,
         status=status,
         error_message=error_message,
-        screener_key=screener_key,
-        params=params,
-        data_snapshot_date=_as_date(params.get("end_date")),
         session_factory=session_factory,
     )
+    if persistence_exc_info is not None:
+        status = ScanStatus.FAILED
+        persistence_error_message = (
+            f"Could not persist scan results "
+            f"({persistence_exc_info[0].__name__})."
+        )
+        error_message = _combine_error_messages(
+            error_message, persistence_error_message
+        )
 
     # --- 4. Emit terminal events after the durable write attempt ---------------
     # A log consumer may react to scan_completed immediately, so success/partial
@@ -253,6 +283,17 @@ def run_scan(
         "universe_key": universe_key,
         "status": status.value,
         "results_count": 0 if results is None else len(results),
+        "persisted_results_count": (
+            len(normalized_rows)
+            if run_id is not None and persistence_exc_info is None
+            else 0
+        ),
+        "rejected_result_rows": rejected_result_rows,
+        "ai_evaluation_count": (
+            len(ai_evaluations)
+            if run_id is not None and persistence_exc_info is None
+            else 0
+        ),
         "loader_failures": len(loader_failures),
         "compute_failures": len(compute_failures),
         "duration_seconds": round(time.monotonic() - started_at, 3),
@@ -287,6 +328,7 @@ def run_scan(
         results=results,
         run_id=run_id,
         compute_failures=compute_failures,
+        rejected_result_rows=rejected_result_rows,
         error_message=error_message,
     )
 
@@ -324,8 +366,7 @@ def _create_run_header(
                 session,
                 screener_key=screener_key,
                 universe_key=universe_key,
-                # Strip callbacks/functions so only JSON-storable params are saved.
-                params=_params_snapshot(params),
+                params=params,
                 data_snapshot_date=_as_date(params.get("end_date")),
                 triggered_by=triggered_by,
                 symbols_scanned=symbols_scanned,
@@ -342,12 +383,10 @@ def _create_run_header(
 def _persist_run_outcome(
     *,
     run_id: int | None,
-    results: pd.DataFrame,
+    normalized_rows: list[dict[str, Any]],
+    ai_evaluations: list[Any],
     status: ScanStatus,
     error_message: str | None,
-    screener_key: str,
-    params: dict[str, Any],
-    data_snapshot_date: dt.date | None,
     session_factory: SessionFactory,
 ) -> ExceptionInfo | None:
     """Save result rows and stamp the final status for an existing run header.
@@ -363,10 +402,10 @@ def _persist_run_outcome(
     Normalization is intentionally delayed until here: earlier conversion could
     change the DataFrame that Streamlit expects to receive unchanged.
 
-    If result persistence fails, the returned ``ScanRunResult`` still reflects
-    what happened in memory. The database row may be marked FAILED as a separate
-    audit concern, because "the scan succeeded but history write failed" is still
-    something operators should be able to notice.
+    If result persistence fails, the DataFrame still returns for UI recovery, but
+    the service outcome is FAILED because no durable result/evaluation rows were
+    committed. The database row is marked FAILED in a separate best-effort
+    transaction so callers, logs, and history agree on the terminal state.
     """
     if run_id is None:
         return None
@@ -382,13 +421,9 @@ def _persist_run_outcome(
             save_scan_results(
                 session,
                 run,
-                _result_rows(
-                    results,
-                    screener_key=screener_key,
-                    params=params,
-                    data_snapshot_date=data_snapshot_date,
-                ),
+                normalized_rows,
             )
+            save_ai_evaluations(session, run, ai_evaluations)
             finish_scan_run(session, run, status=status, error_message=error_message)
     except Exception as exc:
         persistence_exc_info = _current_exc_info()
@@ -432,18 +467,13 @@ def _mark_run_failed_after_persistence_error(
         )
 
 
-def _params_snapshot(params: dict[str, Any]) -> dict[str, Any]:
-    """Drop callables (e.g. progress/compute callbacks) so params stay JSON-safe."""
-    return {key: value for key, value in params.items() if not callable(value)}
-
-
 def _result_rows(
     results: pd.DataFrame,
     *,
     screener_key: str,
     params: dict[str, Any],
     data_snapshot_date: dt.date | None,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], int]:
     """Return normalized persistence copies of the screener's DataFrame rows.
 
     ``normalize_screener_row`` recursively copies nested values. Provenance and
@@ -452,7 +482,7 @@ def _result_rows(
     screener for Streamlit to render.
     """
     if results is None or results.empty:
-        return []
+        return [], 0
 
     # ``to_dict("records")`` creates one ordinary mapping per DataFrame row.
     # The normalizer then deep-copies nested content and enriches only these
@@ -469,7 +499,7 @@ def _result_rows(
                     data_snapshot_date=data_snapshot_date,
                 )
             )
-        except ResultContractError as exc:
+        except ResultContractError:
             # One unusable row (typically a NaN symbol from a screener merge
             # bug) must not erase history for every other result in the run.
             # Skip it loudly; the in-memory DataFrame shown by Streamlit is
@@ -478,19 +508,18 @@ def _result_rows(
             skipped += 1
             logger.warning(
                 "Skipping result row %d for %s; it cannot satisfy the result "
-                "contract: %s",
+                "contract (%s).",
                 index,
                 screener_key,
-                exc,
+                ResultContractError.__name__,
             )
-    if skipped and not rows:
-        # Every row failing is a systemic screener/contract problem, not one
-        # bad merge. Recording an empty-but-successful run would be misleading
-        # audit data, so keep the existing loud persistence-failure path.
-        raise ResultContractError(
-            f"All {skipped} result rows for {screener_key} failed the result contract."
-        )
-    return rows
+    return rows, skipped
+
+
+def _combine_error_messages(*messages: str | None) -> str | None:
+    """Join already-safe status summaries without exposing exception text."""
+    parts = [message for message in messages if message]
+    return " ".join(parts) if parts else None
 
 
 def _as_date(value: Any) -> dt.date | None:

@@ -2,7 +2,7 @@
   {
     "symbol": "BUY",
     "rating": "BUY",
-    "signal_date": "2026-01-12",
+    "signal_date": "2026-01-12T00:00:00",
     "close": 15.0,
     "reason": "Daily Heikin Ashi close (15.00) crossed above SuperTrend(3, 1) at 5.86.",
     "ha_open": 7.5,
@@ -31,7 +31,7 @@
   {
     "symbol": "SELL",
     "rating": "SELL",
-    "signal_date": "2026-01-12",
+    "signal_date": "2026-01-12T00:00:00",
     "close": 10.0,
     "reason": "Daily Heikin Ashi close (10.00) crossed below SuperTrend(3, 1) at 27.33.",
     "ha_open": 25.0,

@@ -29,20 +29,23 @@ from backend.storage.database import (
     init_db,
     session_scope,
 )
-from backend.storage.models import Base, ScanResult, ScanRun, ScanStatus
+from backend.storage.models import AIEvaluation, Base, ScanResult, ScanRun, ScanStatus
 from backend.storage.repository import (
     count_scan_results_for_runs,
     create_scan_run,
     finish_scan_run,
+    get_ai_evaluations,
     get_latest_scan_runs,
     get_scan_results,
     list_distinct_screener_keys,
     list_distinct_triggered_by_values,
     list_distinct_universe_keys,
+    save_ai_evaluations,
     save_scan_results,
 )
 
 __all__ = [
+    "AIEvaluation",
     "Base",
     "ScanResult",
     "ScanRun",
@@ -53,6 +56,7 @@ __all__ = [
     "engine",
     "ensure_database_schema",
     "finish_scan_run",
+    "get_ai_evaluations",
     "get_database_url",
     "get_latest_scan_runs",
     "get_scan_results",
@@ -60,6 +64,7 @@ __all__ = [
     "list_distinct_screener_keys",
     "list_distinct_triggered_by_values",
     "list_distinct_universe_keys",
+    "save_ai_evaluations",
     "save_scan_results",
     "session_scope",
 ]

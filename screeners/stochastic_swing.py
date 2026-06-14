@@ -59,14 +59,26 @@ def _recent_cross_confirmation(
     3. Keep the confirmation true only while the trend side still matches and
        the crossover is no older than `MAX_CONFIRMATION_AGE` (7 days).
     """
+    confirmation, _, _ = _recent_cross_details(timestamp, cross_mask, direction_mask)
+    return confirmation
+
+
+def _recent_cross_details(
+    timestamp: pd.Series,
+    cross_mask: pd.Series,
+    direction_mask: pd.Series,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Return active confirmation plus the cross timestamp and age in days."""
     last_cross_timestamp = timestamp.where(cross_mask).ffill()
     age = timestamp - last_cross_timestamp
-    return (
+    confirmation = (
         direction_mask
         & last_cross_timestamp.notna()
         & age.ge(pd.Timedelta(0))
         & age.le(MAX_CONFIRMATION_AGE)
     )
+    age_days = age.dt.total_seconds() / 86_400.0
+    return confirmation, last_cross_timestamp, age_days
 
 
 class StochasticSwing(BaseScanner):
@@ -138,10 +150,18 @@ class StochasticSwing(BaseScanner):
         # AND the EMA must still sit on the correct side of the SMA.
         bullish_ema_cross = _crossed_above(frame["ema5"], frame["sma200"])
         bearish_ema_cross = _crossed_below(frame["ema5"], frame["sma200"])
-        frame["bullish_confirmation"] = _recent_cross_confirmation(
+        (
+            frame["bullish_confirmation"],
+            frame["bullish_cross_timestamp"],
+            frame["bullish_cross_age_days"],
+        ) = _recent_cross_details(
             frame["timestamp"], bullish_ema_cross, frame["ema5"] > frame["sma200"]
         )
-        frame["bearish_confirmation"] = _recent_cross_confirmation(
+        (
+            frame["bearish_confirmation"],
+            frame["bearish_cross_timestamp"],
+            frame["bearish_cross_age_days"],
+        ) = _recent_cross_details(
             frame["timestamp"], bearish_ema_cross, frame["ema5"] < frame["sma200"]
         )
         return frame
@@ -208,6 +228,8 @@ class StochasticSwing(BaseScanner):
             rating = "BUY"
             stop = close * (1.0 - STOP_LOSS_PCT)
             target = close * (1.0 + TARGET_PCT)
+            ema_sma_cross_timestamp = current["bullish_cross_timestamp"]
+            ema_sma_cross_age_days = current["bullish_cross_age_days"]
             triggered_rules = [
                 "close_above_sma200",
                 "stoch_k_crossed_above_d_from_oversold",
@@ -222,6 +244,8 @@ class StochasticSwing(BaseScanner):
             rating = "SELL"
             stop = close * (1.0 + STOP_LOSS_PCT)
             target = close * (1.0 - TARGET_PCT)
+            ema_sma_cross_timestamp = current["bearish_cross_timestamp"]
+            ema_sma_cross_age_days = current["bearish_cross_age_days"]
             triggered_rules = [
                 "close_below_sma200",
                 "stoch_k_crossed_below_d_from_overbought",
@@ -261,6 +285,8 @@ class StochasticSwing(BaseScanner):
                     "stoch_d": latest_d,
                     "previous_stoch_k": prev_k,
                     "previous_stoch_d": prev_d,
+                    "ema_sma_cross_timestamp": ema_sma_cross_timestamp,
+                    "ema_sma_cross_age_days": ema_sma_cross_age_days,
                     "stop": stop,
                     "target": target,
                 },

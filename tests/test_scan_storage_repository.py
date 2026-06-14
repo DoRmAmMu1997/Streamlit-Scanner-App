@@ -10,6 +10,9 @@ from __future__ import annotations
 import datetime as dt
 from decimal import Decimal
 
+import pytest
+
+from backend.scanning.result_contract import AIEvaluationRecord, AIProvenance
 from backend.storage.models import ScanStatus
 
 # The ``db_session`` fixture these tests use lives in tests/conftest.py,
@@ -96,6 +99,7 @@ def test_repository_creates_run_results_and_failed_status(db_session):
     assert by_symbol["RELIANCE"].raw_result_json["extra"]["threshold"] == "0.07"
     assert by_symbol["TCS"].close_price == Decimal("3890.0000")
     assert by_symbol["TCS"].final_score == Decimal("82.50")
+    assert by_symbol["TCS"].raw_result_json["final_score"] == "82.50"
     assert by_symbol["TCS"].provenance_json == {
         "model": "claude-sonnet-4-6",
         "checked_at": "2026-06-04T10:00:00+00:00",
@@ -329,3 +333,169 @@ def test_list_distinct_history_filter_values_are_sorted_and_deduplicated(db_sess
         "ui:admin@example.com",
         "ui:analyst@example.com",
     ]
+
+
+def test_create_scan_run_uses_recursive_secret_safe_json_normalization(db_session):
+    from backend.storage.repository import create_scan_run
+
+    run = create_scan_run(
+        db_session,
+        screener_key="envelope",
+        universe_key="nifty_500",
+        params={
+            "as_of": dt.date(2026, 6, 13),
+            "threshold": Decimal("0.1250"),
+            "callback": lambda: None,
+            "nested": {
+                "api_key": "raw-secret",
+                "message": "token=inline-secret",
+            },
+        },
+    )
+
+    assert run.params_json == {
+        "as_of": "2026-06-13",
+        "threshold": "0.1250",
+        "nested": {
+            "api_key": "***REDACTED***",
+            "message": "token=***REDACTED***",
+        },
+    }
+
+
+def test_repository_saves_and_gets_sanitized_ai_evaluations(db_session):
+    from backend.storage.repository import (
+        create_scan_run,
+        get_ai_evaluations,
+        save_ai_evaluations,
+    )
+
+    run = create_scan_run(
+        db_session,
+        screener_key="technical_analysis_ai",
+        universe_key="nifty_500",
+    )
+    saved = save_ai_evaluations(
+        db_session,
+        run,
+        [
+            AIEvaluationRecord(
+                symbol="TCS",
+                signal_date=dt.date(2026, 6, 13),
+                outcome="approved",
+                verdict="BUY",
+                confidence=Decimal("8.75"),
+                decision_reason="token=reason-secret",
+                provenance=AIProvenance(
+                    model_name="gpt-test",
+                    prompt_version="v1",
+                    prompt_sha256="b" * 64,
+                    generated_at=dt.datetime(2026, 6, 13, 8, 0, tzinfo=dt.UTC),
+                    cache_hit=False,
+                    verdict="BUY",
+                    confidence=Decimal("8.75"),
+                    decision_reason="token=reason-secret",
+                    evidence_references=[],
+                ),
+                validated_verdict_json={
+                    "rating": "BUY",
+                    "api_key": "verdict-secret",
+                },
+            )
+        ],
+    )
+    db_session.commit()
+
+    assert saved[0].run_id == run.id
+    loaded = get_ai_evaluations(db_session, run.id)
+    assert len(loaded) == 1
+    assert loaded[0].outcome == "approved"
+    assert loaded[0].confidence == Decimal("8.7500")
+    assert loaded[0].validated_verdict_json["api_key"] == "***REDACTED***"
+    assert "reason-secret" not in str(loaded[0].validated_verdict_json)
+    assert loaded[0].provenance_json["verdict"] == "BUY"
+    assert loaded[0].provenance_json["confidence"] == "8.75"
+    assert "reason-secret" not in loaded[0].provenance_json["decision_reason"]
+
+
+def test_repository_allows_error_ai_receipts_without_decision_fields(db_session):
+    from backend.storage.repository import create_scan_run, save_ai_evaluations
+
+    run = create_scan_run(
+        db_session,
+        screener_key="technical_analysis_ai",
+        universe_key="nifty_500",
+    )
+    saved = save_ai_evaluations(
+        db_session,
+        run,
+        [
+            AIEvaluationRecord(
+                symbol="TCS",
+                signal_date=dt.date(2026, 6, 13),
+                outcome="error",
+                verdict=None,
+                confidence=None,
+                decision_reason=None,
+                provenance=AIProvenance(
+                    model_name="gpt-test",
+                    prompt_version="v1",
+                    prompt_sha256="b" * 64,
+                    generated_at=dt.datetime(2026, 6, 13, 8, 0, tzinfo=dt.UTC),
+                    cache_hit=False,
+                ),
+            )
+        ],
+    )
+
+    assert saved[0].verdict_label is None
+    assert saved[0].confidence is None
+    assert saved[0].provenance_json["verdict"] is None
+    assert saved[0].provenance_json["confidence"] is None
+    assert saved[0].provenance_json["decision_reason"] is None
+
+
+def test_repository_rejects_verdict_json_that_contradicts_the_trusted_receipt(
+    db_session,
+):
+    from backend.storage.repository import create_scan_run, save_ai_evaluations
+
+    run = create_scan_run(
+        db_session,
+        screener_key="technical_analysis_ai",
+        universe_key="nifty_500",
+    )
+    record = AIEvaluationRecord(
+        symbol="TCS",
+        signal_date=dt.date(2026, 6, 13),
+        outcome="approved",
+        verdict="BUY",
+        confidence=Decimal("8"),
+        decision_reason="Validated reason.",
+        provenance=AIProvenance(
+            model_name="gpt-test",
+            prompt_version="v1",
+            prompt_sha256="b" * 64,
+            generated_at=dt.datetime(2026, 6, 13, 8, 0, tzinfo=dt.UTC),
+            cache_hit=False,
+            verdict="BUY",
+            confidence=Decimal("8"),
+            decision_reason="Validated reason.",
+        ),
+        validated_verdict_json={
+            "verdict": "SELL",
+            "confidence": 1,
+            "decision_reason": "Contradictory reason.",
+        },
+    )
+
+    with pytest.raises(ValueError, match="validated_verdict_json verdict"):
+        save_ai_evaluations(db_session, run, [record])
+
+
+def test_storage_package_exports_ai_evaluation_api():
+    from backend import storage
+
+    assert storage.AIEvaluation is not None
+    assert callable(storage.save_ai_evaluations)
+    assert callable(storage.get_ai_evaluations)

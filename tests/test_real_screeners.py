@@ -1,16 +1,28 @@
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import json
 import time
-from datetime import date
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
-from backend.sixty_seven.agent import EvidenceItem, SixtySevenVerdict
-from backend.technical.technical_agent import TechnicalVerdict
+from backend.scanning.result_contract import AIProvenance, EvidenceReference
+from backend.sixty_seven import agent as sixty_seven_agent_module
+from backend.sixty_seven.agent import (
+    EvidenceItem,
+    SixtySevenEvaluationResult,
+    SixtySevenVerdict,
+)
+from backend.technical import technical_agent as technical_agent_module
+from backend.technical.technical_agent import (
+    TechnicalAnalysisAgent,
+    TechnicalEvaluationResult,
+    TechnicalVerdict,
+)
 from screeners import (
     bollinger_band_reversal,
     bollinger_lower_band,
@@ -369,6 +381,11 @@ def test_envelope_knoxville_buy_returns_buy_only_when_both_filters_pass():
     assert row["close"] <= row["env_lower"] * 1.01
     assert row["entry_trigger"] == "recent_envelope_kd"
     assert "Knoxville" in row["reason"]
+    evidence = row["provenance"]["indicator_values"]
+    assert evidence["prior_pivot_low"] > evidence["divergence_price"]
+    assert evidence["prior_pivot_momentum"] < evidence["momentum"]
+    assert evidence["prior_pivot_timestamp"]
+    assert evidence["divergence_timestamp"]
 
 
 def test_envelope_knoxville_buy_shortlists_old_kd_retest_without_envelope():
@@ -402,6 +419,11 @@ def test_envelope_knoxville_buy_shortlists_old_kd_retest_without_envelope():
     assert row["divergence_bars_ago"] > params["signal_recency_bars"]
     assert row["kd_retest_distance_pct"] == pytest.approx(0.02)
     assert row["close"] > row["env_lower"] * 1.01
+    evidence = row["provenance"]["indicator_values"]
+    assert evidence["prior_pivot_low"] > evidence["divergence_price"]
+    assert evidence["prior_pivot_momentum"] < evidence["momentum"]
+    assert evidence["prior_pivot_timestamp"]
+    assert evidence["divergence_timestamp"]
 
 
 def test_envelope_knoxville_buy_tolerates_empty_and_short_frames():
@@ -452,6 +474,47 @@ def test_stochastic_swing_screener_runs_and_returns_schema():
     assert len(result) <= 1
     if not result.empty:
         assert result.iloc[0]["rating"] in {"BUY", "SELL"}
+
+
+def test_stochastic_swing_provenance_records_confirmation_cross_freshness(monkeypatch):
+    timestamps = pd.date_range("2026-01-01", periods=4, freq="D")
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "open": [90.0, 95.0, 100.0, 110.0],
+            "high": [91.0, 96.0, 101.0, 111.0],
+            "low": [89.0, 94.0, 99.0, 109.0],
+            "close": [90.0, 95.0, 100.0, 110.0],
+            "volume": [1000.0] * 4,
+        }
+    )
+    enriched = frame.assign(
+        sma200=[92.0, 94.0, 98.0, 100.0],
+        ema5=[91.0, 93.0, 99.0, 105.0],
+        stoch_k=[40.0, 30.0, 10.0, 25.0],
+        stoch_d=[45.0, 35.0, 15.0, 20.0],
+        bullish_confirmation=[False, False, True, True],
+        bearish_confirmation=[False, False, False, False],
+        bullish_cross_timestamp=[pd.NaT, pd.NaT, timestamps[2], timestamps[2]],
+        bearish_cross_timestamp=[pd.NaT, pd.NaT, pd.NaT, pd.NaT],
+        bullish_cross_age_days=[float("nan"), float("nan"), 0.0, 1.0],
+        bearish_cross_age_days=[float("nan")] * 4,
+    )
+    monkeypatch.setattr(stochastic_swing._scanner, "_enrich", lambda _frame, _params: enriched)
+
+    params = _stochastic_params()
+    params.update({"sma_period": 2, "oversold": 20.0})
+    result = stochastic_swing.run(
+        _universe_for(["BUY"]),
+        FakeDataLoader({"BUY": frame}),
+        params,
+    )
+
+    row = result.iloc[0]
+    assert row["rating"] == "BUY"
+    evidence = row["provenance"]["indicator_values"]
+    assert evidence["ema_sma_cross_timestamp"] == timestamps[2].isoformat()
+    assert evidence["ema_sma_cross_age_days"] == 1.0
 
 
 def test_stochastic_swing_screener_tolerates_empty_and_short_frames():
@@ -511,6 +574,34 @@ def test_week52_low_ceyhun_returns_buy_when_close_revisits_low():
     assert row["rating"] == "BUY"
     # The signal proximity should be at most the configured threshold.
     assert row["proximity_pct_at_signal"] <= 0.03
+
+
+def test_week52_low_provenance_uses_the_actual_signal_candle():
+    closes = [100.0, 100.0, 50.0, 100.0, 120.0, 130.0]
+    lows = [99.0, 99.0, 49.0, 100.0, 119.0, 129.0]
+    frames = {
+        "EARLIER_LOW": _bollinger_candles(
+            open_values=closes,
+            high_values=[value + 1.0 for value in closes],
+            low_values=lows,
+            close_values=closes,
+        )
+    }
+
+    result = week52_low_ceyhun.run(
+        _universe_for(["EARLIER_LOW"]),
+        FakeDataLoader(frames),
+        _week52_params(window_bars=3, recent_window_bars=4, proximity_pct=0.03),
+    )
+
+    row = result.iloc[0]
+    assert row["close"] == 130.0
+    evidence = row["provenance"]["indicator_values"]
+    assert evidence["signal_close"] == 50.0
+    assert evidence["week52_low_at_signal"] == 49.0
+    assert evidence["week52_high_at_signal"] == 101.0
+    assert evidence["signal_timestamp"] == pd.Timestamp("2026-01-03").isoformat()
+    assert evidence["days_since_signal"] == 3
 
 
 def test_week52_low_ceyhun_skips_when_close_is_far_from_low():
@@ -732,10 +823,28 @@ class _StubTechnicalAgent:
         self.calls = 0
         self.force_refreshes: list[bool] = []
 
-    def analyze(self, symbol, candles, levels, *, params=None, force_refresh=False):
+    def evaluate(self, symbol, candles, levels, *, params=None, force_refresh=False):
         self.calls += 1
         self.force_refreshes.append(bool(force_refresh))
-        return self.verdict.model_copy(update={"symbol": str(symbol).upper()})
+        verdict = self.verdict.model_copy(update={"symbol": str(symbol).upper()})
+        return TechnicalEvaluationResult(
+            verdict=verdict,
+            provenance=AIProvenance(
+                model_name="test-model",
+                prompt_version="technical-analysis-v1",
+                prompt_sha256="a" * 64,
+                generated_at=datetime(2026, 6, 13, tzinfo=UTC),
+                cache_hit=False,
+                evidence_references=[
+                    EvidenceReference("daily OHLC window", None, "b" * 64)
+                ],
+                input_context_hash="c" * 64,
+                verdict=verdict.pattern,
+                confidence=verdict.confidence,
+                decision_reason=verdict.reasoning,
+            ),
+            validated_verdict_json=verdict.model_dump(mode="json"),
+        )
 
 
 def _ta_candles(lows: list[float]) -> pd.DataFrame:
@@ -832,7 +941,12 @@ def test_technical_analysis_gate_admits_at_support_and_calls_agent(monkeypatch):
     monkeypatch.setattr(technical_analysis, "_get_agent", lambda: stub)
 
     frames = {"BUY": _ta_candles(_AT_SUPPORT_LOWS)}
-    result = technical_analysis.run(_universe(), FakeDataLoader(frames), _ta_params())
+    evaluations = []
+    result = technical_analysis.run(
+        _universe(),
+        FakeDataLoader(frames),
+        _ta_params(ai_evaluation_callback=evaluations.append),
+    )
 
     assert result["symbol"].tolist() == ["BUY"]
     row = result.iloc[0]
@@ -846,6 +960,12 @@ def test_technical_analysis_gate_admits_at_support_and_calls_agent(monkeypatch):
     assert provenance["screener_key"] == technical_analysis.SCREENER["key"]
     assert "gate_at_support" in provenance["triggered_rules"]
     assert "ai_setup_qualified" in provenance["triggered_rules"]
+    assert provenance["ai"]["prompt_version"] == "technical-analysis-v1"
+    assert len(evaluations) == 1
+    assert evaluations[0].outcome == "approved"
+    assert evaluations[0].validated_verdict_json["pattern"] == "at_support"
+    assert isinstance(row["signal_date"], str)
+    json.dumps(result.to_dict("records"), allow_nan=False)
     # The candidate reached the agent exactly once.
     assert stub.calls == 1
     assert list(result.columns) == [
@@ -882,6 +1002,25 @@ def test_technical_analysis_honors_max_ai_candidates(monkeypatch):
     assert stub.calls == 1
 
 
+def test_technical_analysis_redacts_gate_failure_callback(monkeypatch):
+    def _raise_secret(*_args, **_kwargs):
+        raise RuntimeError("token=technical-secret")
+
+    monkeypatch.setattr(technical_analysis._scanner, "_prepare_candidate", _raise_secret)
+    failures = []
+
+    result = technical_analysis.run(
+        _universe(),
+        FakeDataLoader({"BUY": _ta_candles(_AT_SUPPORT_LOWS)}),
+        _ta_params(compute_failure_callback=failures.append),
+    )
+
+    assert result.empty
+    assert len(failures) == 1
+    assert "technical-secret" not in failures[0]["message"]
+    assert "***REDACTED***" in failures[0]["message"]
+
+
 def test_technical_analysis_forwards_force_refresh_to_agent(monkeypatch):
     """A UI refresh should bypass the AI verdict cache, not only candle cache."""
     stub = _StubTechnicalAgent(_ta_verdict())
@@ -911,6 +1050,25 @@ def test_technical_analysis_gate_rejects_midrange_without_calling_agent(monkeypa
     assert list(result.columns) == technical_analysis.RESULT_COLUMNS
 
 
+def test_technical_analysis_records_rejected_ai_verdict_before_filtering(monkeypatch):
+    stub = _StubTechnicalAgent(
+        _ta_verdict(pattern="none", confirmed=False, key_levels=[])
+    )
+    monkeypatch.setattr(technical_analysis, "_get_agent", lambda: stub)
+    evaluations = []
+
+    result = technical_analysis.run(
+        _universe(),
+        FakeDataLoader({"BUY": _ta_candles(_AT_SUPPORT_LOWS)}),
+        _ta_params(ai_evaluation_callback=evaluations.append),
+    )
+
+    assert result.empty
+    assert len(evaluations) == 1
+    assert evaluations[0].outcome == "rejected"
+    assert evaluations[0].verdict == "none"
+
+
 def test_technical_analysis_degrades_when_agent_unavailable(monkeypatch):
     # Agent raises (e.g. Claude Agent SDK not installed / plan limit) → the
     # screener still surfaces a gate-only at-support candidate.
@@ -918,7 +1076,7 @@ def test_technical_analysis_degrades_when_agent_unavailable(monkeypatch):
 
     def _raising_agent():
         class _Boom:
-            def analyze(self, *a, **k):
+            def evaluate(self, *a, **k):
                 raise FundamentalsAgentError("claude-agent-sdk is not installed.")
 
         return _Boom()
@@ -926,7 +1084,45 @@ def test_technical_analysis_degrades_when_agent_unavailable(monkeypatch):
     monkeypatch.setattr(technical_analysis, "_get_agent", _raising_agent)
 
     frames = {"BUY": _ta_candles(_AT_SUPPORT_LOWS)}
-    result = technical_analysis.run(_universe(), FakeDataLoader(frames), _ta_params())
+    params = _ta_params(
+        ai_evaluation_callback=None,
+        compute_failure_callback=None,
+    )
+    candidate = technical_analysis._scanner._prepare_candidate(
+        "BUY",
+        frames["BUY"],
+        params,
+    )
+    assert candidate is not None
+    model = technical_analysis.get_fundamentals_model()
+    canonical_agent = TechnicalAnalysisAgent(model=model)
+    expected_prompt_sha256 = hashlib.sha256(
+        (
+            technical_agent_module.SYSTEM_PROMPT
+            + technical_agent_module._FINAL_OUTPUT_INSTRUCTION
+            + "\n\n"
+            + canonical_agent._build_user_prompt(
+                "BUY",
+                candidate["frame"],
+                candidate["levels"],
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+    expected_context_hash = technical_agent_module._technical_context_hash(
+        candidate["frame"],
+        candidate["levels"],
+        candidate["tool_params"],
+    )
+    evaluations = []
+    failures = []
+    result = technical_analysis.run(
+        _universe(),
+        FakeDataLoader(frames),
+        _ta_params(
+            ai_evaluation_callback=evaluations.append,
+            compute_failure_callback=failures.append,
+        ),
+    )
 
     assert result["symbol"].tolist() == ["BUY"]
     row = result.iloc[0]
@@ -938,6 +1134,12 @@ def test_technical_analysis_degrades_when_agent_unavailable(monkeypatch):
     assert provenance["source"] == "deterministic"
     assert "gate_at_support" in provenance["triggered_rules"]
     assert "ai_confirmation_unavailable" in provenance["triggered_rules"]
+    assert len(evaluations) == 1
+    assert evaluations[0].outcome == "error"
+    assert evaluations[0].provenance.prompt_sha256 == expected_prompt_sha256
+    assert evaluations[0].provenance.input_context_hash == expected_context_hash
+    assert len(failures) == 1
+    assert failures[0]["phase"] == "ai_evaluation"
     assert list(result.columns) == [
         "symbol",
         "rating",
@@ -950,6 +1152,56 @@ def test_technical_analysis_degrades_when_agent_unavailable(monkeypatch):
         "trend",
         "nearest_level",
         "provenance",
+    ]
+
+
+def test_technical_fallback_preserves_all_fired_gate_rules():
+    candidate = {
+        "symbol": "BUY",
+        "signal_date": pd.Timestamp("2026-01-10"),
+        "close": 90.0,
+        "nearest_level": 90.0,
+        "gate": {
+            "at_support": True,
+            "fresh_breakout": False,
+            "double_bottom": True,
+            "bullish_fvg": True,
+            "order_block": False,
+        },
+    }
+
+    row = technical_analysis._scanner._gate_only_row(candidate)
+
+    assert row is not None
+    assert row["provenance"]["triggered_rules"] == [
+        "gate_at_support",
+        "gate_double_bottom",
+        "gate_bullish_fvg",
+        "ai_confirmation_unavailable",
+    ]
+
+
+def test_technical_fvg_fallback_uses_the_same_rule_name_as_hybrid_results():
+    candidate = {
+        "symbol": "BUY",
+        "signal_date": pd.Timestamp("2026-01-10"),
+        "close": 90.0,
+        "nearest_level": 88.0,
+        "gate": {
+            "at_support": False,
+            "fresh_breakout": False,
+            "double_bottom": False,
+            "bullish_fvg": True,
+            "order_block": False,
+        },
+    }
+
+    row = technical_analysis._scanner._gate_only_row(candidate)
+
+    assert row is not None
+    assert row["provenance"]["triggered_rules"] == [
+        "gate_bullish_fvg",
+        "ai_confirmation_unavailable",
     ]
 
 
@@ -1010,7 +1262,7 @@ def test_technical_analysis_double_bottom_degrades_without_agent(monkeypatch):
 
     def _raising_agent():
         class _Boom:
-            def analyze(self, *a, **k):
+            def evaluate(self, *a, **k):
                 raise FundamentalsAgentError("claude-agent-sdk is not installed.")
 
         return _Boom()
@@ -1111,10 +1363,10 @@ class _StubSixtySevenAgent:
         self.approvals = approvals
         self.calls: list[tuple[str, bool]] = []
 
-    def verify(self, symbol, candidate, *, force_refresh=False, search_result_count=5):
+    def evaluate(self, symbol, candidate, *, force_refresh=False, search_result_count=5):
         self.calls.append((str(symbol).upper(), bool(force_refresh)))
         approved = self.approvals.get(str(symbol).upper(), False)
-        return SixtySevenVerdict(
+        verdict = SixtySevenVerdict(
             symbol=str(symbol).upper(),
             approved=approved,
             fall_reason_category="business" if approved else "unclear",
@@ -1136,6 +1388,34 @@ class _StubSixtySevenAgent:
             rejection_reason="" if approved else "Reason for the fall is still unclear.",
             summary="Approved 67 ka funda setup." if approved else "Rejected.",
             model_used="test-model",
+        )
+        safe_verdict = verdict.model_copy(update={"evidence": []})
+        label = "approved" if approved else "rejected"
+        return SixtySevenEvaluationResult(
+            verdict=safe_verdict,
+            provenance=AIProvenance(
+                model_name="test-model",
+                prompt_version="sixty-seven-ka-funda-v1",
+                prompt_sha256="d" * 64,
+                generated_at=datetime(2026, 6, 13, tzinfo=UTC),
+                cache_hit=False,
+                evidence_references=[
+                    EvidenceReference(
+                        "Screener.in snapshot",
+                        "https://www.screener.in/company/BUY/",
+                        "e" * 64,
+                    )
+                ],
+                input_context_hash="f" * 64,
+                verdict=label,
+                confidence=safe_verdict.confidence,
+                decision_reason=(
+                    safe_verdict.summary
+                    if approved
+                    else safe_verdict.rejection_reason
+                ),
+            ),
+            validated_verdict_json=safe_verdict.model_dump(mode="json"),
         )
 
 
@@ -1174,10 +1454,14 @@ def test_sixty_seven_screener_returns_ai_approved_rows_only(monkeypatch):
         "HOLD": _sixty_seven_candles(300.0, 150.0),
     }
 
+    evaluations = []
     result = sixty_seven_ka_funda.run(
         _universe(),
         FakeDataLoader(frames),
-        _sixty_seven_params(max_ai_candidates=10),
+        _sixty_seven_params(
+            max_ai_candidates=10,
+            ai_evaluation_callback=evaluations.append,
+        ),
     )
 
     assert result["symbol"].tolist() == ["BUY"]
@@ -1187,6 +1471,14 @@ def test_sixty_seven_screener_returns_ai_approved_rows_only(monkeypatch):
     assert row["drawdown_pct"] == pytest.approx(70.0)
     assert row["fall_reason_category"] == "business"
     assert "Approved" in row["reason"]
+    assert row["evidence_summary"] == "Screener.in snapshot"
+    assert row["provenance"]["ai"]["prompt_version"] == (
+        "sixty-seven-ka-funda-v1"
+    )
+    assert [item.outcome for item in evaluations] == ["approved", "rejected"]
+    assert all(item.validated_verdict_json["evidence"] == [] for item in evaluations)
+    assert isinstance(row["signal_date"], str)
+    json.dumps(result.to_dict("records"), allow_nan=False)
     assert list(result.columns) == sixty_seven_ka_funda.RESULT_COLUMNS
 
 
@@ -1208,6 +1500,25 @@ def test_sixty_seven_screener_honors_max_ai_candidates(monkeypatch):
     assert stub.calls == [("BUY", False)]
 
 
+def test_sixty_seven_screener_redacts_gate_failure_callback(monkeypatch):
+    def _raise_secret(*_args, **_kwargs):
+        raise RuntimeError("api_key=sixty-seven-secret")
+
+    monkeypatch.setattr(sixty_seven_ka_funda._scanner, "_candidate_from_frame", _raise_secret)
+    failures = []
+
+    result = sixty_seven_ka_funda.run(
+        _universe(),
+        FakeDataLoader({"BUY": _sixty_seven_candles(300.0, 90.0)}),
+        _sixty_seven_params(compute_failure_callback=failures.append),
+    )
+
+    assert result.empty
+    assert len(failures) == 1
+    assert "sixty-seven-secret" not in failures[0]["message"]
+    assert "***REDACTED***" in failures[0]["message"]
+
+
 def test_sixty_seven_screener_forwards_force_refresh_to_agent(monkeypatch):
     stub = _StubSixtySevenAgent({"BUY": True})
     monkeypatch.setattr(sixty_seven_ka_funda, "_get_agent", lambda: stub)
@@ -1219,3 +1530,57 @@ def test_sixty_seven_screener_forwards_force_refresh_to_agent(monkeypatch):
     )
 
     assert stub.calls == [("BUY", True)]
+
+
+def test_sixty_seven_screener_records_safe_error_evaluation(monkeypatch):
+    class _ErrorAgent:
+        def evaluate(self, *args, **kwargs):
+            raise RuntimeError("api_key=raw-research-secret")
+
+    monkeypatch.setattr(sixty_seven_ka_funda, "_get_agent", _ErrorAgent)
+    candles = _sixty_seven_candles(300.0, 90.0)
+    params = _sixty_seven_params()
+    candidate = sixty_seven_ka_funda._scanner._candidate_from_frame(
+        "BUY",
+        candles,
+        params,
+    )
+    assert candidate is not None
+    model = sixty_seven_ka_funda.get_fundamentals_model()
+    expected_prompt_sha256 = hashlib.sha256(
+        (
+            sixty_seven_agent_module.SYSTEM_PROMPT
+            + sixty_seven_agent_module._FINAL_OUTPUT_INSTRUCTION
+            + "\n\n"
+            + sixty_seven_agent_module._build_user_prompt(
+                candidate.symbol,
+                candidate,
+                model,
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+    expected_context_hash = sixty_seven_agent_module._candidate_context_hash(
+        candidate
+    )
+    evaluations = []
+    failures = []
+
+    result = sixty_seven_ka_funda.run(
+        _universe(),
+        FakeDataLoader({"BUY": candles}),
+        _sixty_seven_params(
+            ai_evaluation_callback=evaluations.append,
+            compute_failure_callback=failures.append,
+        ),
+    )
+
+    assert result.empty
+    assert len(evaluations) == 1
+    assert evaluations[0].outcome == "error"
+    assert evaluations[0].provenance.prompt_sha256 == expected_prompt_sha256
+    assert evaluations[0].provenance.input_context_hash == expected_context_hash
+    assert "raw-research-secret" not in (
+        evaluations[0].decision_reason or ""
+    )
+    assert len(failures) == 1
+    assert failures[0]["phase"] == "ai_evaluation"
