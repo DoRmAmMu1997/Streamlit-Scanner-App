@@ -1,12 +1,12 @@
-# LLD — Security (secret redaction + SSRF guardrails)
+# LLD — Security (secret redaction + SSRF guardrails + AI cache integrity)
 
 | | |
 |---|---|
 | **Component** | Cross-cutting security utilities |
-| **Source** | [`backend/security/redaction.py`](../../../backend/security/redaction.py), [`backend/security/__init__.py`](../../../backend/security/__init__.py), [`backend/url_safety.py`](../../../backend/url_safety.py) |
+| **Source** | [`backend/security/redaction.py`](../../../backend/security/redaction.py), [`backend/security/__init__.py`](../../../backend/security/__init__.py), [`backend/url_safety.py`](../../../backend/url_safety.py), [`backend/ai_cache_integrity.py`](../../../backend/ai_cache_integrity.py) |
 | **Layer** | Foundation (leaf utilities, best-effort, never raise on the safety path) |
-| **Status** | Stable (SEC-001 URL safety · SEC-002 redaction) |
-| **Related** | [HLD](../high-level-design.md) · [configuration.md](configuration.md) · [observability.md](observability.md) · [fundamentals-ai.md](fundamentals-ai.md) · [sixty-seven-ka-funda-ai.md](sixty-seven-ka-funda-ai.md) |
+| **Status** | Stable (SEC-001 URL safety · SEC-002 redaction · PROV-003 AI cache integrity) |
+| **Related** | [HLD](../high-level-design.md) · [configuration.md](configuration.md) · [observability.md](observability.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [storage-persistence.md](storage-persistence.md) · [technical-analysis-ai.md](technical-analysis-ai.md) · [sixty-seven-ka-funda-ai.md](sixty-seven-ka-funda-ai.md) |
 
 ## 1. Purpose & responsibilities
 
@@ -17,6 +17,11 @@ Two independent guardrails that keep the app safe by default:
 2. **SSRF guardrails (SEC-001)** — decide whether a URL scraped from an untrusted
    public page is safe for the server to fetch, refusing loopback / private /
    link-local / metadata addresses.
+3. **AI cache integrity (PROV-003)** — HMAC-sign each durable AI verdict-cache
+   envelope and verify it before reuse, so a tampered/forged cache entry is
+   rejected and recomputed instead of trusted. Plus the AI-evidence boundary:
+   evidence URLs are sanitized (credentials/query/fragment stripped, SSRF-screened)
+   and only hashes + labels are stored — never raw scraped/model text.
 
 **Non-responsibilities**
 - Does not own *what* gets logged (that is [observability.md](observability.md)) — only how it is masked.
@@ -36,6 +41,12 @@ flowchart LR
     subgraph URLSafety[SEC-001 url_safety]
       SCRAPE["scraped link (untrusted)"] --> SAFE["is_safe_http_url()"]
       SAFE --> FETCH["server-side fetch"]
+    end
+    subgraph AICache[PROV-003 ai_cache_integrity]
+      KEY["signing key (env or per-process)"] --> SIGN["sign_cache_envelope (HMAC-SHA256)"]
+      SIGN --> DISK[("on-disk AI verdict cache")]
+      DISK --> VERIFY["verify_cache_envelope"]
+      VERIFY -->|invalid| RECOMPUTE["cache miss -> recompute"]
     end
 ```
 
@@ -58,6 +69,18 @@ flowchart LR
 | `hostname_looks_public(hostname)` | Cheap pre-DNS screen: rejects `localhost`/`*.localhost`, IP literals in non-global ranges. |
 | `hostname_resolves_public(hostname)` | Resolves via `getaddrinfo`; **every** answer must be global (closes DNS-rebinding). Resolution failure ⇒ unsafe. |
 
+### AI cache integrity — `backend/ai_cache_integrity.py`
+| Symbol | Contract |
+|---|---|
+| `sign_cache_envelope(envelope, *, key)` | Return a copy carrying `integrity_hmac_sha256` over the canonical JSON of the whole envelope (signature field removed first). |
+| `verify_cache_envelope(envelope, *, key)` | `True` only on a length/type-checked, constant-time (`hmac.compare_digest`) match; non-dict / missing sig / non-finite JSON → `False`. |
+| `get_ai_cache_signing_key()` | Operator key from `SCANNER_AI_CACHE_SIGNING_KEY`, else a per-process random key (secure by default; a restart invalidates the disk cache). |
+
+### Evidence sanitization — `backend/scanning/result_contract.py`
+| Symbol | Contract |
+|---|---|
+| `sanitize_evidence_url(value)` | Redact, SSRF-screen (`is_safe_http_url`), and strip credentials/query/fragment — the only URL form stored in an AI receipt. |
+
 ## 4. Key design decisions & trade-offs
 
 | Decision | Rationale | Alternative rejected |
@@ -70,6 +93,9 @@ flowchart LR
 | **Filter masks `getMessage()` + clears `args`** | A `LogRecord` stores template + args separately; redacting only `msg` lets a handler re-interpolate the secret later. | Redact `msg` only — leak via deferred formatting. |
 | **URL safety fails closed on resolution error** | A legitimate production fetch uses a resolvable, public host. | Allow on error — SSRF bypass. |
 | **One shared `is_secret_key_name`** | Same definition protects log redaction *and* persisted scan history — add a name once, both benefit. | Two vocabularies — drift. |
+| **AI verdict cache is HMAC-signed** | A disk cache is writable; an HMAC over the full envelope (constant-time verify) means a forged/edited entry is rejected and recomputed, never served as a real verdict. The signing key is in `secret_values()` so it is itself redacted. | Unsigned cache — forgeable "approved" verdicts. |
+| **Store hashed evidence, not raw text** | AI receipts persist SHA-256 hashes + sanitized URLs + labels; raw scraped pages / model responses are never written to durable history. | Persist raw evidence — durable leak, unverifiable. |
+| **Receipt cross-checked against the verdict** | Persistence rejects a receipt whose `validated_verdict_json` contradicts the trusted fields, so model output can't rewrite the audit record. | Trust model JSON — forgeable audit. |
 
 ## 5. Failure modes / degradation
 
@@ -81,6 +107,7 @@ flowchart LR
 
 - [`tests/test_secret_redaction.py`](../../../tests/test_secret_redaction.py) — key/value, Bearer, DB-URL password, logging filter, `is_secret_key_name`.
 - [`tests/test_url_safety.py`](../../../tests/test_url_safety.py) — loopback/private/link-local rejection, allowlist, DNS resolution path.
+- [`tests/test_ai_cache_integrity.py`](../../../tests/test_ai_cache_integrity.py) — tamper detection, key binding, non-finite rejection.
 - [`tests/test_supply_chain_policy.py`](../../../tests/test_supply_chain_policy.py) — dependency posture.
 
 ## 7. Extension points

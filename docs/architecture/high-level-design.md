@@ -51,9 +51,9 @@ flowchart TD
     APP -->|OIDC sign-in| Google["Google OIDC"]
     APP -->|daily candles, instrument master| Dhan["DhanHQ API"]
     APP -->|company data scrape| ScreenerIn["screener.in"]
-    APP -->|agentic analysis (subscription)| Claude["Claude Agent SDK / CLI"]
+    APP -->|agentic analysis via subscription| Claude["Claude Agent SDK / CLI"]
     APP -->|web research| Serp["SerpAPI (Google)"]
-    APP -->|chart lib (CDN+SRI)| CDN["unpkg: Lightweight Charts"]
+    APP -->|chart lib via CDN+SRI| CDN["unpkg: Lightweight Charts"]
     APP --> DB[("SQLite / Postgres scan history")]
     APP --> Cache[("Local Parquet + JSON caches")]
 ```
@@ -105,8 +105,8 @@ flowchart TB
 | Screener framework | [screener-framework](components/screener-framework.md) | `BaseScanner` ABC + plugin registry |
 | Indicators | [indicators](components/indicators.md) | TA-Lib/pandas_ta + fallbacks, levels, weekly |
 | Screener catalog | [screener-catalog](components/screener-catalog.md) | The 10 strategies |
-| Scan service & provenance | [scan-service-and-provenance](components/scan-service-and-provenance.md) | `run_scan` lifecycle + result/provenance contract |
-| Storage & persistence | [storage-persistence](components/storage-persistence.md) | ORM, engine/session, repository, Alembic |
+| Scan service & provenance | [scan-service-and-provenance](components/scan-service-and-provenance.md) | `run_scan` lifecycle + strict result/provenance contract + AI evaluation receipts |
+| Storage & persistence | [storage-persistence](components/storage-persistence.md) | ORM (`scan_runs`/`scan_results`/`ai_evaluations`), engine/session, repository, Alembic |
 | Daily scan job | [daily-scan-job](components/daily-scan-job.md) | Headless CLI + YAML schedule |
 | Check Fundamentals (AI) | [fundamentals-ai](components/fundamentals-ai.md) | Claude agent + screener.in scraper + PDF + cache |
 | Technical Analysis (AI) | [technical-analysis-ai](components/technical-analysis-ai.md) | Claude agent + price-action detectors + MCP tools |
@@ -114,7 +114,7 @@ flowchart TB
 | Charts & visualization | [charts-visualization](components/charts-visualization.md) | Lightweight-Charts specs + chart cache |
 | UI pages | [ui-pages](components/ui-pages.md) | Scan-history page + shared UI helpers |
 | Observability | [observability](components/observability.md) | Structured, secret-safe logging |
-| Security | [security](components/security.md) | Secret redaction + SSRF guards |
+| Security | [security](components/security.md) | Secret redaction + SSRF guards + AI verdict-cache integrity (HMAC) |
 | Health monitoring | [health-monitoring](components/health-monitoring.md) | Passive admin health snapshot/page |
 
 ## 6. End-to-end flows
@@ -175,9 +175,9 @@ flowchart LR
 - **Auth** — one gate at the top of `main()`; nothing renders before it. ([authentication](components/authentication.md))
 - **Observability** — named structured events, JSON in prod, identical across all three entrypoints. ([observability](components/observability.md))
 - **Security** — secret redaction on every sink (logs, UI errors, persisted messages); SSRF guards on scraped fetches; CSV-injection escaping; prompt-injection posture. ([security](components/security.md))
-- **Persistence & provenance** — one schema serves deterministic + AI screeners via JSON columns; provenance envelope evolves without migration. ([scan-service-and-provenance](components/scan-service-and-provenance.md), [storage-persistence](components/storage-persistence.md))
-- **Caching** — Parquet candle cache (incremental), per-day AI verdict cache, per-session chart cache, 30/60s Streamlit data caches.
-- **Graceful AI degradation** — cheap gate first; if the SDK/SerpAPI is absent, Technical Analysis falls back to a gate-only BUY while 67 Ka Funda skips the candidate (partial run) — neither crashes the scan.
+- **Persistence & provenance** — every shortlisted row carries a deterministic receipt (PROV-002: `triggered_rules` + `indicator_values` + `source`, built by `BaseScanner.build_provenance`); AI screeners add a tamper-evident verdict receipt (PROV-003: model, semantic prompt version, prompt/evidence/context SHA-256, sanitized source URLs — never raw scraped/model text) persisted to the `ai_evaluations` ledger. One JSON-backed schema serves both and evolves without migration. ([scan-service-and-provenance](components/scan-service-and-provenance.md), [storage-persistence](components/storage-persistence.md))
+- **Caching** — Parquet candle cache (incremental), per-day AI verdict cache (**HMAC-signed and verified before reuse** — a tampered entry is rejected and recomputed), per-session chart cache, 30/60s Streamlit data caches.
+- **Graceful AI degradation** — cheap gate first; if the SDK/SerpAPI is absent, Technical Analysis falls back to a gate-only BUY while 67 Ka Funda skips the candidate (partial run) — neither crashes the scan. Approved, rejected, **and** error AI decisions are all recorded in `ai_evaluations` for audit.
 
 ## 8. Tech stack
 
@@ -185,7 +185,7 @@ Python 3.11+ · Streamlit · pandas / pyarrow · SQLAlchemy 2 + Alembic · `dhan
 
 ## 9. Data & storage
 
-Runtime data under `DATA_DIR` (default `./data`, git-ignored): `cache/daily/*.parquet` (candles), `cache/fundamentals/` (JSON data + verdicts + concall PDFs), `universes/*.csv`, `scanner.db` (SQLite). Scan history = `scan_runs` (1) ──< `scan_results` (many); deterministic columns for queries + `raw_result_json`/`provenance_json` for flexible audit. Full design: [scan-run-persistence.md](scan-run-persistence.md).
+Runtime data under `DATA_DIR` (default `./data`, git-ignored): `cache/daily/*.parquet` (candles), `cache/fundamentals/` (JSON data + verdicts + concall PDFs), `universes/*.csv`, `scanner.db` (SQLite). Scan history = `scan_runs` (1) ──< `scan_results` (many) and `scan_runs` (1) ──< `ai_evaluations` (many — the AI verdict ledger of approved/rejected/error receipts); deterministic columns for queries + `raw_result_json`/`provenance_json` for flexible audit. Full design: [scan-run-persistence.md](scan-run-persistence.md).
 
 ## 10. Deployment & runtime
 
@@ -205,9 +205,12 @@ Runtime data under `DATA_DIR` (default `./data`, git-ignored): `cache/daily/*.pa
 | **Best-effort persistence in UI, strict in the job** | The UI always shows fresh rows even if the DB is down; the scheduled job fails loudly if history isn't written. |
 | **Secret-safe by construction** | Redaction is a shared filter on every output sink, not a per-call concern. |
 | **Claude-subscription billing** | AI features draw on the plan's Agent SDK credit; `ANTHROPIC_API_KEY` is deliberately kept unset. |
+| **Tamper-evident AI receipts** | AI verdicts persist hashed evidence + a semantic prompt version as an audit ledger (`ai_evaluations`); the on-disk verdict cache is HMAC-signed so a forged/edited entry is rejected and recomputed, never trusted. Raw scraped text and raw model responses are never stored. |
+| **Strict result contract, truthful status** | Rows are validated against the provenance contract *before* the DataFrame is built; contract-rejected rows and persistence failures downgrade the run to `PARTIAL`/`FAILED` rather than reporting a false success. |
 
 ## 12. Risks & future evolution
 
 - **AI/external dependency** — Dhan/screener.in/SerpAPI/CLI changes can break features; mitigated by fallbacks, caches, and untrusted-evidence handling.
 - **Single-writer SQLite locally** — WAL + short sessions mitigate; Postgres for real concurrency.
-- **Roadmap (backlog)**: PROV-002 (per-screener deterministic receipts via `build_provenance`), PROV-003 (AI evidence into `provenance_json`), RANK-* (`final_score` ranking), VALID-* (forward-return validation + `(symbol, signal_date)` index), AUTH-003 (role-gated features), DEPLOY-* (hosting). These land in reserved columns / JSON without flag-day migrations.
+- **Recently shipped**: PROV-002 (deterministic per-screener receipts via `build_provenance`) and PROV-003 (AI verdict receipts + the `ai_evaluations` ledger + HMAC verdict-cache integrity) are now on `main`.
+- **Roadmap (backlog)**: RANK-* (`final_score` ranking), VALID-* (forward-return validation + `(symbol, signal_date)` index), AUTH-003 (role-gated features), DEPLOY-* (hosting). These land in reserved columns / JSON without flag-day migrations.
