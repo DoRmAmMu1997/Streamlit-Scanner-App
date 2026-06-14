@@ -47,7 +47,7 @@ flowchart TD
     PREP --> IND["backend.indicators.*"]
     IND --> TRIG{"trigger met?"}
     TRIG -->|no| NONE["return None (skip)"]
-    TRIG -->|yes| ROW["row dict: common cols + EXTRA_RESULT_COLUMNS (+provenance via build_provenance)"]
+    TRIG -->|yes| ROW["row dict: common cols + EXTRA_RESULT_COLUMNS"]
     CHART["build_chart()"] --> CHARTS["backend.charts overlays"]
 ```
 
@@ -62,14 +62,14 @@ flowchart TD
 | **Shortlist, not advice** | Screeners omit non-matches (return `None`) rather than emit HOLD; output is "what to look at today". |
 | **Fixed risk rules as module constants** | Strategy-brief invariants (e.g. 3%/5%) live in the file, not `default_params`, so they aren't mistaken for UI knobs. |
 | **`lookback_days` mostly advisory** | The app feeds ~10y cached candles; the value mainly drives the sidebar "Lookback" display + warm-up sanity. |
-| **AI screeners degrade to gate-only** | When the Claude Agent SDK/SerpAPI is unavailable, the deterministic gate still produces a shortlist (labeled `source="deterministic"`); with AI it's `hybrid`. |
+| **AI-screener degradation differs by screener** | When the Claude Agent SDK/SerpAPI is unavailable, **Technical Analysis** still emits a gate-only BUY for deterministic setups (at-support / fresh double bottom / bullish FVG / order block — *not* a bare breakout); **67 Ka Funda** has **no** gate-only fallback — it logs, records a compute failure, and skips that candidate (→ partial run). Neither stamps a `source` field today. |
 | **Warm-up handled by skipping** | NaN indicator during warm-up → return `None`, never raise (per-symbol resilience). |
-| **PROV-002 provenance** | Each `compute_signal` attaches `build_provenance(triggered_rules, indicator_values)` on a reserved `provenance` column; dropped from UI/CSV, folded into `provenance_json`. See [scan-service-and-provenance.md](scan-service-and-provenance.md). |
+| **Provenance is the persistence layer's job (PROV-001A)** | Screeners return only the common + `EXTRA_RESULT_COLUMNS`; they do **not** emit a `provenance` column today. The scan service builds the canonical `provenance_json` envelope from the screener key + run params + data date; `triggered_rules`/`indicator_values` stay empty until per-screener receipts (`build_provenance`, PROV-002) are implemented. See [scan-service-and-provenance.md](scan-service-and-provenance.md). |
 
 ## 5. Failure modes
 
 - Bad candle frame for one symbol → caught by the `run()` template, logged (redacted), surfaced in "Run details"; scan continues (→ `partial`).
-- AI dependency missing → gate-only fallback (no crash).
+- AI dependency missing → Technical Analysis falls back to a gate-only BUY; 67 Ka Funda skips the candidate (partial run). Neither crashes the scan.
 
 ## 6. Testing
 

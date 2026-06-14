@@ -69,7 +69,7 @@ sequenceDiagram
 
 ## 5. Failure modes / degradation
 
-- Missing `SERPAPI_API_KEY` → `ensure_ready()` fails fast (live path); the screener degrades to gate-only (`source="deterministic"`).
+- Missing `SERPAPI_API_KEY` / SDK absent / usage-limit hit → the screener logs, records a compute failure, and **skips that candidate** (→ partial run). Unlike Technical Analysis it has **no** gate-only fallback, so a gate-passing stock simply produces no row when AI research is unavailable.
 - Screener.in fetch fails → tool returns an error payload; the model rejects.
 - Search fails → screener data still returned + error noted; verdict proceeds.
 - SDK/CLI missing or usage limit → `FundamentalsAgentError` / `FundamentalsUsageLimitError` (shared).

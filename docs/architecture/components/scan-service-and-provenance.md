@@ -5,7 +5,7 @@
 | **Component** | Scan orchestration lifecycle + typed result/provenance normalization |
 | **Source** | [`backend/scanning/service.py`](../../../backend/scanning/service.py), [`backend/scanning/result_contract.py`](../../../backend/scanning/result_contract.py) |
 | **Layer** | Screening engine ↔ persistence seam (`backend/`) |
-| **Status** | Stable (SCAN-003 service · PROV-001A contract · PROV-002 deterministic provenance) |
+| **Status** | Stable (SCAN-003 service · PROV-001A result/provenance contract). PROV-002 per-screener receipts: not yet on `main`. |
 | **Related** | [HLD](../high-level-design.md) · [screener-framework.md](screener-framework.md) · [storage-persistence.md](storage-persistence.md) · [scan-run-persistence.md](../scan-run-persistence.md) · [observability.md](observability.md) · [security.md](security.md) |
 
 ## 1. Purpose & responsibilities
@@ -74,7 +74,7 @@ sequenceDiagram
 | **Redact + mask secret-named keys before store** | Scan history is durable; a token in a param/field/provider message must not become a long-lived DB secret. Uses shared `is_secret_key_name`/`redact_text`. | Store raw — durable leak. |
 | **Skip one unusable row, fail only if all fail** | A single NaN-symbol merge bug shouldn't erase history for the whole run; all-fail is systemic and raised. | All-or-nothing — fragile audit. |
 | **Strict JSON (`allow_nan=False` posture)** | NaN/Inf → `null`; Decimal→str (lossless), dates→ISO, NumPy `.item()`. Typed columns remain the numeric source of truth. | Store floats/NaN — non-standard JSON, rounding. |
-| **`source` not inferred** | A wrong deterministic/ai/hybrid label is worse than `null`; AI screeners set it explicitly (`hybrid`/`deterministic`). | Guess — untrustworthy audit. |
+| **`source` not inferred** | A wrong deterministic/ai/hybrid label is worse than `null`, so legacy rows stay `null`. No screener sets `source` on `main` today; PROV-002/003 will populate it. | Guess — untrustworthy audit. |
 
 ## 6. Failure modes
 

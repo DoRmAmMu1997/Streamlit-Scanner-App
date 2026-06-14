@@ -5,7 +5,7 @@
 | **Component** | The screener plugin system |
 | **Source** | [`backend/scanner_base.py`](../../../backend/scanner_base.py), [`backend/screener_registry.py`](../../../backend/screener_registry.py) |
 | **Layer** | Screening engine (`backend/`) |
-| **Status** | Stable (BaseScanner refactor + PROV-002 provenance hook) |
+| **Status** | Stable (BaseScanner refactor) |
 | **Related** | [HLD](../high-level-design.md) · [screener-catalog.md](screener-catalog.md) · [indicators.md](indicators.md) · [data-acquisition.md](data-acquisition.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) |
 
 ## 1. Purpose & responsibilities
@@ -18,15 +18,17 @@ registry or `app.py`.
 **`scanner_base.BaseScanner`** — the ABC every strategy subclasses: defines the
 common result schema, the per-symbol `run(...)` template (fetch → evaluate →
 collect), per-symbol exception capture, and small helpers (`prepare_candles`,
-`coerce_param`, `empty_result`, `build_provenance`*, `build_chart`).
+`coerce_param`, `empty_result`, `build_chart`).
 
 **`screener_registry`** — discovers, validates, and normalizes every screener
 module into a uniform `ScreenerDefinition`, supporting both class-based
 (preferred) and legacy module-based screeners.
 
-> *`build_provenance(...)` is the PROV-002 helper screeners call to stamp
-> `triggered_rules` + `indicator_values` onto a reserved `provenance` result
-> column. See [scan-service-and-provenance.md](scan-service-and-provenance.md).
+> **Note:** per-screener deterministic receipts (a `build_provenance` helper that
+> stamps `triggered_rules` + `indicator_values` onto a reserved `provenance`
+> column — PROV-002) are **not yet on `main`**. Today screeners return only the
+> common + extra columns; the scan service builds the `provenance_json` envelope
+> (PROV-001A). See [scan-service-and-provenance.md](scan-service-and-provenance.md).
 
 ## 2. Position in the system
 
@@ -41,7 +43,7 @@ flowchart TD
     UI -->|run| TMPL["BaseScanner.run() template"]
     TMPL --> LOADER["DailyDataLoader.iter_universe_history"]
     TMPL --> CS["compute_signal(symbol, candles, params)"]
-    CS --> ROW["result row dict (+provenance)"]
+    CS --> ROW["result row dict (common + extra cols)"]
     ROW --> DF["result DataFrame (fixed columns)"]
 ```
 

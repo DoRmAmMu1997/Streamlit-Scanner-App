@@ -28,7 +28,7 @@ with an email allowlist.
 **Functional**
 - Run pluggable screeners over configurable stock universes on cached daily candles.
 - Interactive per-stock charts with the screener's own indicator overlay.
-- Per-stock AI fundamental analysis + two AI-assisted screeners (graceful gate-only fallback).
+- Per-stock AI fundamental analysis + two AI-assisted screeners (graceful degradation when AI is unavailable).
 - Persist every scan run + shortlist for later "why was this shortlisted on date D?" audit.
 - Headless daily job for schedulers; Google-SSO gate + allowlist.
 
@@ -177,7 +177,7 @@ flowchart LR
 - **Security** — secret redaction on every sink (logs, UI errors, persisted messages); SSRF guards on scraped fetches; CSV-injection escaping; prompt-injection posture. ([security](components/security.md))
 - **Persistence & provenance** — one schema serves deterministic + AI screeners via JSON columns; provenance envelope evolves without migration. ([scan-service-and-provenance](components/scan-service-and-provenance.md), [storage-persistence](components/storage-persistence.md))
 - **Caching** — Parquet candle cache (incremental), per-day AI verdict cache, per-session chart cache, 30/60s Streamlit data caches.
-- **Graceful AI degradation** — cheap gate first; if the SDK/SerpAPI is absent, AI screeners fall back to gate-only.
+- **Graceful AI degradation** — cheap gate first; if the SDK/SerpAPI is absent, Technical Analysis falls back to a gate-only BUY while 67 Ka Funda skips the candidate (partial run) — neither crashes the scan.
 
 ## 8. Tech stack
 
@@ -210,4 +210,4 @@ Runtime data under `DATA_DIR` (default `./data`, git-ignored): `cache/daily/*.pa
 
 - **AI/external dependency** — Dhan/screener.in/SerpAPI/CLI changes can break features; mitigated by fallbacks, caches, and untrusted-evidence handling.
 - **Single-writer SQLite locally** — WAL + short sessions mitigate; Postgres for real concurrency.
-- **Roadmap (backlog)**: PROV-003 (AI evidence into `provenance_json`), RANK-* (`final_score` ranking), VALID-* (forward-return validation + `(symbol, signal_date)` index), AUTH-003 (role-gated features), DEPLOY-* (hosting). These land in reserved columns / JSON without flag-day migrations.
+- **Roadmap (backlog)**: PROV-002 (per-screener deterministic receipts via `build_provenance`), PROV-003 (AI evidence into `provenance_json`), RANK-* (`final_score` ranking), VALID-* (forward-return validation + `(symbol, signal_date)` index), AUTH-003 (role-gated features), DEPLOY-* (hosting). These land in reserved columns / JSON without flag-day migrations.

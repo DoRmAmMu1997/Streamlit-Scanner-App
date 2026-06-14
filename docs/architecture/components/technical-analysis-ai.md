@@ -72,7 +72,7 @@ sequenceDiagram
 
 ## 5. Failure modes / degradation
 
-- SDK not installed / CLI missing → `FundamentalsAgentError` with setup hint; the screener degrades to **gate-only** (`source="deterministic"`).
+- SDK not installed / CLI missing / usage-limit hit → the screener degrades to a **gate-only** BUY for deterministic setups (at-support / fresh double bottom / bullish FVG / order block; a bare resistance breakout is *not* surfaced — it needs the AI to label). No `source` field is stamped today.
 - Plan usage limit → `FundamentalsUsageLimitError` (code `usage_limit_reached`); UI shows reset time.
 - Unparseable final JSON → `FundamentalsAgentError` with a preview.
 - `pattern="none"` can never be `confirmed` (normalized).

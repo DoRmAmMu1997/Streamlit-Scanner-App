@@ -25,7 +25,7 @@ responses into a uniform on-disk Parquet cache that every screener reads.
 **Non-responsibilities**
 - No strategy logic (that is [screener-catalog.md](screener-catalog.md)).
 - No universe membership (that is [universe-management.md](universe-management.md)).
-- The Streamlit UI **never fetches live** — it reads cache only (`read_cached_history`).
+- The **chart** path is cache-only (`read_cached_history`); a **screener run** in the UI builds a live `DhanDataClient` and *will* fetch on a cache miss via `get_daily_history` — the `python app.py` prefetch normally makes those cache hits.
 
 ## 2. Position in the system
 
