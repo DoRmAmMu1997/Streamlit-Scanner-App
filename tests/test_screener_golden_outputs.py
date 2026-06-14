@@ -40,6 +40,7 @@ from numbers import Integral, Real
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -334,6 +335,13 @@ def _normalize_value(value):
         if not math.isfinite(number):
             return None
         return round(number, 6)
+    # PROV-002 stores a ``provenance`` dict cell whose nested numbers need the same
+    # rounding/NaN handling as flat columns, otherwise raw NumPy floats would vary
+    # in the last decimals across platforms and break the snapshot non-portably.
+    if isinstance(value, dict):
+        return {str(key): _normalize_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_value(item) for item in value]
     return value
 
 
@@ -343,6 +351,28 @@ def _normalize_records(frame: pd.DataFrame) -> list[dict]:
         {column: _normalize_value(value) for column, value in row.items()}
         for row in frame.to_dict("records")
     ]
+
+
+def test_normalize_value_recurses_into_dict_and_list_cells():
+    """PROV-002 adds a ``provenance`` dict cell, whose floats need the same rounding.
+
+    Without recursion a dict/list cell would be returned verbatim, leaving raw
+    NumPy floats that ``json.dump`` cannot serialize and that vary in the last
+    decimals across platforms. Recursion makes nested values as stable as the
+    flat columns the snapshots already pin.
+    """
+    cell = {
+        "indicator_values": {"pct": np.float64(0.142857142857)},
+        "triggered_rules": ["rule_a"],
+        "nested_list": [np.int64(3), np.nan],
+    }
+    normalized = _normalize_value(cell)
+
+    assert normalized["indicator_values"]["pct"] == round(0.142857142857, 6)
+    assert isinstance(normalized["indicator_values"]["pct"], float)
+    assert normalized["triggered_rules"] == ["rule_a"]
+    assert normalized["nested_list"] == [3, None]
+    json.dumps(normalized, allow_nan=False)
 
 
 def _load_golden_records(key: str) -> list[dict]:

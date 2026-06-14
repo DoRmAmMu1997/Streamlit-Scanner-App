@@ -8,6 +8,7 @@ would contain. This mirrors `tests/test_fundamental_agent.py`.
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pandas as pd
@@ -16,7 +17,9 @@ import pytest
 from backend.fundamentals.fundamental_agent import AgentRunResult
 from backend.fundamentals.fundamentals_cache import FundamentalsCache
 from backend.technical.technical_agent import (
+    TECHNICAL_PROMPT_VERSION,
     TechnicalAnalysisAgent,
+    TechnicalEvaluationResult,
     TechnicalVerdict,
 )
 from backend.technical.tools import SERVER_NAME, TOOL_NAMES, TechnicalToolContext
@@ -141,6 +144,40 @@ def test_agent_returns_parsed_verdict(tmp_path):
     assert "FINAL OUTPUT FORMAT" in (runner.last_system_prompt or "")
 
 
+def test_agent_evaluate_returns_code_stamped_provenance_receipt(tmp_path):
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    runner = _FakeRunner(_sample_verdict(model_used="model-controlled"))
+    agent = TechnicalAnalysisAgent(model="test-model", cache=cache, runner=runner)
+
+    result = agent.evaluate("DEMO", _sample_candles(), _sample_levels())
+
+    assert isinstance(result, TechnicalEvaluationResult)
+    assert result.error_type is None
+    assert result.verdict is not None
+    assert result.verdict.model_used == "test-model"
+    receipt = result.provenance
+    assert receipt.model_name == "test-model"
+    assert receipt.prompt_version == TECHNICAL_PROMPT_VERSION
+    expected_prompt_hash = hashlib.sha256(
+        f"{runner.last_system_prompt}\n\n{runner.last_prompt}".encode()
+    ).hexdigest()
+    assert receipt.prompt_sha256 == expected_prompt_hash
+    assert receipt.input_context_hash and len(receipt.input_context_hash) == 64
+    assert receipt.generated_at.tzinfo is not None
+    assert receipt.cache_hit is False
+    assert receipt.verdict == "at_support"
+    assert receipt.confidence == 7
+    assert receipt.decision_reason == result.verdict.reasoning
+    assert {ref.source_label for ref in receipt.evidence_references} == {
+        "daily OHLC window",
+        "major support/resistance levels",
+        "technical detector parameters",
+    }
+    assert all(len(ref.sha256) == 64 for ref in receipt.evidence_references)
+    assert all(ref.sanitized_url is None for ref in receipt.evidence_references)
+    assert result.validated_verdict_json["model_used"] == "test-model"
+
+
 def test_agent_passes_per_call_tool_context_to_runner(tmp_path):
     # The agent must build a TechnicalToolContext for THIS stock and hand it to
     # the runner, so the tools (and parallel confirmations) work on the right data.
@@ -191,14 +228,23 @@ def test_agent_caches_verdict_per_symbol_model_candle_date(tmp_path):
 
     # First call writes to disk under the "::technical" key + latest candle date.
     levels = _sample_levels()
-    agent.analyze("DEMO", candles, levels)
+    first = agent.evaluate("DEMO", candles, levels)
     latest_date = str(candles.iloc[-1]["timestamp"])[:10]
-    assert cache.get_verdict("DEMO", agent._cache_model_key(candles, levels), latest_date) is not None
+    cache_key = agent._cache_model_key("DEMO", candles, levels)
+    envelope = cache.get_verdict("DEMO", cache_key, latest_date)
+    assert envelope is not None
+    assert envelope["schema_version"] == 2
+    assert len(envelope["integrity_hmac_sha256"]) == 64
+    assert envelope["prompt_version"] == TECHNICAL_PROMPT_VERSION
+    assert envelope["verdict"] == first.validated_verdict_json
+    assert "provenance" in envelope
 
     # Second call on the same candle date must hit the cache, not the runner.
     runner.calls = 0
-    agent.analyze("DEMO", candles, levels)
+    second = agent.evaluate("DEMO", candles, levels)
     assert runner.calls == 0
+    assert second.provenance.cache_hit is True
+    assert second.provenance.prompt_sha256 == first.provenance.prompt_sha256
 
 
 def test_agent_cache_changes_when_levels_change_on_same_candle_date(tmp_path):
@@ -222,6 +268,86 @@ def test_agent_cache_changes_when_levels_change_on_same_candle_date(tmp_path):
     agent.analyze("DEMO", candles, changed_levels)
 
     assert runner.calls == 1
+
+
+def test_agent_rejects_tampered_cached_receipt_and_recomputes(tmp_path):
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    runner = _FakeRunner(_sample_verdict(confidence=8))
+    agent = TechnicalAnalysisAgent(model="test-model", cache=cache, runner=runner)
+    candles = _sample_candles()
+    levels = _sample_levels()
+
+    agent.evaluate("DEMO", candles, levels)
+    data_date = str(candles.iloc[-1]["timestamp"])[:10]
+    cache_key = agent._cache_model_key("DEMO", candles, levels)
+    envelope = cache.get_verdict("DEMO", cache_key, data_date)
+    envelope["provenance"]["evidence_references"][0]["sha256"] = "not-a-hash"
+    cache.set_verdict("DEMO", cache_key, data_date, envelope)
+    runner.verdict = _sample_verdict(confidence=4)
+    runner.calls = 0
+
+    result = agent.evaluate("DEMO", candles, levels)
+
+    assert runner.calls == 1
+    assert result.verdict is not None and result.verdict.confidence == 4
+    assert result.provenance.cache_hit is False
+
+
+def test_agent_recomputes_when_cached_envelope_contains_non_finite_json(tmp_path):
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    runner = _FakeRunner(_sample_verdict(confidence=8))
+    agent = TechnicalAnalysisAgent(model="test-model", cache=cache, runner=runner)
+    candles = _sample_candles()
+    levels = _sample_levels()
+
+    agent.evaluate("DEMO", candles, levels)
+    data_date = str(candles.iloc[-1]["timestamp"])[:10]
+    cache_key = agent._cache_model_key("DEMO", candles, levels)
+    envelope = cache.get_verdict("DEMO", cache_key, data_date)
+    envelope["verdict"]["confidence"] = float("nan")
+    cache.set_verdict("DEMO", cache_key, data_date, envelope)
+    runner.verdict = _sample_verdict(confidence=4)
+    runner.calls = 0
+
+    result = agent.evaluate("DEMO", candles, levels)
+
+    assert runner.calls == 1
+    assert result.verdict is not None and result.verdict.confidence == 4
+    assert result.provenance.cache_hit is False
+
+
+def test_agent_rejects_forged_cached_verdict_and_recomputes(tmp_path):
+    """A valid-shaped cache edit must never become a trusted chart verdict."""
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    runner = _FakeRunner(_sample_verdict(confidence=8))
+    agent = TechnicalAnalysisAgent(model="test-model", cache=cache, runner=runner)
+    candles = _sample_candles()
+    levels = _sample_levels()
+
+    agent.evaluate("DEMO", candles, levels)
+    data_date = str(candles.iloc[-1]["timestamp"])[:10]
+    cache_key = agent._cache_model_key("DEMO", candles, levels)
+    envelope = cache.get_verdict("DEMO", cache_key, data_date)
+    envelope["verdict"].update(
+        {
+            "pattern": "breakout",
+            "confidence": 9,
+            "reasoning": "Forged cached approval.",
+        }
+    )
+    cache.set_verdict("DEMO", cache_key, data_date, envelope)
+    runner.verdict = _sample_verdict(confidence=4)
+    runner.calls = 0
+
+    second = agent.evaluate("DEMO", candles, levels)
+
+    assert runner.calls == 1
+    assert second.provenance.cache_hit is False
+    assert second.verdict is not None
+    assert second.verdict.confidence == 4
+    assert second.provenance.verdict == second.verdict.pattern
+    assert second.provenance.confidence == second.verdict.confidence
+    assert second.provenance.decision_reason == second.verdict.reasoning
 
 
 def test_agent_cache_changes_between_fast_and_thorough_modes(tmp_path):
@@ -305,6 +431,34 @@ def test_agent_raises_when_no_json_in_final_message(tmp_path):
     )
     with pytest.raises(FundamentalsAgentError):
         agent.analyze("DEMO", _sample_candles(), _sample_levels())
+
+
+def test_agent_evaluate_turns_malformed_output_into_safe_auditable_error(tmp_path):
+    cache = FundamentalsCache(cache_dir=tmp_path)
+
+    class _SecretProseRunner(_FakeRunner):
+        async def __call__(
+            self, prompt, *, system_prompt, model, max_turns, tool_context=None
+        ):
+            self.calls += 1
+            self.last_prompt = prompt
+            self.last_system_prompt = system_prompt
+            return AgentRunResult(text="token=raw-model-secret and no JSON")
+
+    agent = TechnicalAnalysisAgent(
+        model="test-model",
+        cache=cache,
+        runner=_SecretProseRunner(_sample_verdict()),
+    )
+
+    result = agent.evaluate("DEMO", _sample_candles(), _sample_levels())
+
+    assert result.verdict is None
+    assert result.error_type == "FundamentalsAgentError"
+    assert result.provenance.verdict == "error"
+    assert result.provenance.confidence is None
+    assert "raw-model-secret" not in (result.provenance.decision_reason or "")
+    assert result.validated_verdict_json == {}
 
 
 def test_agent_demotes_confirmed_when_pattern_is_none(tmp_path):

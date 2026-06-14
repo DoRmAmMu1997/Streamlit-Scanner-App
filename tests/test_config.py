@@ -6,6 +6,7 @@ from backend.config import (
     dhan_rate_limit_retry_delays,
     dhan_request_delay_seconds,
     get_agent_fast_mode,
+    secret_values,
 )
 
 
@@ -52,3 +53,12 @@ def test_agent_fast_mode_rejects_other_values(monkeypatch):
     for value in ("0", "false", "no", "", "maybe"):
         monkeypatch.setenv("SCANNER_AGENT_FAST_MODE", value)
         assert get_agent_fast_mode() is False, value
+
+
+def test_secret_values_include_ai_cache_signing_key(monkeypatch):
+    monkeypatch.setenv(
+        "SCANNER_AI_CACHE_SIGNING_KEY",
+        "cache-signing-secret-value",
+    )
+
+    assert "cache-signing-secret-value" in secret_values()

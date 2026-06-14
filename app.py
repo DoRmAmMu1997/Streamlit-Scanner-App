@@ -108,6 +108,7 @@ from ui.common import (  # noqa: F401
     _RATING_BADGES,
     _csv_safe,
     _decimal_column_config,
+    _drop_provenance,
     _emoji_rating,
     _escape_cell,
     _redact_secrets,
@@ -1220,7 +1221,7 @@ def _render_scan_output(selected: ScreenerDefinition, cache: dict[str, Any]) -> 
         # rounds to 2 decimals, so the CSV mirrors the source data.
         st.download_button(
             "Download results CSV",
-            data=_csv_safe(results).to_csv(index=False).encode("utf-8"),
+            data=_csv_safe(_drop_provenance(results)).to_csv(index=False).encode("utf-8"),
             file_name=f"{selected.key}_results.csv",
             mime="text/csv",
         )
@@ -1253,16 +1254,21 @@ def _render_results_with_chart(
     """
     table_key = f"results_table_{selected.key}"
 
+    # The reserved PROV-002 provenance column is machine-readable evidence for
+    # persistence, not a table column; drop it for display. Row order/indices are
+    # unchanged, so the row-selection below still maps back to `results`.
+    display = _drop_provenance(results)
+
     # ONE plain DataFrame does both jobs: emoji BUY/SELL badges for the eye,
     # and `selection_mode` row-selection to drive the chart. We deliberately
     # do NOT pass a pandas Styler here — Streamlit only reliably supports row
     # selection on plain DataFrames. 2-decimal price display is handled by
     # `column_config`, which (unlike a Styler) composes with selection.
     table_state = st.dataframe(
-        _emoji_rating(results),
+        _emoji_rating(display),
         width="stretch",
         hide_index=True,
-        column_config=_decimal_column_config(results),
+        column_config=_decimal_column_config(display),
         selection_mode="single-row",
         on_select="rerun",
         key=table_key,

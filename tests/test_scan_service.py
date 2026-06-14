@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
-from datetime import date
+from datetime import UTC, date, datetime
+from decimal import Decimal
 
 import pandas as pd
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from backend.observability import (
@@ -22,8 +24,14 @@ from backend.observability import (
     EVENT_SCAN_STARTED,
     EVENT_SYMBOL_SCAN_FAILED,
 )
+from backend.scanner_base import BaseScanner
 from backend.scanning import ScanStatus, run_scan
-from backend.storage.repository import get_latest_scan_runs, get_scan_results
+from backend.scanning.result_contract import AIEvaluationRecord, AIProvenance
+from backend.storage.repository import (
+    get_ai_evaluations,
+    get_latest_scan_runs,
+    get_scan_results,
+)
 
 # The ``db_engine`` and ``session_factory`` fixtures these tests use live in
 # tests/conftest.py, shared with the other scan-history test modules.
@@ -41,12 +49,21 @@ def _base_params() -> dict:
 
 
 def _two_buy_rows() -> pd.DataFrame:
+    def provenance(rule: str, value: float) -> dict:
+        return {
+            "triggered_rules": [rule],
+            "indicator_values": {"signal_value": value},
+            "source": "deterministic",
+        }
+
     return pd.DataFrame(
         [
             {"symbol": "RELIANCE", "rating": "BUY", "signal_date": "2026-06-01",
-             "close": 1234.5, "reason": "oversold bounce"},
+             "close": 1234.5, "reason": "oversold bounce",
+             "provenance": provenance("oversold_bounce", 31.5)},
             {"symbol": "TCS", "rating": "BUY", "signal_date": "2026-06-01",
-             "close": 3890.0, "reason": "breakout"},
+             "close": 3890.0, "reason": "breakout",
+             "provenance": provenance("breakout", 1.2)},
         ]
     )
 
@@ -92,6 +109,7 @@ def test_run_scan_success_persists_run_and_results(db_engine, session_factory):
         "signal_date",
         "close",
         "reason",
+        "provenance",
     ]
 
     # Re-query the database to prove the run + results were written.
@@ -108,22 +126,18 @@ def test_run_scan_success_persists_run_and_results(db_engine, session_factory):
         rows = get_scan_results(session, result.run_id)
         assert [r.symbol for r in rows] == ["RELIANCE", "TCS"]
 
-        # This screener supplied no provenance, so the service fills a small,
-        # predictable envelope from run-level context. ``source`` stays None
-        # because orchestration cannot know whether arbitrary legacy logic was
-        # deterministic, AI-assisted, or hybrid.
         assert rows[0].provenance_json == {
             "screener_key": "envelope",
             "screener_version": None,
-            "triggered_rules": [],
-            "indicator_values": {},
+            "triggered_rules": ["oversold_bounce"],
+            "indicator_values": {"signal_value": 31.5},
             "params_snapshot": {
                 "start_date": "2016-06-02",
                 "end_date": "2026-06-02",
                 "period": 20,
             },
             "data_snapshot_date": "2026-06-02",
-            "source": None,
+            "source": "deterministic",
             "notes": None,
             "ai": None,
         }
@@ -265,6 +279,123 @@ def test_run_scan_marks_partial_on_compute_failure(session_factory):
     assert result.compute_failures == [{"symbol": "TCS", "message": "bad candles"}]
 
 
+def test_base_scanner_skips_invalid_emitted_row_and_run_scan_is_partial(
+    db_engine, session_factory
+):
+    class _MixedContractScanner(BaseScanner):
+        SCREENER = {
+            "key": "mixed_contract",
+            "name": "Mixed Contract",
+            "description": "Test scanner",
+            "universe": "test",
+            "timeframe": "daily",
+            "lookback_days": 1,
+            "default_params": {},
+        }
+
+        def compute_signal(self, symbol, candles, params):
+            indicator_values = {"close": 10.0}
+            if symbol == "BAD":
+                indicator_values = {"api_key": ["secret-value"]}
+            return {
+                "symbol": symbol,
+                "rating": "BUY",
+                "signal_date": pd.Timestamp("2026-06-01"),
+                "close": 10.0,
+                "reason": "valid signal",
+                "provenance": {
+                    "triggered_rules": ["rule"],
+                    "indicator_values": indicator_values,
+                    "source": "deterministic",
+                },
+            }
+
+    class _BatchLoader(_FakeLoader):
+        def load_universe_history(self, **_kwargs):
+            return type(
+                "_Batch",
+                (),
+                {
+                    "frames": {
+                        "GOOD": pd.DataFrame({"close": [10.0]}),
+                        "BAD": pd.DataFrame({"close": [10.0]}),
+                    }
+                },
+            )()
+
+    scanner = _MixedContractScanner()
+    result = run_scan(
+        screener_key="mixed_contract",
+        universe_key="test",
+        run_callable=scanner.run,
+        universe_df=pd.DataFrame({"symbol": ["GOOD", "BAD"]}),
+        data_loader=_BatchLoader(),
+        params=_base_params(),
+        session_factory=session_factory,
+    )
+
+    assert result.status is ScanStatus.PARTIAL
+    assert result.results["symbol"].tolist() == ["GOOD"]
+    assert len(result.compute_failures) == 1
+    assert result.rejected_result_rows == 1
+    assert result.compute_failures[0]["symbol"] == "BAD"
+    assert "secret-value" not in result.compute_failures[0]["message"]
+    with Session(db_engine) as session:
+        assert get_latest_scan_runs(session)[0].status is ScanStatus.PARTIAL
+
+
+def test_base_scanner_marks_run_failed_when_every_emitted_row_is_invalid(
+    session_factory,
+):
+    class _InvalidContractScanner(BaseScanner):
+        SCREENER = {
+            "key": "invalid_contract",
+            "name": "Invalid Contract",
+            "description": "Test scanner",
+            "universe": "test",
+            "timeframe": "daily",
+            "lookback_days": 1,
+            "default_params": {},
+        }
+
+        def compute_signal(self, symbol, candles, params):
+            return {
+                "symbol": symbol,
+                "rating": "BUY",
+                "signal_date": "2026-06-01",
+                "close": 10.0,
+                "reason": "invalid signal",
+                "provenance": {
+                    "triggered_rules": ["rule"],
+                    "indicator_values": {"nested": [1, 2]},
+                    "source": "deterministic",
+                },
+            }
+
+    class _BatchLoader(_FakeLoader):
+        def load_universe_history(self, **_kwargs):
+            return type(
+                "_Batch",
+                (),
+                {"frames": {"BAD": pd.DataFrame({"close": [10.0]})}},
+            )()
+
+    scanner = _InvalidContractScanner()
+    result = run_scan(
+        screener_key="invalid_contract",
+        universe_key="test",
+        run_callable=scanner.run,
+        universe_df=pd.DataFrame({"symbol": ["BAD"]}),
+        data_loader=_BatchLoader(),
+        params=_base_params(),
+        session_factory=session_factory,
+    )
+
+    assert result.status is ScanStatus.FAILED
+    assert result.results.empty
+    assert result.rejected_result_rows == 1
+
+
 # ---------------------------------------------------------------------------
 # Database resilience: persistence must never break the scan
 # ---------------------------------------------------------------------------
@@ -333,13 +464,15 @@ def test_run_scan_persists_good_rows_when_one_row_breaks_the_contract(
 
     # The in-memory DataFrame for Streamlit keeps all three rows; only the
     # persistence copies are filtered.
-    assert result.status is ScanStatus.SUCCESS
+    assert result.status is ScanStatus.PARTIAL
+    assert result.rejected_result_rows == 1
     assert result.run_id is not None
     assert len(result.results) == 3
 
     with Session(db_engine) as session:
         rows = get_scan_results(session, result.run_id)
         assert [r.symbol for r in rows] == ["RELIANCE", "TCS"]
+        assert get_latest_scan_runs(session)[0].status is ScanStatus.PARTIAL
     assert any("skipping" in record.message.lower() for record in caplog.records)
 
 
@@ -369,11 +502,97 @@ def test_run_scan_treats_every_row_failing_the_contract_as_persistence_failure(
 
     # The caller still gets the in-memory results despite the history failure.
     assert len(result.results) == 1
+    assert result.status is ScanStatus.FAILED
+    assert result.rejected_result_rows == 1
     with Session(db_engine) as session:
         runs = get_latest_scan_runs(session)
         assert len(runs) == 1
         assert runs[0].status is ScanStatus.FAILED
         assert get_scan_results(session, runs[0].id) == []
+
+
+def test_run_scan_collects_and_atomically_persists_ai_evaluation_callbacks(
+    db_engine, session_factory
+):
+    def screener_run(_universe_df, _data_loader, params):
+        params["ai_evaluation_callback"](
+            AIEvaluationRecord(
+                symbol="RELIANCE",
+                signal_date=date(2026, 6, 1),
+                outcome="approved",
+                verdict="BUY",
+                confidence=Decimal("0.91"),
+                decision_reason="token=secret-reason",
+                provenance=AIProvenance(
+                    model_name="gpt-test",
+                    prompt_version="v1",
+                    prompt_sha256="b" * 64,
+                    generated_at=datetime(2026, 6, 13, 8, 0, tzinfo=UTC),
+                    cache_hit=False,
+                    evidence_references=[],
+                ),
+                validated_verdict_json={"rating": "BUY"},
+            )
+        )
+        return _two_buy_rows()
+
+    result = run_scan(
+        screener_key="envelope",
+        universe_key="hemant_super_45",
+        run_callable=screener_run,
+        universe_df=pd.DataFrame({"symbol": ["RELIANCE", "TCS"]}),
+        data_loader=_FakeLoader(),
+        params=_base_params(),
+        session_factory=session_factory,
+    )
+
+    assert result.status is ScanStatus.SUCCESS
+    with Session(db_engine) as session:
+        evaluations = get_ai_evaluations(session, result.run_id)
+        assert len(evaluations) == 1
+        assert evaluations[0].symbol == "RELIANCE"
+        assert evaluations[0].verdict_label == "BUY"
+        assert evaluations[0].confidence == Decimal("0.9100")
+        assert "secret-reason" not in str(evaluations[0].validated_verdict_json)
+
+
+def test_invalid_ai_evaluation_rolls_back_shortlist_rows_and_fails_run(
+    db_engine, session_factory
+):
+    def screener_run(_universe_df, _data_loader, params):
+        params["ai_evaluation_callback"](
+            {
+                "symbol": "RELIANCE",
+                "outcome": "maybe",
+                "verdict": "BUY",
+                "confidence": "0.9",
+                "provenance": {
+                    "model_name": "gpt-test",
+                    "prompt_version": "v1",
+                    "prompt_sha256": "b" * 64,
+                    "generated_at": "2026-06-13T08:00:00+00:00",
+                    "cache_hit": False,
+                    "evidence_references": [],
+                },
+            }
+        )
+        return _two_buy_rows()
+
+    result = run_scan(
+        screener_key="envelope",
+        universe_key="hemant_super_45",
+        run_callable=screener_run,
+        universe_df=pd.DataFrame({"symbol": ["RELIANCE", "TCS"]}),
+        data_loader=_FakeLoader(),
+        params=_base_params(),
+        session_factory=session_factory,
+    )
+
+    assert result.status is ScanStatus.FAILED
+    with Session(db_engine) as session:
+        assert get_scan_results(session, result.run_id) == []
+        assert get_ai_evaluations(session, result.run_id) == []
+        assert get_latest_scan_runs(session)[0].status is ScanStatus.FAILED
 
 
 def test_run_scan_records_universe_size_as_symbols_scanned(db_engine, session_factory):
@@ -579,7 +798,11 @@ def test_run_scan_emits_persistence_failure_without_false_completion(
         nonlocal calls
         calls += 1
         if calls == 2:
-            raise RuntimeError("token=DATABASESECRET should stay hidden")
+            raise OperationalError(
+                "INSERT",
+                {},
+                RuntimeError("token=DATABASESECRET should stay hidden"),
+            )
         with session_factory() as session:
             yield session
 
@@ -595,11 +818,17 @@ def test_run_scan_emits_persistence_failure_without_false_completion(
         )
 
     failed = _event_fields(caplog, EVENT_SCAN_FAILED)
-    assert result.status is ScanStatus.SUCCESS
+    assert result.status is ScanStatus.FAILED
     assert result.run_id is not None
+    assert result.error_message == (
+        "Could not persist scan results (OperationalError)."
+    )
     assert len(failed) == 1
     assert failed[0]["phase"] == "persistence"
-    assert failed[0]["error_type"] == "RuntimeError"
+    assert failed[0]["error_type"] == "OperationalError"
+    assert failed[0]["status"] == "failed"
+    assert failed[0]["persisted_results_count"] == 0
+    assert failed[0]["ai_evaluation_count"] == 0
     assert "DATABASESECRET" not in str(failed[0])
     assert _event_fields(caplog, EVENT_SCAN_COMPLETED) == []
     assert _event_fields(caplog, EVENT_SCAN_PARTIAL) == []
@@ -632,3 +861,72 @@ def test_run_scan_emits_header_failure_without_false_completion(caplog):
     assert failed[0]["error_type"] == "RuntimeError"
     assert "HEADERSECRET" not in str(failed[0])
     assert _event_fields(caplog, EVENT_SCAN_COMPLETED) == []
+
+
+class _ProvenanceScanner(BaseScanner):
+    """A minimal screener that emits PROV-002 provenance via the base helper."""
+
+    SCREENER = {
+        "key": "envelope",
+        "name": "Provenance Demo",
+        "description": "Test-only screener that records provenance.",
+        "universe": "test",
+        "timeframe": "daily",
+        "lookback_days": 10,
+        "default_params": {},
+    }
+
+    def compute_signal(self, symbol, candles, params):
+        return {
+            "symbol": symbol,
+            "rating": "BUY",
+            "signal_date": "2026-06-01",
+            "close": 80.0,
+            "reason": "at/below the lower envelope band",
+            "provenance": self.build_provenance(
+                triggered_rules=["close_at_or_below_lower_envelope_band"],
+                indicator_values={"close": 80.0, "env_lower": 82.5},
+            ),
+        }
+
+
+def test_run_scan_persists_screener_provenance_end_to_end(db_engine, session_factory):
+    """A screener's provenance must reach scan_results.provenance_json intact.
+
+    This is the whole PROV-002 contract through the real service + repository: a
+    row carrying a ``build_provenance`` dict is normalized and stored as the
+    canonical envelope, while the UI DataFrame keeps the raw provenance column.
+    """
+    scanner = _ProvenanceScanner()
+
+    def screener_run(_universe_df, _data_loader, _params):
+        # Build the frame exactly as BaseScanner.run would (one compute_signal row
+        # selected down to result_columns), without needing a candle-backed loader.
+        row = scanner.compute_signal("DISCOUNT", pd.DataFrame(), _params)
+        return pd.DataFrame([row], columns=scanner.result_columns)
+
+    result = run_scan(
+        screener_key="envelope",
+        universe_key="hemant_super_45",
+        run_callable=screener_run,
+        universe_df=pd.DataFrame({"symbol": ["DISCOUNT"]}),
+        data_loader=_FakeLoader(),
+        params={**_base_params(), "max_symbols": None},
+        session_factory=session_factory,
+    )
+
+    assert result.status is ScanStatus.SUCCESS
+    # The UI frame keeps the raw provenance column (only the display path drops it).
+    assert "provenance" in result.results.columns
+
+    with Session(db_engine) as session:
+        rows = get_scan_results(session, result.run_id)
+        assert [r.symbol for r in rows] == ["DISCOUNT"]
+        provenance = rows[0].provenance_json
+        assert provenance["source"] == "deterministic"
+        assert provenance["screener_key"] == "envelope"
+        assert provenance["screener_version"] == "1.0.0"
+        assert provenance["triggered_rules"] == ["close_at_or_below_lower_envelope_band"]
+        assert provenance["indicator_values"]["env_lower"] == 82.5
+        # Run-level context the screener did not set is filled by the normalizer.
+        assert provenance["data_snapshot_date"] == "2026-06-02"

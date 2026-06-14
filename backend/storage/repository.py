@@ -15,14 +15,19 @@ session ownership outside the repository makes it easy for SCAN-003 to wrap
 from __future__ import annotations
 
 import datetime as dt
+import re
 from collections.abc import Mapping, Sequence
+from dataclasses import asdict, is_dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, cast
 
 from sqlalchemy import exists, func, select
 from sqlalchemy.orm import Session
 
-from backend.storage.models import ScanResult, ScanRun, ScanStatus
+from backend.storage.models import AIEvaluation, ScanResult, ScanRun, ScanStatus
+
+_AI_EVALUATION_OUTCOMES = frozenset({"approved", "rejected", "error"})
+_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 def create_scan_run(
@@ -47,6 +52,8 @@ def create_scan_run(
     ``run.id``. It does not commit the transaction; the caller can still roll the
     whole scan back if something goes wrong.
     """
+    from backend.scanning.result_contract import normalize_secret_safe_json
+
     run = ScanRun(
         started_at=dt.datetime.now(dt.UTC),
         status=ScanStatus.RUNNING,
@@ -54,7 +61,10 @@ def create_scan_run(
         universe_key=universe_key,
         # Params may contain dates/Decimals in future screeners. Store a
         # JSON-safe copy, not the caller's original object.
-        params_json=cast(dict[str, Any] | None, _json_safe(dict(params)) if params else None),
+        params_json=cast(
+            dict[str, Any] | None,
+            normalize_secret_safe_json(dict(params)) if params else None,
+        ),
         data_snapshot_date=data_snapshot_date,
         app_version=app_version,
         git_commit_sha=git_commit_sha,
@@ -81,8 +91,13 @@ def save_scan_results(
     lost. That raw JSON blob is what lets one table support deterministic and AI
     screeners without making a table per strategy.
     """
+    from backend.scanning.result_contract import normalize_secret_safe_json
+
     results: list[ScanResult] = []
     for row in rows:
+        normalized_row = normalize_secret_safe_json(dict(row))
+        if not isinstance(normalized_row, dict):
+            raise ValueError("Scan result normalization must produce a JSON object.")
         # Existing screeners use "close"; the database column is named
         # "close_price" so it reads clearly months later in history views. Accept
         # both keys to make future normalized rows easy to persist too.
@@ -103,10 +118,12 @@ def save_scan_results(
             rating=_as_optional_str(row.get("rating")),
             final_score=_as_decimal(row.get("final_score")),
             reason=_as_optional_str(row.get("reason")),
-            raw_result_json=cast(dict[str, Any], _json_safe(dict(row))),
+            raw_result_json=cast(dict[str, Any], normalized_row),
             provenance_json=cast(
                 dict[str, Any] | None,
-                _json_safe(provenance_value) if provenance_value is not None else None,
+                normalize_secret_safe_json(provenance_value)
+                if provenance_value is not None
+                else None,
             ),
         )
         results.append(result)
@@ -117,6 +134,18 @@ def save_scan_results(
     run.results.extend(results)
     session.flush()
     return results
+
+
+def save_ai_evaluations(
+    session: Session,
+    run: ScanRun,
+    records: Sequence[Mapping[str, Any] | Any],
+) -> list[AIEvaluation]:
+    """Validate, sanitize, and persist AI callback records for one run."""
+    evaluations = [_build_ai_evaluation(record) for record in records]
+    run.ai_evaluations.extend(evaluations)
+    session.flush()
+    return evaluations
 
 
 def finish_scan_run(
@@ -281,6 +310,265 @@ def get_scan_results(session: Session, run_id: int) -> list[ScanResult]:
     return list(session.scalars(stmt))
 
 
+def get_ai_evaluations(session: Session, run_id: int) -> list[AIEvaluation]:
+    """Return AI evaluation receipts for one run in stable symbol/id order."""
+    stmt = (
+        select(AIEvaluation)
+        .where(AIEvaluation.run_id == run_id)
+        .order_by(AIEvaluation.symbol.asc(), AIEvaluation.id.asc())
+    )
+    return list(session.scalars(stmt))
+
+
+def _build_ai_evaluation(
+    record: Mapping[str, Any] | Any,
+) -> AIEvaluation:
+    from backend.scanning.result_contract import normalize_secret_safe_json
+
+    if isinstance(record, Mapping):
+        raw = dict(record)
+    elif is_dataclass(record) and not isinstance(record, type):
+        raw = asdict(record)
+    else:
+        raise ValueError("AI evaluation record must be a mapping or dataclass.")
+
+    normalized = normalize_secret_safe_json(raw)
+    if not isinstance(normalized, dict):
+        raise ValueError("AI evaluation normalization must produce a JSON object.")
+
+    symbol = str(normalized.get("symbol") or "").strip()
+    if not symbol:
+        raise ValueError("AI evaluation requires a non-blank symbol.")
+
+    outcome = str(normalized.get("outcome") or "").strip().lower()
+    if outcome not in _AI_EVALUATION_OUTCOMES:
+        raise ValueError("AI evaluation outcome must be approved, rejected, or error.")
+
+    confidence = _as_decimal(normalized.get("confidence"))
+    if confidence is not None and not Decimal("0") <= confidence <= Decimal("10"):
+        raise ValueError("AI evaluation confidence must be between 0 and 10.")
+
+    verdict = _as_optional_str(
+        normalized.get("verdict_label", normalized.get("verdict"))
+    )
+    decision_reason = _as_optional_str(normalized.get("decision_reason"))
+    provenance_value = normalized.get("provenance_json", normalized.get("provenance"))
+    provenance = _validated_ai_provenance(
+        provenance_value,
+        outcome=outcome,
+        verdict=verdict,
+        confidence=confidence,
+        decision_reason=decision_reason,
+    )
+    verdict = cast(str | None, provenance["verdict"])
+    confidence = _as_decimal(provenance["confidence"])
+    decision_reason = cast(str | None, provenance["decision_reason"])
+
+    verdict_value = normalized.get("validated_verdict_json", {})
+    if not isinstance(verdict_value, Mapping):
+        raise ValueError("validated_verdict_json must be a mapping.")
+    validated_verdict = dict(verdict_value)
+    _validate_verdict_json_receipt_fields(
+        validated_verdict,
+        symbol=symbol,
+        outcome=outcome,
+        verdict=verdict,
+        confidence=confidence,
+        decision_reason=decision_reason,
+        model_name=cast(str, provenance["model_name"]),
+    )
+    if verdict is not None:
+        validated_verdict.setdefault("verdict", verdict)
+    if confidence is not None:
+        validated_verdict.setdefault("confidence", str(confidence))
+    if decision_reason is not None:
+        validated_verdict.setdefault("decision_reason", decision_reason)
+
+    created_at = _as_utc_datetime(normalized.get("created_at"), required=False)
+    return AIEvaluation(
+        symbol=symbol,
+        signal_date=_as_date(normalized.get("signal_date")),
+        outcome=outcome,
+        verdict_label=verdict,
+        confidence=confidence,
+        model_name=cast(str, provenance["model_name"]),
+        prompt_version=cast(str, provenance["prompt_version"]),
+        validated_verdict_json=validated_verdict,
+        provenance_json=provenance,
+        created_at=created_at or dt.datetime.now(dt.UTC),
+    )
+
+
+def _validate_verdict_json_receipt_fields(
+    verdict_json: Mapping[str, Any],
+    *,
+    symbol: str,
+    outcome: str,
+    verdict: str | None,
+    confidence: Decimal | None,
+    decision_reason: str | None,
+    model_name: str,
+) -> None:
+    """Reject model-output fields that contradict the trusted audit receipt."""
+    if "symbol" in verdict_json and str(verdict_json["symbol"]).strip() != symbol:
+        raise ValueError(
+            "validated_verdict_json symbol must match the evaluation symbol."
+        )
+    if (
+        "model_used" in verdict_json
+        and str(verdict_json["model_used"]).strip() != model_name
+    ):
+        raise ValueError(
+            "validated_verdict_json model_used must match AI provenance."
+        )
+    if (
+        "verdict" in verdict_json
+        and _as_optional_str(verdict_json["verdict"]) != verdict
+    ):
+        raise ValueError(
+            "validated_verdict_json verdict must match AI provenance."
+        )
+    if (
+        "confidence" in verdict_json
+        and _as_decimal(verdict_json["confidence"]) != confidence
+    ):
+        raise ValueError(
+            "validated_verdict_json confidence must match AI provenance."
+        )
+    if (
+        "decision_reason" in verdict_json
+        and _as_optional_str(verdict_json["decision_reason"]) != decision_reason
+    ):
+        raise ValueError(
+            "validated_verdict_json decision_reason must match AI provenance."
+        )
+    if "approved" in verdict_json:
+        approved = verdict_json["approved"]
+        if not isinstance(approved, bool) or approved != (outcome == "approved"):
+            raise ValueError(
+                "validated_verdict_json approved must match the evaluation outcome."
+            )
+
+
+def _validated_ai_provenance(
+    value: Any,
+    *,
+    outcome: str,
+    verdict: str | None,
+    confidence: Decimal | None,
+    decision_reason: str | None,
+) -> dict[str, Any]:
+    from backend.scanning.result_contract import sanitize_evidence_url
+
+    if not isinstance(value, Mapping):
+        raise ValueError("AI evaluation provenance must be a mapping.")
+    provenance = dict(value)
+
+    model_name = str(provenance.get("model_name") or "").strip()
+    prompt_version = str(provenance.get("prompt_version") or "").strip()
+    if not model_name or not prompt_version:
+        raise ValueError("AI provenance requires model_name and prompt_version.")
+
+    prompt_sha256 = _full_sha256(provenance.get("prompt_sha256"), "prompt_sha256")
+    generated_at = _as_utc_datetime(provenance.get("generated_at"), required=True)
+    cache_hit = provenance.get("cache_hit")
+    if not isinstance(cache_hit, bool):
+        raise ValueError("AI provenance cache_hit must be boolean.")
+
+    evidence_value = provenance.get("evidence_references", [])
+    if not isinstance(evidence_value, list):
+        raise ValueError("AI provenance evidence_references must be a list.")
+    evidence: list[dict[str, Any]] = []
+    for item in evidence_value:
+        if not isinstance(item, Mapping):
+            raise ValueError("Each evidence reference must be a mapping.")
+        source_label = str(item.get("source_label") or "").strip()
+        if not source_label:
+            raise ValueError("Evidence reference requires a source_label.")
+        evidence.append(
+            {
+                "source_label": source_label,
+                "sanitized_url": sanitize_evidence_url(item.get("sanitized_url")),
+                "sha256": _full_sha256(item.get("sha256"), "evidence sha256"),
+            }
+        )
+
+    input_context_hash = provenance.get("input_context_hash")
+    normalized_context_hash = (
+        _full_sha256(input_context_hash, "input_context_hash")
+        if input_context_hash is not None
+        else None
+    )
+    provenance_verdict = _as_optional_str(provenance.get("verdict")) or verdict
+    provenance_confidence = _as_decimal(provenance.get("confidence"))
+    if provenance_confidence is None:
+        provenance_confidence = confidence
+    if provenance_confidence is not None and not (
+        Decimal("0") <= provenance_confidence <= Decimal("10")
+    ):
+        raise ValueError("AI evaluation confidence must be between 0 and 10.")
+    provenance_reason = (
+        _as_optional_str(provenance.get("decision_reason")) or decision_reason
+    )
+    if verdict is not None and provenance_verdict != verdict:
+        raise ValueError("AI provenance verdict must match the evaluation verdict.")
+    if confidence is not None and provenance_confidence != confidence:
+        raise ValueError("AI provenance confidence must match the evaluation confidence.")
+    if decision_reason is not None and provenance_reason != decision_reason:
+        raise ValueError(
+            "AI provenance decision_reason must match the evaluation decision_reason."
+        )
+    if outcome != "error" and (
+        provenance_verdict is None
+        or provenance_confidence is None
+        or provenance_reason is None
+    ):
+        raise ValueError(
+            "Approved and rejected AI evaluations require verdict, confidence, "
+            "and decision_reason."
+        )
+    return {
+        "model_name": model_name,
+        "prompt_version": prompt_version,
+        "prompt_sha256": prompt_sha256,
+        "generated_at": cast(dt.datetime, generated_at).isoformat(),
+        "cache_hit": cache_hit,
+        "verdict": provenance_verdict,
+        "confidence": (
+            str(provenance_confidence)
+            if provenance_confidence is not None
+            else None
+        ),
+        "decision_reason": provenance_reason,
+        "evidence_references": evidence,
+        "input_context_hash": normalized_context_hash,
+    }
+
+
+def _full_sha256(value: Any, field_name: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if not _SHA256_RE.fullmatch(normalized):
+        raise ValueError(f"AI provenance {field_name} must be a full SHA-256.")
+    return normalized
+
+
+def _as_utc_datetime(value: Any, *, required: bool) -> dt.datetime | None:
+    if _is_missing(value):
+        if required:
+            raise ValueError("AI provenance generated_at is required.")
+        return None
+    if isinstance(value, dt.datetime):
+        parsed = value
+    else:
+        try:
+            parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("AI timestamp must be valid ISO-8601.") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != dt.timedelta(0):
+        raise ValueError("AI timestamp must be timezone-aware UTC.")
+    return parsed.astimezone(dt.UTC)
+
+
 def _as_optional_str(value: Any) -> str | None:
     """Convert optional display fields to strings while preserving blanks as NULL."""
     if _is_missing(value):
@@ -316,45 +604,6 @@ def _as_decimal(value: Any) -> Decimal | None:
         return Decimal(str(value))
     except (InvalidOperation, ValueError):
         return None
-
-
-def _json_safe(value: Any) -> Any:
-    """Return a structure SQLAlchemy's JSON type can serialize safely.
-
-    SQLAlchemy's generic JSON column eventually calls Python's JSON encoder.
-    That encoder understands dict/list/str/int/float/bool/None, but not
-    ``Decimal``, dates, datetimes, or NumPy scalar objects. This helper walks the
-    whole structure and converts those common non-JSON values before insert.
-
-    ``Decimal`` becomes a string on purpose: typed numeric columns are the query
-    source of truth, while JSON blobs are audit snapshots where lossless text is
-    safer than binary floating-point rounding.
-    """
-    if _is_missing(value):
-        return None
-    if isinstance(value, Decimal):
-        return str(value)
-    if isinstance(value, dt.datetime | dt.date):
-        return value.isoformat()
-    if isinstance(value, Mapping):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, list | tuple | set):
-        return [_json_safe(item) for item in value]
-    if isinstance(value, str | int | float | bool):
-        return value
-
-    item = getattr(value, "item", None)
-    if callable(item):
-        try:
-            # NumPy and pandas scalar objects commonly expose `.item()`, which
-            # turns them into ordinary Python scalars the JSON encoder knows.
-            return _json_safe(item())
-        except (TypeError, ValueError):
-            pass
-
-    # Last-resort fallback: preserve something readable instead of crashing the
-    # entire scan because one extra screener column has an unusual object type.
-    return str(value)
 
 
 def _is_missing(value: Any) -> bool:

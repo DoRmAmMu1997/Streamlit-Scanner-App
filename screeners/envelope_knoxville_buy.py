@@ -179,6 +179,10 @@ class EnvelopeKnoxvilleBuy(BaseScanner):
         rsi_value = float(divergence["rsi"])
         momentum_value = float(divergence["momentum"])
         if entry_trigger == "recent_envelope_kd":
+            triggered_rules = [
+                "close_near_lower_envelope_band",
+                "recent_bullish_knoxville_divergence",
+            ]
             reason = (
                 f"Close {close:.2f} is {env_distance_pct * 100:.2f}% from the lower "
                 f"Envelope band ({lower_band:.2f}). Recent bullish Knoxville: "
@@ -186,6 +190,7 @@ class EnvelopeKnoxvilleBuy(BaseScanner):
                 f"({momentum_value:.2f}) with RSI oversold ({rsi_value:.1f})."
             )
         else:
+            triggered_rules = ["knoxville_pivot_low_retest"]
             reason = (
                 f"Close {close:.2f} is {kd_retest_distance_pct * 100:.2f}% from "
                 f"the last bullish Knoxville pivot low ({selected_divergence_price:.2f}) "
@@ -211,6 +216,24 @@ class EnvelopeKnoxvilleBuy(BaseScanner):
             "rsi": rsi_value,
             "momentum": momentum_value,
             "reason": reason,
+            "provenance": self.build_provenance(
+                triggered_rules=triggered_rules,
+                indicator_values={
+                    "close": close,
+                    "env_basis": float(latest_basis),
+                    "env_lower": lower_band,
+                    "env_distance_pct": env_distance_pct,
+                    "divergence_timestamp": divergence.get("timestamp", ""),
+                    "divergence_price": selected_divergence_price,
+                    "divergence_bars_ago": selected_bars_ago,
+                    "prior_pivot_timestamp": divergence.get("prior_pivot_timestamp", ""),
+                    "prior_pivot_low": divergence.get("prior_pivot_low"),
+                    "prior_pivot_momentum": divergence.get("prior_pivot_momentum"),
+                    "kd_retest_distance_pct": kd_retest_distance_pct,
+                    "rsi": rsi_value,
+                    "momentum": momentum_value,
+                },
+            ),
         }
 
     def build_chart(self, candles: pd.DataFrame, params: dict) -> dict:

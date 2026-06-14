@@ -14,19 +14,27 @@ step for that symbol rather than failing the whole scan.
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 import pandas as pd
 
 from backend.charts import candlestick_with_volume
-from backend.fundamentals.fundamental_agent import (
-    FundamentalsAgentError,
-    FundamentalsUsageLimitError,
-)
+from backend.config import get_fundamentals_model
 from backend.scanner_base import BaseScanner
-from backend.sixty_seven.agent import SixtySevenVerdict, get_cached_agent
-from backend.sixty_seven.search_client import SerpApiSearchError, SerpApiSetupError
+from backend.scanning.result_contract import (
+    AIEvaluationRecord,
+    AIProvenance,
+)
+from backend.security import redact_text
+from backend.sixty_seven.agent import (
+    SIXTY_SEVEN_PROMPT_VERSION,
+    SixtySevenEvaluationResult,
+    SixtySevenVerdict,
+    get_cached_agent,
+    sixty_seven_provenance_fingerprints,
+)
 from backend.sixty_seven.shortlister import DrawdownCandidate, shortlist_candidate
 
 logger = logging.getLogger(__name__)
@@ -36,6 +44,68 @@ def _get_agent():
     # Indirection so tests can monkeypatch the agent with a stub (see
     # tests/test_real_screeners.py) without disturbing get_cached_agent's cache.
     return get_cached_agent()
+
+
+def _signal_date(value) -> dt.date | None:
+    try:
+        return pd.Timestamp(value).date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _emit_ai_evaluation(
+    callback,
+    *,
+    candidate: DrawdownCandidate,
+    result: SixtySevenEvaluationResult,
+    outcome: Literal["approved", "rejected", "error"],
+) -> None:
+    if not callable(callback):
+        return
+    callback(
+        AIEvaluationRecord(
+            symbol=candidate.symbol,
+            signal_date=_signal_date(candidate.signal_date),
+            outcome=outcome,
+            verdict=result.provenance.verdict,
+            confidence=result.provenance.confidence,
+            decision_reason=result.provenance.decision_reason,
+            provenance=result.provenance,
+            validated_verdict_json=result.validated_verdict_json,
+        )
+    )
+
+
+def _sixty_seven_error_result(
+    candidate: DrawdownCandidate, exc: Exception
+) -> SixtySevenEvaluationResult:
+    model = get_fundamentals_model()
+    prompt_sha256, context_sha256 = sixty_seven_provenance_fingerprints(
+        model,
+        candidate.symbol,
+        candidate,
+    )
+    provenance = AIProvenance(
+        model_name=model,
+        prompt_version=SIXTY_SEVEN_PROMPT_VERSION,
+        prompt_sha256=prompt_sha256,
+        generated_at=dt.datetime.now(dt.UTC),
+        cache_hit=False,
+        evidence_references=[],
+        input_context_hash=context_sha256,
+        verdict="error",
+        confidence=None,
+        decision_reason=(
+            "67 ka funda evaluation failed "
+            f"({type(exc).__name__})."
+        ),
+    )
+    return SixtySevenEvaluationResult(
+        verdict=None,
+        provenance=provenance,
+        validated_verdict_json={},
+        error_type=type(exc).__name__,
+    )
 
 
 class SixtySevenKaFunda(BaseScanner):
@@ -92,14 +162,16 @@ class SixtySevenKaFunda(BaseScanner):
         self,
         candidate: DrawdownCandidate,
         verdict: SixtySevenVerdict,
+        provenance: AIProvenance,
     ) -> dict | None:
         """Turn an approved verdict into a result row, or None when not approved."""
         if not verdict.approved:
             return None
-        # A short, human-readable digest of the first few evidence items for the
-        # results table (titles preferred, falling back to snippets).
+        # Display only source labels/domains. Scraped titles and snippets are
+        # untrusted model context and must not enter the result table or CSV.
         evidence_summary = "; ".join(
-            item.title or item.snippet for item in verdict.evidence[:3] if (item.title or item.snippet)
+            reference.source_label
+            for reference in provenance.evidence_references[:3]
         )
         return {
             "symbol": candidate.symbol,
@@ -114,7 +186,61 @@ class SixtySevenKaFunda(BaseScanner):
             "fall_reason_category": verdict.fall_reason_category,
             "confidence": int(verdict.confidence),
             "evidence_summary": evidence_summary,
+            # Deterministic drawdown gate + AI verifier => hybrid. The AI evidence
+            # itself (model, prompt, scraped text) is reserved for PROV-003.
+            "provenance": self.build_provenance(
+                triggered_rules=["drawdown_gate_passed", "ai_verdict_approved"],
+                indicator_values={
+                    "close": float(candidate.latest_close),
+                    "ath_price": float(candidate.ath_price),
+                    "drawdown_pct": float(candidate.drawdown_pct),
+                    "upside_to_ath_pct": float(candidate.upside_to_ath_pct),
+                    "confidence": int(verdict.confidence),
+                },
+                source="hybrid",
+                ai=provenance,
+            ),
         }
+
+    def _consume_evaluation(
+        self,
+        candidate: DrawdownCandidate,
+        evaluation: SixtySevenEvaluationResult,
+        *,
+        ai_evaluation_callback=None,
+        compute_failure_callback=None,
+    ) -> dict | None:
+        if evaluation.verdict is None:
+            _emit_ai_evaluation(
+                ai_evaluation_callback,
+                candidate=candidate,
+                result=evaluation,
+                outcome="error",
+            )
+            if callable(compute_failure_callback):
+                compute_failure_callback(
+                    {
+                        "symbol": candidate.symbol,
+                        "scanner": type(self).__name__,
+                        "message": (
+                            evaluation.provenance.decision_reason
+                            or "67 ka funda AI evaluation failed."
+                        ),
+                        "phase": "ai_evaluation",
+                    }
+                )
+            return None
+        _emit_ai_evaluation(
+            ai_evaluation_callback,
+            candidate=candidate,
+            result=evaluation,
+            outcome="approved" if evaluation.verdict.approved else "rejected",
+        )
+        return self._row_from_verdict(
+            candidate,
+            evaluation.verdict,
+            evaluation.provenance,
+        )
 
     def compute_signal(self, symbol: str, candles: pd.DataFrame, params: dict) -> dict | None:
         """Single-symbol gate → verify path (the BaseScanner contract + tests).
@@ -125,13 +251,21 @@ class SixtySevenKaFunda(BaseScanner):
         candidate = self._candidate_from_frame(symbol, candles, params)
         if candidate is None:
             return None
-        verdict = _get_agent().verify(
-            candidate.symbol,
+        try:
+            evaluation = _get_agent().evaluate(
+                candidate.symbol,
+                candidate,
+                force_refresh=bool(params.get("force_refresh", False)),
+                search_result_count=int(params.get("search_result_count") or 5),
+            )
+        except Exception as exc:  # noqa: BLE001 - emit a trusted error receipt
+            evaluation = _sixty_seven_error_result(candidate, exc)
+        return self._consume_evaluation(
             candidate,
-            force_refresh=bool(params.get("force_refresh", False)),
-            search_result_count=int(params.get("search_result_count") or 5),
+            evaluation,
+            ai_evaluation_callback=params.get("ai_evaluation_callback"),
+            compute_failure_callback=params.get("compute_failure_callback"),
         )
-        return self._row_from_verdict(candidate, verdict)
 
     def run(self, universe_df: pd.DataFrame, data_loader, params: dict) -> pd.DataFrame:
         """Gate the whole universe cheaply, then AI-verify the survivors in order.
@@ -161,10 +295,15 @@ class SixtySevenKaFunda(BaseScanner):
             try:
                 candidate = self._candidate_from_frame(symbol, candles, params)
             except Exception as exc:  # noqa: BLE001 - isolate malformed candle frames
-                logger.warning("67 ka funda gate failed for %s: %s", symbol, exc)
+                safe_message = redact_text(str(exc))
+                logger.warning("67 ka funda gate failed for %s: %s", symbol, safe_message)
                 if callable(compute_failure_callback):
                     compute_failure_callback(
-                        {"symbol": symbol, "scanner": type(self).__name__, "message": str(exc)}
+                        {
+                            "symbol": symbol,
+                            "scanner": type(self).__name__,
+                            "message": safe_message,
+                        }
                     )
                 continue
             if candidate is None:
@@ -174,32 +313,33 @@ class SixtySevenKaFunda(BaseScanner):
             if max_ai_candidates > 0 and candidates_seen >= max_ai_candidates:
                 break
             candidates_seen += 1
-            # Graceful degradation: a missing SDK / plan limit / SerpAPI outage
-            # skips just this symbol's AI step instead of failing the whole scan.
             try:
-                verdict = _get_agent().verify(
+                evaluation = _get_agent().evaluate(
                     candidate.symbol,
                     candidate,
                     force_refresh=force_refresh,
                     search_result_count=search_result_count,
                 )
-            except (
-                FundamentalsAgentError,
-                FundamentalsUsageLimitError,
-                SerpApiSetupError,
-                SerpApiSearchError,
-            ) as exc:
-                logger.warning("67 ka funda AI verification unavailable for %s: %s", symbol, exc)
-                if callable(compute_failure_callback):
-                    compute_failure_callback(
-                        {"symbol": symbol, "scanner": type(self).__name__, "message": str(exc)}
-                    )
-                continue
-            row = self._row_from_verdict(candidate, verdict)
+            except Exception as exc:  # noqa: BLE001 - emit a trusted error receipt
+                logger.warning(
+                    "67 ka funda AI verification unavailable for %s (%s).",
+                    symbol,
+                    type(exc).__name__,
+                )
+                evaluation = _sixty_seven_error_result(candidate, exc)
+            row = self._consume_evaluation(
+                candidate,
+                evaluation,
+                ai_evaluation_callback=params.get("ai_evaluation_callback"),
+                compute_failure_callback=compute_failure_callback,
+            )
             if row is not None:
                 rows.append(row)
 
-        return pd.DataFrame(rows, columns=self.result_columns)
+        return self.build_result_frame(
+            rows,
+            compute_failure_callback=compute_failure_callback,
+        )
 
     def build_chart(self, candles: pd.DataFrame, params: dict) -> dict:
         """Daily candles with the available-history ATH drawn as a red guide line."""

@@ -66,6 +66,14 @@ class _FakeDataLoader:
         self.last_rate_limit_retries = 0
 
 
+def _provenance(rule: str, value: float) -> dict:
+    return {
+        "triggered_rules": [rule],
+        "indicator_values": {"signal_value": value},
+        "source": "deterministic",
+    }
+
+
 def _fake_universe() -> pd.DataFrame:
     """A small offline universe shared by the integration tests."""
     return pd.DataFrame(
@@ -116,6 +124,8 @@ def test_full_scan_run_persists_results_and_history_can_be_queried(
                     "reason": "fake breakout with rising volume",
                     "provenance": {
                         "rules": ["fake_breakout", "volume_confirmation"],
+                        "indicator_values": {"signal_value": 1.0},
+                        "source": "deterministic",
                         "observed_at": date(2026, 6, 1),
                     },
                 },
@@ -127,6 +137,7 @@ def test_full_scan_run_persists_results_and_history_can_be_queried(
                     "final_score": Decimal("82.25"),
                     "reason": "fake pullback near support",
                     "extra_note": "kept in raw_result_json",
+                    "provenance": _provenance("pullback_near_support", 0.8),
                 },
             ]
         )
@@ -195,14 +206,14 @@ def test_full_scan_run_persists_results_and_history_can_be_queried(
             "screener_key": "fake_integration_screener",
             "screener_version": None,
             "triggered_rules": ["fake_breakout", "volume_confirmation"],
-            "indicator_values": {},
+            "indicator_values": {"signal_value": 1.0},
             "params_snapshot": {
                 "start_date": "2026-01-01",
                 "end_date": "2026-06-02",
                 "min_score": "80.5",
             },
             "data_snapshot_date": "2026-06-02",
-            "source": None,
+            "source": "deterministic",
             "notes": None,
             "ai": None,
         }
@@ -213,6 +224,8 @@ def test_full_scan_run_persists_results_and_history_can_be_queried(
         # it and extracted into the dedicated provenance column.
         assert rows[0].raw_result_json["provenance"] == {
             "rules": ["fake_breakout", "volume_confirmation"],
+            "indicator_values": {"signal_value": 1.0},
+            "source": "deterministic",
             "observed_at": "2026-06-01",
         }
         assert rows[0].raw_result_json["provenance_json"] == rows[0].provenance_json
@@ -277,6 +290,7 @@ def test_partial_scan_run_persists_status_message_and_results(
                     "signal_date": date(2026, 6, 1),
                     "close": Decimal("2500.00"),
                     "reason": "usable row survived partial scan",
+                    "provenance": _provenance("partial_survivor", 1.0),
                 }
             ]
         )

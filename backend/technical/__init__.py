@@ -11,11 +11,17 @@ Public surface:
 """
 
 from backend.technical.technical_agent import (
+    TECHNICAL_PROMPT_VERSION,
     TechnicalAnalysisAgent,
+    TechnicalEvaluationResult,
     TechnicalVerdict,
+    technical_provenance_fingerprints,
 )
 
 __all__ = [
+    "TECHNICAL_PROMPT_VERSION",
     "TechnicalAnalysisAgent",
+    "TechnicalEvaluationResult",
     "TechnicalVerdict",
+    "technical_provenance_fingerprints",
 ]

@@ -13,7 +13,24 @@ import pandas as pd
 import streamlit as st
 
 from backend.auth.session import auth_secret_values
+from backend.scanner_base import PROVENANCE_COLUMN
 from backend.security import redact_text
+
+
+def _drop_provenance(results: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy without legacy or canonical internal provenance columns.
+
+    PROV-002 attaches a per-row provenance dict to every screener frame for
+    persistence. It is machine-readable evidence, not something to render in the
+    results table or dump into the download CSV (a raw dict cell would show as a
+    repr and bloat the file), so display/export paths drop it. ``errors="ignore"``
+    keeps this safe for legacy or hand-built frames that never had the column.
+    """
+    return results.drop(
+        columns=[PROVENANCE_COLUMN, "provenance_json"],
+        errors="ignore",
+    )
+
 
 # Excel/Sheets treat a cell whose first character is one of these as a formula.
 # That makes plain text like `=cmd|...` execute when the CSV is opened in a
@@ -31,7 +48,7 @@ def _csv_safe(df: pd.DataFrame) -> pd.DataFrame:
     safe = df.copy()
     for column in safe.columns:
         series = safe[column]
-        if series.dtype == object:
+        if series.dtype == object or pd.api.types.is_string_dtype(series.dtype):
             safe[column] = series.map(_escape_cell)
     return safe
 

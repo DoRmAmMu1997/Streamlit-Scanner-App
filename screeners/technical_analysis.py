@@ -31,9 +31,10 @@ gate-only "near support" candidates rather than failing the whole scan.
 from __future__ import annotations
 
 import concurrent.futures
+import datetime as dt
 import logging
 import threading
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 import pandas as pd
 
@@ -44,13 +45,20 @@ from backend.charts import (
     candlestick_with_volume,
 )
 from backend.config import get_agent_fast_mode, get_fundamentals_model
-from backend.fundamentals.fundamental_agent import (
-    FundamentalsAgentError,
-    FundamentalsUsageLimitError,
-)
 from backend.indicators import major_levels, rank_levels
 from backend.scanner_base import BaseScanner
-from backend.technical import TechnicalAnalysisAgent, TechnicalVerdict
+from backend.scanning.result_contract import (
+    AIEvaluationRecord,
+    AIProvenance,
+)
+from backend.security import redact_text
+from backend.technical import (
+    TECHNICAL_PROMPT_VERSION,
+    TechnicalAnalysisAgent,
+    TechnicalEvaluationResult,
+    TechnicalVerdict,
+    technical_provenance_fingerprints,
+)
 from backend.technical.patterns import (
     detect_double_patterns,
     detect_fair_value_gaps,
@@ -68,6 +76,27 @@ logger = logging.getLogger(__name__)
 _AGENT_CACHE: dict[tuple[str, bool], TechnicalAnalysisAgent] = {}
 _AGENT_CACHE_LOCK = threading.Lock()
 
+# The boolean gate flags (the gate dict's keys excluding "nearest_support"). Used
+# to label which deterministic setups fired in PROV-002 provenance.
+_GATE_RULE_FLAGS = (
+    "at_support",
+    "fresh_breakout",
+    "double_bottom",
+    "bullish_fvg",
+    "order_block",
+)
+
+_GATE_RULE_NAMES = {flag: f"gate_{flag}" for flag in _GATE_RULE_FLAGS}
+
+
+def _triggered_gate_rules(gate: dict) -> list[str]:
+    """Return every fired deterministic gate using one stable rule vocabulary."""
+    return [
+        _GATE_RULE_NAMES[flag]
+        for flag in _GATE_RULE_FLAGS
+        if gate.get(flag)
+    ]
+
 
 def _get_agent() -> TechnicalAnalysisAgent:
     """Return a cached technical agent for the configured Claude model + fast mode."""
@@ -83,6 +112,70 @@ def _get_agent() -> TechnicalAnalysisAgent:
             agent = TechnicalAnalysisAgent(model=model, fast_mode=fast_mode)
             _AGENT_CACHE[key] = agent
         return agent
+
+
+def _signal_date(value) -> dt.date | None:
+    try:
+        return pd.Timestamp(value).date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _emit_ai_evaluation(
+    callback,
+    *,
+    candidate: dict,
+    result: TechnicalEvaluationResult,
+    outcome: Literal["approved", "rejected", "error"],
+) -> None:
+    if not callable(callback):
+        return
+    callback(
+        AIEvaluationRecord(
+            symbol=str(candidate["symbol"]).upper(),
+            signal_date=_signal_date(candidate.get("signal_date")),
+            outcome=outcome,
+            verdict=result.provenance.verdict,
+            confidence=result.provenance.confidence,
+            decision_reason=result.provenance.decision_reason,
+            provenance=result.provenance,
+            validated_verdict_json=result.validated_verdict_json,
+        )
+    )
+
+
+def _technical_error_result(candidate: dict, exc: Exception) -> TechnicalEvaluationResult:
+    """Build a safe receipt when agent construction fails before evaluation."""
+    symbol = str(candidate.get("symbol") or "").upper()
+    model = get_fundamentals_model()
+    prompt_sha256, context_sha256 = technical_provenance_fingerprints(
+        model,
+        symbol,
+        candidate["frame"],
+        candidate["levels"],
+        candidate.get("tool_params"),
+    )
+    provenance = AIProvenance(
+        model_name=model,
+        prompt_version=TECHNICAL_PROMPT_VERSION,
+        prompt_sha256=prompt_sha256,
+        generated_at=dt.datetime.now(dt.UTC),
+        cache_hit=False,
+        evidence_references=[],
+        input_context_hash=context_sha256,
+        verdict="error",
+        confidence=None,
+        decision_reason=(
+            "Technical agent evaluation failed "
+            f"({type(exc).__name__})."
+        ),
+    )
+    return TechnicalEvaluationResult(
+        verdict=None,
+        provenance=provenance,
+        validated_verdict_json={},
+        error_type=type(exc).__name__,
+    )
 
 
 class TechnicalAnalysis(BaseScanner):
@@ -305,7 +398,14 @@ class TechnicalAnalysis(BaseScanner):
             "nearest_level": float(nearest_support["price"]) if nearest_support else float("nan"),
         }
 
-    def _confirm_candidate(self, candidate: dict, *, force_refresh: bool = False) -> dict | None:
+    def _confirm_candidate(
+        self,
+        candidate: dict,
+        *,
+        force_refresh: bool = False,
+        ai_evaluation_callback=None,
+        compute_failure_callback=None,
+    ) -> dict | None:
         """Run the AI confirmation for one gate-passing candidate → result row.
 
         Calls the Claude Agent SDK agent and maps its verdict to a result row.
@@ -321,16 +421,41 @@ class TechnicalAnalysis(BaseScanner):
             # A user-triggered refresh should bypass both layers of cache:
             # candles in the loader and AI verdicts inside the agent. The detector
             # settings travel along so the agent's tools match the gate.
-            verdict: TechnicalVerdict = _get_agent().analyze(
+            evaluation = _get_agent().evaluate(
                 symbol,
                 candidate["frame"],
                 candidate["levels"],
                 params=candidate.get("tool_params"),
                 force_refresh=force_refresh,
             )
-        except (FundamentalsAgentError, FundamentalsUsageLimitError) as exc:
-            logger.warning("Technical agent unavailable for %s: %s", symbol, exc)
+        except Exception as exc:  # noqa: BLE001 - emit a trusted error receipt
+            logger.warning(
+                "Technical agent unavailable for %s (%s).",
+                symbol,
+                type(exc).__name__,
+            )
+            evaluation = _technical_error_result(candidate, exc)
+        if evaluation.verdict is None:
+            _emit_ai_evaluation(
+                ai_evaluation_callback,
+                candidate=candidate,
+                result=evaluation,
+                outcome="error",
+            )
+            if callable(compute_failure_callback):
+                compute_failure_callback(
+                    {
+                        "symbol": symbol,
+                        "scanner": type(self).__name__,
+                        "message": (
+                            evaluation.provenance.decision_reason
+                            or "Technical AI evaluation failed."
+                        ),
+                        "phase": "ai_evaluation",
+                    }
+                )
             return self._gate_only_row(candidate)
+        verdict: TechnicalVerdict = evaluation.verdict
 
         # A BUY needs either price currently AT a major support, or one of the
         # bullish patterns with its trigger already confirmed (breakout/reaction).
@@ -344,6 +469,12 @@ class TechnicalAnalysis(BaseScanner):
         qualifies = verdict.pattern == "at_support" or (
             verdict.pattern in bullish_confirmable and verdict.confirmed
         )
+        _emit_ai_evaluation(
+            ai_evaluation_callback,
+            candidate=candidate,
+            result=evaluation,
+            outcome="approved" if qualifies else "rejected",
+        )
         if not qualifies:
             return None
 
@@ -351,6 +482,7 @@ class TechnicalAnalysis(BaseScanner):
         # gate support so the column is always populated.
         reported_level = float(verdict.key_levels[0]) if verdict.key_levels else nearest_level
 
+        gate_rules = _triggered_gate_rules(candidate["gate"])
         return {
             "symbol": symbol,
             "rating": "BUY",
@@ -362,10 +494,21 @@ class TechnicalAnalysis(BaseScanner):
             "trend": verdict.trend,
             "nearest_level": reported_level,
             "reason": verdict.reasoning,
+            # Gate + AI agreed, so this is a hybrid signal. AI evidence (model,
+            # prompt, scraped text) is intentionally out of scope until PROV-003.
+            "provenance": self.build_provenance(
+                triggered_rules=[*gate_rules, "ai_setup_qualified"],
+                indicator_values={
+                    "close": close,
+                    "nearest_level": reported_level,
+                    "confidence": int(verdict.confidence),
+                },
+                source="hybrid",
+                ai=evaluation.provenance,
+            ),
         }
 
-    @staticmethod
-    def _gate_only_row(candidate: dict) -> dict | None:
+    def _gate_only_row(self, candidate: dict) -> dict | None:
         """Build a gate-only BUY row when the Claude Agent SDK is unavailable.
 
         Without the agent (not installed, or plan limit hit) we still surface a
@@ -404,6 +547,15 @@ class TechnicalAnalysis(BaseScanner):
                 f"Gate: close {close:.2f} is {what}. AI confirmation unavailable "
                 "(Claude Agent SDK not ready); showing gate-only candidate."
             ),
+            # No AI ran, so this fallback row is a purely deterministic gate hit.
+            "provenance": self.build_provenance(
+                triggered_rules=[
+                    *_triggered_gate_rules(gate),
+                    "ai_confirmation_unavailable",
+                ],
+                indicator_values={"close": close, "nearest_level": nearest_level},
+                source="deterministic",
+            ),
         }
 
     def compute_signal(self, symbol: str, candles: pd.DataFrame, params: dict) -> dict | None:
@@ -434,6 +586,8 @@ class TechnicalAnalysis(BaseScanner):
         return self._confirm_candidate(
             candidate,
             force_refresh=bool(params.get("force_refresh", False)),
+            ai_evaluation_callback=params.get("ai_evaluation_callback"),
+            compute_failure_callback=params.get("compute_failure_callback"),
         )
 
     def run(self, universe_df: pd.DataFrame, data_loader, params: dict) -> pd.DataFrame:
@@ -464,10 +618,20 @@ class TechnicalAnalysis(BaseScanner):
             try:
                 candidate = self._prepare_candidate(symbol, candles, params)
             except Exception as exc:  # noqa: BLE001 — one bad frame must not abort the scan
-                logger.warning("%s gate failed for %s: %s", type(self).__name__, symbol, exc)
+                safe_message = redact_text(str(exc))
+                logger.warning(
+                    "%s gate failed for %s: %s",
+                    type(self).__name__,
+                    symbol,
+                    safe_message,
+                )
                 if callable(compute_failure_callback):
                     compute_failure_callback(
-                        {"symbol": symbol, "scanner": type(self).__name__, "message": str(exc)}
+                        {
+                            "symbol": symbol,
+                            "scanner": type(self).__name__,
+                            "message": safe_message,
+                        }
                     )
                 continue
             if candidate is not None:
@@ -486,6 +650,8 @@ class TechnicalAnalysis(BaseScanner):
                         self._confirm_candidate,
                         candidate,
                         force_refresh=force_refresh,
+                        ai_evaluation_callback=params.get("ai_evaluation_callback"),
+                        compute_failure_callback=compute_failure_callback,
                     ): candidate["symbol"]
                     for candidate in candidates
                 }
@@ -494,12 +660,20 @@ class TechnicalAnalysis(BaseScanner):
                     try:
                         row = future.result()
                     except Exception as exc:  # noqa: BLE001 — isolate per-symbol failures
+                        safe_message = redact_text(str(exc))
                         logger.warning(
-                            "%s AI confirm failed for %s: %s", type(self).__name__, symbol, exc
+                            "%s AI confirm failed for %s: %s",
+                            type(self).__name__,
+                            symbol,
+                            safe_message,
                         )
                         if callable(compute_failure_callback):
                             compute_failure_callback(
-                                {"symbol": symbol, "scanner": type(self).__name__, "message": str(exc)}
+                                {
+                                    "symbol": symbol,
+                                    "scanner": type(self).__name__,
+                                    "message": safe_message,
+                                }
                             )
                         continue
                     if row is not None:
@@ -507,7 +681,10 @@ class TechnicalAnalysis(BaseScanner):
 
         # 3. Assemble in universe order so the table + tests stay deterministic.
         rows = [rows_by_symbol[c["symbol"]] for c in candidates if c["symbol"] in rows_by_symbol]
-        return pd.DataFrame(rows, columns=self.result_columns)
+        return self.build_result_frame(
+            rows,
+            compute_failure_callback=compute_failure_callback,
+        )
 
     # ------------------------------------------------------------------
     # Chart

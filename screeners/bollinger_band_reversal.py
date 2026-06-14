@@ -83,6 +83,7 @@ class BollingerBandReversal(BaseScanner):
         # the candle to a green close. Green means close is greater than open.
         if low_price < lower_band and close_price > open_price:
             rating = "BUY"
+            triggered_rules = ["low_pierced_lower_band", "closed_green"]
             reason = (
                 f"Daily candle traded below the lower Bollinger Band "
                 f"({lower_band:.2f}) and closed green at {close_price:.2f}."
@@ -91,6 +92,7 @@ class BollingerBandReversal(BaseScanner):
         # a red close. Red means close is less than open.
         elif high_price > upper_band and close_price < open_price:
             rating = "SELL"
+            triggered_rules = ["high_pierced_upper_band", "closed_red"]
             reason = (
                 f"Daily candle traded above the upper Bollinger Band "
                 f"({upper_band:.2f}) and closed red at {close_price:.2f}."
@@ -111,6 +113,18 @@ class BollingerBandReversal(BaseScanner):
             "bb_upper": upper_band,
             "bb_lower": lower_band,
             "reason": reason,
+            "provenance": self.build_provenance(
+                triggered_rules=triggered_rules,
+                indicator_values={
+                    "open": open_price,
+                    "high": high_price,
+                    "low": low_price,
+                    "close": close_price,
+                    "bb_middle": float(latest["bb_middle"]),
+                    "bb_upper": upper_band,
+                    "bb_lower": lower_band,
+                },
+            ),
         }
 
     def build_chart(self, candles: pd.DataFrame, params: dict) -> dict:

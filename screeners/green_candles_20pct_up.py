@@ -142,6 +142,16 @@ class GreenCandles20PctUp(BaseScanner):
             "run_low": run["run_low"],
             "run_high": run["run_high"],
             "reason": reason,
+            "provenance": self.build_provenance(
+                triggered_rules=["green_run_gain_above_threshold"],
+                indicator_values={
+                    "close": float(latest["close"]),
+                    "run_length": int(run["length"]),
+                    "run_gain_pct": float(run["gain"]),
+                    "run_low": run["run_low"],
+                    "run_high": run["run_high"],
+                },
+            ),
         }
 
     def build_chart(self, candles: pd.DataFrame, params: dict) -> dict:
