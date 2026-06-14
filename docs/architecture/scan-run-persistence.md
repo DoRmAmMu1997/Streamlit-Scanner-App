@@ -119,8 +119,29 @@ time. `scan_results` remains shortlist-only. An approved AI decision therefore
 appears in both places, while rejected and malformed/error decisions remain
 auditable without being presented as signals.
 
+| Column | Type | Null | Index | Purpose |
+|---|---|---|---|---|
+| `id` | BigInt PK¹ | no | PK | Surrogate key. |
+| `run_id` | BigInt FK¹ | no | ✓ | → `scan_runs.id`, `ON DELETE CASCADE`. |
+| `symbol` | String(50) | no | ✓ | Stock the verdict is about. |
+| `signal_date` | Date | yes | — | Candle date the verdict was based on. |
+| `outcome` | String(16)² | no | ✓ | `approved` \| `rejected` \| `error`. |
+| `verdict_label` | String(50) | yes | — | Screener verdict (e.g. AI pattern / approved). |
+| `confidence` | Numeric(8,4) | yes | — | Model confidence (0–10), exact not float. |
+| `model_name` | String(100) | no | — | LLM that produced the verdict (code-stamped). |
+| `prompt_version` | String(100) | no | — | Semantic prompt version (code-stamped). |
+| `validated_verdict_json` | JSON | no | — | The Pydantic-validated verdict object. |
+| `provenance_json` | JSON | no | — | Trusted receipt: prompt SHA-256, evidence references (label/URL/hash), input-context hash, generated-at, cache flag. |
+| `created_at` | DateTime(tz) | no | — | UTC row-creation time (ORM default). |
+
+² Stored as VARCHAR + CHECK (`ck_ai_evaluations_outcome`), same portable pattern as `scan_runs.status` (§4.3).
+
 Raw model responses and scraped snippets are not stored. Research evidence is
-represented by sanitized source labels/URLs and full SHA-256 hashes.
+represented by sanitized source labels/URLs and full SHA-256 hashes. The on-disk
+verdict cache that feeds this ledger is itself HMAC-signed and verified before
+reuse, so a tampered cache entry is rejected and recomputed rather than trusted
+(see `backend/ai_cache_integrity.py`; set `SCANNER_AI_CACHE_SIGNING_KEY` for a
+restart-stable, cross-process key).
 
 ---
 

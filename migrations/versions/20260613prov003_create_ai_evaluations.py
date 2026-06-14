@@ -1,5 +1,15 @@
 """Create durable AI evaluation receipts for PROV-003.
 
+Beginner note:
+This migration adds the ``ai_evaluations`` table — an append-only *ledger* of
+every AI verdict attempt (approved, rejected, or error) tied to a scan run. It
+exists so an AI decision can be audited months later: which model and prompt
+version ran, the confidence, and a trusted receipt — without storing any raw
+scraped text or raw model response. ``scan_results`` stays shortlist-only, so an
+approved decision appears in both tables while rejected/error ones remain
+auditable here without being shown as signals. The ``outcome`` CHECK constraint
+and the FK ``ON DELETE CASCADE`` keep the ledger consistent with its parent run.
+
 Revision ID: 20260613prov003
 Revises: 20260610scan004
 """
