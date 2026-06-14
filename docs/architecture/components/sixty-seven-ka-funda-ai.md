@@ -40,7 +40,7 @@ sequenceDiagram
         Tool->>SI: fetch_company_data (cached)
         Tool->>Serp: 3 focused queries
         Tool-->>Agent: JSON evidence [source_policy: evidence only]
-        Agent->>Agent: prompt-injection scan; hash evidence; HMAC-sign cache
+        Agent->>Agent: prompt-injection scan, hash evidence, HMAC-sign cache
         Agent-->>Screener: SixtySevenEvaluationResult [verdict + AIProvenance receipt]
         Screener-->>Screener: ai_evaluation_callback -> ai_evaluations [approved/rejected/error]
     end
@@ -57,7 +57,7 @@ sequenceDiagram
 | `.evaluate(symbol, candidate, *, force_refresh=False, search_result_count=5) -> SixtySevenEvaluationResult` | Main entry: validated verdict **+ trusted `AIProvenance` receipt + `validated_verdict_json`**. Malformed/missing/injected evidence → `verdict=None` + an `error` receipt. Signs the verdict cache; `_cached_evaluation` verifies + cross-checks (prompt/context hash, model) on read, recomputing on tamper. |
 | `.verify(symbol, candidate, ...) -> SixtySevenVerdict` | Compat wrapper over `evaluate`; raises `FundamentalsAgentError` on an error result. |
 | `SixtySevenVerdict` / `SixtySevenEvaluationResult` | Verdict: `symbol, approved, fall_reason_category, 6 core flags, confidence, evidence[], rejection_reason, summary, model_used` (**`model_validator`: `approved` ⇒ all core flags True**). Result: `verdict|None`, `provenance` (`AIProvenance`), `validated_verdict_json`, `error_type`. |
-| `sixty_seven_provenance_fingerprints(model, symbol, candidate)` | `(prompt_sha256, context_sha256)` — the deterministic hashes stamped into the receipt + cache key. |
+| `sixty_seven_provenance_fingerprints(model, symbol, candidate)` | `(prompt_sha256, context_sha256)` — deterministic hashes stamped into the receipt; the cache key uses the prompt hash plus a stable candidate-facts digest. |
 | `SerpApiClient(api_key=None, session=None)` · `.search(query, max_results=5)` | Fixed `ENDPOINT`; `SerpApiSetupError`/`SerpApiSearchError`; India-localized (`gl=in,hl=en`). |
 
 ## 4. Key design decisions & trade-offs

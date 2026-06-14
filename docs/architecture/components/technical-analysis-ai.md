@@ -30,7 +30,7 @@ sequenceDiagram
     participant SDK as Claude Agent SDK
     participant Tools as in-process MCP tools
     Gate->>Agent: evaluate(symbol, candles, major_levels, params)
-    Agent->>Cache: get_verdict(...); verify_cache_envelope (HMAC)
+    Agent->>Cache: get_verdict(...) and verify_cache_envelope (HMAC)
     alt cache hit (signature + hashes valid)
         Cache-->>Agent: TechnicalEvaluationResult [rebuilt from trusted inputs]
     else miss / tampered
@@ -38,7 +38,7 @@ sequenceDiagram
         SDK->>Tools: market_structure / level_map / price_patterns
         Tools-->>SDK: deterministic JSON (per-call context)
         SDK-->>Agent: final JSON message
-        Agent->>Agent: validate TechnicalVerdict; hash evidence; build AIProvenance
+        Agent->>Agent: validate TechnicalVerdict, hash evidence, build AIProvenance
         Agent->>Cache: sign_cache_envelope + set_verdict
     end
     Agent-->>Gate: TechnicalEvaluationResult [verdict + receipt]

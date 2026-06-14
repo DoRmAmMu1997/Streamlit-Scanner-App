@@ -10,7 +10,7 @@
 
 ## 1. Purpose & responsibilities
 
-Two independent guardrails that keep the app safe by default:
+Three independent guardrails keep the app safe by default:
 
 1. **Secret redaction (SEC-002)** — mask credentials before any text reaches a
    log handler, a UI error panel, or a persisted `scan_runs.error_message`.

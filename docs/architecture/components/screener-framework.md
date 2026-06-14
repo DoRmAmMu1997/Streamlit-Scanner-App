@@ -85,7 +85,7 @@ flowchart TD
 |---|---|---|
 | **ABC with `@abstractmethod compute_signal`** | "Forgot to implement the strategy" fails at instantiation/discovery, not as a silent empty shortlist at runtime. | Duck typing — late, confusing failures. |
 | **Fixed `COMMON_RESULT_COLUMNS` prefix** | UI badge logic, chart symbol pick, CSV download rely on these 5 columns regardless of screener. | Free-form output — UI special-cases per screener. |
-| **Provenance is mandatory (PROV-001B/002)** | `build_result_frame` validates each row's `provenance` (`source` + `triggered_rules` + scalar `indicator_values`) and drops failures; a screener that forgets provenance yields an empty/`PARTIAL` run, never silent bad audit data. | Optional provenance — empty/untrustworthy receipts. |
+| **Provenance is mandatory (PROV-001B/002)** | `build_result_frame` validates each row's `provenance` (`source` + `triggered_rules` + scalar `indicator_values`) and drops failures; a screener that forgets provenance yields no persisted result rows and the scan service marks the run `FAILED` when none survive, never silent bad audit data. | Optional provenance — empty/untrustworthy receipts. |
 | **Template `run(...)`, rarely overridden** | One scan shape (one row per signal, empty frame on no match) keeps the UI simple. | Per-screener loops — duplication, drift. |
 | **Streaming-first with batch fallback** | Large universes compute per-symbol without holding all candles in memory; old loaders still work. | Batch only — memory pressure. |
 | **Per-symbol try/except (redacted) + continue** | One bad candle frame must not kill the whole scan; failures surface in "Run details" via a callback. | Fail whole scan — fragile. |
