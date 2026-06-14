@@ -21,7 +21,7 @@ SCAN-001 defines the data model that fixes this. With it, the app can answer
 **"why did it shortlist this stock on 2026-06-03?"** months later — without re-running
 today's (possibly changed) universe, data, or model. This is the *foundation stone* the
 tech-lead called out: every later ticket (scheduled scans, history page, provenance,
-forward-return validation, ranking) builds on these two tables.
+forward-return validation, ranking) builds on these audit tables.
 
 This document is the SCAN-001 deliverable. The schema is materialised as SQLAlchemy ORM
 models in [`backend/storage/models.py`](../../backend/storage/models.py); this doc explains
@@ -45,7 +45,9 @@ the **design, the migration plan, and the model boundaries**.
   screeners emit `triggered_rules` + `indicator_values` via
   `BaseScanner.build_provenance`, carried on a reserved `provenance` row column and
   normalized into `provenance_json`; the two AI screeners label `source` hybrid/deterministic)*.
-- Full AI verdict/evidence provenance → **PROV-003**.
+- Full AI verdict/evidence provenance → **PROV-003** *(implemented for the
+  Technical Analysis and 67 Ka Funda screeners through the `ai_evaluations`
+  ledger and approved-result receipts)*.
 - Populating `final_score` → **RANK-***. Audit log / user identity → **OBS-003 / AUTH-***.
 
 The starter models intentionally stop at "schema only" so this design can be reviewed and
@@ -55,12 +57,13 @@ agreed before the implementation tickets wire a database into the app.
 
 ## 3. The schema
 
-One run has many results (1‑to‑many). `scan_results.run_id` references `scan_runs.id`
-with `ON DELETE CASCADE`, so deleting a run removes its results — no orphans.
+One run has many shortlisted results and many AI evaluations. Both child tables
+reference `scan_runs.id` with `ON DELETE CASCADE`, so deleting a run removes its
+complete audit trail with no orphans.
 
 ```
 scan_runs (1) ─────< (many) scan_results
-   id  ◄──────────────── run_id  (FK, ON DELETE CASCADE)
+         (1) ─────< (many) ai_evaluations
 ```
 
 ### 3.1 `scan_runs` — one row per scan execution (the audit header)
@@ -107,6 +110,39 @@ The first five `scan_results` business columns (`symbol`, `rating`, `signal_date
 "close", "reason"]`. Persisting a screener row is therefore a near 1:1 copy, with the
 screener's own `EXTRA_RESULT_COLUMNS` captured in `raw_result_json`.
 
+### 3.3 `ai_evaluations` — one row per attempted AI decision
+
+This ledger records approved, rejected, and error outcomes before shortlist
+filtering. It stores the code-stamped model and prompt version, full prompt hash,
+validated verdict JSON, trusted provenance JSON, confidence, and UTC creation
+time. `scan_results` remains shortlist-only. An approved AI decision therefore
+appears in both places, while rejected and malformed/error decisions remain
+auditable without being presented as signals.
+
+| Column | Type | Null | Index | Purpose |
+|---|---|---|---|---|
+| `id` | BigInt PK¹ | no | PK | Surrogate key. |
+| `run_id` | BigInt FK¹ | no | ✓ | → `scan_runs.id`, `ON DELETE CASCADE`. |
+| `symbol` | String(50) | no | ✓ | Stock the verdict is about. |
+| `signal_date` | Date | yes | — | Candle date the verdict was based on. |
+| `outcome` | String(16)² | no | ✓ | `approved` \| `rejected` \| `error`. |
+| `verdict_label` | String(50) | yes | — | Screener verdict (e.g. AI pattern / approved). |
+| `confidence` | Numeric(8,4) | yes | — | Model confidence (0–10), exact not float. |
+| `model_name` | String(100) | no | — | LLM that produced the verdict (code-stamped). |
+| `prompt_version` | String(100) | no | — | Semantic prompt version (code-stamped). |
+| `validated_verdict_json` | JSON | no | — | The Pydantic-validated verdict object. |
+| `provenance_json` | JSON | no | — | Trusted receipt: prompt SHA-256, evidence references (label/URL/hash), input-context hash, generated-at, cache flag. |
+| `created_at` | DateTime(tz) | no | — | UTC row-creation time (ORM default). |
+
+² Stored as VARCHAR + CHECK (`ck_ai_evaluations_outcome`), same portable pattern as `scan_runs.status` (§4.3).
+
+Raw model responses and scraped snippets are not stored. Research evidence is
+represented by sanitized source labels/URLs and full SHA-256 hashes. The on-disk
+verdict cache that feeds this ledger is itself HMAC-signed and verified before
+reuse, so a tampered cache entry is rejected and recomputed rather than trusted
+(see `backend/ai_cache_integrity.py`; set `SCANNER_AI_CACHE_SIGNING_KEY` for a
+restart-stable, cross-process key).
+
 ---
 
 ## 4. Design decisions (and why)
@@ -140,7 +176,8 @@ represent values like `12.07` exactly; for prices and scores that feed decisions
 rounding error is unacceptable. The round-trip test asserts `Decimal("12.07")` survives intact.
 
 ### 4.5 JSON columns for schema-flexible, AI-and-non-AI output
-`params_json`, `raw_result_json`, and `provenance_json` use the generic `JSON` type
+`params_json`, `raw_result_json`, `provenance_json`,
+`validated_verdict_json`, and AI-evaluation `provenance_json` use the generic `JSON` type
 (portable: stored as `TEXT` on SQLite, `json` on Postgres — `JSONB` is an easy Postgres-only
 upgrade later). This is the key to **one schema serving every screener**: deterministic
 screeners store triggered rules + indicator values; AI screeners store model name, prompt
@@ -152,11 +189,13 @@ It is also the seam PROV-001 plugs into without changing the schema.
   (SCAN-004) filters by them.
 - `scan_results`: `run_id` (load a run's results — the most common query) and `symbol`
   (a symbol's history across runs — the validation use case) are indexed.
+- `ai_evaluations`: `run_id`, `symbol`, and `outcome` support ledger lookup and
+  operational review.
 - Deferred on purpose: a `(symbol, signal_date)` composite and any `final_score` sort index
   are left for VALID-*/RANK-*, when queries that need them actually exist.
 
 ### 4.7 Cascade delete, no orphans
-The relationship uses `cascade="all, delete-orphan"` (ORM level) and the FK uses
+Both child relationships use `cascade="all, delete-orphan"` (ORM level) and their FKs use
 `ON DELETE CASCADE` (DB level, with `passive_deletes=True`). Deleting a run cleans up its
 results either way. SQLite only enforces the DB-level cascade when `PRAGMA foreign_keys=ON`
 is set — SCAN-002 sets that on the engine; the test demonstrates it.
@@ -208,7 +247,7 @@ Scan service (SCAN-003)         ← orchestrates a run; owns the "create → run
 Repository (SCAN-002/REFACTOR-002)  ← the ONLY place that builds queries / sessions
         │
         ▼
-ORM models (SCAN-001 — THIS)    ← table shapes: ScanRun, ScanResult, ScanStatus, Base
+ORM models (SCAN-001 / PROV-003) ← table shapes: ScanRun, ScanResult, AIEvaluation, ScanStatus
         │
         ▼
 Engine + Session (SCAN-002)     ← DATABASE_URL → SQLite (dev) / Postgres (prod)
@@ -226,36 +265,42 @@ Engine + Session (SCAN-002)     ← DATABASE_URL → SQLite (dev) / Postgres (pr
   service converts `Decimal`/`date`/`datetime` to JSON-safe forms before storing (mirroring
   the existing cache's `json.dumps(..., default=str)` habit). The dedicated columns
   (`close_price`, `signal_date`, `rating`, …) stay strongly typed for querying.
-- **Scraped / AI text is untrusted evidence.** Whatever lands in `provenance_json` from an AI
-  agent or a scraped page is stored as *evidence*, not as instructions — consistent with the
-  app's existing prompt-injection posture (AI-003 / TEST-003).
+- **Scraped / AI text is untrusted evidence.** Raw scraped text and model responses
+  are transient only. Durable receipts contain validated verdict fields plus
+  sanitized source labels/URLs and evidence hashes.
 
 ### 6.1 PROV-001A result normalization boundary
 
 `backend/scanning/result_contract.py` supplies the domain models anticipated
 above. It deliberately sits between flexible screener output and the repository:
 
-1. A screener returns its existing DataFrame.
-2. `backend.scanning.service` creates row dictionaries only for persistence.
-3. `normalize_screener_row(...)` copies each row, converts non-JSON values,
-   redacts credential-shaped data, and writes canonical `provenance_json`.
-4. The repository stores that normalized copy in `raw_result_json` and extracts
+1. A screener emits candidate row mappings.
+2. `BaseScanner.build_result_frame(...)` validates and normalizes each accepted
+   row before constructing the live DataFrame. Invalid rows are skipped and
+   reported to the scan service.
+3. `backend.scanning.service` creates separate row dictionaries for persistence;
+   `normalize_screener_row(...)` redacts credential-shaped data and writes
+   canonical `provenance_json`.
+4. The repository stores that persistence copy in `raw_result_json` and extracts
    the same canonical provenance into `provenance_json`.
-5. The original DataFrame is returned unchanged to Streamlit.
+5. The validated DataFrame is returned to Streamlit. PROV-002 producers include
+   a trailing internal `provenance` column, and transitional callers may include
+   canonical `provenance_json`; render and CSV helpers remove both columns from
+   display/export copies.
 
 The word **copy** is important here. A pandas DataFrame is the live result that
 the UI may sort, display, chart, or export. The persistence copy is a separate
-tree of ordinary JSON values. Adding provenance to that tree cannot add columns
-to the UI's DataFrame or replace its pandas/NumPy values while the page is
-rendering.
+tree of ordinary JSON values. Normalization never mutates pandas/NumPy values
+inside the live frame; UI/export code explicitly strips internal provenance
+columns before rendering or download.
 
-The v1 provenance envelope contains `screener_key`, optional
+The provenance envelope contains `screener_key`, optional
 `screener_version`, `triggered_rules`, scalar `indicator_values`,
 `params_snapshot`, `data_snapshot_date`, optional
 `deterministic | ai | hybrid` source, optional notes, and a deliberately small
-AI placeholder. Unknown existing provenance fields are preserved. This lets
-PROV-002 and PROV-003 add real evidence incrementally without another database
-migration or a flag-day conversion of all screeners.
+AI receipt with model, semantic prompt version, full prompt SHA-256, UTC
+generation timestamp, cache status, decision fields, and hashed evidence
+references. Unknown existing provenance fields are preserved.
 
 ---
 

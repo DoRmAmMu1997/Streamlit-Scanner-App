@@ -415,6 +415,7 @@ def secret_values(settings: AppSettings | None = None) -> list[str]:
             settings.serpapi_api_key,
             settings.dhan_client_id,
             settings.dhan_access_token,
+            _clean_env_value(os.getenv("SCANNER_AI_CACHE_SIGNING_KEY")),
         )
         if value
     ]

@@ -14,7 +14,10 @@ package rather than forcing every screener, test, and service to change imports.
 """
 
 from backend.scanning.result_contract import (
+    AIEvaluationOutcome,
+    AIEvaluationRecord,
     AIProvenance,
+    EvidenceReference,
     JSONScalar,
     JSONValue,
     ResultContractError,
@@ -23,12 +26,16 @@ from backend.scanning.result_contract import (
     SignalProvenance,
     SignalSource,
     normalize_screener_row,
+    normalize_secret_safe_json,
 )
 from backend.scanning.service import ScanRunResult, run_scan
 from backend.storage.models import ScanStatus
 
 __all__ = [
+    "AIEvaluationOutcome",
+    "AIEvaluationRecord",
     "AIProvenance",
+    "EvidenceReference",
     "JSONScalar",
     "JSONValue",
     "ResultContractError",
@@ -39,5 +46,6 @@ __all__ = [
     "SignalProvenance",
     "SignalSource",
     "normalize_screener_row",
+    "normalize_secret_safe_json",
     "run_scan",
 ]

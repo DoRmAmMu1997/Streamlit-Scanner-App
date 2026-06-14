@@ -46,6 +46,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     BigInteger,
+    CheckConstraint,
     Date,
     DateTime,
     Enum,
@@ -206,6 +207,11 @@ class ScanRun(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+    ai_evaluations: Mapped[list[AIEvaluation]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
     def __repr__(self) -> str:  # Friendly output in logs / the Python shell.
         return (
@@ -310,6 +316,44 @@ class ScanResult(Base):
             f"ScanResult(id={self.id!r}, run_id={self.run_id!r}, "
             f"symbol={self.symbol!r}, rating={self.rating!r})"
         )
+
+
+class AIEvaluation(Base):
+    """One validated AI verdict receipt associated with a scan run."""
+
+    __tablename__ = "ai_evaluations"
+    __table_args__ = (
+        CheckConstraint(
+            "outcome IN ('approved', 'rejected', 'error')",
+            name="ck_ai_evaluations_outcome",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
+    run_id: Mapped[int] = mapped_column(
+        BigIntPrimaryKey,
+        ForeignKey("scan_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    signal_date: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+    outcome: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    verdict_label: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    confidence: Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
+    model_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    validated_verdict_json: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False
+    )
+    provenance_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: dt.datetime.now(dt.UTC),
+    )
+
+    run: Mapped[ScanRun] = relationship(back_populates="ai_evaluations")
 
 
 # ============================================================================

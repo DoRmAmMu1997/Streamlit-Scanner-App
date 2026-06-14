@@ -651,6 +651,11 @@ that had `forward_outlook` as a plain string are automatically migrated into
 the new three-part shape on load (the legacy string becomes the
 `overall_summary` subfield).
 
+PROV-003 AI-screener envelopes are HMAC-authenticated before reuse. Set
+`SCANNER_AI_CACHE_SIGNING_KEY` to a deployment secret for restart-stable cache
+hits. When it is absent, a process-random key allows safe hits only within the
+current app process, so unsigned or previously forged files naturally miss.
+
 ### Cost ballpark (Claude Sonnet, billed to your plan)
 
 Usage draws on your Claude plan's monthly **Agent SDK credit** (Pro $20 /
@@ -698,13 +703,14 @@ re-running today's data, universe, or model.
 
 - **Schema (SCAN-001)** — two SQLAlchemy tables in `backend/storage/models.py`:
   `scan_runs` (the audit header — screener, universe, params, data snapshot,
-  app/git version, status, error) and `scan_results` (one row per shortlisted
-  stock, with the full screener output plus a provenance JSON column).
+  app/git version, status, error), `scan_results` (one row per shortlisted
+  stock), and `ai_evaluations` (approved, rejected, and error AI decisions).
 - **Database layer (SCAN-002)** — `backend/storage/database.py` (engine + short
   `session_scope()` sessions; SQLite default at `data/scanner.db`, Postgres via
   `DATABASE_URL`) and `backend/storage/repository.py` (the only query/write
-  helpers: `create_scan_run`, `save_scan_results`, `finish_scan_run`,
-  `get_latest_scan_runs`, `get_scan_results`, `count_scan_results_for_runs`,
+  helpers: `create_scan_run`, `save_scan_results`, `save_ai_evaluations`,
+  `finish_scan_run`, `get_latest_scan_runs`, `get_scan_results`,
+  `get_ai_evaluations`, `count_scan_results_for_runs`,
   `list_distinct_screener_keys`, `list_distinct_universe_keys`,
   `list_distinct_triggered_by_values`). Schema changes are versioned with
   **Alembic** (`migrations/`, `alembic.ini`); create or upgrade the local database
@@ -716,11 +722,11 @@ re-running today's data, universe, or model.
   universe contained (`symbols_scanned`).
 - **Typed result contract (PROV-001A)** —
   `backend/scanning/result_contract.py` defines the small `ScreenerResult`,
-  `SignalProvenance`, `RuleCheck`, and placeholder `AIProvenance` domain models.
-  Before persistence, the scan service normalizes a copy of each legacy result
-  row into strict JSON and adds a canonical `provenance_json` payload. Existing
-  screener DataFrames are returned to Streamlit unchanged, so adopting the
-  contract does not require rewriting every screener.
+  `SignalProvenance`, `RuleCheck`, `EvidenceReference`, expanded `AIProvenance`,
+  and `AIEvaluationRecord` domain models. `BaseScanner` validates provenance and
+  strict JSON before constructing the result DataFrame; the scan service then
+  creates a separate secret-safe persistence copy with canonical
+  `provenance_json`.
 - **Scan history page (SCAN-004)** — switch the view radio at the top of the app
   to **Scan history** to inspect previous runs: started/finished timestamps,
   screener, universe, status badge, symbols scanned, shortlisted count, trigger,
@@ -730,7 +736,8 @@ re-running today's data, universe, or model.
   (secret-redacted) error message.
 
 > **Upgrading an existing checkout?** The app applies migrations automatically
-> on startup, so the database gains the `symbols_scanned` column on first run.
+> on startup, so the database gains the `symbols_scanned` column and
+> `ai_evaluations` ledger on first run.
 > Runs recorded before the upgrade show "—" in that column — the value was not
 > stored back then.
 
@@ -743,7 +750,7 @@ The design is documented in
 including strategy-specific columns. `provenance_json` is the standardized
 explanation envelope: screener identity/version, triggered rules, indicator
 values, parameters, data date, source category, notes, and an optional reserved
-AI metadata object. Legacy `provenance` and `rules` keys remain readable and are
+AI receipt. Legacy `provenance` and `rules` keys remain readable and are
 enriched rather than discarded.
 
 For a beginner-friendly analogy, `raw_result_json` is the complete worksheet a
@@ -751,11 +758,11 @@ screener handed in, while `provenance_json` is the consistently labeled
 "show your work" section. Keeping both means new history features can read a
 stable explanation format without throwing away strategy-specific details.
 
-Only `symbol` is mandatory during this compatibility phase. Other common fields
-(`rating`, `signal_date`, `close`/`close_price`, and `reason`) remain optional so
-older and AI-assisted screeners continue to persist. Dates, `Decimal`, pandas,
-and NumPy values are converted to strict JSON; callable parameters are omitted,
-and credential-shaped values are redacted before result persistence.
+Every emitted shortlist row requires a symbol plus structured provenance with
+non-empty triggered rules, non-empty scalar indicator values, and a valid source.
+Dates, lossless `Decimal` strings, and NumPy scalars are normalized to strict
+JSON; non-finite indicators and custom/collection values are rejected, callable
+parameters are omitted, and credential-shaped values are redacted.
 
 **Deterministic screener provenance (PROV-002).** Every screener now records
 *why* a stock shortlisted. `BaseScanner` exposes `build_provenance(...)`, and each
@@ -772,10 +779,20 @@ and credential-shaped values are redacted before result persistence.
 The helper stamps the screener's `key` and `SCREENER_VERSION`, converts indicator
 values to plain JSON scalars, and the persistence layer folds it into
 `provenance_json` (filling run-level `params_snapshot`/`data_snapshot_date`). The
-column is dropped from the on-screen results table and the download CSV, so it is
-durable audit evidence without cluttering the UI. The two AI screeners label
+Both `provenance` and `provenance_json` are dropped from the on-screen results
+table and download CSV, so the receipt is durable audit evidence without
+cluttering the UI. The two AI screeners label
 their rows `source="hybrid"` (gate + AI) or `"deterministic"` (gate-only
-fallback); capturing the AI model/prompt/evidence itself is reserved for PROV-003.
+fallback).
+
+**AI screener provenance (PROV-003).** Technical Analysis and 67 Ka Funda stamp
+the configured model, semantic prompt version, full prompt SHA-256, UTC
+generation time, cache-hit state, verdict/confidence/reason, and hashed evidence
+references. Versioned, HMAC-authenticated cache entries store only the validated
+verdict-plus-receipt envelope. The 67 Ka Funda research collector rejects
+model-directed instructions in external evidence and never persists raw model
+responses or scraped snippets; result summaries use sanitized source
+labels/domains.
 
 ## Adding your own screener
 

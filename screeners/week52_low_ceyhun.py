@@ -145,9 +145,10 @@ class Week52LowCeyhun(BaseScanner):
             "provenance": self.build_provenance(
                 triggered_rules=["close_within_proximity_of_52w_low_in_recent_window"],
                 indicator_values={
-                    "close": float(latest["close"]),
-                    "week52_low": float(rolling_low.iloc[-1]),
-                    "week52_high": float(rolling_high.iloc[-1]),
+                    "signal_timestamp": signal_row.get("timestamp", ""),
+                    "signal_close": float(signal_row["close"]),
+                    "week52_low_at_signal": float(rolling_low.iloc[global_signal_idx]),
+                    "week52_high_at_signal": float(rolling_high.iloc[global_signal_idx]),
                     "proximity_pct_at_signal": tightest_proximity,
                     "days_since_signal": days_since_signal,
                 },

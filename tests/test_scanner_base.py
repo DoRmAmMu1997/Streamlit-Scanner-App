@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import date
+from decimal import Decimal
 from types import SimpleNamespace
 
 import numpy as np
@@ -11,6 +12,7 @@ import pandas as pd
 import pytest
 
 from backend.scanner_base import COMMON_RESULT_COLUMNS, PROVENANCE_COLUMN, BaseScanner
+from backend.scanning.result_contract import ResultContractError
 
 
 class _SimpleScanner(BaseScanner):
@@ -43,6 +45,10 @@ class _SimpleScanner(BaseScanner):
             "close": latest_close,
             "reason": f"close {latest_close} >= threshold {threshold}",
             "latest_close": latest_close,
+            "provenance": self.build_provenance(
+                triggered_rules=["latest_close_at_or_above_threshold"],
+                indicator_values={"close": latest_close, "threshold": threshold},
+            ),
         }
 
 
@@ -191,28 +197,34 @@ def test_build_provenance_injects_screener_identity_and_defaults():
     assert provenance["source"] == "deterministic"
 
 
-def test_build_provenance_makes_numpy_indicator_values_json_safe():
-    """Goldens serialize the raw frame, so indicator values must be plain JSON.
-
-    A screener computes with NumPy, so ``indicator_values`` commonly holds
-    ``np.float64``/``np.int64`` and the occasional NaN. The helper converts those
-    to builtin scalars (NaN -> None) so ``json.dumps(..., allow_nan=False)`` and
-    the cross-platform golden snapshots stay stable.
-    """
+def test_build_provenance_normalizes_numpy_scalars_and_rejects_nan():
     provenance = _SimpleScanner().build_provenance(
         triggered_rules=["rule"],
         indicator_values={
             "np_float": np.float64(1.25),
             "np_int": np.int64(7),
-            "missing": np.nan,
         },
     )
 
     values = provenance["indicator_values"]
     assert values["np_float"] == 1.25 and isinstance(values["np_float"], float)
     assert values["np_int"] == 7 and isinstance(values["np_int"], int)
-    assert values["missing"] is None
     json.dumps(provenance, allow_nan=False)
+
+    with pytest.raises(ResultContractError, match="finite"):
+        _SimpleScanner().build_provenance(
+            triggered_rules=["rule"],
+            indicator_values={"missing": np.nan},
+        )
+
+
+def test_build_provenance_preserves_decimal_indicator_losslessly():
+    provenance = _SimpleScanner().build_provenance(
+        triggered_rules=["rule"],
+        indicator_values={"ratio": Decimal("0.1000000000000000001")},
+    )
+
+    assert provenance["indicator_values"]["ratio"] == "0.1000000000000000001"
 
 
 def test_build_provenance_rejects_an_unknown_source():
@@ -220,9 +232,62 @@ def test_build_provenance_rejects_an_unknown_source():
     with pytest.raises(ValueError):
         _SimpleScanner().build_provenance(
             triggered_rules=["rule"],
-            indicator_values={},
+            indicator_values={"value": 1},
             source="deterministicc",  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.parametrize(
+    ("triggered_rules", "indicator_values"),
+    [
+        ([], {"value": 1}),
+        (["rule"], {}),
+        (["rule"], {"nested": [1, 2]}),
+    ],
+)
+def test_build_result_frame_skips_rows_without_complete_scalar_provenance(
+    triggered_rules, indicator_values
+):
+    scanner = _SimpleScanner()
+    row = scanner.compute_signal("TCS", _candles([10.0]), _params())
+    row["provenance"] = {
+        "triggered_rules": triggered_rules,
+        "indicator_values": indicator_values,
+        "source": "deterministic",
+    }
+    failures = []
+
+    result = scanner.build_result_frame(
+        [row],
+        compute_failure_callback=failures.append,
+    )
+
+    assert result.empty
+    assert len(failures) == 1
+    assert failures[0]["symbol"] == "TCS"
+
+
+def test_build_result_frame_returns_strict_json_normalized_values():
+    scanner = _SimpleScanner()
+    row = scanner.compute_signal("TCS", _candles([10.0]), _params())
+    row["signal_date"] = pd.Timestamp("2026-01-10")
+    row["close"] = Decimal("10.125000000000000001")
+    row["latest_close"] = Decimal("10.125000000000000001")
+    row["provenance"]["indicator_values"]["close"] = Decimal(
+        "10.125000000000000001"
+    )
+
+    result = scanner.build_result_frame([row])
+    emitted = result.iloc[0].to_dict()
+
+    assert emitted["signal_date"] == "2026-01-10T00:00:00"
+    assert emitted["close"] == "10.125000000000000001"
+    assert emitted["latest_close"] == "10.125000000000000001"
+    assert (
+        emitted["provenance"]["indicator_values"]["close"]
+        == "10.125000000000000001"
+    )
+    json.dumps(result.to_dict("records"), allow_nan=False)
 
 
 def test_run_carries_the_provenance_dict_into_the_result_frame():
