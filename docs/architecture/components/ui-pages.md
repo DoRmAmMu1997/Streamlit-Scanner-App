@@ -13,7 +13,7 @@
 ## 1. Purpose & responsibilities
 
 - **`history_page.py`** — the SCAN-004 **read-only** audit view: filter recorded runs, list them, click one to inspect its persisted results + download CSV. Pure data-shaping helpers are separated from rendering so they unit-test without a browser.
-- **`ui/common.py`** — display helpers needed by both the scanner page and the history page (which must not import each other or `app.py`): CSV-injection escaping, secret-redaction wrapper, BUY/SELL emoji badges, decimal column config.
+- **`ui/common.py`** — display helpers needed by both the scanner page and the history page (which must not import each other or `app.py`): CSV-injection escaping, secret-redaction wrapper, BUY/SELL emoji badges, decimal column config, and provenance-column hiding.
 
 ## 2. Position in the system
 
@@ -35,7 +35,7 @@ flowchart TD
 `_render_history_page()` (the view) · `_render_history_run_details(row, *, symbol_filter="")` · pure helpers `_history_filter_kwargs(...)` (widgets → repository filters), `_history_filter_signature(...)` (filter hash for table widget key), `_history_run_row(run, shortlisted)`, `_history_runs_frame(rows, *, error_redactor)`, `_format_utc_timestamp`, `_format_run_duration`, `_as_utc`. Status badges `_HISTORY_STATUS_BADGES`; preview cap `_HISTORY_ERROR_PREVIEW_CHARS=80`.
 
 ### `ui/common.py`
-`_csv_safe(df)` / `_escape_cell` (formula-injection escaping) · `_redact_secrets(text)` (wraps `redact_text` + `auth_secret_values`) · `_emoji_rating(df)` (BUY/SELL badges) · `_decimal_column_config(df)` (2-dp display).
+`_csv_safe(df)` / `_escape_cell` (formula-injection escaping) · `_redact_secrets(text)` (wraps `redact_text` + `auth_secret_values`) · `_emoji_rating(df)` (BUY/SELL badges) · `_decimal_column_config(df)` (2-dp display) · `_drop_provenance(df)` (drops the internal `provenance` **and** `provenance_json` columns from the table + CSV — machine-readable evidence, not display data).
 
 ## 4. Key design decisions & trade-offs
 
