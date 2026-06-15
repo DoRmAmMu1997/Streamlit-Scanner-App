@@ -90,6 +90,10 @@ class ScanRunResult:
     run_id: int | None = None
     compute_failures: list[dict[str, Any]] = field(default_factory=list)
     rejected_result_rows: int = 0
+    # AI-004 (AC3): how many AI verdicts were rejected because their output failed
+    # strict validation even after the bounded retry (a subset of
+    # ``compute_failures`` tagged ``phase="ai_validation"``).
+    ai_validation_failures: int = 0
     error_message: str | None = None
 
 
@@ -229,6 +233,22 @@ def run_scan(
         status = ScanStatus.PARTIAL if normalized_rows else ScanStatus.FAILED
         error_message = _combine_error_messages(error_message, rejection_message)
 
+    # AI-004 (AC3): surface AI output-validation failures explicitly at the run
+    # level. They are a subset of compute_failures — the AI screeners tag them
+    # phase="ai_validation" once a malformed/incomplete verdict survives the retry
+    # (AIValidationError) — so the generic "failed to compute" count already
+    # includes them. This adds a separately-countable clause + terminal event
+    # field so an operator can tell "the AI was unavailable" (an SDK/usage-limit
+    # failure) apart from "the AI returned junk we could not parse".
+    ai_validation_failures = sum(
+        1 for failure in compute_failures if failure.get("phase") == "ai_validation"
+    )
+    if ai_validation_failures:
+        error_message = _combine_error_messages(
+            error_message,
+            f"{ai_validation_failures} AI output(s) failed validation after retries.",
+        )
+
     # OBS-001: one symbol_scan_failed per failed symbol (load failures from the
     # data loader, compute failures from the screener callback), each tagged with
     # run_id + symbol so a single stock's failure is traceable. Both message
@@ -296,6 +316,7 @@ def run_scan(
         ),
         "loader_failures": len(loader_failures),
         "compute_failures": len(compute_failures),
+        "ai_validation_failures": ai_validation_failures,
         "duration_seconds": round(time.monotonic() - started_at, 3),
     }
     if screener_exc_info is not None:
@@ -329,6 +350,7 @@ def run_scan(
         run_id=run_id,
         compute_failures=compute_failures,
         rejected_result_rows=rejected_result_rows,
+        ai_validation_failures=ai_validation_failures,
         error_message=error_message,
     )
 

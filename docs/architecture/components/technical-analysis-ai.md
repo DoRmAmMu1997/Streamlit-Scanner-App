@@ -69,17 +69,18 @@ sequenceDiagram
 | **Confidence via `@field_validator`, not `Field(ge/le)`** | Keeps `minimum`/`maximum` out of the JSON schema (Claude rejects them on ints). | `Field(ge,le)` — schema Claude refuses. |
 | **Long-only; bearish → `caution`** | Screener is long-only; bearish structure tempers, never triggers, a BUY. | Allow shorts — out of scope. |
 | **Reuses fundamentals' SDK plumbing/cache/error types** | One Windows-safe async bridge, one usage-limit path, one on-disk cache (namespaced `::technical`). See [fundamentals-ai.md](fundamentals-ai.md). | Duplicate SDK code — drift. |
+| **Bounded validation-retry on malformed output (AI-004)** | A transient malformed/incomplete verdict is re-run up to `SCANNER_AI_MAX_ATTEMPTS` (default 2) via the shared `parse_with_retry`, then rejected as `AIValidationError`. Only parse/validation failures retry — never SDK/CLI/usage-limit (a retry can't fix those and would burn Agent SDK credit). | Reject on first malformed reply — wastes a recoverable run; retry everything — wastes credit on unfixable errors. |
 
 ## 5. Failure modes / degradation
 
 - SDK not installed / CLI missing / usage-limit hit → the screener degrades to a **gate-only** BUY for deterministic setups (at-support / fresh double bottom / bullish FVG / order block; a bare resistance breakout is *not* surfaced — it needs the AI to label). No `source` field is stamped today.
 - Plan usage limit → `FundamentalsUsageLimitError` (code `usage_limit_reached`); UI shows reset time.
-- Unparseable final JSON → `FundamentalsAgentError` with a preview.
+- Unparseable / invalid final JSON → re-run up to `SCANNER_AI_MAX_ATTEMPTS` (AI-004); still failing → an `error` receipt with `error_type="AIValidationError"` and the screener tags the run-level failure `phase="ai_validation"`. See [scan-service-and-provenance.md](scan-service-and-provenance.md).
 - `pattern="none"` can never be `confirmed` (normalized).
 
 ## 6. Configuration & dependencies
 
-`CLAUDE_AGENT_MODEL` (default `claude-sonnet-4-6`); `SCANNER_AGENT_FAST_MODE` (disables extended thinking). **`ANTHROPIC_API_KEY` must stay UNSET** (Claude-subscription billing). External: `claude-agent-sdk` (lazy), `pydantic`.
+`CLAUDE_AGENT_MODEL` (default `claude-sonnet-4-6`); `SCANNER_AGENT_FAST_MODE` (disables extended thinking); `SCANNER_AI_MAX_ATTEMPTS` (default 2 — the AI-output validation-retry budget). **`ANTHROPIC_API_KEY` must stay UNSET** (Claude-subscription billing). External: `claude-agent-sdk` (lazy), `pydantic`.
 
 ## 7. Testing
 

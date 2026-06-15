@@ -48,8 +48,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from backend.ai_validation import parse_with_retry
+from backend.config import get_ai_max_attempts
 from backend.fundamentals.fundamentals_cache import FundamentalsCache
 from backend.fundamentals.pdf_reader import read_recent_concall_text
 from backend.fundamentals.screener_in_client import (
@@ -1081,27 +1083,42 @@ class FundamentalAgent:
             prompt = _build_user_prompt(normalized, mode, self._model)
             runner = self._runner or self._default_run
 
-            run_result = self._run_sync(
-                runner(
-                    prompt,
-                    system_prompt=system_prompt,
-                    model=self._model,
-                    max_turns=self.MAX_TURNS,
+            def _run_once() -> str:
+                # SDK / CLI / usage-limit failures here propagate (not retried);
+                # only malformed AI JSON is retried by parse_with_retry below.
+                run_result = self._run_sync(
+                    runner(
+                        prompt,
+                        system_prompt=system_prompt,
+                        model=self._model,
+                        max_turns=self.MAX_TURNS,
+                    )
                 )
+                if run_result.cost_usd is not None:
+                    logger.info(
+                        "FundamentalAgent run for %s (%s) cost ~$%.4f",
+                        normalized,
+                        mode,
+                        run_result.cost_usd,
+                    )
+                return run_result.text
+
+            def _parse(text: str) -> AgentVerdict:
+                return self._parse_verdict(text, symbol=normalized, mode=mode)
+
+            # 3. Validate the final JSON into AgentVerdict. AI-004: re-run the
+            # agentic loop on malformed/incomplete JSON up to get_ai_max_attempts()
+            # tries, then raise (the Streamlit panel surfaces the error).
+            verdict = parse_with_retry(
+                _run_once,
+                _parse,
+                attempts=get_ai_max_attempts(),
+                retry_on=(FundamentalsAgentError, ValidationError),
+                label=f"AgentVerdict[{normalized}]",
             )
         finally:
             _FORCE_REFRESH.reset(refresh_token)
             _REQUESTED_SYMBOL.reset(symbol_token)
-        if run_result.cost_usd is not None:
-            logger.info(
-                "FundamentalAgent run for %s (%s) cost ~$%.4f",
-                normalized,
-                mode,
-                run_result.cost_usd,
-            )
-
-        # 3. Validate the final JSON into AgentVerdict.
-        verdict = self._parse_verdict(run_result.text, symbol=normalized, mode=mode)
 
         # 4. Persist the verdict to the cache so the next click is instant.
         # Cache key includes mode plus fast-mode state so each setting reuses

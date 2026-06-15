@@ -509,6 +509,100 @@ def test_fundamental_agent_parse_failure_raises_clear_error(tmp_path):
         agent.check("DEMO")
 
 
+def test_fundamental_agent_retries_then_succeeds_on_transient_malformed_output(tmp_path):
+    """A transient non-JSON answer is retried; the next valid answer is used (AI-004)."""
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("DEMO", _sample_screener_data())
+    valid_json = json.dumps(_sample_verdict().model_dump(mode="json"))
+
+    class _FlakyRunner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __call__(self, prompt, *, system_prompt, model, max_turns):
+            self.calls += 1
+            text = "still thinking, no JSON yet" if self.calls == 1 else valid_json
+            return AgentRunResult(text=text)
+
+    runner = _FlakyRunner()
+    agent = FundamentalAgent(model="test-model", cache=cache, runner=runner)
+
+    verdict = agent.check("DEMO")
+
+    assert runner.calls == 2
+    assert verdict.symbol == "DEMO"
+
+
+def test_fundamental_agent_retry_exhaustion_raises_ai_validation_error(tmp_path):
+    """Persistent malformed output is retried once, then raises AIValidationError."""
+    from backend.ai_validation import AIValidationError
+
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("DEMO", _sample_screener_data())
+
+    class _BadRunner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __call__(self, prompt, *, system_prompt, model, max_turns):
+            self.calls += 1
+            return AgentRunResult(text="no JSON here")
+
+    runner = _BadRunner()
+    agent = FundamentalAgent(model="test-model", cache=cache, runner=runner)
+
+    with pytest.raises(AIValidationError):
+        agent.check("DEMO")
+    assert runner.calls == 2  # one retry before giving up
+
+
+def test_fundamental_agent_rejects_verdict_missing_required_fields(tmp_path):
+    """A verdict JSON missing a required field (rating) fails validation (AI-004)."""
+    from backend.ai_validation import AIValidationError
+
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("DEMO", _sample_screener_data())
+    payload = _sample_verdict().model_dump(mode="json")
+    del payload["rating"]  # a required field with no default
+    missing_field_json = json.dumps(payload)
+
+    class _MissingFieldRunner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __call__(self, prompt, *, system_prompt, model, max_turns):
+            self.calls += 1
+            return AgentRunResult(text=missing_field_json)
+
+    runner = _MissingFieldRunner()
+    agent = FundamentalAgent(model="test-model", cache=cache, runner=runner)
+
+    with pytest.raises(AIValidationError):
+        agent.check("DEMO")
+    assert runner.calls == 2
+
+
+def test_fundamental_agent_does_not_retry_usage_limit(tmp_path):
+    """A usage-limit error is infrastructure, not malformed output: tried once."""
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("DEMO", _sample_screener_data())
+
+    class _UsageLimitRunner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __call__(self, prompt, *, system_prompt, model, max_turns):
+            self.calls += 1
+            raise FundamentalsUsageLimitError()
+
+    runner = _UsageLimitRunner()
+    agent = FundamentalAgent(model="test-model", cache=cache, runner=runner)
+
+    with pytest.raises(FundamentalsUsageLimitError):
+        agent.check("DEMO")
+    assert runner.calls == 1
+
+
 def test_fundamental_agent_tolerates_json_in_markdown_fence(tmp_path):
     """Models sometimes wrap the final JSON in a ```json fence — the agent
     must still parse it."""

@@ -83,6 +83,7 @@ The mode is chosen by the UI from the row's universe; `_normalize_verdict` **enf
 | **Windows ProactorEventLoop bridge** | The SDK spawns the Claude CLI subprocess; Streamlit/Tornado's SelectorEventLoop can't (`NotImplementedError`). | `asyncio.run()` — fails on Windows. |
 | **Structured usage-limit detection** | `RateLimitEvent`/`AssistantMessage.error`/HTTP 429 → typed `FundamentalsUsageLimitError` (not string matching); UI shows reset time, cached verdicts keep working. | String matching only — brittle. |
 | **`allowed_tools` + `dontAsk` + `setting_sources=[]`** | Agent reaches ONLY the two tools; never built-in fs/bash; ignores user CLAUDE.md. | Default tools/settings — unsafe headless. |
+| **Bounded validation-retry on malformed output (AI-004)** | `check()` re-runs the agentic loop up to `SCANNER_AI_MAX_ATTEMPTS` (default 2) via the shared `parse_with_retry` when the verdict is unparseable/invalid, then raises `AIValidationError` (a `RuntimeError` the UI already catches). Only parse/validation retries — never SDK/CLI/usage-limit. | Reject on first malformed reply — wastes a recoverable click; retry SDK errors — wastes Agent SDK credit. |
 
 ## 6. Failure modes / degradation
 
@@ -90,11 +91,11 @@ The mode is chosen by the UI from the row's universe; `_normalize_verdict` **enf
 - Plan limit exhausted → `FundamentalsUsageLimitError` (gentle notice + reset time); cached verdicts still served.
 - screener.in fetch fails → tool returns an error payload; the agent surfaces the limitation honestly.
 - No transcript → `read_recent_concall_text` returns `""`; the agent falls back to announcements + sector knowledge.
-- Unparseable final JSON → `FundamentalsAgentError` with a preview.
+- Unparseable / invalid final JSON → re-run up to `SCANNER_AI_MAX_ATTEMPTS` (AI-004); still failing → `AIValidationError` (preserves the underlying preview message), caught and shown by the Check Fundamentals panel.
 
 ## 7. Configuration & dependencies
 
-`CLAUDE_AGENT_MODEL` (default `claude-sonnet-4-6`), `SCANNER_AGENT_FAST_MODE`, `SCANNER_FUNDAMENTALS_TTL_DAYS`; **`ANTHROPIC_API_KEY` unset**. External: `claude-agent-sdk` (lazy), `requests`+`beautifulsoup4`, `pdfplumber`/`pypdf` (optional), `pydantic`. Caches under `DATA_DIR/cache/fundamentals/`.
+`CLAUDE_AGENT_MODEL` (default `claude-sonnet-4-6`), `SCANNER_AGENT_FAST_MODE`, `SCANNER_AI_MAX_ATTEMPTS` (default 2 — validation-retry budget), `SCANNER_FUNDAMENTALS_TTL_DAYS`; **`ANTHROPIC_API_KEY` unset**. External: `claude-agent-sdk` (lazy), `requests`+`beautifulsoup4`, `pdfplumber`/`pypdf` (optional), `pydantic`. Caches under `DATA_DIR/cache/fundamentals/`.
 
 ## 8. Testing
 

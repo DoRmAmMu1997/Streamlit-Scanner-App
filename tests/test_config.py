@@ -6,6 +6,7 @@ from backend.config import (
     dhan_rate_limit_retry_delays,
     dhan_request_delay_seconds,
     get_agent_fast_mode,
+    get_ai_max_attempts,
     secret_values,
 )
 
@@ -53,6 +54,26 @@ def test_agent_fast_mode_rejects_other_values(monkeypatch):
     for value in ("0", "false", "no", "", "maybe"):
         monkeypatch.setenv("SCANNER_AGENT_FAST_MODE", value)
         assert get_agent_fast_mode() is False, value
+
+
+def test_ai_max_attempts_defaults_to_one_retry(monkeypatch):
+    # Unset → 2 total tries (one retry): bounded + cost-aware (AI-004).
+    monkeypatch.delenv("SCANNER_AI_MAX_ATTEMPTS", raising=False)
+    assert get_ai_max_attempts() == 2
+
+
+def test_ai_max_attempts_falls_back_for_invalid_values(monkeypatch):
+    # A bad .env edit must not disable retry or make it unbounded.
+    for value in ("not-a-number", "", "  ", "1.5"):
+        monkeypatch.setenv("SCANNER_AI_MAX_ATTEMPTS", value)
+        assert get_ai_max_attempts() == 2, value
+
+
+def test_ai_max_attempts_is_clamped_to_one_through_three(monkeypatch):
+    # At least one try; capped at three so a typo can't burn Agent SDK credit.
+    for raw, expected in (("1", 1), ("2", 2), ("3", 3), ("4", 3), ("0", 1), ("-5", 1)):
+        monkeypatch.setenv("SCANNER_AI_MAX_ATTEMPTS", raw)
+        assert get_ai_max_attempts() == expected, raw
 
 
 def test_secret_values_include_ai_cache_signing_key(monkeypatch):

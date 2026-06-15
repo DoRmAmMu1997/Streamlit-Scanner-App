@@ -66,17 +66,19 @@ sequenceDiagram
 | **Shared `FundamentalsCache` (`::sixty-seven` namespace)** | Reuses one Screener.in data cache + verdict store across all three AI agents without collisions. | Separate caches — duplicate fetches. |
 | **`force_refresh` skips the read, rewrites at end** | A run that fails partway never destroys a good cached verdict. | Delete-then-refetch — data loss on failure. |
 | **Reuses fundamentals SDK plumbing/errors** | One Windows-safe bridge, one usage-limit path. See [fundamentals-ai.md](fundamentals-ai.md). | Duplicate — drift. |
+| **Bounded validation-retry, fresh research per attempt (AI-004)** | A malformed/incomplete verdict is re-run up to `SCANNER_AI_MAX_ATTEMPTS` (default 2) via the shared `parse_with_retry`; each attempt **clears the `_RESEARCH_COLLECTOR`** so it re-researches cleanly and the "exactly one payload" invariant still holds. Only verdict-JSON parse/validation retries — **research-evidence failures (missing / malformed / prompt-injection) and SDK/usage-limit errors never retry** (a re-fetch yields the same evidence; injection must not be re-run). | Retry without resetting the collector — mixes payloads, breaks the one-payload invariant; retry research/injection failures — same bad evidence, re-running an injection. |
 
 ## 5. Failure modes / degradation
 
 - Missing `SERPAPI_API_KEY` / SDK absent / usage-limit hit → the screener logs, records a compute failure, and **skips that candidate** (→ partial run). Unlike Technical Analysis it has **no** gate-only fallback, so a gate-passing stock simply produces no row when AI research is unavailable.
 - Screener.in fetch fails → tool returns an error payload; the model rejects.
 - Search fails → screener data still returned + error noted; verdict proceeds.
-- SDK/CLI missing or usage limit → `FundamentalsAgentError` / `FundamentalsUsageLimitError` (shared).
+- SDK/CLI missing or usage limit → `FundamentalsAgentError` / `FundamentalsUsageLimitError` (shared); not retried.
+- Malformed/invalid verdict JSON → re-run up to `SCANNER_AI_MAX_ATTEMPTS` (AI-004); still failing → `error` receipt `error_type="AIValidationError"`, screener tags `phase="ai_validation"`. Missing/malformed/injected research evidence → `MissingResearchEvidence` / `MalformedResearchEvidence` / `PromptInjectionEvidence`, **never retried**.
 
 ## 6. Configuration & dependencies
 
-`SERPAPI_API_KEY`, `CLAUDE_AGENT_MODEL`, `SCANNER_AGENT_FAST_MODE`; **`ANTHROPIC_API_KEY` unset**. External: `requests` (SerpAPI), `claude-agent-sdk` (lazy), `pydantic`. Cache: shared `FundamentalsCache`.
+`SERPAPI_API_KEY`, `CLAUDE_AGENT_MODEL`, `SCANNER_AGENT_FAST_MODE`, `SCANNER_AI_MAX_ATTEMPTS` (default 2 — validation-retry budget); **`ANTHROPIC_API_KEY` unset**. External: `requests` (SerpAPI), `claude-agent-sdk` (lazy), `pydantic`. Cache: shared `FundamentalsCache`.
 
 ## 7. Testing
 

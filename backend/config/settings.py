@@ -554,3 +554,22 @@ def dhan_rate_limit_retry_delays() -> list[float]:
     if not delays or any(delay < 0 for delay in delays):
         return defaults
     return delays
+
+
+def get_ai_max_attempts() -> int:
+    """Total parse attempts for one AI verdict, defaulting to 2 (i.e. one retry).
+
+    AI-004: when an AI agent's final JSON fails strict parsing/validation, it is
+    re-run up to this many times before the response is rejected (recorded as an
+    ``error`` AI evaluation). ``1`` disables retry. The cap of 3 keeps a typo like
+    "30" from multiplying the plan's Agent SDK cost on persistently broken output.
+    """
+    load_environment()
+    raw_value = _clean_env_value(os.getenv("SCANNER_AI_MAX_ATTEMPTS"))
+    if not raw_value:
+        return 2
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        return 2
+    return min(3, max(1, parsed))

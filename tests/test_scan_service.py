@@ -279,6 +279,45 @@ def test_run_scan_marks_partial_on_compute_failure(session_factory):
     assert result.compute_failures == [{"symbol": "TCS", "message": "bad candles"}]
 
 
+def test_run_scan_records_ai_validation_failures_distinctly(session_factory, caplog):
+    """AI output-validation failures (phase='ai_validation') are counted and
+    surfaced separately from generic compute failures (AI-004 AC3)."""
+
+    def screener_run(_universe_df, _data_loader, params):
+        # One malformed-AI failure (the AI returned junk we could not parse) ...
+        params["compute_failure_callback"](
+            {
+                "symbol": "TCS",
+                "message": "67 ka funda evaluation failed (AIValidationError).",
+                "phase": "ai_validation",
+            }
+        )
+        # ... and one ordinary compute failure that must NOT be counted as such.
+        params["compute_failure_callback"]({"symbol": "INFY", "message": "bad candles"})
+        return _two_buy_rows()
+
+    with caplog.at_level(logging.INFO):
+        result = run_scan(
+            screener_key="sixty_seven_ka_funda",
+            universe_key="hemant_super_45",
+            run_callable=screener_run,
+            universe_df=pd.DataFrame({"symbol": ["RELIANCE", "TCS", "INFY"]}),
+            data_loader=_FakeLoader(),
+            params=_base_params(),
+            session_factory=session_factory,
+        )
+
+    assert result.status is ScanStatus.PARTIAL
+    # Only the phase="ai_validation" failure is counted, not the generic one.
+    assert result.ai_validation_failures == 1
+    assert "1 AI output(s) failed validation after retries." in (result.error_message or "")
+
+    partial = _event_fields(caplog, EVENT_SCAN_PARTIAL)
+    assert len(partial) == 1
+    assert partial[0]["ai_validation_failures"] == 1
+    assert partial[0]["compute_failures"] == 2
+
+
 def test_base_scanner_skips_invalid_emitted_row_and_run_scan_is_partial(
     db_engine, session_factory
 ):

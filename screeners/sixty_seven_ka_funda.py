@@ -20,6 +20,7 @@ from typing import ClassVar, Literal
 
 import pandas as pd
 
+from backend.ai_validation import AIValidationError
 from backend.charts import candlestick_with_volume
 from backend.config import get_fundamentals_model
 from backend.scanner_base import BaseScanner
@@ -226,7 +227,14 @@ class SixtySevenKaFunda(BaseScanner):
                             evaluation.provenance.decision_reason
                             or "67 ka funda AI evaluation failed."
                         ),
-                        "phase": "ai_evaluation",
+                        # AI-004: malformed/incomplete model output that survived
+                        # the retry is a distinct "ai_validation" failure; an SDK /
+                        # research-evidence failure stays the broader "ai_evaluation".
+                        "phase": (
+                            "ai_validation"
+                            if evaluation.error_type == AIValidationError.__name__
+                            else "ai_evaluation"
+                        ),
                     }
                 )
             return None

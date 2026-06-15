@@ -45,13 +45,15 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 import pandas as pd
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from backend.ai_cache_integrity import (
     get_ai_cache_signing_key,
     sign_cache_envelope,
     verify_cache_envelope,
 )
+from backend.ai_validation import parse_with_retry
+from backend.config import get_ai_max_attempts
 from backend.fundamentals.fundamental_agent import (
     AgentRunResult,
     FundamentalsAgentError,
@@ -703,7 +705,11 @@ class TechnicalAnalysisAgent:
         #    this per-call context) to gather facts, then emits the final JSON.
         tool_context = TechnicalToolContext.build(normalized, candles, levels, params)
         runner = self._runner or self._default_run
-        try:
+
+        def _run_once() -> str:
+            # One agentic pass → the model's final text. SDK / CLI / usage-limit
+            # failures raised here are NOT retried (they fall through to the error
+            # receipt below); only malformed output is retried (see parse_with_retry).
             run_result = self._run_sync(
                 runner(
                     prompt,
@@ -719,10 +725,20 @@ class TechnicalAnalysisAgent:
                     normalized,
                     run_result.cost_usd,
                 )
-            verdict = self._parse_verdict(
-                run_result.text,
-                symbol=normalized,
-                signal_date=signal_date,
+            return run_result.text
+
+        def _parse(text: str) -> TechnicalVerdict:
+            return self._parse_verdict(text, symbol=normalized, signal_date=signal_date)
+
+        try:
+            # AI-004: re-run the agentic loop when the model returns malformed or
+            # incomplete JSON, up to get_ai_max_attempts() tries, before rejecting.
+            verdict = parse_with_retry(
+                _run_once,
+                _parse,
+                attempts=get_ai_max_attempts(),
+                retry_on=(FundamentalsAgentError, ValidationError),
+                label=f"TechnicalVerdict[{normalized}]",
             )
         except Exception as exc:  # noqa: BLE001 - return a durable safe error receipt
             provenance = AIProvenance(

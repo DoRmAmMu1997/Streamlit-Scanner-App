@@ -37,14 +37,15 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from backend.ai_cache_integrity import (
     get_ai_cache_signing_key,
     sign_cache_envelope,
     verify_cache_envelope,
 )
-from backend.config import get_agent_fast_mode, get_fundamentals_model
+from backend.ai_validation import parse_with_retry
+from backend.config import get_agent_fast_mode, get_ai_max_attempts, get_fundamentals_model
 from backend.fundamentals.fundamental_agent import (
     AgentRunResult,
     FundamentalsAgentError,
@@ -532,6 +533,20 @@ def _validated_sha256(value: Any) -> str:
     return digest
 
 
+class _ResearchEvidenceError(Exception):
+    """Non-retryable failure: the research *evidence* (not the model's verdict
+    JSON) is unusable — missing, malformed, or carrying a prompt-injection.
+
+    Retrying would only re-fetch the same evidence (and a prompt injection must
+    never be retried), so these are raised out of the retry loop straight to an
+    error receipt, carrying the specific ``error_type`` the receipt records.
+    """
+
+    def __init__(self, error_type: str) -> None:
+        super().__init__(error_type)
+        self.error_type = error_type
+
+
 class SixtySevenAgent:
     """Per-stock 67 ka funda verifier backed by the Claude Agent SDK.
 
@@ -903,8 +918,58 @@ class SixtySevenAgent:
 
         research_payloads: list[dict[str, Any]] = []
         evidence_references: list[EvidenceReference] = []
+        evidence_holder: dict[str, list[EvidenceReference]] = {}
         error_type: str | None = None
-        run_result: AgentRunResult | None = None
+        verdict: SixtySevenVerdict | None = None
+
+        def _run_once() -> str:
+            # Each attempt collects FRESH research: the collector points at this
+            # list, so clearing it here means a retry never mixes payloads from a
+            # previous attempt (the agent asserts exactly one payload below).
+            research_payloads.clear()
+            run_result = self._run_sync(
+                (self._runner or self._default_run)(
+                    prompt,
+                    system_prompt=system_prompt,
+                    model=self._model,
+                    max_turns=self.MAX_TURNS,
+                    research_recorder=_record_research_payload,
+                )
+            )
+            if run_result.cost_usd is not None:
+                logger.info(
+                    "SixtySevenAgent run for %s cost ~$%.4f", normalized, run_result.cost_usd
+                )
+            # Research-evidence problems concern the SCRAPED INPUT, not the model's
+            # JSON, so they are non-retryable (re-running re-fetches the same
+            # evidence; a prompt injection must never be retried). Raise them out of
+            # the retry loop so they land on a dedicated error receipt below.
+            if len(research_payloads) != 1:
+                raise _ResearchEvidenceError("MissingResearchEvidence")
+            if not _valid_research_payload(research_payloads[0]):
+                raise _ResearchEvidenceError("MalformedResearchEvidence")
+            if _research_payload_has_prompt_injection(research_payloads[0]):
+                raise _ResearchEvidenceError("PromptInjectionEvidence")
+            evidence_holder["refs"] = _research_evidence_references(
+                normalized, research_payloads[0]
+            )
+            return run_result.text
+
+        def _parse(text: str) -> SixtySevenVerdict:
+            payload = _extract_json_object(text)
+            if payload is None:
+                raise FundamentalsAgentError(
+                    "67 ka funda agent did not return parseable verdict JSON."
+                )
+            payload["symbol"] = normalized
+            payload["model_used"] = self._model
+            return SixtySevenVerdict.model_validate(payload).model_copy(
+                update={
+                    "symbol": normalized,
+                    "model_used": self._model,
+                    "evidence": [],
+                }
+            )
 
         # Publish the per-call context for the research tool, then ALWAYS reset it
         # in `finally` so values never leak into a later verify() on this thread.
@@ -915,15 +980,18 @@ class SixtySevenAgent:
         try:
             if self._runner is None:
                 self._search_client.ensure_ready()
-            run_result = self._run_sync(
-                (self._runner or self._default_run)(
-                    prompt,
-                    system_prompt=system_prompt,
-                    model=self._model,
-                    max_turns=self.MAX_TURNS,
-                    research_recorder=_record_research_payload,
-                )
+            # AI-004: retry ONLY malformed/invalid verdict JSON, re-running the
+            # agentic loop (with fresh research) up to get_ai_max_attempts() times;
+            # SDK / usage-limit / research-evidence failures are not retried.
+            verdict = parse_with_retry(
+                _run_once,
+                _parse,
+                attempts=get_ai_max_attempts(),
+                retry_on=(FundamentalsAgentError, ValidationError),
+                label=f"SixtySevenVerdict[{normalized}]",
             )
+        except _ResearchEvidenceError as exc:
+            error_type = exc.error_type
         except Exception as exc:  # noqa: BLE001 - produce a safe error receipt
             error_type = type(exc).__name__
         finally:
@@ -932,40 +1000,7 @@ class SixtySevenAgent:
             _FORCE_REFRESH.reset(refresh_token)
             _REQUESTED_SYMBOL.reset(symbol_token)
 
-        if run_result is not None and run_result.cost_usd is not None:
-            logger.info("SixtySevenAgent run for %s cost ~$%.4f", normalized, run_result.cost_usd)
-
-        if error_type is None:
-            if len(research_payloads) != 1:
-                error_type = "MissingResearchEvidence"
-            elif not _valid_research_payload(research_payloads[0]):
-                error_type = "MalformedResearchEvidence"
-            elif _research_payload_has_prompt_injection(research_payloads[0]):
-                error_type = "PromptInjectionEvidence"
-            else:
-                evidence_references = _research_evidence_references(
-                    normalized, research_payloads[0]
-                )
-
-        verdict: SixtySevenVerdict | None = None
-        if error_type is None and run_result is not None:
-            try:
-                payload = _extract_json_object(run_result.text)
-                if payload is None:
-                    raise FundamentalsAgentError(
-                        "67 ka funda agent did not return parseable verdict JSON."
-                    )
-                payload["symbol"] = normalized
-                payload["model_used"] = self._model
-                verdict = SixtySevenVerdict.model_validate(payload).model_copy(
-                    update={
-                        "symbol": normalized,
-                        "model_used": self._model,
-                        "evidence": [],
-                    }
-                )
-            except Exception as exc:  # noqa: BLE001 - produce a safe error receipt
-                error_type = type(exc).__name__
+        evidence_references = evidence_holder.get("refs", [])
 
         if error_type is not None or verdict is None:
             if error_type == "MissingResearchEvidence":

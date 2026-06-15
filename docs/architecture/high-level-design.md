@@ -51,9 +51,9 @@ flowchart TD
     APP -->|OIDC sign-in| Google["Google OIDC"]
     APP -->|daily candles, instrument master| Dhan["DhanHQ API"]
     APP -->|company data scrape| ScreenerIn["screener.in"]
-    APP -->|agentic analysis (subscription)| Claude["Claude Agent SDK / CLI"]
+    APP -->|agentic analysis via subscription| Claude["Claude Agent SDK / CLI"]
     APP -->|web research| Serp["SerpAPI (Google)"]
-    APP -->|chart lib (CDN+SRI)| CDN["unpkg: Lightweight Charts"]
+    APP -->|chart lib via CDN+SRI| CDN["unpkg: Lightweight Charts"]
     APP --> DB[("SQLite / Postgres scan history")]
     APP --> Cache[("Local Parquet + JSON caches")]
 ```
@@ -178,6 +178,7 @@ flowchart LR
 - **Persistence & provenance** — one schema serves deterministic + AI screeners via JSON columns; provenance envelope evolves without migration. ([scan-service-and-provenance](components/scan-service-and-provenance.md), [storage-persistence](components/storage-persistence.md))
 - **Caching** — Parquet candle cache (incremental), per-day AI verdict cache, per-session chart cache, 30/60s Streamlit data caches.
 - **Graceful AI degradation** — cheap gate first; if the SDK/SerpAPI is absent, Technical Analysis falls back to a gate-only BUY while 67 Ka Funda skips the candidate (partial run) — neither crashes the scan.
+- **Trustworthy AI output (AI-004)** — every AI verdict is parsed into a strict Pydantic schema; malformed/incomplete output is **retried** a bounded number of times (`SCANNER_AI_MAX_ATTEMPTS`, default 2) then **rejected** as `AIValidationError`, and the run records the count distinctly (`ai_validation_failures`, `phase="ai_validation"`) so junk output can never silently corrupt scan results. ([scan-service-and-provenance](components/scan-service-and-provenance.md))
 
 ## 8. Tech stack
 
@@ -205,6 +206,7 @@ Runtime data under `DATA_DIR` (default `./data`, git-ignored): `cache/daily/*.pa
 | **Best-effort persistence in UI, strict in the job** | The UI always shows fresh rows even if the DB is down; the scheduled job fails loudly if history isn't written. |
 | **Secret-safe by construction** | Redaction is a shared filter on every output sink, not a per-call concern. |
 | **Claude-subscription billing** | AI features draw on the plan's Agent SDK credit; `ANTHROPIC_API_KEY` is deliberately kept unset. |
+| **Validate → retry → reject for AI output (AI-004)** | Strict-schema parsing with a bounded retry on malformed output (not SDK/usage-limit errors) recovers transient model glitches without burning Agent SDK credit; persistent junk is rejected and counted, never persisted. |
 
 ## 12. Risks & future evolution
 
