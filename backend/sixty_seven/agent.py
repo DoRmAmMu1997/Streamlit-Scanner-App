@@ -32,6 +32,7 @@ import json
 import logging
 import re
 import sys
+import unicodedata
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -83,8 +84,12 @@ _PROMPT_INJECTION_PATTERNS = (
         re.IGNORECASE | re.DOTALL,
     ),
     re.compile(
-        r"\b(?:system|developer|assistant)\s+(?:message|prompt|instructions?)\b",
-        re.IGNORECASE,
+        r"(?:^|[.!?]\s+)(?:system|developer|assistant)"
+        r"(?:\s+(?:message|prompt|instructions?))?\s*(?::|>|-)\s*"
+        r"(?:you\s+(?:must|should|will)\s+)?"
+        r"(?:approve|reject|return|output|set|mark|rate|ignore|delete|remove|"
+        r"omit|hide|suppress)\b",
+        re.IGNORECASE | re.DOTALL,
     ),
     re.compile(
         r"\b(?:set|mark)\s+(?:the\s+)?(?:verdict|approved)\b",
@@ -99,9 +104,30 @@ _MODEL_DIRECTIVE_RE = re.compile(
     r"(?:^|[.!?]\s+)(?:please\s+)?"
     r"(?:return|output|respond|answer|set|mark|claim|say|write|emit|decide|"
     r"approve|reject|ignore|disregard|override|forget|reveal|print|expose|"
-    r"follow|obey)\b.{0,180}\b"
+    r"follow|obey|rate|label|classify|recommend)\b.{0,180}\b"
     r"(?:approved|approval|verdict|required conditions?|instructions?|prompt|"
-    r"true|false|answer|response)\b",
+    r"true|false|answer|response|strong\s+buy|buy|sell|company|stock)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_WARNING_SUPPRESSION_RE = re.compile(
+    r"(?:^|[.!?]\s+)(?:please\s+)?"
+    r"(?:delete|remove|omit|hide|suppress|erase|drop)\b.{0,100}\b"
+    r"(?:risks?|risk\s+warnings?|risk\s+concerns?|warnings?|cautions?|"
+    r"concerns?|red\s+flags?)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_AUTHORITY_COERCION_RE = re.compile(
+    r"(?:"
+    r"(?:this|the)\s+(?:page|source|document|website|report)\s+is\s+"
+    r"(?:official|authoritative|verified|trusted)\b.{0,120}\b"
+    r"(?:do\s+not|don(?:'|\u2019)t|never)\s+"
+    r"(?:question|verify|challenge|fact-check|factcheck|doubt)\b"
+    r"|"
+    r"(?:^|[.!?]\s+)(?:official|authoritative|verified|trusted)\s+"
+    r"(?:page|source|document|website|report)\s*[:;,-]\s*"
+    r"(?:do\s+not|don(?:'|\u2019)t|never)\s+"
+    r"(?:question|verify|challenge|fact-check|factcheck|doubt)\b"
+    r")",
     re.IGNORECASE | re.DOTALL,
 )
 _OUTPUT_ASSIGNMENT_RE = re.compile(
@@ -111,6 +137,10 @@ _OUTPUT_ASSIGNMENT_RE = re.compile(
     r"\s*(?:=|:)\s*(?:true|false|approved|rejected|\d+|[\"'])",
     re.IGNORECASE,
 )
+_BLOCKED_RESEARCH_RESPONSE = {
+    "error": "Research evidence was blocked by the application safety policy.",
+    "error_type": "PromptInjectionEvidence",
+}
 
 # Per-call context for the research tool (beginner note).
 # The Agent SDK invokes our tool as `research_company(symbol)` — it gives us no way
@@ -387,8 +417,10 @@ def _record_research_payload(payload: dict[str, Any]) -> None:
 
 
 def _research_response(payload: dict[str, Any]) -> str:
-    """Record the exact tool payload before handing it to the model."""
+    """Record exact evidence, but quarantine hostile text before model exposure."""
     _record_research_payload(payload)
+    if _research_payload_has_prompt_injection(payload):
+        return json.dumps(_BLOCKED_RESEARCH_RESPONSE)
     return json.dumps(payload, default=str)
 
 
@@ -403,15 +435,36 @@ def _valid_research_payload(payload: dict[str, Any]) -> bool:
 def _research_payload_has_prompt_injection(payload: dict[str, Any]) -> bool:
     """Fail closed when external evidence contains model-directed instructions."""
 
-    def strings(value: Any):
+    def text_surfaces(value: Any):
         if isinstance(value, str):
-            yield value
+            normalized = _normalize_external_text(value)
+            if normalized:
+                yield normalized
         elif isinstance(value, dict):
-            for child in value.values():
-                yield from strings(child)
+            direct_values: list[str] = []
+            for key, child in value.items():
+                normalized_key = _normalize_external_text(str(key))
+                if normalized_key:
+                    yield normalized_key
+                if isinstance(child, str):
+                    normalized_child = _normalize_external_text(child)
+                    if normalized_child:
+                        direct_values.append(normalized_child)
+                        if normalized_key:
+                            yield f"{normalized_key} {normalized_child}"
+                yield from text_surfaces(child)
+            if direct_values:
+                yield " ".join(direct_values)
         elif isinstance(value, list):
+            direct_values = []
             for child in value:
-                yield from strings(child)
+                if isinstance(child, str):
+                    normalized_child = _normalize_external_text(child)
+                    if normalized_child:
+                        direct_values.append(normalized_child)
+                yield from text_surfaces(child)
+            if direct_values:
+                yield " ".join(direct_values)
 
     # Only inspect externally sourced fields. ``source_policy`` is generated by
     # this application and intentionally contains words such as "instructions".
@@ -421,13 +474,26 @@ def _research_payload_has_prompt_injection(payload: dict[str, Any]) -> bool:
     }
     return any(
         pattern.search(text)
-        for text in strings(external_evidence)
+        for text in text_surfaces(external_evidence)
         for pattern in (
             *_PROMPT_INJECTION_PATTERNS,
             _MODEL_DIRECTIVE_RE,
+            _WARNING_SUPPRESSION_RE,
+            _AUTHORITY_COERCION_RE,
             _OUTPUT_ASSIGNMENT_RE,
         )
     )
+
+
+def _normalize_external_text(value: str) -> str:
+    """Canonicalize common obfuscation without changing the recorded evidence."""
+    normalized = unicodedata.normalize("NFKC", value)
+    without_format_chars = "".join(
+        character
+        for character in normalized
+        if unicodedata.category(character) != "Cf"
+    )
+    return re.sub(r"\s+", " ", without_format_chars).strip()
 
 
 def _research_evidence_references(
@@ -947,10 +1013,10 @@ class SixtySevenAgent:
             # the retry loop so they land on a dedicated error receipt below.
             if len(research_payloads) != 1:
                 raise _ResearchEvidenceError("MissingResearchEvidence")
-            if not _valid_research_payload(research_payloads[0]):
-                raise _ResearchEvidenceError("MalformedResearchEvidence")
             if _research_payload_has_prompt_injection(research_payloads[0]):
                 raise _ResearchEvidenceError("PromptInjectionEvidence")
+            if not _valid_research_payload(research_payloads[0]):
+                raise _ResearchEvidenceError("MalformedResearchEvidence")
             evidence_holder["refs"] = _research_evidence_references(
                 normalized, research_payloads[0]
             )
