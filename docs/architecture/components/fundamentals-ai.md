@@ -91,7 +91,7 @@ The mode is chosen by the UI from the row's universe; `_normalize_verdict` **enf
 - Plan limit exhausted → `FundamentalsUsageLimitError` (gentle notice + reset time); cached verdicts still served.
 - screener.in fetch fails → tool returns an error payload; the agent surfaces the limitation honestly.
 - No transcript → `read_recent_concall_text` returns `""`; the agent falls back to announcements + sector knowledge.
-- Unparseable / invalid final JSON → re-run up to `SCANNER_AI_MAX_ATTEMPTS` (AI-004); still failing → `AIValidationError` (preserves the underlying preview message), caught and shown by the Check Fundamentals panel.
+- Unparseable / invalid final JSON → re-run up to `SCANNER_AI_MAX_ATTEMPTS` (AI-004); still failing → `AIValidationError`, caught and shown by the Check Fundamentals panel. The public error contains only the attempt count and final exception type; raw model text is never included in the message or traceback cause.
 
 ## 7. Configuration & dependencies
 

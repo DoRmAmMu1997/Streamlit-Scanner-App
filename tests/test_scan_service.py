@@ -310,7 +310,10 @@ def test_run_scan_records_ai_validation_failures_distinctly(session_factory, cap
     assert result.status is ScanStatus.PARTIAL
     # Only the phase="ai_validation" failure is counted, not the generic one.
     assert result.ai_validation_failures == 1
-    assert "1 AI output(s) failed validation after retries." in (result.error_message or "")
+    assert "1 AI output(s) failed validation within the configured attempt budget." in (
+        result.error_message or ""
+    )
+    assert "after retries" not in (result.error_message or "")
 
     partial = _event_fields(caplog, EVENT_SCAN_PARTIAL)
     assert len(partial) == 1

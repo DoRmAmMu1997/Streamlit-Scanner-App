@@ -37,14 +37,14 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+from pydantic import Field, ValidationError, field_validator, model_validator
 
 from backend.ai_cache_integrity import (
     get_ai_cache_signing_key,
     sign_cache_envelope,
     verify_cache_envelope,
 )
-from backend.ai_validation import parse_with_retry
+from backend.ai_validation import StrictAIModel, parse_with_retry
 from backend.config import get_agent_fast_mode, get_ai_max_attempts, get_fundamentals_model
 from backend.fundamentals.fundamental_agent import (
     AgentRunResult,
@@ -138,7 +138,7 @@ _RESEARCH_COLLECTOR: contextvars.ContextVar[list[dict[str, Any]] | None] = (
 )
 
 
-class EvidenceItem(BaseModel):
+class EvidenceItem(StrictAIModel):
     """One piece of supporting evidence the model cites for its verdict.
 
     Mirrors a `SearchResult` / Screener.in fact. Every field defaults to "" so
@@ -151,7 +151,7 @@ class EvidenceItem(BaseModel):
     snippet: str = ""
 
 
-class SixtySevenVerdict(BaseModel):
+class SixtySevenVerdict(StrictAIModel):
     """Structured verdict returned by the 67 ka funda verifier.
 
     The six boolean "core flags" (plus the price-upside flag) are the 67-ka-funda
@@ -927,6 +927,7 @@ class SixtySevenAgent:
             # list, so clearing it here means a retry never mixes payloads from a
             # previous attempt (the agent asserts exactly one payload below).
             research_payloads.clear()
+            evidence_holder.clear()
             run_result = self._run_sync(
                 (self._runner or self._default_run)(
                     prompt,

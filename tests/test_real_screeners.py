@@ -1155,6 +1155,54 @@ def test_technical_analysis_degrades_when_agent_unavailable(monkeypatch):
     ]
 
 
+def test_technical_analysis_validation_failure_keeps_gate_only_row(monkeypatch):
+    class _ValidationFailureAgent:
+        def evaluate(self, symbol, candles, levels, *, params=None, force_refresh=False):
+            return TechnicalEvaluationResult(
+                verdict=None,
+                provenance=AIProvenance(
+                    model_name="test-model",
+                    prompt_version="technical-analysis-v1",
+                    prompt_sha256="a" * 64,
+                    generated_at=datetime(2026, 6, 13, tzinfo=UTC),
+                    cache_hit=False,
+                    evidence_references=[],
+                    input_context_hash="c" * 64,
+                    verdict="error",
+                    confidence=None,
+                    decision_reason=(
+                        "Technical agent evaluation failed (AIValidationError)."
+                    ),
+                ),
+                validated_verdict_json={},
+                error_type="AIValidationError",
+            )
+
+    monkeypatch.setattr(
+        technical_analysis,
+        "_get_agent",
+        lambda: _ValidationFailureAgent(),
+    )
+    failures = []
+
+    result = technical_analysis.run(
+        _universe(),
+        FakeDataLoader({"BUY": _ta_candles(_AT_SUPPORT_LOWS)}),
+        _ta_params(compute_failure_callback=failures.append),
+    )
+
+    assert result["symbol"].tolist() == ["BUY"]
+    assert result.iloc[0]["provenance"]["source"] == "deterministic"
+    assert failures == [
+        {
+            "symbol": "BUY",
+            "scanner": "TechnicalAnalysis",
+            "message": "Technical agent evaluation failed (AIValidationError).",
+            "phase": "ai_validation",
+        }
+    ]
+
+
 def test_technical_fallback_preserves_all_fired_gate_rules():
     candidate = {
         "symbol": "BUY",

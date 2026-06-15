@@ -48,9 +48,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import Field, ValidationError, ValidationInfo, field_validator
 
-from backend.ai_validation import parse_with_retry
+from backend.ai_validation import StrictAIModel, parse_with_retry
 from backend.config import get_ai_max_attempts
 from backend.fundamentals.fundamentals_cache import FundamentalsCache
 from backend.fundamentals.pdf_reader import read_recent_concall_text
@@ -157,7 +157,7 @@ def _format_usage_limit_message(resets_at: int | None) -> str:
 # ---------------------------------------------------------------------------
 
 
-class CriterionResult(BaseModel):
+class CriterionResult(StrictAIModel):
     """One of the seven user-defined criteria with the agent's verdict."""
 
     name: str = Field(
@@ -173,7 +173,7 @@ class CriterionResult(BaseModel):
     )
 
 
-class ForwardOutlook(BaseModel):
+class ForwardOutlook(StrictAIModel):
     """Three-part structured forward outlook produced by the agent.
 
     Each subsection corresponds to a specific data source so the UI can
@@ -218,7 +218,7 @@ class ForwardOutlook(BaseModel):
     )
 
 
-class Observation(BaseModel):
+class Observation(StrictAIModel):
     """A fundamental dimension the agent chose to analyse beyond the criteria."""
 
     topic: str = Field(
@@ -233,7 +233,7 @@ class Observation(BaseModel):
     )
 
 
-class AgentVerdict(BaseModel):
+class AgentVerdict(StrictAIModel):
     """Structured verdict returned by the agent for one stock.
 
     Note on integer ranges:
@@ -347,7 +347,11 @@ class AgentVerdict(BaseModel):
 
     @field_validator("forward_outlook", mode="before")
     @classmethod
-    def _migrate_legacy_string_outlook(cls, value: Any) -> Any:
+    def _migrate_legacy_string_outlook(
+        cls,
+        value: Any,
+        info: ValidationInfo,
+    ) -> Any:
         """Promote pre-Job-6 string verdicts into the new ForwardOutlook shape.
 
         Before this revision, `forward_outlook` was a free-form string. Cached
@@ -358,6 +362,10 @@ class AgentVerdict(BaseModel):
         three-part shape becomes the default going forward.
         """
         if isinstance(value, str):
+            if not (info.context or {}).get("allow_legacy_cache"):
+                raise ValueError(
+                    "forward_outlook must be an object for newly generated output"
+                )
             return {"overall_summary": value}
         return value
 
@@ -1072,7 +1080,18 @@ class FundamentalAgent:
                     cache_key_model = self._cache_model_key(mode)
                     cached_verdict = self._cache.get_verdict(normalized, cache_key_model, data_date)
                     if cached_verdict is not None:
-                        return AgentVerdict.model_validate(cached_verdict)
+                        try:
+                            verdict = AgentVerdict.model_validate(
+                                cached_verdict,
+                                context={"allow_legacy_cache": True},
+                            )
+                            self._validate_criteria_counts(verdict, mode=mode)
+                            return verdict
+                        except (ValidationError, ValueError):
+                            logger.warning(
+                                "Cached fundamental verdict for %s is invalid; refreshing.",
+                                normalized,
+                            )
 
             # 2. Build the mode-aware system prompt and run the agentic loop.
             system_prompt = SYSTEM_PROMPT
@@ -1147,13 +1166,32 @@ class FundamentalAgent:
         """Extract + validate the AgentVerdict JSON from the agent's final text."""
         payload = _extract_json_object(text)
         if payload is None:
-            preview = (text or "").strip()[:300] or "<empty response>"
             raise FundamentalsAgentError(
-                "The agent did not return a parseable AgentVerdict JSON object. "
-                f"Final message was: {preview}"
+                "The agent did not return a parseable AgentVerdict JSON object."
             )
         verdict = AgentVerdict.model_validate(payload)
+        try:
+            self._validate_criteria_counts(verdict, mode=mode)
+        except ValueError:
+            raise FundamentalsAgentError(
+                "The AgentVerdict criteria counts are inconsistent."
+            ) from None
         return self._normalize_verdict(verdict, symbol=symbol, mode=mode)
+
+    @staticmethod
+    def _validate_criteria_counts(
+        verdict: AgentVerdict,
+        *,
+        mode: Literal["criteria", "universal"],
+    ) -> None:
+        expected_total = 7 if mode == "universal" else 9
+        passed_rows = sum(item.passed for item in verdict.criteria_breakdown)
+        if (
+            verdict.total_criteria != expected_total
+            or len(verdict.criteria_breakdown) != expected_total
+            or verdict.passed_criteria_count != passed_rows
+        ):
+            raise ValueError("fundamental criterion counts do not agree")
 
     def _normalize_verdict(
         self,

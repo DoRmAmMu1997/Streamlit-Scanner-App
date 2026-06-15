@@ -45,14 +45,14 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 import pandas as pd
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import Field, ValidationError, field_validator
 
 from backend.ai_cache_integrity import (
     get_ai_cache_signing_key,
     sign_cache_envelope,
     verify_cache_envelope,
 )
-from backend.ai_validation import parse_with_retry
+from backend.ai_validation import StrictAIModel, parse_with_retry
 from backend.config import get_ai_max_attempts
 from backend.fundamentals.fundamental_agent import (
     AgentRunResult,
@@ -216,7 +216,7 @@ PatternName = Literal[
 ]
 
 
-class RelevantLevel(BaseModel):
+class RelevantLevel(StrictAIModel):
     """One support/resistance level the agent judged relevant to its verdict.
 
     Surfacing these answers the user's question — *which* levels are relevant —
@@ -232,7 +232,7 @@ class RelevantLevel(BaseModel):
     why: str = Field(default="", description="One line on why this level matters now.")
 
 
-class TechnicalVerdict(BaseModel):
+class TechnicalVerdict(StrictAIModel):
     """Structured verdict returned by the technical-analysis agent for one stock.
 
     Note on the integer range: like `AgentVerdict`, we validate `confidence`
@@ -866,10 +866,9 @@ class TechnicalAnalysisAgent:
         """Extract + validate the TechnicalVerdict JSON from the agent's final text."""
         payload = _extract_json_object(text)
         if payload is None:
-            preview = (text or "").strip()[:300] or "<empty response>"
             raise FundamentalsAgentError(
-                "The technical agent did not return a parseable TechnicalVerdict "
-                f"JSON object. Final message was: {preview}"
+                "The technical agent did not return a parseable "
+                "TechnicalVerdict JSON object."
             )
         verdict = TechnicalVerdict.model_validate(payload)
         return self._normalize_verdict(verdict, symbol=symbol, signal_date=signal_date)

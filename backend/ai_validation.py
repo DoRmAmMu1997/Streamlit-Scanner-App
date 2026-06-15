@@ -1,4 +1,4 @@
-"""AI-004 — bounded retry around strict AI-output parsing.
+"""AI-004 — bounded attempt budget around strict AI-output parsing.
 
 Beginner note (why this exists)
 -------------------------------
@@ -32,6 +32,8 @@ import logging
 from collections.abc import Callable
 from typing import TypeVar
 
+from pydantic import BaseModel, ConfigDict
+
 logger = logging.getLogger(__name__)
 
 # The validated object the caller's ``parse_once`` returns (e.g. a Pydantic
@@ -39,14 +41,28 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 
+class StrictAIModel(BaseModel):
+    """Strict base class for model-produced JSON."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+
 class AIValidationError(RuntimeError):
     """Raised when AI output still fails strict parsing after every retry.
 
-    The original parse/validation error is chained as ``__cause__`` and its text
-    is preserved in the message, so callers that show or match on the message
-    (and the agents that record ``error_type="AIValidationError"``) keep the
-    underlying detail while gaining one clear, dedicated failure type.
+    Only safe structural metadata is exposed. Parser and validation exceptions
+    can contain raw model text, so their messages and traceback chains are not
+    propagated to callers.
     """
+
+    def __init__(self, *, attempts: int, last_error_type: str) -> None:
+        self.attempts = max(1, int(attempts))
+        self.last_error_type = str(last_error_type)
+        noun = "attempt" if self.attempts == 1 else "attempts"
+        super().__init__(
+            "AI output failed strict validation after "
+            f"{self.attempts} {noun} (last error: {self.last_error_type})."
+        )
 
 
 def parse_with_retry(
@@ -81,8 +97,8 @@ def parse_with_retry(
         The validated object from the first attempt that parses.
 
     Raises:
-        AIValidationError: after every attempt fails to parse/validate; the last
-            ``retry_on`` error is chained as ``__cause__``.
+        AIValidationError: after every attempt fails to parse/validate. It
+            exposes only the attempt count and final exception type.
         Exception: immediately and unwrapped, any other error raised by
             ``run_once`` (SDK/CLI/usage-limit, or the 67 agent's research-evidence
             errors) — these are not retried and keep their own type.
@@ -97,10 +113,15 @@ def parse_with_retry(
         except retry_on as exc:
             # The final attempt's failure becomes the caller's recorded
             # rejection / error receipt — surface it as the one dedicated
-            # AIValidationError type (original chained) so downstream code can
-            # tell a validation failure apart from an availability failure.
+            # AIValidationError type so downstream code can tell a validation
+            # failure apart from an availability failure. The original parser
+            # exception is intentionally suppressed because it may contain raw
+            # model-controlled text.
             if attempt >= total:
-                raise AIValidationError(str(exc)) from exc
+                raise AIValidationError(
+                    attempts=total,
+                    last_error_type=type(exc).__name__,
+                ) from None
             logger.warning(
                 "%s failed validation on attempt %d/%d (%s); retrying.",
                 label,

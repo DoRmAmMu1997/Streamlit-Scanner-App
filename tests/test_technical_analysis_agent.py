@@ -123,6 +123,30 @@ def test_technical_verdict_json_schema_omits_min_max_on_confidence():
     assert "maximum" not in conf
 
 
+def test_technical_verdict_rejects_coercion_and_unknown_fields():
+    payload = _sample_verdict(
+        relevant_levels=[
+            {
+                "price": 95.0,
+                "role": "support",
+                "relevance": "high",
+                "why": "Repeated reactions.",
+            }
+        ]
+    ).model_dump(mode="json")
+
+    with pytest.raises(Exception):
+        TechnicalVerdict.model_validate({**payload, "confirmed": "true"})
+
+    with pytest.raises(Exception):
+        TechnicalVerdict.model_validate({**payload, "unexpected": "discarded today"})
+
+    nested = json.loads(json.dumps(payload))
+    nested["relevant_levels"][0]["unexpected"] = "discarded today"
+    with pytest.raises(Exception):
+        TechnicalVerdict.model_validate(nested)
+
+
 # ---------------------------------------------------------------------------
 # Agent behaviour (driven by the fake runner)
 # ---------------------------------------------------------------------------
@@ -463,8 +487,11 @@ def test_agent_evaluate_turns_malformed_output_into_safe_auditable_error(tmp_pat
     assert result.validated_verdict_json == {}
 
 
-def test_agent_retries_then_succeeds_on_transient_malformed_output(tmp_path):
+def test_agent_retries_then_succeeds_on_transient_malformed_output(
+    tmp_path, monkeypatch
+):
     """A first malformed answer is retried; the second valid answer wins (AI-004)."""
+    monkeypatch.setenv("SCANNER_AI_MAX_ATTEMPTS", "2")
     cache = FundamentalsCache(cache_dir=tmp_path)
     valid_json = json.dumps(_sample_verdict().model_dump(mode="json"))
 
@@ -487,8 +514,9 @@ def test_agent_retries_then_succeeds_on_transient_malformed_output(tmp_path):
     assert result.verdict.pattern == "at_support"
 
 
-def test_agent_rejects_verdict_missing_required_fields(tmp_path):
+def test_agent_rejects_verdict_missing_required_fields(tmp_path, monkeypatch):
     """A verdict JSON missing a required field exhausts the retry → AIValidationError."""
+    monkeypatch.setenv("SCANNER_AI_MAX_ATTEMPTS", "2")
     cache = FundamentalsCache(cache_dir=tmp_path)
     # Valid JSON object, but the required `reasoning` field is absent.
     missing_field_json = json.dumps(
@@ -511,6 +539,21 @@ def test_agent_rejects_verdict_missing_required_fields(tmp_path):
     assert result.verdict is None
     assert result.error_type == "AIValidationError"
     assert result.provenance.verdict == "error"
+
+
+def test_technical_parser_does_not_include_raw_model_text(tmp_path):
+    from backend.fundamentals.fundamental_agent import FundamentalsAgentError
+
+    marker = "UNTRUSTED_MARKDOWN_[click](https://attacker.example/leak)"
+    agent = TechnicalAnalysisAgent(
+        model="test-model",
+        cache=FundamentalsCache(cache_dir=tmp_path),
+    )
+
+    with pytest.raises(FundamentalsAgentError) as excinfo:
+        agent._parse_verdict(marker, symbol="DEMO", signal_date="2026-01-01")
+
+    assert marker not in str(excinfo.value)
 
 
 def test_agent_does_not_retry_usage_limit(tmp_path):

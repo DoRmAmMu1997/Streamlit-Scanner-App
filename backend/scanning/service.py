@@ -91,7 +91,7 @@ class ScanRunResult:
     compute_failures: list[dict[str, Any]] = field(default_factory=list)
     rejected_result_rows: int = 0
     # AI-004 (AC3): how many AI verdicts were rejected because their output failed
-    # strict validation even after the bounded retry (a subset of
+    # strict validation within the configured attempt budget (a subset of
     # ``compute_failures`` tagged ``phase="ai_validation"``).
     ai_validation_failures: int = 0
     error_message: str | None = None
@@ -235,7 +235,7 @@ def run_scan(
 
     # AI-004 (AC3): surface AI output-validation failures explicitly at the run
     # level. They are a subset of compute_failures — the AI screeners tag them
-    # phase="ai_validation" once a malformed/incomplete verdict survives the retry
+    # phase="ai_validation" once the configured attempt budget is exhausted
     # (AIValidationError) — so the generic "failed to compute" count already
     # includes them. This adds a separately-countable clause + terminal event
     # field so an operator can tell "the AI was unavailable" (an SDK/usage-limit
@@ -246,7 +246,8 @@ def run_scan(
     if ai_validation_failures:
         error_message = _combine_error_messages(
             error_message,
-            f"{ai_validation_failures} AI output(s) failed validation after retries.",
+            f"{ai_validation_failures} AI output(s) failed validation "
+            "within the configured attempt budget.",
         )
 
     # OBS-001: one symbol_scan_failed per failed symbol (load failures from the

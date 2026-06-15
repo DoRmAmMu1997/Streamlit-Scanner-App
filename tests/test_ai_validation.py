@@ -9,6 +9,8 @@ that matter: succeed first try, retry then succeed, exhaust into a single
 
 from __future__ import annotations
 
+import traceback
+
 import pytest
 
 from backend.ai_validation import AIValidationError, parse_with_retry
@@ -63,22 +65,28 @@ def test_retries_then_succeeds():
     assert rec.parse_calls == 2
 
 
-def test_exhausts_into_a_single_ai_validation_error():
+def test_exhausts_into_a_sanitized_ai_validation_error():
     rec = _Recorder(["always-bad"])
+    marker = "UNTRUSTED_MARKDOWN_[click](https://attacker.example/leak)"
 
     def parse(text: str) -> str:
         rec.parse_calls += 1
-        raise ValueError("still malformed: secret-detail")
+        raise ValueError(f"still malformed: {marker}")
 
     with pytest.raises(AIValidationError) as excinfo:
         parse_with_retry(rec.run_once, parse, attempts=3, retry_on=(ValueError,))
 
-    # All attempts were spent, the original error is chained, and its text is
-    # preserved on the wrapper (callers/UI match or display the message).
     assert rec.run_calls == 3
     assert rec.parse_calls == 3
-    assert isinstance(excinfo.value.__cause__, ValueError)
-    assert "still malformed" in str(excinfo.value)
+    assert excinfo.value.attempts == 3
+    assert excinfo.value.last_error_type == "ValueError"
+    assert str(excinfo.value) == (
+        "AI output failed strict validation after 3 attempts "
+        "(last error: ValueError)."
+    )
+    assert marker not in str(excinfo.value)
+    assert excinfo.value.__cause__ is None
+    assert marker not in "".join(traceback.format_exception(excinfo.value))
 
 
 def test_does_not_retry_errors_raised_by_run_once():
