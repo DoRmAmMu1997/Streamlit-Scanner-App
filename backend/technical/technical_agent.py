@@ -45,13 +45,15 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 import pandas as pd
-from pydantic import BaseModel, Field, field_validator
+from pydantic import Field, ValidationError, field_validator
 
 from backend.ai_cache_integrity import (
     get_ai_cache_signing_key,
     sign_cache_envelope,
     verify_cache_envelope,
 )
+from backend.ai_validation import StrictAIModel, parse_with_retry
+from backend.config import get_ai_max_attempts
 from backend.fundamentals.fundamental_agent import (
     AgentRunResult,
     FundamentalsAgentError,
@@ -214,7 +216,7 @@ PatternName = Literal[
 ]
 
 
-class RelevantLevel(BaseModel):
+class RelevantLevel(StrictAIModel):
     """One support/resistance level the agent judged relevant to its verdict.
 
     Surfacing these answers the user's question — *which* levels are relevant —
@@ -230,7 +232,7 @@ class RelevantLevel(BaseModel):
     why: str = Field(default="", description="One line on why this level matters now.")
 
 
-class TechnicalVerdict(BaseModel):
+class TechnicalVerdict(StrictAIModel):
     """Structured verdict returned by the technical-analysis agent for one stock.
 
     Note on the integer range: like `AgentVerdict`, we validate `confidence`
@@ -703,7 +705,11 @@ class TechnicalAnalysisAgent:
         #    this per-call context) to gather facts, then emits the final JSON.
         tool_context = TechnicalToolContext.build(normalized, candles, levels, params)
         runner = self._runner or self._default_run
-        try:
+
+        def _run_once() -> str:
+            # One agentic pass → the model's final text. SDK / CLI / usage-limit
+            # failures raised here are NOT retried (they fall through to the error
+            # receipt below); only malformed output is retried (see parse_with_retry).
             run_result = self._run_sync(
                 runner(
                     prompt,
@@ -719,10 +725,20 @@ class TechnicalAnalysisAgent:
                     normalized,
                     run_result.cost_usd,
                 )
-            verdict = self._parse_verdict(
-                run_result.text,
-                symbol=normalized,
-                signal_date=signal_date,
+            return run_result.text
+
+        def _parse(text: str) -> TechnicalVerdict:
+            return self._parse_verdict(text, symbol=normalized, signal_date=signal_date)
+
+        try:
+            # AI-004: re-run the agentic loop when the model returns malformed or
+            # incomplete JSON, up to get_ai_max_attempts() tries, before rejecting.
+            verdict = parse_with_retry(
+                _run_once,
+                _parse,
+                attempts=get_ai_max_attempts(),
+                retry_on=(FundamentalsAgentError, ValidationError),
+                label=f"TechnicalVerdict[{normalized}]",
             )
         except Exception as exc:  # noqa: BLE001 - return a durable safe error receipt
             provenance = AIProvenance(
@@ -850,10 +866,9 @@ class TechnicalAnalysisAgent:
         """Extract + validate the TechnicalVerdict JSON from the agent's final text."""
         payload = _extract_json_object(text)
         if payload is None:
-            preview = (text or "").strip()[:300] or "<empty response>"
             raise FundamentalsAgentError(
-                "The technical agent did not return a parseable TechnicalVerdict "
-                f"JSON object. Final message was: {preview}"
+                "The technical agent did not return a parseable "
+                "TechnicalVerdict JSON object."
             )
         verdict = TechnicalVerdict.model_validate(payload)
         return self._normalize_verdict(verdict, symbol=symbol, signal_date=signal_date)

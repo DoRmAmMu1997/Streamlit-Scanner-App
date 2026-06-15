@@ -123,6 +123,30 @@ def test_technical_verdict_json_schema_omits_min_max_on_confidence():
     assert "maximum" not in conf
 
 
+def test_technical_verdict_rejects_coercion_and_unknown_fields():
+    payload = _sample_verdict(
+        relevant_levels=[
+            {
+                "price": 95.0,
+                "role": "support",
+                "relevance": "high",
+                "why": "Repeated reactions.",
+            }
+        ]
+    ).model_dump(mode="json")
+
+    with pytest.raises(Exception):
+        TechnicalVerdict.model_validate({**payload, "confirmed": "true"})
+
+    with pytest.raises(Exception):
+        TechnicalVerdict.model_validate({**payload, "unexpected": "discarded today"})
+
+    nested = json.loads(json.dumps(payload))
+    nested["relevant_levels"][0]["unexpected"] = "discarded today"
+    with pytest.raises(Exception):
+        TechnicalVerdict.model_validate(nested)
+
+
 # ---------------------------------------------------------------------------
 # Agent behaviour (driven by the fake runner)
 # ---------------------------------------------------------------------------
@@ -454,11 +478,105 @@ def test_agent_evaluate_turns_malformed_output_into_safe_auditable_error(tmp_pat
     result = agent.evaluate("DEMO", _sample_candles(), _sample_levels())
 
     assert result.verdict is None
-    assert result.error_type == "FundamentalsAgentError"
+    # AI-004: malformed output that survives the retry is recorded as the
+    # dedicated AIValidationError type (distinct from an SDK/usage-limit failure).
+    assert result.error_type == "AIValidationError"
     assert result.provenance.verdict == "error"
     assert result.provenance.confidence is None
     assert "raw-model-secret" not in (result.provenance.decision_reason or "")
     assert result.validated_verdict_json == {}
+
+
+def test_agent_retries_then_succeeds_on_transient_malformed_output(
+    tmp_path, monkeypatch
+):
+    """A first malformed answer is retried; the second valid answer wins (AI-004)."""
+    monkeypatch.setenv("SCANNER_AI_MAX_ATTEMPTS", "2")
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    valid_json = json.dumps(_sample_verdict().model_dump(mode="json"))
+
+    class _FlakyRunner(_FakeRunner):
+        async def __call__(
+            self, prompt, *, system_prompt, model, max_turns, tool_context=None
+        ):
+            self.calls += 1
+            text = "sorry, no JSON yet" if self.calls == 1 else valid_json
+            return AgentRunResult(text=text, cost_usd=0.01)
+
+    runner = _FlakyRunner(_sample_verdict())
+    agent = TechnicalAnalysisAgent(model="test-model", cache=cache, runner=runner)
+
+    result = agent.evaluate("DEMO", _sample_candles(), _sample_levels())
+
+    assert runner.calls == 2
+    assert result.error_type is None
+    assert result.verdict is not None
+    assert result.verdict.pattern == "at_support"
+
+
+def test_agent_rejects_verdict_missing_required_fields(tmp_path, monkeypatch):
+    """A verdict JSON missing a required field exhausts the retry → AIValidationError."""
+    monkeypatch.setenv("SCANNER_AI_MAX_ATTEMPTS", "2")
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    # Valid JSON object, but the required `reasoning` field is absent.
+    missing_field_json = json.dumps(
+        {"pattern": "at_support", "confirmed": True, "confidence": 7}
+    )
+
+    class _MissingFieldRunner(_FakeRunner):
+        async def __call__(
+            self, prompt, *, system_prompt, model, max_turns, tool_context=None
+        ):
+            self.calls += 1
+            return AgentRunResult(text=missing_field_json, cost_usd=0.01)
+
+    runner = _MissingFieldRunner(_sample_verdict())
+    agent = TechnicalAnalysisAgent(model="test-model", cache=cache, runner=runner)
+
+    result = agent.evaluate("DEMO", _sample_candles(), _sample_levels())
+
+    assert runner.calls == 2  # one retry, then give up
+    assert result.verdict is None
+    assert result.error_type == "AIValidationError"
+    assert result.provenance.verdict == "error"
+
+
+def test_technical_parser_does_not_include_raw_model_text(tmp_path):
+    from backend.fundamentals.fundamental_agent import FundamentalsAgentError
+
+    marker = "UNTRUSTED_MARKDOWN_[click](https://attacker.example/leak)"
+    agent = TechnicalAnalysisAgent(
+        model="test-model",
+        cache=FundamentalsCache(cache_dir=tmp_path),
+    )
+
+    with pytest.raises(FundamentalsAgentError) as excinfo:
+        agent._parse_verdict(marker, symbol="DEMO", signal_date="2026-01-01")
+
+    assert marker not in str(excinfo.value)
+
+
+def test_agent_does_not_retry_usage_limit(tmp_path):
+    """A usage-limit error is infrastructure, not malformed output: tried once."""
+    from backend.fundamentals.fundamental_agent import FundamentalsUsageLimitError
+
+    cache = FundamentalsCache(cache_dir=tmp_path)
+
+    class _UsageLimitRunner(_FakeRunner):
+        async def __call__(
+            self, prompt, *, system_prompt, model, max_turns, tool_context=None
+        ):
+            self.calls += 1
+            raise FundamentalsUsageLimitError()
+
+    runner = _UsageLimitRunner(_sample_verdict())
+    agent = TechnicalAnalysisAgent(model="test-model", cache=cache, runner=runner)
+
+    result = agent.evaluate("DEMO", _sample_candles(), _sample_levels())
+
+    assert runner.calls == 1  # NOT retried
+    assert result.verdict is None
+    assert result.error_type == "FundamentalsUsageLimitError"
 
 
 def test_agent_demotes_confirmed_when_pattern_is_none(tmp_path):

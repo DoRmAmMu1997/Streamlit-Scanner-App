@@ -149,9 +149,35 @@ def test_operations_guide_matches_scheduler_database_and_ci_contracts():
     assert "CRON_TZ=Asia/Kolkata" in text
     assert "host timezone" in text.lower()
     assert "`psycopg[binary]`" in text
+    assert "SCANNER_AI_MAX_ATTEMPTS=2" in text
+    assert "1 disables validation retries" in text
+    assert "clamped to `1`-`3`" in text
+    assert "Agent SDK credit" in text
     for command in CI_COMMANDS:
         assert command in text
     assert "python -m pip_audit -r requirements.txt -r requirements-dev.txt" not in text
+
+
+def test_ai_architecture_docs_describe_validation_fallback_and_safe_errors():
+    scan_service = (
+        ROOT
+        / "docs"
+        / "architecture"
+        / "components"
+        / "scan-service-and-provenance.md"
+    ).read_text(encoding="utf-8")
+    fundamentals = (
+        ROOT / "docs" / "architecture" / "components" / "fundamentals-ai.md"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        "technical-analysis screener keeps an eligible deterministic gate-only row"
+        in scan_service
+    )
+    assert "67 ka funda screener produces no result row" in scan_service
+    assert "failed validation after retries" not in scan_service
+    assert "raw model text" in fundamentals
+    assert "never included" in fundamentals
 
 
 def test_screener_guide_matches_registry_chart_golden_and_ci_contracts():

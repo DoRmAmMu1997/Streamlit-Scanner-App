@@ -97,6 +97,19 @@ def _sample_verdict() -> AgentVerdict:
     )
 
 
+def _sample_universal_verdict() -> AgentVerdict:
+    verdict = _sample_verdict()
+    criteria = verdict.criteria_breakdown[:7]
+    return verdict.model_copy(
+        update={
+            "mode": "universal",
+            "passed_criteria_count": sum(item.passed for item in criteria),
+            "total_criteria": 7,
+            "criteria_breakdown": criteria,
+        }
+    )
+
+
 class _FakeRunner:
     """Stand-in for the Claude Agent SDK runner used by FundamentalAgent.
 
@@ -186,6 +199,21 @@ def test_agent_verdict_json_schema_omits_min_max_on_integer_fields():
     assert "maximum" not in pcc_props
 
 
+def test_agent_verdict_rejects_coercion_and_unknown_fields():
+    payload = _sample_verdict().model_dump(mode="json")
+
+    with pytest.raises(Exception):
+        AgentVerdict.model_validate({**payload, "rating": "8"})
+
+    with pytest.raises(Exception):
+        AgentVerdict.model_validate({**payload, "unexpected": "discarded today"})
+
+    nested = json.loads(json.dumps(payload))
+    nested["criteria_breakdown"][0]["unexpected"] = "discarded today"
+    with pytest.raises(Exception):
+        AgentVerdict.model_validate(nested)
+
+
 def test_agent_verdict_field_validator_still_rejects_out_of_range_rating():
     """The field_validator must keep enforcing 0 <= rating <= 10 at parse time."""
     valid = dict(
@@ -262,7 +290,13 @@ def test_agent_verdict_accepts_legacy_string_forward_outlook():
         "data_freshness": "2026-01-01",
         "model_used": "legacy-model",
     }
-    verdict = AgentVerdict.model_validate(legacy_payload)
+    with pytest.raises(Exception):
+        AgentVerdict.model_validate(legacy_payload)
+
+    verdict = AgentVerdict.model_validate(
+        legacy_payload,
+        context={"allow_legacy_cache": True},
+    )
     assert isinstance(verdict.forward_outlook, ForwardOutlook)
     assert verdict.forward_outlook.overall_summary == (
         "Demand environment looks supportive over FY26."
@@ -371,25 +405,14 @@ def test_check_backfills_when_model_omits_data_freshness_and_model_used(tmp_path
     cache = FundamentalsCache(cache_dir=tmp_path)
     cache.set_data("RELAXO", _sample_screener_data())
 
-    # A minimal valid verdict body that deliberately leaves OUT data_freshness
-    # and model_used — exactly the shape that triggered the crash.
-    raw = json.dumps(
-        {
-            "symbol": "RELAXO",
-            "mode": "criteria",
-            "rating": 6,
-            "passed_criteria_count": 5,
-            "total_criteria": 9,
-            "criteria_breakdown": [],
-            "additional_observations": [],
-            "summary_comments": "Decent franchise but valuation limits a premium rating.",
-            "forward_outlook": {
-                "announcements_conclusion": "",
-                "concall_conclusion": "",
-                "overall_summary": "Steady volume growth expected.",
-            },
-        }
-    )
+    # A structurally valid verdict that deliberately leaves OUT data_freshness
+    # and model_used — exactly the bookkeeping omission that triggered the crash.
+    payload = _sample_verdict().model_dump(mode="json")
+    payload["symbol"] = "RELAXO"
+    payload["rating"] = 6
+    del payload["data_freshness"]
+    del payload["model_used"]
+    raw = json.dumps(payload)
     runner = _RawJSONRunner(raw)
     agent = FundamentalAgent(model="test-model", cache=cache, runner=runner)
 
@@ -496,8 +519,9 @@ def test_fundamental_agent_normalize_verdict_fills_blank_fields(tmp_path):
 
 
 def test_fundamental_agent_parse_failure_raises_clear_error(tmp_path):
-    """A runner that returns non-JSON must raise a clear RuntimeError rather
-    than a cryptic validation error."""
+    """A non-JSON response becomes a sanitized validation error."""
+    from backend.ai_validation import AIValidationError
+
     cache = FundamentalsCache(cache_dir=tmp_path)
     cache.set_data("DEMO", _sample_screener_data())
 
@@ -505,8 +529,172 @@ def test_fundamental_agent_parse_failure_raises_clear_error(tmp_path):
         return AgentRunResult(text="I could not complete the analysis, sorry.")
 
     agent = FundamentalAgent(model="test-model", cache=cache, runner=_bad_runner)
-    with pytest.raises(RuntimeError, match="parseable AgentVerdict"):
+    with pytest.raises(AIValidationError) as excinfo:
         agent.check("DEMO")
+
+    assert excinfo.value.last_error_type == "FundamentalsAgentError"
+    assert "I could not complete" not in str(excinfo.value)
+
+
+def test_fundamental_agent_retries_then_succeeds_on_transient_malformed_output(
+    tmp_path, monkeypatch
+):
+    """A transient non-JSON answer is retried; the next valid answer is used (AI-004)."""
+    monkeypatch.setenv("SCANNER_AI_MAX_ATTEMPTS", "2")
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("DEMO", _sample_screener_data())
+    valid_json = json.dumps(_sample_verdict().model_dump(mode="json"))
+
+    class _FlakyRunner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __call__(self, prompt, *, system_prompt, model, max_turns):
+            self.calls += 1
+            text = "still thinking, no JSON yet" if self.calls == 1 else valid_json
+            return AgentRunResult(text=text)
+
+    runner = _FlakyRunner()
+    agent = FundamentalAgent(model="test-model", cache=cache, runner=runner)
+
+    verdict = agent.check("DEMO")
+
+    assert runner.calls == 2
+    assert verdict.symbol == "DEMO"
+
+
+@pytest.mark.parametrize("attempts", [1, 2, 3])
+def test_fundamental_agent_retry_exhaustion_honors_attempt_budget(
+    tmp_path, monkeypatch, attempts
+):
+    """Persistent malformed output consumes the configured attempt budget."""
+    from backend.ai_validation import AIValidationError
+
+    monkeypatch.setenv("SCANNER_AI_MAX_ATTEMPTS", str(attempts))
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("DEMO", _sample_screener_data())
+
+    class _BadRunner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __call__(self, prompt, *, system_prompt, model, max_turns):
+            self.calls += 1
+            return AgentRunResult(text="no JSON here")
+
+    runner = _BadRunner()
+    agent = FundamentalAgent(model="test-model", cache=cache, runner=runner)
+
+    with pytest.raises(AIValidationError):
+        agent.check("DEMO")
+    assert runner.calls == attempts
+
+
+def test_fundamental_agent_rejects_verdict_missing_required_fields(
+    tmp_path, monkeypatch
+):
+    """A verdict JSON missing a required field (rating) fails validation (AI-004)."""
+    from backend.ai_validation import AIValidationError
+
+    monkeypatch.setenv("SCANNER_AI_MAX_ATTEMPTS", "2")
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("DEMO", _sample_screener_data())
+    payload = _sample_verdict().model_dump(mode="json")
+    del payload["rating"]  # a required field with no default
+    missing_field_json = json.dumps(payload)
+
+    class _MissingFieldRunner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __call__(self, prompt, *, system_prompt, model, max_turns):
+            self.calls += 1
+            return AgentRunResult(text=missing_field_json)
+
+    runner = _MissingFieldRunner()
+    agent = FundamentalAgent(model="test-model", cache=cache, runner=runner)
+
+    with pytest.raises(AIValidationError):
+        agent.check("DEMO")
+    assert runner.calls == 2
+
+
+def test_fundamental_agent_rejects_inconsistent_criteria_counts(
+    tmp_path, monkeypatch
+):
+    from backend.ai_validation import AIValidationError
+
+    monkeypatch.setenv("SCANNER_AI_MAX_ATTEMPTS", "1")
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("DEMO", _sample_screener_data())
+    payload = _sample_verdict().model_dump(mode="json")
+    payload["passed_criteria_count"] = 9
+
+    async def _inconsistent_runner(prompt, *, system_prompt, model, max_turns):
+        return AgentRunResult(text=json.dumps(payload))
+
+    agent = FundamentalAgent(
+        model="test-model",
+        cache=cache,
+        runner=_inconsistent_runner,
+    )
+
+    with pytest.raises(AIValidationError):
+        agent.check("DEMO")
+
+
+def test_fundamental_parser_does_not_include_raw_model_text(tmp_path):
+    marker = "UNTRUSTED_MARKDOWN_[click](https://attacker.example/leak)"
+    agent = FundamentalAgent(
+        model="test-model",
+        cache=FundamentalsCache(cache_dir=tmp_path),
+    )
+
+    with pytest.raises(FundamentalsAgentError) as excinfo:
+        agent._parse_verdict(marker, symbol="DEMO")
+
+    assert marker not in str(excinfo.value)
+
+
+def test_invalid_cached_fundamental_verdict_is_refreshed(tmp_path):
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("DEMO", _sample_screener_data())
+    invalid = _sample_verdict().model_dump(mode="json")
+    invalid["rating"] = "8"
+    cache.set_verdict(
+        "DEMO",
+        "test-model::criteria",
+        "2026-05-27",
+        invalid,
+    )
+    runner = _FakeRunner(_sample_verdict())
+    agent = FundamentalAgent(model="test-model", cache=cache, runner=runner)
+
+    verdict = agent.check("DEMO")
+
+    assert verdict.rating == 8
+    assert runner.calls == 1
+
+
+def test_fundamental_agent_does_not_retry_usage_limit(tmp_path):
+    """A usage-limit error is infrastructure, not malformed output: tried once."""
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("DEMO", _sample_screener_data())
+
+    class _UsageLimitRunner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __call__(self, prompt, *, system_prompt, model, max_turns):
+            self.calls += 1
+            raise FundamentalsUsageLimitError()
+
+    runner = _UsageLimitRunner()
+    agent = FundamentalAgent(model="test-model", cache=cache, runner=runner)
+
+    with pytest.raises(FundamentalsUsageLimitError):
+        agent.check("DEMO")
+    assert runner.calls == 1
 
 
 def test_fundamental_agent_tolerates_json_in_markdown_fence(tmp_path):
@@ -679,16 +867,15 @@ def test_concall_transcript_impl_returns_message_when_no_cache(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_fundamental_agent_check_universal_mode_forces_seven_criteria(tmp_path):
-    """Running in universal mode forces total_criteria=7, regardless of what
-    the model emitted (the curated nine-criteria sample has total_criteria=9)."""
+def test_fundamental_agent_check_universal_mode_accepts_seven_criteria(tmp_path):
+    """Universal output must contain exactly the seven applicable criteria."""
     cache = FundamentalsCache(cache_dir=tmp_path)
     cache.set_data("OUTSIDE", _sample_screener_data())
 
     # The runner returns the curated sample (total_criteria=9); the agent's
     # _normalize_verdict must stamp total_criteria=7 because the call is universal.
-    polluted = _sample_verdict()  # total_criteria=9
-    runner = _FakeRunner(polluted)
+    expected = _sample_universal_verdict()
+    runner = _FakeRunner(expected)
 
     agent = FundamentalAgent(model="test-model", cache=cache, runner=runner)
     verdict = agent.check("OUTSIDE", mode="universal")
@@ -696,8 +883,8 @@ def test_fundamental_agent_check_universal_mode_forces_seven_criteria(tmp_path):
     assert verdict.mode == "universal"
     assert verdict.total_criteria == 7
     # Rating and the breakdown survive — only the count denominator is enforced.
-    assert verdict.rating == polluted.rating
-    assert verdict.criteria_breakdown == polluted.criteria_breakdown
+    assert verdict.rating == expected.rating
+    assert verdict.criteria_breakdown == expected.criteria_breakdown
 
 
 def test_fundamental_agent_check_criteria_mode_forces_nine_criteria(tmp_path):
@@ -719,11 +906,19 @@ def test_fundamental_agent_verdict_cache_keys_by_mode(tmp_path):
     cache = FundamentalsCache(cache_dir=tmp_path)
     cache.set_data("BOTH", _sample_screener_data())
 
-    runner = _FakeRunner(_sample_verdict())
-    agent = FundamentalAgent(model="test-model", cache=cache, runner=runner)
+    criteria_agent = FundamentalAgent(
+        model="test-model",
+        cache=cache,
+        runner=_FakeRunner(_sample_verdict()),
+    )
+    universal_agent = FundamentalAgent(
+        model="test-model",
+        cache=cache,
+        runner=_FakeRunner(_sample_universal_verdict()),
+    )
 
-    agent.check("BOTH", mode="criteria")
-    agent.check("BOTH", mode="universal")
+    criteria_agent.check("BOTH", mode="criteria")
+    universal_agent.check("BOTH", mode="universal")
 
     # Two distinct cache files should exist for the same symbol + model + date.
     cached_criteria = cache.get_verdict("BOTH", "test-model::criteria", "2026-05-27")

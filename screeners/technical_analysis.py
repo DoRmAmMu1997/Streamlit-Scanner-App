@@ -38,6 +38,7 @@ from typing import ClassVar, Literal
 
 import pandas as pd
 
+from backend.ai_validation import AIValidationError
 from backend.charts import (
     add_levels_overlay,
     add_neckline_overlay,
@@ -451,7 +452,14 @@ class TechnicalAnalysis(BaseScanner):
                             evaluation.provenance.decision_reason
                             or "Technical AI evaluation failed."
                         ),
-                        "phase": "ai_evaluation",
+                        # AI-004: malformed/incomplete model output that survived
+                        # the retry is a distinct "ai_validation" failure; an SDK /
+                        # CLI / usage-limit failure stays the broader "ai_evaluation".
+                        "phase": (
+                            "ai_validation"
+                            if evaluation.error_type == AIValidationError.__name__
+                            else "ai_evaluation"
+                        ),
                     }
                 )
             return self._gate_only_row(candidate)

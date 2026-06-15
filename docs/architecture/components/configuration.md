@@ -59,6 +59,7 @@ working after `config.py` became the `config/` package.
 | `secret_values(settings=None)` | fn | List of configured secret strings for the redactor. |
 | `get_fundamentals_model()` | fn | `CLAUDE_AGENT_MODEL` or default `claude-sonnet-4-6`. |
 | `get_agent_fast_mode()` | fn | `SCANNER_AGENT_FAST_MODE` truthiness. |
+| `get_ai_max_attempts()` | fn | Total AI-output parse attempts per verdict from `SCANNER_AI_MAX_ATTEMPTS` (default `2` = one retry; clamped to 1–3). Powers the AI-004 validation-retry — see [scan-service-and-provenance.md](scan-service-and-provenance.md). |
 | `credential_status()` | fn | UI-friendly booleans (no secret values). |
 | `ensure_project_dirs()` | fn | `mkdir -p` the runtime folder skeleton (dirs only, never files). |
 | `dhan_request_delay_seconds()` / `dhan_rate_limit_retry_delays()` | fn | Dhan pacing knobs (defaults `0.5s` / `[2,5,10]s`). |
@@ -88,7 +89,7 @@ working after `config.py` became the `config/` package.
 `APP_ENV`(`SCANNER_ENV`) · `DATA_DIR` · `DATABASE_URL` · `ALLOWED_EMAILS` · `ADMIN_EMAILS` ·
 `ANTHROPIC_API_KEY` · `SERPAPI_API_KEY` · `DHAN_CLIENT_ID`(`DHAN_CLIENT_CODE`) · `DHAN_ACCESS_TOKEN` ·
 `LOG_LEVEL`(+`SCANNER_DEBUG`) · `LOG_FORMAT` · `AUTH_REQUIRED` · `CLAUDE_AGENT_MODEL` ·
-`SCANNER_AGENT_FAST_MODE` · `SCANNER_DHAN_REQUEST_DELAY_SECONDS` · `SCANNER_DHAN_RATE_LIMIT_RETRY_DELAYS` · `SCANNER_DHAN_FETCH_WORKERS` · `SCANNER_AI_CACHE_SIGNING_KEY` (PROV-003; restart-stable AI verdict-cache signing — also folded into `secret_values()` for redaction).
+`SCANNER_AGENT_FAST_MODE` · `SCANNER_AI_MAX_ATTEMPTS` · `SCANNER_DHAN_REQUEST_DELAY_SECONDS` · `SCANNER_DHAN_RATE_LIMIT_RETRY_DELAYS` · `SCANNER_DHAN_FETCH_WORKERS` · `SCANNER_AI_CACHE_SIGNING_KEY` (PROV-003; restart-stable AI verdict-cache signing — also folded into `secret_values()` for redaction).
 
 ## 7. Testing
 

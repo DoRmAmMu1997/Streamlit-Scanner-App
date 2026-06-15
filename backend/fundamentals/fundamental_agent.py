@@ -48,8 +48,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import Field, ValidationError, ValidationInfo, field_validator
 
+from backend.ai_validation import StrictAIModel, parse_with_retry
+from backend.config import get_ai_max_attempts
 from backend.fundamentals.fundamentals_cache import FundamentalsCache
 from backend.fundamentals.pdf_reader import read_recent_concall_text
 from backend.fundamentals.screener_in_client import (
@@ -155,7 +157,7 @@ def _format_usage_limit_message(resets_at: int | None) -> str:
 # ---------------------------------------------------------------------------
 
 
-class CriterionResult(BaseModel):
+class CriterionResult(StrictAIModel):
     """One of the seven user-defined criteria with the agent's verdict."""
 
     name: str = Field(
@@ -171,7 +173,7 @@ class CriterionResult(BaseModel):
     )
 
 
-class ForwardOutlook(BaseModel):
+class ForwardOutlook(StrictAIModel):
     """Three-part structured forward outlook produced by the agent.
 
     Each subsection corresponds to a specific data source so the UI can
@@ -216,7 +218,7 @@ class ForwardOutlook(BaseModel):
     )
 
 
-class Observation(BaseModel):
+class Observation(StrictAIModel):
     """A fundamental dimension the agent chose to analyse beyond the criteria."""
 
     topic: str = Field(
@@ -231,7 +233,7 @@ class Observation(BaseModel):
     )
 
 
-class AgentVerdict(BaseModel):
+class AgentVerdict(StrictAIModel):
     """Structured verdict returned by the agent for one stock.
 
     Note on integer ranges:
@@ -345,7 +347,11 @@ class AgentVerdict(BaseModel):
 
     @field_validator("forward_outlook", mode="before")
     @classmethod
-    def _migrate_legacy_string_outlook(cls, value: Any) -> Any:
+    def _migrate_legacy_string_outlook(
+        cls,
+        value: Any,
+        info: ValidationInfo,
+    ) -> Any:
         """Promote pre-Job-6 string verdicts into the new ForwardOutlook shape.
 
         Before this revision, `forward_outlook` was a free-form string. Cached
@@ -356,6 +362,10 @@ class AgentVerdict(BaseModel):
         three-part shape becomes the default going forward.
         """
         if isinstance(value, str):
+            if not (info.context or {}).get("allow_legacy_cache"):
+                raise ValueError(
+                    "forward_outlook must be an object for newly generated output"
+                )
             return {"overall_summary": value}
         return value
 
@@ -1070,7 +1080,18 @@ class FundamentalAgent:
                     cache_key_model = self._cache_model_key(mode)
                     cached_verdict = self._cache.get_verdict(normalized, cache_key_model, data_date)
                     if cached_verdict is not None:
-                        return AgentVerdict.model_validate(cached_verdict)
+                        try:
+                            verdict = AgentVerdict.model_validate(
+                                cached_verdict,
+                                context={"allow_legacy_cache": True},
+                            )
+                            self._validate_criteria_counts(verdict, mode=mode)
+                            return verdict
+                        except (ValidationError, ValueError):
+                            logger.warning(
+                                "Cached fundamental verdict for %s is invalid; refreshing.",
+                                normalized,
+                            )
 
             # 2. Build the mode-aware system prompt and run the agentic loop.
             system_prompt = SYSTEM_PROMPT
@@ -1081,27 +1102,42 @@ class FundamentalAgent:
             prompt = _build_user_prompt(normalized, mode, self._model)
             runner = self._runner or self._default_run
 
-            run_result = self._run_sync(
-                runner(
-                    prompt,
-                    system_prompt=system_prompt,
-                    model=self._model,
-                    max_turns=self.MAX_TURNS,
+            def _run_once() -> str:
+                # SDK / CLI / usage-limit failures here propagate (not retried);
+                # only malformed AI JSON is retried by parse_with_retry below.
+                run_result = self._run_sync(
+                    runner(
+                        prompt,
+                        system_prompt=system_prompt,
+                        model=self._model,
+                        max_turns=self.MAX_TURNS,
+                    )
                 )
+                if run_result.cost_usd is not None:
+                    logger.info(
+                        "FundamentalAgent run for %s (%s) cost ~$%.4f",
+                        normalized,
+                        mode,
+                        run_result.cost_usd,
+                    )
+                return run_result.text
+
+            def _parse(text: str) -> AgentVerdict:
+                return self._parse_verdict(text, symbol=normalized, mode=mode)
+
+            # 3. Validate the final JSON into AgentVerdict. AI-004: re-run the
+            # agentic loop on malformed/incomplete JSON up to get_ai_max_attempts()
+            # tries, then raise (the Streamlit panel surfaces the error).
+            verdict = parse_with_retry(
+                _run_once,
+                _parse,
+                attempts=get_ai_max_attempts(),
+                retry_on=(FundamentalsAgentError, ValidationError),
+                label=f"AgentVerdict[{normalized}]",
             )
         finally:
             _FORCE_REFRESH.reset(refresh_token)
             _REQUESTED_SYMBOL.reset(symbol_token)
-        if run_result.cost_usd is not None:
-            logger.info(
-                "FundamentalAgent run for %s (%s) cost ~$%.4f",
-                normalized,
-                mode,
-                run_result.cost_usd,
-            )
-
-        # 3. Validate the final JSON into AgentVerdict.
-        verdict = self._parse_verdict(run_result.text, symbol=normalized, mode=mode)
 
         # 4. Persist the verdict to the cache so the next click is instant.
         # Cache key includes mode plus fast-mode state so each setting reuses
@@ -1130,13 +1166,32 @@ class FundamentalAgent:
         """Extract + validate the AgentVerdict JSON from the agent's final text."""
         payload = _extract_json_object(text)
         if payload is None:
-            preview = (text or "").strip()[:300] or "<empty response>"
             raise FundamentalsAgentError(
-                "The agent did not return a parseable AgentVerdict JSON object. "
-                f"Final message was: {preview}"
+                "The agent did not return a parseable AgentVerdict JSON object."
             )
         verdict = AgentVerdict.model_validate(payload)
+        try:
+            self._validate_criteria_counts(verdict, mode=mode)
+        except ValueError:
+            raise FundamentalsAgentError(
+                "The AgentVerdict criteria counts are inconsistent."
+            ) from None
         return self._normalize_verdict(verdict, symbol=symbol, mode=mode)
+
+    @staticmethod
+    def _validate_criteria_counts(
+        verdict: AgentVerdict,
+        *,
+        mode: Literal["criteria", "universal"],
+    ) -> None:
+        expected_total = 7 if mode == "universal" else 9
+        passed_rows = sum(item.passed for item in verdict.criteria_breakdown)
+        if (
+            verdict.total_criteria != expected_total
+            or len(verdict.criteria_breakdown) != expected_total
+            or verdict.passed_criteria_count != passed_rows
+        ):
+            raise ValueError("fundamental criterion counts do not agree")
 
     def _normalize_verdict(
         self,

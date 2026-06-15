@@ -50,10 +50,10 @@ sequenceDiagram
 | Symbol | Contract |
 |---|---|
 | `run_scan(*, screener_key, universe_key, scan_name=None, run_callable, universe_df, data_loader, params, triggered_by="ui", session_factory=session_scope)` | Orchestrate one scan; returns `ScanRunResult`; never raises for screener/DB failure. |
-| `ScanRunResult` | frozen: `status`, `results` (the **unchanged** screener DataFrame), `run_id|None`, `compute_failures`, `rejected_result_rows`, `error_message`. |
+| `ScanRunResult` | frozen: `status`, `results` (the **unchanged** screener DataFrame), `run_id|None`, `compute_failures`, `rejected_result_rows`, `ai_validation_failures` (AI-004), `error_message`. |
 | `RunCallable` / `SessionFactory` | Type aliases; `session_factory` injectable for tests. |
 
-**Lifecycle nuances**: header is a separate short transaction (visible immediately, no lock held during the scan); params snapshot drops callables; `data_snapshot_date` derived from `end_date`; a copy of `params` is made (never mutate the caller's dict — UI reuses it for charts); `compute_failure_callback` **and** `ai_evaluation_callback` are wired so the service decides SUCCESS vs PARTIAL and streams AI verdict receipts to `save_ai_evaluations`; terminal events emitted only after the durable write, with `phase` (`create_header`/`screener`/`persistence`). **Truthful terminal state**: a persistence failure (or all result rows rejected) downgrades the run to `FAILED`; some rows rejected → `PARTIAL`.
+**Lifecycle nuances**: header is a separate short transaction (visible immediately, no lock held during the scan); params snapshot drops callables; `data_snapshot_date` derived from `end_date`; a copy of `params` is made (never mutate the caller's dict — UI reuses it for charts); `compute_failure_callback` **and** `ai_evaluation_callback` are wired so the service decides SUCCESS vs PARTIAL and streams AI verdict receipts to `save_ai_evaluations`; terminal events emitted only after the durable write, with `phase` (`create_header`/`screener`/`persistence`). **Truthful terminal state**: a persistence failure (or all result rows rejected) downgrades the run to `FAILED`; some rows rejected → `PARTIAL`. **AI-004 (AC3)**: the AI screeners tag a verdict that still fails strict validation within the configured attempt budget with `phase="ai_validation"` in that callback; `run_scan` counts those into `ScanRunResult.ai_validation_failures`, an `ai_validation_failures=N` field on the terminal `scan_*` event, and an attempt-budget-neutral clause in `error_message` — so "the AI was unavailable" reads differently from "the AI returned unparseable output".
 
 ### `result_contract.py`
 | Symbol | Contract |
@@ -90,13 +90,14 @@ sequenceDiagram
 - Screener raises → `FAILED`, generic type-only message, traceback logged.
 - Result / AI-evaluation persistence fails → run marked `FAILED` (type-only message, not stuck RUNNING); in-memory results still returned to the UI.
 - Rows fail the contract → dropped and counted (`rejected_result_rows`); some → `PARTIAL`, all → `FAILED`.
-- An AI screener with a malformed/missing verdict emits an `error` `AIEvaluationRecord` (still persisted for audit) and produces no result row.
+- AI verdict still malformed within the configured attempt budget → the screener emits an `error` `AIEvaluationRecord` (persisted for audit) **and** a `phase="ai_validation"` compute failure. The technical-analysis screener keeps an eligible deterministic gate-only row, so a mixed run can remain `PARTIAL`; the 67 ka funda screener produces no result row. `ai_validation_failures` is reported in either case.
 
 ## 7. Testing
 
 - [`tests/test_scan_run_integration.py`](../../../tests/test_scan_run_integration.py), [`tests/test_daily_scan_job.py`](../../../tests/test_daily_scan_job.py) — full lifecycle, status transitions.
 - [`tests/test_result_contract.py`](../../../tests/test_result_contract.py) — normalization, redaction, source validation, JSON safety.
 - [`tests/test_observability.py`](../../../tests/test_observability.py) — event emission/levels.
+- [`tests/test_ai_validation.py`](../../../tests/test_ai_validation.py) — the AI-004 retry helper (retry-then-succeed, exhaustion → `AIValidationError`, no retry on SDK/usage-limit); [`tests/test_scan_service.py`](../../../tests/test_scan_service.py) records `ai_validation_failures`.
 
 ## 8. Extension points
 

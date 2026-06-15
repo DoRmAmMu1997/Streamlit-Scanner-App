@@ -137,6 +137,21 @@ def test_sixty_seven_verdict_uses_known_fall_categories():
         _verdict(fall_reason_category="random")
 
 
+def test_sixty_seven_verdict_rejects_coercion_and_unknown_fields():
+    payload = _verdict().model_dump(mode="json")
+
+    with pytest.raises(Exception):
+        SixtySevenVerdict.model_validate({**payload, "approved": "true"})
+
+    with pytest.raises(Exception):
+        SixtySevenVerdict.model_validate({**payload, "unexpected": "discarded today"})
+
+    nested = json.loads(json.dumps(payload))
+    nested["evidence"][0]["unexpected"] = "discarded today"
+    with pytest.raises(Exception):
+        SixtySevenVerdict.model_validate(nested)
+
+
 def test_agent_returns_parsed_verdict_and_prompt_contains_drawdown_facts(tmp_path):
     runner = _FakeRunner(_verdict())
     agent = SixtySevenAgent(
@@ -381,8 +396,143 @@ def test_agent_malformed_model_json_is_an_auditable_error(tmp_path):
     result = agent.evaluate("DEMO", _candidate())
 
     assert result.verdict is None
-    assert result.error_type == "FundamentalsAgentError"
+    # AI-004: a malformed verdict that survives the retry is recorded as the
+    # dedicated AIValidationError (distinct from research/SDK failure types).
+    assert result.error_type == "AIValidationError"
     assert "raw-secret" not in (result.provenance.decision_reason or "")
+
+
+def test_agent_retries_then_succeeds_on_transient_malformed_output(
+    tmp_path, monkeypatch
+):
+    """A first malformed verdict is retried with fresh research; the second wins."""
+    monkeypatch.setenv("SCANNER_AI_MAX_ATTEMPTS", "2")
+    valid_json = json.dumps(_verdict().model_dump(mode="json"))
+
+    class _FlakyRunner(_FakeRunner):
+        async def __call__(
+            self, prompt, *, system_prompt, model, max_turns, research_recorder=None
+        ):
+            self.calls += 1
+            if research_recorder is not None:
+                research_recorder(_research_payload())
+            text = "no JSON this time" if self.calls == 1 else valid_json
+            return AgentRunResult(text=text, cost_usd=0.01)
+
+    runner = _FlakyRunner(_verdict())
+    agent = SixtySevenAgent(
+        model="test-model", cache=FundamentalsCache(cache_dir=tmp_path), runner=runner
+    )
+
+    result = agent.evaluate("DEMO", _candidate())
+
+    assert runner.calls == 2
+    assert result.error_type is None
+    assert result.verdict is not None
+    assert result.verdict.approved is True
+
+
+def test_agent_rejects_verdict_missing_required_fields(tmp_path, monkeypatch):
+    """A verdict JSON missing a required field exhausts the retry → AIValidationError."""
+    monkeypatch.setenv("SCANNER_AI_MAX_ATTEMPTS", "2")
+    payload = _verdict().model_dump(mode="json")
+    del payload["approved"]  # a required field with no default
+    missing_field_json = json.dumps(payload)
+
+    class _MissingFieldRunner(_FakeRunner):
+        async def __call__(
+            self, prompt, *, system_prompt, model, max_turns, research_recorder=None
+        ):
+            self.calls += 1
+            if research_recorder is not None:
+                research_recorder(_research_payload())
+            return AgentRunResult(text=missing_field_json, cost_usd=0.01)
+
+    runner = _MissingFieldRunner(_verdict())
+    agent = SixtySevenAgent(
+        model="test-model", cache=FundamentalsCache(cache_dir=tmp_path), runner=runner
+    )
+
+    result = agent.evaluate("DEMO", _candidate())
+
+    assert runner.calls == 2
+    assert result.verdict is None
+    assert result.error_type == "AIValidationError"
+
+
+def test_retry_failure_does_not_reuse_evidence_from_an_earlier_attempt(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("SCANNER_AI_MAX_ATTEMPTS", "2")
+
+    class _StaleEvidenceRunner(_FakeRunner):
+        async def __call__(
+            self,
+            prompt,
+            *,
+            system_prompt,
+            model,
+            max_turns,
+            research_recorder=None,
+        ):
+            self.calls += 1
+            if self.calls == 1:
+                if research_recorder is not None:
+                    research_recorder(_research_payload())
+                return AgentRunResult(text="not JSON")
+            raise RuntimeError("SDK transport failed")
+
+    runner = _StaleEvidenceRunner(_verdict())
+    agent = SixtySevenAgent(
+        model="test-model",
+        cache=FundamentalsCache(cache_dir=tmp_path),
+        runner=runner,
+    )
+
+    result = agent.evaluate("DEMO", _candidate())
+
+    assert runner.calls == 2
+    assert result.error_type == "RuntimeError"
+    assert result.provenance.evidence_references == []
+
+
+def test_agent_does_not_retry_missing_research_evidence(tmp_path):
+    """A research-evidence failure concerns the scraped input, not the model's
+    JSON, so it is not retried (and is never an AIValidationError)."""
+    # record_research=False → the collector stays empty → MissingResearchEvidence.
+    runner = _FakeRunner(_verdict(), record_research=False)
+    agent = SixtySevenAgent(
+        model="test-model", cache=FundamentalsCache(cache_dir=tmp_path), runner=runner
+    )
+
+    result = agent.evaluate("DEMO", _candidate())
+
+    assert runner.calls == 1  # NOT retried
+    assert result.verdict is None
+    assert result.error_type == "MissingResearchEvidence"
+
+
+def test_agent_does_not_retry_usage_limit(tmp_path):
+    """A usage-limit error propagates from the run and is tried exactly once."""
+    from backend.fundamentals.fundamental_agent import FundamentalsUsageLimitError
+
+    class _UsageLimitRunner(_FakeRunner):
+        async def __call__(
+            self, prompt, *, system_prompt, model, max_turns, research_recorder=None
+        ):
+            self.calls += 1
+            raise FundamentalsUsageLimitError()
+
+    runner = _UsageLimitRunner(_verdict())
+    agent = SixtySevenAgent(
+        model="test-model", cache=FundamentalsCache(cache_dir=tmp_path), runner=runner
+    )
+
+    result = agent.evaluate("DEMO", _candidate())
+
+    assert runner.calls == 1  # NOT retried
+    assert result.verdict is None
+    assert result.error_type == "FundamentalsUsageLimitError"
 
 
 def test_request_scoped_research_collectors_do_not_cross_concurrent_runs(tmp_path):

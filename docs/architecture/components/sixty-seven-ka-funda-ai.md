@@ -76,17 +76,19 @@ sequenceDiagram
 | **Tamper-evident PROV-003 receipt + HMAC cache** | The receipt stores hashed evidence + sanitized URLs + a semantic prompt version (never raw text); the disk verdict cache is HMAC-signed and re-validated (prompt/context hash, model) on read, recomputing on tamper. See [security.md](security.md). | Raw evidence / unsigned cache — leak + forgeable. |
 | **Every decision is auditable** | `evaluate` always returns a receipt (approved/rejected/error); the screener persists each to `ai_evaluations`. | Persist approvals only — no audit of rejects/errors. |
 | **Reuses fundamentals SDK plumbing/errors** | One Windows-safe bridge, one usage-limit path. See [fundamentals-ai.md](fundamentals-ai.md). | Duplicate — drift. |
+| **Bounded validation-retry, fresh research per attempt (AI-004)** | A malformed/incomplete verdict is re-run up to `SCANNER_AI_MAX_ATTEMPTS` (default 2) via the shared `parse_with_retry`; each attempt **clears the `_RESEARCH_COLLECTOR`** so it re-researches cleanly and the "exactly one payload" invariant still holds. Only verdict-JSON parse/validation retries — **research-evidence failures (missing / malformed / prompt-injection) and SDK/usage-limit errors never retry** (a re-fetch yields the same evidence; injection must not be re-run). | Retry without resetting the collector — mixes payloads, breaks the one-payload invariant; retry research/injection failures — same bad evidence, re-running an injection. |
 
 ## 5. Failure modes / degradation
 
 - Missing `SERPAPI_API_KEY` / SDK absent / usage-limit hit → `evaluate` returns an `error` result; the screener emits an `error` `AIEvaluationRecord` (persisted), records a compute failure, and **skips that candidate** (→ partial run). Unlike Technical Analysis it has **no** gate-only fallback, so a gate-passing stock produces no BUY row when AI research is unavailable — but the attempt stays auditable in `ai_evaluations`.
 - Screener.in fetch fails → tool returns an error payload; the model rejects.
 - Search fails → screener data still returned + error noted; verdict proceeds.
-- SDK/CLI missing or usage limit → `FundamentalsAgentError` / `FundamentalsUsageLimitError` (shared).
+- SDK/CLI missing or usage limit → `FundamentalsAgentError` / `FundamentalsUsageLimitError` (shared); not retried.
+- Malformed/invalid verdict JSON → re-run up to `SCANNER_AI_MAX_ATTEMPTS` (AI-004); still failing → `error` receipt `error_type="AIValidationError"`, screener tags `phase="ai_validation"`. Missing/malformed/injected research evidence → `MissingResearchEvidence` / `MalformedResearchEvidence` / `PromptInjectionEvidence`, **never retried**.
 
 ## 6. Configuration & dependencies
 
-`SERPAPI_API_KEY`, `CLAUDE_AGENT_MODEL`, `SCANNER_AGENT_FAST_MODE`, optional `SCANNER_AI_CACHE_SIGNING_KEY` (restart-stable verdict cache); **`ANTHROPIC_API_KEY` unset**. External: `requests` (SerpAPI), `claude-agent-sdk` (lazy), `pydantic`. Cache: shared `FundamentalsCache` (HMAC-signed verdict envelopes).
+`SERPAPI_API_KEY`, `CLAUDE_AGENT_MODEL`, `SCANNER_AGENT_FAST_MODE`, `SCANNER_AI_MAX_ATTEMPTS` (default 2 — validation-retry budget), optional `SCANNER_AI_CACHE_SIGNING_KEY` (restart-stable verdict cache); **`ANTHROPIC_API_KEY` unset**. External: `requests` (SerpAPI), `claude-agent-sdk` (lazy), `pydantic`. Cache: shared `FundamentalsCache` (HMAC-signed verdict envelopes).
 
 ## 7. Testing
 

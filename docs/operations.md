@@ -71,6 +71,24 @@ Worth knowing before turning it up:
 
 ---
 
+## AI output validation attempts (AI-004)
+
+Malformed or incomplete AI verdict JSON is retried within a small, bounded
+attempt budget:
+
+```env
+SCANNER_AI_MAX_ATTEMPTS=2
+```
+
+The default `2` means one initial attempt plus one validation retry. Setting
+1 disables validation retries; larger values are clamped to `1`-`3`. Raising
+the value can recover another transient formatting failure, but every additional
+attempt re-runs the agentic loop and consumes Agent SDK credit. SDK, CLI,
+usage-limit, and unsafe-research failures are never retried because another
+model call cannot repair them.
+
+---
+
 ## Database: SQLite locally, Postgres when shared
 
 Local default: `sqlite:///data/scanner.db` (WAL mode, created automatically,
