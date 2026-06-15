@@ -68,6 +68,7 @@ sequenceDiagram
 | **Per-call `TechnicalToolContext` (no agent mutable state)** | The screener confirms candidates in parallel on a shared agent; per-call context is race-free. | Agent instance state — data races. |
 | **Cache key folds candles + levels + `params`; envelope HMAC-signed** | Tool outputs are pure functions of these; a changed detector setting must invalidate the verdict (not just the date). `::fast` suffix isolates fast-mode verdicts. The stored envelope is HMAC-signed and re-validated on read (recompute on tamper). | Date-only key / unsigned cache — stale or forgeable verdicts. |
 | **`allowed_tools` + `permission_mode="dontAsk"` + `setting_sources=[]`** | The agent can reach ONLY the 3 technical tools — never built-in filesystem/bash in a headless run. | Default tools — unsafe in a server. |
+| **No untrusted free-text channel (TEST-003 posture)** | Inputs are deterministic OHLC candles + candle-derived levels; the 3 tools are pure functions of those, so no scraped/web/PDF text ever reaches the model. Unlike the fundamental/67 agents this path needs **no** prompt-injection quarantine — and a regression test locks the posture so a future news/sentiment tool can't reintroduce the risk silently. | A scraped-text/news tool without the shared quarantine — injection risk. |
 | **Externalized `knowledge.py`** | The agent's "brain" is reviewable prose, edited without touching Python. | Inline mega-string — unmaintainable. |
 | **Confidence via `@field_validator`, not `Field(ge/le)`** | Keeps `minimum`/`maximum` out of the JSON schema (Claude rejects them on ints). | `Field(ge,le)` — schema Claude refuses. |
 | **Long-only; bearish → `caution`** | Screener is long-only; bearish structure tempers, never triggers, a BUY. | Allow shorts — out of scope. |
@@ -88,10 +89,10 @@ sequenceDiagram
 
 ## 7. Testing
 
-- [`tests/test_technical_analysis_agent.py`](../../../tests/test_technical_analysis_agent.py) — agent loop via injected `runner`, JSON validation, normalization, caching.
+- [`tests/test_technical_analysis_agent.py`](../../../tests/test_technical_analysis_agent.py) — agent loop via injected `runner`, JSON validation, normalization, caching, and the **TEST-003 posture lock** (`test_technical_tools_are_deterministic_analyzers_only`, `test_technical_agent_does_not_import_untrusted_text_fetchers`, `test_technical_user_prompt_is_pure_function_of_structured_inputs`).
 - [`tests/test_technical_tools.py`](../../../tests/test_technical_tools.py) — tool payloads/context.
 - [`tests/test_patterns.py`](../../../tests/test_patterns.py) — detectors vs synthetic fixtures.
 
 ## 8. Extension points
 
-A new bullish setup = a `PatternName` literal + detector in `patterns.py` + prose in `knowledge.py` (+ gate trigger in the screener). New tool = add to `tools.py` and `TOOL_NAMES`. PROV-003 receipts (model/prompt/evidence) are already recorded to `ai_evaluations`; richer evidence rides in `AIProvenance`/`EvidenceReference` with no schema change.
+A new bullish setup = a `PatternName` literal + detector in `patterns.py` + prose in `knowledge.py` (+ gate trigger in the screener). New tool = add to `tools.py` and `TOOL_NAMES` — **but** any tool that surfaces external/free text (news, filings, web) must route that text through the shared [`backend.security.prompt_injection`](../../../backend/security/prompt_injection.py) quarantine first; the TEST-003 posture tests enforce that no untrusted-text tool exists here today. PROV-003 receipts (model/prompt/evidence) are already recorded to `ai_evaluations`; richer evidence rides in `AIProvenance`/`EvidenceReference` with no schema change.

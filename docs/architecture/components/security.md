@@ -3,14 +3,14 @@
 | | |
 |---|---|
 | **Component** | Cross-cutting security utilities |
-| **Source** | [`backend/security/redaction.py`](../../../backend/security/redaction.py), [`backend/security/__init__.py`](../../../backend/security/__init__.py), [`backend/url_safety.py`](../../../backend/url_safety.py), [`backend/ai_cache_integrity.py`](../../../backend/ai_cache_integrity.py) |
+| **Source** | [`backend/security/redaction.py`](../../../backend/security/redaction.py), [`backend/security/prompt_injection.py`](../../../backend/security/prompt_injection.py), [`backend/security/__init__.py`](../../../backend/security/__init__.py), [`backend/url_safety.py`](../../../backend/url_safety.py), [`backend/ai_cache_integrity.py`](../../../backend/ai_cache_integrity.py) |
 | **Layer** | Foundation (leaf utilities, best-effort, never raise on the safety path) |
-| **Status** | Stable (SEC-001 URL safety · SEC-002 redaction · PROV-003 AI cache integrity) |
-| **Related** | [HLD](../high-level-design.md) · [configuration.md](configuration.md) · [observability.md](observability.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [storage-persistence.md](storage-persistence.md) · [technical-analysis-ai.md](technical-analysis-ai.md) · [sixty-seven-ka-funda-ai.md](sixty-seven-ka-funda-ai.md) |
+| **Status** | Stable (SEC-001 URL safety · SEC-002 redaction · PROV-003 AI cache integrity · TEST-003 prompt-injection quarantine) |
+| **Related** | [HLD](../high-level-design.md) · [configuration.md](configuration.md) · [observability.md](observability.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [storage-persistence.md](storage-persistence.md) · [fundamentals-ai.md](fundamentals-ai.md) · [technical-analysis-ai.md](technical-analysis-ai.md) · [sixty-seven-ka-funda-ai.md](sixty-seven-ka-funda-ai.md) |
 
 ## 1. Purpose & responsibilities
 
-Three independent guardrails keep the app safe by default:
+Four independent guardrails keep the app safe by default:
 
 1. **Secret redaction (SEC-002)** — mask credentials before any text reaches a
    log handler, a UI error panel, or a persisted `scan_runs.error_message`.
@@ -22,6 +22,10 @@ Three independent guardrails keep the app safe by default:
    rejected and recomputed instead of trusted. Plus the AI-evidence boundary:
    evidence URLs are sanitized (credentials/query/fragment stripped, SSRF-screened)
    and only hashes + labels are stored — never raw scraped/model text.
+4. **Prompt-injection quarantine (TEST-003)** — one shared engine the AI agents
+   run over external evidence (Screener.in scrapes, SerpAPI snippets, PDF concall
+   transcripts) *before* it reaches a model context. On a hit the tool returns a
+   generic blocked response (never the hostile text) and the agent fails closed.
 
 **Non-responsibilities**
 - Does not own *what* gets logged (that is [observability.md](observability.md)) — only how it is masked.
@@ -47,6 +51,11 @@ flowchart LR
       SIGN --> DISK[("on-disk AI verdict cache")]
       DISK --> VERIFY["verify_cache_envelope"]
       VERIFY -->|invalid| RECOMPUTE["cache miss -> recompute"]
+    end
+    subgraph PromptInjection[TEST-003 prompt-injection quarantine]
+      EVID["external evidence (scrape / snippet / transcript)"] --> SCAN["contains_injection()"]
+      SCAN -->|hit| BLOCK["generic blocked response -> agent fails closed"]
+      SCAN -->|clean| MODEL["model context"]
     end
 ```
 
@@ -81,6 +90,30 @@ flowchart LR
 |---|---|
 | `sanitize_evidence_url(value)` | Redact, SSRF-screen (`is_safe_http_url`), and strip credentials/query/fragment — the only URL form stored in an AI receipt. |
 
+### Prompt-injection quarantine — `backend/security/prompt_injection.py`
+| Symbol | Contract |
+|---|---|
+| `contains_injection(value)` | Recursively scan external evidence (strings, dict keys+values, list items, and one record's sibling fields joined) for model-directed instructions. Caller excludes app-owned fields (e.g. `source_policy`). |
+| `normalize_external_text(value)` | Canonicalize for matching only (recorded evidence is untouched): NFKC, strip `Cf`/zero-width, fold Cyrillic/Greek homoglyphs to Latin, collapse whitespace. |
+| `BLOCKED_EVIDENCE_RESPONSE` / `BLOCKED_EVIDENCE_TEXT` | Generic, payload-free responses the tools hand the model in place of blocked JSON / transcript text. |
+
+**Defense-in-depth, not the backstop.** Regex detection is one layer and is
+*deliberately* incomplete. The controls that actually hold the line are
+structural and apply to both AI agents: the strict structured-output schema
+(AI-004), the verdict invariants (`approved` requires all core flags), the
+one-symbol tool binding, the HMAC-signed cache, and **fail-closed evaluation**.
+A regex miss does not mean a model can be steered into a self-contradictory
+"approved" verdict.
+
+**Documented residual limitations (accepted).** The scanner is tuned for the
+real threat (English-language, instruction-shaped text in scraped pages) while
+avoiding false positives on benign financial prose. It does **not** claim to
+catch: non-English instructions; base64/URL/HTML-entity-encoded payloads;
+instructions padded beyond the pattern proximity windows; or an instruction
+split across a leaf string and a deeply nested sibling. These are intentionally
+left to the structural backstops above rather than chased with ever-broader
+regexes (which raise the false-positive rate and block legitimate evaluations).
+
 ## 4. Key design decisions & trade-offs
 
 | Decision | Rationale | Alternative rejected |
@@ -96,6 +129,10 @@ flowchart LR
 | **AI verdict cache is HMAC-signed** | A disk cache is writable; an HMAC over the full envelope (constant-time verify) means a forged/edited entry is rejected and recomputed, never served as a real verdict. The signing key is in `secret_values()` so it is itself redacted. | Unsigned cache — forgeable "approved" verdicts. |
 | **Store hashed evidence, not raw text** | AI receipts persist SHA-256 hashes + sanitized URLs + labels; raw scraped pages / model responses are never written to durable history. | Persist raw evidence — durable leak, unverifiable. |
 | **Receipt cross-checked against the verdict** | Persistence rejects a receipt whose `validated_verdict_json` contradicts the trusted fields, so model output can't rewrite the audit record. | Trust model JSON — forgeable audit. |
+| **One shared prompt-injection engine (TEST-003)** | The 67 Ka Funda and Check Fundamentals agents import the same `contains_injection` / normalization, so the two screeners never drift apart on what counts as hostile. | Per-agent copies of the regexes — inconsistent coverage, silent drift. |
+| **Quarantine fails closed, preserves evidence for audit only** | A hit blocks the *whole* payload to the model and the run yields an error receipt (no verdict, no cache write); the raw evidence survives only in the request-local audit collector. Matches "unsafe outputs fail closed". | Surgically strip the instruction and pass the rest — more bypass-prone; or drop the evidence entirely — no forensics. |
+| **Prompt-injection failures are non-retryable** | Re-running re-fetches the same poisoned page, so injection raises *outside* the AI-004 validation-retry loop. | Retry on injection — wasted Agent SDK credit, identical outcome. |
+| **Normalize for matching, never mutate recorded evidence** | Homoglyph/zero-width folding defeats obfuscation without altering the bytes preserved for audit. | Normalize in place — corrupts the forensic record. |
 
 ## 5. Failure modes / degradation
 
@@ -108,8 +145,9 @@ flowchart LR
 - [`tests/test_secret_redaction.py`](../../../tests/test_secret_redaction.py) — key/value, Bearer, DB-URL password, logging filter, `is_secret_key_name`.
 - [`tests/test_url_safety.py`](../../../tests/test_url_safety.py) — loopback/private/link-local rejection, allowlist, DNS resolution path.
 - [`tests/test_ai_cache_integrity.py`](../../../tests/test_ai_cache_integrity.py) — tamper detection, key binding, non-finite rejection.
+- [`tests/test_prompt_injection.py`](../../../tests/test_prompt_injection.py) — the shared corpus (blocked detected / benign not), Unicode + homoglyph normalization, and the recursive key/list/sibling scan. The two AI agents add their own quarantine + fail-closed tests on top ([fundamentals-ai.md](fundamentals-ai.md), [sixty-seven-ka-funda-ai.md](sixty-seven-ka-funda-ai.md)).
 - [`tests/test_supply_chain_policy.py`](../../../tests/test_supply_chain_policy.py) — dependency posture.
 
 ## 7. Extension points
 
-Add a new credential shape by extending `_SECRET_NAME` / the specific regexes in `redaction.py`, and add the field-name form to `SECRET_KEY_NAME_PARTS`. Add a new allowed scrape host by passing `allowed_hosts=` at the call site, not by widening the global policy.
+Add a new credential shape by extending `_SECRET_NAME` / the specific regexes in `redaction.py`, and add the field-name form to `SECRET_KEY_NAME_PARTS`. Add a new allowed scrape host by passing `allowed_hosts=` at the call site, not by widening the global policy. Tighten prompt-injection coverage by adding a pattern (or homoglyph) in `prompt_injection.py` **with a matching blocked + benign fixture** in [`tests/fixtures/ai_prompt_injection_cases.json`](../../../tests/fixtures/ai_prompt_injection_cases.json) — keep the benign near-neighbors green so detection gains don't start blocking legitimate evaluations.

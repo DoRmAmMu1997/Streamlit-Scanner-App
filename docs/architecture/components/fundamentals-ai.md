@@ -42,8 +42,10 @@ sequenceDiagram
         SDK->>T1: fetch_company_data(symbol)  --> screener.in (cached)
         SDK->>T2: read_recent_concall_transcript(symbol)  [optional]
         T2->>T2: pdf_reader (pdfplumber→pypdf, capped)
+        Note over T1,T2: TEST-003 — record raw evidence (audit) then prompt-injection scan; a hit returns a generic blocked response, never the hostile text
         SDK-->>Agent: final AgentVerdict JSON
         Agent->>Agent: parse+validate, normalize (stamp mode/total_criteria)
+        Agent->>Agent: fail closed on poisoned evidence (PromptInjectionEvidence) — no verdict/cache
         Agent->>Cache: set_verdict
     end
     Agent-->>UI: AgentVerdict
@@ -76,6 +78,7 @@ The mode is chosen by the UI from the row's universe; `_normalize_verdict` **enf
 | **Claude Agent SDK on the Claude subscription** | Usage draws on the plan's monthly Agent SDK credit, not per-token API. **`ANTHROPIC_API_KEY` must stay UNSET** or the SDK silently bills the API account. | Per-token API key / OpenRouter — billing surprise / dead key. |
 | **Two tools, `read_recent_concall_transcript` only when needed** | The transcript is ~8–15K tokens; the agent skips it when structured data is decisive (cost control). | Always read transcript — expensive. |
 | **Tool outputs are untrusted evidence; symbol-bound** | System prompt + tool reject a mismatched symbol; scraped text is never followed as instructions (AI-003). | Trust scraped text — prompt-injection. |
+| **External evidence quarantined before model exposure (TEST-003)** | Both tools record the raw screener JSON / concall transcript in a request-local audit collector, then scan it via the shared [`backend.security.prompt_injection`](../../../backend/security/prompt_injection.py) engine (Unicode/homoglyph normalization + instruction patterns). A hit returns a generic blocked response to the model — never the hostile text — and `check` then fails closed with `PromptInjectionEvidence` (no verdict, no cache write, no retry). Context is copied across the worker thread so the collector actually populates. | Let hostile transcript/scrape text enter the model context or rely on the system prompt alone — injection risk. |
 | **`@field_validator` for `rating`/counts, not `Field(ge/le)`** | Keeps `minimum`/`maximum` out of the JSON schema (Claude rejects them on ints). | `Field(ge,le)` — Claude rejects schema. |
 | **Holistic 0–10 rating ≠ pass count** | Expert weighted judgment (a stock can pass all yet rate 5, or fail two yet rate 8). | Count passes — naive. |
 | **Three-part `forward_outlook` with provenance** | Separates announcements vs concall vs integrated view; empty `concall_conclusion` when the transcript wasn't read (no speculation). Legacy string migrated via `mode="before"` validator. | Free-form string — no provenance, breaks old caches. |
@@ -92,6 +95,7 @@ The mode is chosen by the UI from the row's universe; `_normalize_verdict` **enf
 - screener.in fetch fails → tool returns an error payload; the agent surfaces the limitation honestly.
 - No transcript → `read_recent_concall_text` returns `""`; the agent falls back to announcements + sector knowledge.
 - Unparseable / invalid final JSON → re-run up to `SCANNER_AI_MAX_ATTEMPTS` (AI-004); still failing → `AIValidationError`, caught and shown by the Check Fundamentals panel. The public error contains only the attempt count and final exception type; raw model text is never included in the message or traceback cause.
+- Prompt injection in scraped/transcript evidence (TEST-003) → the tool hands the model a generic blocked response and `check` fails closed with a `PromptInjectionEvidence` error receipt: **non-retryable** (re-running would re-fetch the same poisoned evidence), no verdict, no cache write. A payload-free `logger.warning` records the event; the hostile text is never logged.
 
 ## 7. Configuration & dependencies
 
@@ -99,7 +103,8 @@ The mode is chosen by the UI from the row's universe; `_normalize_verdict` **enf
 
 ## 8. Testing
 
-- [`tests/test_fundamental_agent.py`](../../../tests/test_fundamental_agent.py) — agent loop via injected `runner`, modes, verdict validation/normalization, usage-limit + legacy-outlook migration.
+- [`tests/test_fundamental_agent.py`](../../../tests/test_fundamental_agent.py) — agent loop via injected `runner`, modes, verdict validation/normalization, usage-limit + legacy-outlook migration, and **prompt-injection quarantine** (both tools block hostile screener/transcript text, `check` fails closed without leaking the payload, benign near-neighbors pass).
+- [`tests/test_prompt_injection.py`](../../../tests/test_prompt_injection.py) — the shared detection engine + corpus, reused by this agent and the 67 Ka Funda agent ([`tests/fixtures/ai_prompt_injection_cases.json`](../../../tests/fixtures/ai_prompt_injection_cases.json)).
 - [`tests/test_screener_in_client.py`](../../../tests/test_screener_in_client.py) — scraper parsing (HTMX peers, announcements, concalls, median P/E).
 - [`tests/test_pdf_reader.py`](../../../tests/test_pdf_reader.py) — download caps, `pdfplumber`/`pypdf` fallback, content sniff.
 - [`tests/test_fundamentals_cache.py`](../../../tests/test_fundamentals_cache.py) — TTL, keys, invalidate.

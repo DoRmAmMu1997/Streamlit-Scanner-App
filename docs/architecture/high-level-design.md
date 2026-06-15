@@ -58,7 +58,7 @@ flowchart TD
     APP --> Cache[("Local Parquet + JSON caches")]
 ```
 
-External data and AI text are treated as **untrusted evidence**, never instructions (prompt-injection posture); server-side fetches pass SSRF guards.
+External data and AI text are treated as **untrusted evidence**, never instructions (prompt-injection posture): a shared quarantine (TEST-003) scans scraped/search/transcript evidence before it reaches any model and the AI agents fail closed on a hit; server-side fetches pass SSRF guards.
 
 ## 4. Architecture overview
 
@@ -174,7 +174,7 @@ flowchart LR
 
 - **Auth** — one gate at the top of `main()`; nothing renders before it. ([authentication](components/authentication.md))
 - **Observability** — named structured events, JSON in prod, identical across all three entrypoints. ([observability](components/observability.md))
-- **Security** — secret redaction on every sink (logs, UI errors, persisted messages); SSRF guards on scraped fetches; CSV-injection escaping; prompt-injection posture. ([security](components/security.md))
+- **Security** — secret redaction on every sink (logs, UI errors, persisted messages); SSRF guards on scraped fetches; CSV-injection escaping; a shared prompt-injection quarantine (TEST-003) that scans external evidence before model exposure and fails the AI screeners closed on a hit. ([security](components/security.md))
 - **Persistence & provenance** — every shortlisted row carries a deterministic receipt (PROV-002: `triggered_rules` + `indicator_values` + `source`, built by `BaseScanner.build_provenance`); AI screeners add a tamper-evident verdict receipt (PROV-003: model, semantic prompt version, prompt/evidence/context SHA-256, sanitized source URLs — never raw scraped/model text) persisted to the `ai_evaluations` ledger. Shared JSON receipt envelopes let deterministic and AI audit detail evolve without per-strategy tables. ([scan-service-and-provenance](components/scan-service-and-provenance.md), [storage-persistence](components/storage-persistence.md))
 - **Caching** — Parquet candle cache (incremental), per-day AI verdict cache (**HMAC-signed and verified before reuse** — a tampered entry is rejected and recomputed), per-session chart cache, 30/60s Streamlit data caches.
 - **Graceful AI degradation** — cheap gate first; if the SDK/SerpAPI is absent, Technical Analysis falls back to a gate-only BUY while 67 Ka Funda skips the candidate (partial run) — neither crashes the scan. Approved, rejected, **and** error AI decisions are all recorded in `ai_evaluations` for audit.

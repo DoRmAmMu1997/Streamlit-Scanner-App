@@ -39,8 +39,9 @@ sequenceDiagram
         Agent->>Tool: research_company(symbol) [bound symbol]
         Tool->>SI: fetch_company_data (cached)
         Tool->>Serp: 3 focused queries
-        Tool-->>Agent: JSON evidence [source_policy: evidence only]
-        Agent->>Agent: prompt-injection scan, hash evidence, HMAC-sign cache
+        Tool->>Tool: normalize + prompt-injection scan
+        Tool-->>Agent: safe JSON or generic blocked response
+        Agent->>Agent: validate collected evidence, hash evidence, HMAC-sign cache
         Agent-->>Screener: SixtySevenEvaluationResult [verdict + AIProvenance receipt]
         Screener-->>Screener: ai_evaluation_callback -> ai_evaluations [approved/rejected/error]
     end
@@ -66,7 +67,7 @@ sequenceDiagram
 |---|---|---|
 | **Cheap gate → AI only on survivors** | 67% drawdown is pure price math; only a handful of stocks reach the costly verifier. | AI on all — expensive. |
 | **All scraped/search text is *evidence*, never instructions** | Explicit `source_policy` in the tool payload + system prompt — prompt-injection posture (AI-003). | Treat as context to follow — injection risk. |
-| **External evidence scanned for prompt injection** | Before trusting research output, `evaluate` scans the scraped/search fields (not the app's own `source_policy`) for model-directed instructions and fails closed (`error` receipt) on a hit. | Rely on the system prompt alone — injection risk. |
+| **External evidence quarantined before model exposure (TEST-003)** | The research tool records the original request-local payload for audit, then scans only scraped/search fields (not the app's own `source_policy`) via the **shared** [`backend.security.prompt_injection`](../../../backend/security/prompt_injection.py) engine (NFKC + `Cf`-strip + Cyrillic/Greek **homoglyph** fold, instruction patterns). A hit returns a generic blocked response to Claude; `evaluate` then fails closed with `PromptInjectionEvidence`, no verdict/evidence references/cache write, and no retry. The same engine guards the Check Fundamentals agent, so the two screeners never drift. | Let hostile text enter the model context or rely on the system prompt alone — injection risk. |
 | **Tool bound to ONE symbol; mismatched request rejected** | The model can't redirect research to a different company. | Trust the model's symbol arg — wrong-company analysis. |
 | **`approved` requires ALL core flags (`model_validator`)** | An approved verdict can never be self-contradictory at the schema level. | Trust the boolean — inconsistent verdicts. |
 | **ContextVars + `copy_context()` across the thread bridge** | The SDK tool API can't take extra args; bound symbol/refresh/count ride ContextVars, and `_run_sync` copies the context across the worker thread (a fresh thread starts empty). | Module globals / no copy — silent wrong binding. |
@@ -94,7 +95,8 @@ sequenceDiagram
 
 - [`tests/test_sixty_seven_shortlister.py`](../../../tests/test_sixty_seven_shortlister.py) — drawdown math, thresholds, malformed frames.
 - [`tests/test_sixty_seven_search_client.py`](../../../tests/test_sixty_seven_search_client.py) — SerpAPI normalization, key redaction, error paths (fake session).
-- [`tests/test_sixty_seven_agent.py`](../../../tests/test_sixty_seven_agent.py) — verifier via injected `runner`, the `approved`-invariant, symbol binding, caching.
+- [`tests/test_sixty_seven_agent.py`](../../../tests/test_sixty_seven_agent.py) — verifier via injected `runner`, the `approved`-invariant, symbol binding, caching, and **prompt-injection quarantine** (hostile text blocked before Claude, fail-closed without leaking the payload).
+- [`tests/test_prompt_injection.py`](../../../tests/test_prompt_injection.py) + [`tests/fixtures/ai_prompt_injection_cases.json`](../../../tests/fixtures/ai_prompt_injection_cases.json) — the shared detection engine + corpus this agent and Check Fundamentals both reuse.
 
 ## 8. Extension points
 

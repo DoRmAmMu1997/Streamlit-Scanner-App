@@ -16,11 +16,13 @@ import pytest
 
 from backend.fundamentals.fundamental_agent import AgentRunResult
 from backend.fundamentals.fundamentals_cache import FundamentalsCache
+from backend.technical import technical_agent as technical_agent_module
 from backend.technical.technical_agent import (
     TECHNICAL_PROMPT_VERSION,
     TechnicalAnalysisAgent,
     TechnicalEvaluationResult,
     TechnicalVerdict,
+    _build_technical_user_prompt,
 )
 from backend.technical.tools import SERVER_NAME, TOOL_NAMES, TechnicalToolContext
 
@@ -756,3 +758,60 @@ def test_default_run_registers_only_the_technical_tools(monkeypatch, tmp_path):
     assert options["allowed_tools"] == TOOL_NAMES
     assert options["permission_mode"] == "dontAsk"
     assert options["setting_sources"] == []
+
+
+# ---------------------------------------------------------------------------
+# Prompt-injection posture (TEST-003) — the "technical AI" path.
+#
+# Unlike the fundamental/67 agents, this agent ingests NO untrusted free text:
+# its only inputs are deterministic OHLC candles + candle-derived levels, and
+# its tools are pure functions of those. These tests lock that posture so a
+# future news/sentiment/scrape tool can't silently reintroduce injection risk
+# without a failing test (and a security review).
+# ---------------------------------------------------------------------------
+
+
+def test_technical_tools_are_deterministic_analyzers_only():
+    # Exactly three candle-derived analyzers; no scraped/web/PDF/search tool.
+    assert len(TOOL_NAMES) == 3
+    forbidden = (
+        "fetch",
+        "company",
+        "concall",
+        "transcript",
+        "search",
+        "news",
+        "web",
+        "screener",
+        "url",
+        "pdf",
+        "research",
+    )
+    for tool_name in TOOL_NAMES:
+        assert not any(token in tool_name.lower() for token in forbidden)
+
+
+def test_technical_agent_does_not_import_untrusted_text_fetchers():
+    # If someone wires a scraped-text source into this agent, this fails loudly.
+    for fetcher in (
+        "fetch_company_data",
+        "read_recent_concall_text",
+        "ScreenerInFetchError",
+        "SerpApiClient",
+        "contains_injection",
+    ):
+        assert not hasattr(technical_agent_module, fetcher)
+
+
+def test_technical_user_prompt_is_pure_function_of_structured_inputs():
+    candles = _sample_candles()
+    levels = _sample_levels()
+    first = _build_technical_user_prompt("test-model", "DEMO", candles, levels)
+    second = _build_technical_user_prompt("test-model", "DEMO", candles, levels)
+
+    # Deterministic (no network/scrape I/O) and built only from symbol + numbers.
+    assert first == second
+    assert "Stock: DEMO" in first
+    # No scraped-evidence channel like the fundamental/67 agents carry.
+    assert "source_policy" not in first
+    assert "snippet" not in first

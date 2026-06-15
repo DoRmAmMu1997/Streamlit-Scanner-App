@@ -72,3 +72,9 @@ ignore_missing_imports = true
 # C408: `dict(key=value)` factory builders with `**overrides` merging are a
 # deliberate, readable test idiom here; literal-dict churn adds nothing.
 "tests/**" = ["B017", "C408", "RUF012"]
+# RUF001/RUF003: the shared prompt-injection module and its tests deliberately
+# embed Cyrillic/Greek homoglyphs and fullwidth/curly-quote look-alikes —
+# detecting and folding those IS the feature, so the ambiguous-Unicode lint is
+# noise in exactly these two files (it stays on everywhere else).
+"backend/security/prompt_injection.py" = ["RUF001", "RUF003"]
+"tests/test_prompt_injection.py" = ["RUF001", "RUF003"]
