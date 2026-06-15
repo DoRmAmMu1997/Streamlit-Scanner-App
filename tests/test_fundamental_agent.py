@@ -10,11 +10,14 @@ contain. The two screener.in tools are tested directly via their plain
 from __future__ import annotations
 
 import json
+import logging
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+from backend.fundamentals import fundamental_agent as fundamental_agent_module
 from backend.fundamentals.fundamental_agent import (
     AgentRunResult,
     AgentVerdict,
@@ -24,10 +27,20 @@ from backend.fundamentals.fundamental_agent import (
     FundamentalsAgentError,
     FundamentalsUsageLimitError,
     Observation,
+    _data_date_from_payload,
     _mentions_usage_limit,
     _usage_limit_from_message,
 )
 from backend.fundamentals.fundamentals_cache import FundamentalsCache
+from backend.security import BLOCKED_EVIDENCE_RESPONSE, BLOCKED_EVIDENCE_TEXT
+
+_PROMPT_INJECTION_FIXTURES = json.loads(
+    (Path(__file__).parent / "fixtures" / "ai_prompt_injection_cases.json").read_text(
+        encoding="utf-8"
+    )
+)
+_BLOCKED_PROMPT_INJECTIONS = _PROMPT_INJECTION_FIXTURES["blocked"]
+_ALLOWED_PROMPT_INJECTIONS = _PROMPT_INJECTION_FIXTURES["allowed"]
 
 
 def _sample_screener_data() -> dict[str, Any]:
@@ -654,6 +667,191 @@ def test_fundamental_parser_does_not_include_raw_model_text(tmp_path):
         agent._parse_verdict(marker, symbol="DEMO")
 
     assert marker not in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# Prompt-injection quarantine (TEST-003) — the "fundamental AI" path.
+#
+# Both screener.in JSON and the concall PDF transcript are untrusted external
+# evidence. Each tool quarantines hostile text before the model sees it, and a
+# poisoned run fails the check closed without leaking the payload.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "case", _BLOCKED_PROMPT_INJECTIONS, ids=lambda case: case["id"]
+)
+def test_fetch_tool_quarantines_hostile_screener_text(tmp_path, case):
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    poisoned = _sample_screener_data()
+    poisoned["about"] = case["text"]
+    cache.set_data("DEMO", poisoned)
+    agent = FundamentalAgent(model="test-model", cache=cache)
+
+    collector: list[Any] = []
+    token = fundamental_agent_module._EVIDENCE_COLLECTOR.set(collector)
+    try:
+        response = agent._fetch_company_data_impl("DEMO", requested_symbol="DEMO")
+    finally:
+        fundamental_agent_module._EVIDENCE_COLLECTOR.reset(token)
+
+    # Model sees only the generic blocked response...
+    assert json.loads(response) == BLOCKED_EVIDENCE_RESPONSE
+    assert case["text"] not in response
+    # ...while the raw evidence is preserved for audit/forensics.
+    assert collector and collector[0].get("about") == case["text"]
+
+
+@pytest.mark.parametrize(
+    "case", _ALLOWED_PROMPT_INJECTIONS, ids=lambda case: case["id"]
+)
+def test_fetch_tool_passes_benign_screener_text(tmp_path, case):
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    benign = _sample_screener_data()
+    benign["about"] = case["text"]
+    cache.set_data("DEMO", benign)
+    agent = FundamentalAgent(model="test-model", cache=cache)
+
+    response = agent._fetch_company_data_impl("DEMO", requested_symbol="DEMO")
+
+    # Benign near-neighbors flow through untouched.
+    assert json.loads(response)["about"] == case["text"]
+    assert json.loads(response) != BLOCKED_EVIDENCE_RESPONSE
+
+
+def test_fetch_tool_logs_detection_without_leaking_payload(tmp_path, caplog):
+    marker = next(
+        case["text"]
+        for case in _BLOCKED_PROMPT_INJECTIONS
+        if case["id"] == "delete_risk_warnings"
+    )
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    poisoned = _sample_screener_data()
+    poisoned["about"] = marker
+    cache.set_data("DEMO", poisoned)
+    agent = FundamentalAgent(model="test-model", cache=cache)
+
+    collector: list[Any] = []
+    token = fundamental_agent_module._EVIDENCE_COLLECTOR.set(collector)
+    try:
+        with caplog.at_level(logging.WARNING):
+            agent._fetch_company_data_impl("DEMO", requested_symbol="DEMO")
+    finally:
+        fundamental_agent_module._EVIDENCE_COLLECTOR.reset(token)
+
+    assert "Prompt-injection evidence blocked" in caplog.text
+    assert marker not in caplog.text
+
+
+def test_concall_tool_quarantines_hostile_transcript(tmp_path, monkeypatch):
+    marker = next(
+        case["text"]
+        for case in _BLOCKED_PROMPT_INJECTIONS
+        if case["id"] == "transcript_embedded_directive"
+    )
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    data = _sample_screener_data()
+    data["concalls"] = [{"month": "May 2026", "url": "http://test/transcript.pdf"}]
+    cache.set_data("DEMO", data)
+    agent = FundamentalAgent(model="test-model", cache=cache)
+    monkeypatch.setattr(
+        fundamental_agent_module, "read_recent_concall_text", lambda concalls: marker
+    )
+
+    collector: list[Any] = []
+    token = fundamental_agent_module._EVIDENCE_COLLECTOR.set(collector)
+    try:
+        text = agent._read_concall_impl("DEMO", requested_symbol="DEMO")
+    finally:
+        fundamental_agent_module._EVIDENCE_COLLECTOR.reset(token)
+
+    assert text == BLOCKED_EVIDENCE_TEXT
+    assert marker not in text
+    assert collector == [marker]
+
+
+def test_concall_tool_passes_benign_transcript(tmp_path, monkeypatch):
+    benign = "Management reiterated guidance and highlighted steady demand."
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    data = _sample_screener_data()
+    data["concalls"] = [{"month": "May 2026", "url": "http://test/transcript.pdf"}]
+    cache.set_data("DEMO", data)
+    agent = FundamentalAgent(model="test-model", cache=cache)
+    monkeypatch.setattr(
+        fundamental_agent_module, "read_recent_concall_text", lambda concalls: benign
+    )
+
+    text = agent._read_concall_impl("DEMO", requested_symbol="DEMO")
+
+    assert text == benign
+
+
+class _ToolCallingRunner:
+    """Fake runner that drives the fetch tool (so the quarantine + evidence
+    collector run inside the real `_run_sync` worker context) then returns a
+    canned verdict — mimicking a real agentic loop calling the screener tool."""
+
+    def __init__(self, agent: FundamentalAgent, verdict: AgentVerdict):
+        self._agent = agent
+        self._verdict = verdict
+        self.calls = 0
+        self.tool_response: str | None = None
+
+    async def __call__(self, prompt, *, system_prompt, model, max_turns):
+        self.calls += 1
+        self.tool_response = self._agent._fetch_company_data_impl("DEMO")
+        return AgentRunResult(
+            text=json.dumps(self._verdict.model_dump(mode="json")), cost_usd=0.01
+        )
+
+
+def test_check_fails_closed_on_prompt_injection_without_leaking(
+    tmp_path, monkeypatch, caplog
+):
+    monkeypatch.setenv("SCANNER_AI_MAX_ATTEMPTS", "3")
+    marker = next(
+        case["text"]
+        for case in _BLOCKED_PROMPT_INJECTIONS
+        if case["id"] == "official_do_not_question"
+    )
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    poisoned = _sample_screener_data()
+    poisoned["about"] = marker
+    cache.set_data("DEMO", poisoned)
+    agent = FundamentalAgent(model="test-model", cache=cache)
+    runner = _ToolCallingRunner(agent, _sample_verdict())
+    agent._runner = runner
+
+    with caplog.at_level(logging.WARNING), pytest.raises(
+        FundamentalsAgentError, match="PromptInjectionEvidence"
+    ):
+        agent.check("DEMO")
+
+    # Non-retryable: the same poisoned evidence is never re-fetched.
+    assert runner.calls == 1
+    # The model only ever saw the generic blocked response.
+    assert runner.tool_response is not None
+    assert json.loads(runner.tool_response) == BLOCKED_EVIDENCE_RESPONSE
+    # No verdict was cached, and the hostile payload never reached the logs.
+    data_date = _data_date_from_payload(poisoned)
+    assert cache.get_verdict("DEMO", agent._cache_model_key("criteria"), data_date) is None
+    assert marker not in caplog.text
+
+
+def test_check_allows_benign_tool_evidence(tmp_path):
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    cache.set_data("DEMO", _sample_screener_data())
+    agent = FundamentalAgent(model="test-model", cache=cache)
+    runner = _ToolCallingRunner(agent, _sample_verdict())
+    agent._runner = runner
+
+    verdict = agent.check("DEMO")
+
+    assert isinstance(verdict, AgentVerdict)
+    assert verdict.rating == 8
+    # The fetch tool returned the real screener JSON, not a blocked response.
+    assert runner.tool_response is not None
+    assert json.loads(runner.tool_response) != BLOCKED_EVIDENCE_RESPONSE
 
 
 def test_invalid_cached_fundamental_verdict_is_refreshed(tmp_path):

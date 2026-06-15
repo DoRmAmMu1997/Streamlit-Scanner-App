@@ -58,6 +58,11 @@ from backend.fundamentals.screener_in_client import (
     ScreenerInFetchError,
     fetch_company_data,
 )
+from backend.security import (
+    BLOCKED_EVIDENCE_RESPONSE,
+    BLOCKED_EVIDENCE_TEXT,
+    contains_injection,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +79,22 @@ _FORCE_REFRESH: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "fundamentals_force_refresh",
     default=False,
 )
+# Request-local collector of the raw external evidence each tool fetched. It
+# preserves the exact scraped/transcript text for audit/forensics while the
+# tools hand the *model* only a quarantined (blocked) response on a hit. Stays
+# None outside a `check()` so direct tool unit tests don't accumulate state.
+_EVIDENCE_COLLECTOR: contextvars.ContextVar[list[Any] | None] = contextvars.ContextVar(
+    "fundamentals_evidence_collector",
+    default=None,
+)
+
+
+def _record_external_evidence(value: Any) -> None:
+    """Append one request-local evidence record without sharing mutable state."""
+    collector = _EVIDENCE_COLLECTOR.get()
+    if collector is None:
+        return
+    collector.append(json.loads(json.dumps(value, default=str)))
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +137,17 @@ class FundamentalsUsageLimitError(FundamentalsAgentError):
         self.resets_at = resets_at
         self.rate_limit_type = rate_limit_type
         super().__init__(message or _format_usage_limit_message(resets_at))
+
+
+class _FundamentalEvidenceError(Exception):
+    """Non-retryable: the scraped/transcript evidence contained model-directed
+    instructions. Deliberately NOT a ``FundamentalsAgentError`` so it escapes
+    the malformed-JSON retry loop — re-running would only re-fetch the same
+    poisoned evidence. ``check`` converts it into a user-facing error receipt."""
+
+    def __init__(self, error_type: str = "PromptInjectionEvidence") -> None:
+        super().__init__(error_type)
+        self.error_type = error_type
 
 
 # Substrings that mark a usage/limit failure in *unstructured* CLI error text.
@@ -774,6 +806,34 @@ class FundamentalAgent:
     # behaviour directly without importing claude_agent_sdk.
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _quarantine_payload(payload: dict[str, Any], symbol: str) -> str:
+        """Record raw screener evidence for audit, then block model exposure on
+        a prompt-injection hit (TEST-003). The whole snapshot is externally
+        sourced, so it is scanned in full."""
+        _record_external_evidence(payload)
+        if contains_injection(payload):
+            logger.warning(
+                "Prompt-injection evidence blocked for %s before model exposure",
+                symbol,
+            )
+            return json.dumps(BLOCKED_EVIDENCE_RESPONSE)
+        return json.dumps(payload, default=str)
+
+    @staticmethod
+    def _quarantine_text(text: str, symbol: str) -> str:
+        """Record a raw transcript for audit, then block model exposure on a
+        prompt-injection hit. PDF transcripts are the largest free-text surface,
+        so they go through the same scanner before the model ever sees them."""
+        _record_external_evidence(text)
+        if text and contains_injection(text):
+            logger.warning(
+                "Prompt-injection evidence blocked for %s before model exposure",
+                symbol,
+            )
+            return BLOCKED_EVIDENCE_TEXT
+        return text
+
     def _fetch_company_data_impl(
         self,
         symbol: str,
@@ -806,14 +866,14 @@ class FundamentalAgent:
         if not refresh_now:
             cached = self._cache.get_data(requested)
             if cached is not None:
-                return json.dumps(cached, default=str)
+                return self._quarantine_payload(cached, requested)
 
         try:
             fresh = fetch_company_data(requested)
         except ScreenerInFetchError as exc:
             return json.dumps({"error": str(exc)})
         self._cache.set_data(requested, fresh)
-        return json.dumps(fresh, default=str)
+        return self._quarantine_payload(fresh, requested)
 
     def _read_concall_impl(
         self,
@@ -843,12 +903,13 @@ class FundamentalAgent:
 
         concalls = data.get("concalls") or []
         try:
-            return read_recent_concall_text(concalls) or ""
+            transcript = read_recent_concall_text(concalls) or ""
         except Exception:  # noqa: BLE001
             logger.warning(
                 "Concall transcript fetch failed for %s", normalized, exc_info=True
             )
             return ""
+        return self._quarantine_text(transcript, normalized)
 
     # ------------------------------------------------------------------
     # Default runner (Claude Agent SDK)
@@ -1014,12 +1075,24 @@ class FundamentalAgent:
         Runs in a dedicated worker thread with its OWN event loop so we never
         collide with Streamlit/Tornado's running loop.
 
+        Context propagation (beginner note). `check()` stashes the bound symbol,
+        the force-refresh flag, and the per-check evidence collector in
+        module-level `ContextVar`s on THIS (caller) thread. A freshly-spawned
+        worker thread starts with an EMPTY context, so we snapshot the caller's
+        context with `contextvars.copy_context()` and run the worker *inside* it
+        (`ctx.run(...)`). The tools' `asyncio.to_thread(...)` calls then inherit
+        those values instead of silently reading the ContextVar defaults — which
+        would defeat symbol binding and leave the evidence collector empty (so a
+        prompt injection could never fail the check closed).
+
         On Windows we must build a ProactorEventLoop explicitly. The Agent SDK
         launches the Claude CLI as a subprocess, but Streamlit/Tornado installs
         the SelectorEventLoop policy on Windows, and that loop raises
         NotImplementedError for subprocesses. `asyncio.run()` would inherit
         that selector policy, so we create the right loop ourselves instead.
         """
+        # Snapshot on the CALLER thread, where check() just set the ContextVars.
+        ctx = contextvars.copy_context()
 
         def _runner() -> AgentRunResult:
             if sys.platform == "win32":
@@ -1036,7 +1109,9 @@ class FundamentalAgent:
                 loop.close()
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            return executor.submit(_runner).result()
+            # Run the worker INSIDE the captured context so the ContextVars cross
+            # the thread boundary (see beginner note above).
+            return executor.submit(ctx.run, _runner).result()
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -1068,6 +1143,11 @@ class FundamentalAgent:
         # the SDK tool wrappers see these values without shared mutable state.
         symbol_token = _REQUESTED_SYMBOL.set(normalized)
         refresh_token = _FORCE_REFRESH.set(bool(force_refresh))
+        # Collect the raw evidence each tool fetches so a prompt injection can be
+        # detected (and fail the check closed) after the run, without ever
+        # exposing the hostile text to the model.
+        evidence_collector: list[Any] = []
+        collector_token = _EVIDENCE_COLLECTOR.set(evidence_collector)
 
         try:
             # 1. Try the verdict cache first (free re-clicks on the same day).
@@ -1105,6 +1185,7 @@ class FundamentalAgent:
             def _run_once() -> str:
                 # SDK / CLI / usage-limit failures here propagate (not retried);
                 # only malformed AI JSON is retried by parse_with_retry below.
+                evidence_collector.clear()
                 run_result = self._run_sync(
                     runner(
                         prompt,
@@ -1120,6 +1201,11 @@ class FundamentalAgent:
                         mode,
                         run_result.cost_usd,
                     )
+                # Fail closed on poisoned evidence (TEST-003). The tools already
+                # quarantined the hostile text from the model; this raises a
+                # NON-retryable error so the same injection is never re-fetched.
+                if any(contains_injection(item) for item in evidence_collector):
+                    raise _FundamentalEvidenceError("PromptInjectionEvidence")
                 return run_result.text
 
             def _parse(text: str) -> AgentVerdict:
@@ -1128,14 +1214,22 @@ class FundamentalAgent:
             # 3. Validate the final JSON into AgentVerdict. AI-004: re-run the
             # agentic loop on malformed/incomplete JSON up to get_ai_max_attempts()
             # tries, then raise (the Streamlit panel surfaces the error).
-            verdict = parse_with_retry(
-                _run_once,
-                _parse,
-                attempts=get_ai_max_attempts(),
-                retry_on=(FundamentalsAgentError, ValidationError),
-                label=f"AgentVerdict[{normalized}]",
-            )
+            try:
+                verdict = parse_with_retry(
+                    _run_once,
+                    _parse,
+                    attempts=get_ai_max_attempts(),
+                    retry_on=(FundamentalsAgentError, ValidationError),
+                    label=f"AgentVerdict[{normalized}]",
+                )
+            except _FundamentalEvidenceError as exc:
+                # No verdict, no cache write: the result is a safe error receipt.
+                raise FundamentalsAgentError(
+                    "Research evidence was blocked by the application safety "
+                    f"policy [{exc.error_type}]."
+                ) from None
         finally:
+            _EVIDENCE_COLLECTOR.reset(collector_token)
             _FORCE_REFRESH.reset(refresh_token)
             _REQUESTED_SYMBOL.reset(symbol_token)
 
