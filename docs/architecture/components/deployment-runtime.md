@@ -1,10 +1,10 @@
-# LLD - Deployment runtime (`Dockerfile`, `docker-compose.yml`, `.dockerignore`)
+# LLD — Deployment runtime (`Dockerfile`, `docker-compose.yml`, `.dockerignore`)
 
 | | |
 |---|---|
 | **Component** | Production container image + local production Docker Compose stack + CI image/stack gates (DEPLOY-001, DEPLOY-002) |
 | **Source** | [`Dockerfile`](../../../Dockerfile), [`docker-compose.yml`](../../../docker-compose.yml), [`.dockerignore`](../../../.dockerignore), [`.env.example`](../../../.env.example), [`.github/workflows/quality-and-security.yml`](../../../.github/workflows/quality-and-security.yml) (`docker-build` job) |
-| **Layer** | Deployment / packaging (no app logic - scanner behavior, schema, auth, and the daily job stay in the app layers) |
+| **Layer** | Deployment / packaging (no app logic — scanner behavior, schema, auth, and the daily job stay in the app layers) |
 | **Status** | Stable (DEPLOY-001 image, DEPLOY-002 local production Compose stack) |
 | **Related** | [HLD](../high-level-design.md) · [operations.md](../../operations.md) · [configuration.md](configuration.md) · [authentication.md](authentication.md) · [storage-persistence.md](storage-persistence.md) |
 
@@ -58,15 +58,15 @@ port on the developer machine.
 | Decision | Rationale | Alternative rejected |
 |---|---|---|
 | **`python:3.11-slim-bookworm` base** | 3.11 is the deployment target in CI; slim Debian keeps the runtime small and boring. | Full `python` image (bloat) / Alpine (musl wheel friction). |
-| **Install `requirements.txt` constrained by `constraints.txt`, before `COPY . .`** | Runtime-only deps (no dev/optional accelerators); copying deps first lets Docker cache the install layer across source edits. | Install everything / copy source first - slower rebuilds, larger image. |
-| **`streamlit run app.py`, not `python app.py`** | The plain-Python entrypoint does local prefetch-then-launch-browser; a container should become a web server immediately. | `python app.py` - would try to open a browser and run the prefetch wrapper at boot. |
-| **Production + auth-required defaults** | A deployed image and Compose stack fail closed until real prod env + OIDC secrets are present. | Permissive defaults - an exposed container would run unauthenticated. |
-| **Non-root `appuser`** | Least privilege; mutable state is confined to `/data` and the user's home cache. | Run as root - unnecessary privilege in a long-lived container. |
-| **Compose has `scanner-ui` + `postgres` only** | The acceptance scope is app + database. The daily scan job can run on demand against the same volumes with `docker compose run`. | Add `scanner-job` now - more moving parts before scheduling semantics are designed. |
-| **Postgres has no host port** | Only the app needs database access in normal local production mode; no host `5432` reduces accidental exposure. | Publish `5432:5432` by default - convenient but broader than the app needs. |
-| **Separate `scanner-data` and `postgres-data` volumes** | Candle/cache resets should not wipe scan history, and DB resets should not require deleting app caches. | One shared volume - harder to reason about backups and resets. |
-| **Secrets mounted, not baked** | `.streamlit/secrets.toml` contains Google OIDC credentials and belongs outside Docker layers and build context. | `COPY` secrets into the image - leaks through image history and registries. |
-| **CI image + Compose smoke** | Local machines may lack Docker; CI proves both the image and the Compose stack start on every PR. | Trust docs/tests only - broken Compose could ship unnoticed. |
+| **Install `requirements.txt` constrained by `constraints.txt`, before `COPY . .`** | Runtime-only deps (no dev/optional accelerators); copying deps first lets Docker cache the install layer across source edits. | Install everything / copy source first — slower rebuilds, larger image. |
+| **`streamlit run app.py`, not `python app.py`** | The plain-Python entrypoint does local prefetch-then-launch-browser; a container should become a web server immediately. | `python app.py` — would try to open a browser and run the prefetch wrapper at boot. |
+| **Production + auth-required defaults** | A deployed image and Compose stack fail closed until real prod env + OIDC secrets are present. | Permissive defaults — an exposed container would run unauthenticated. |
+| **Non-root `appuser`** | Least privilege; mutable state is confined to `/data` and the user's home cache. | Run as root — unnecessary privilege in a long-lived container. |
+| **Compose has `scanner-ui` + `postgres` only** | The acceptance scope is app + database. The daily scan job can run on demand against the same volumes with `docker compose run`. | Add `scanner-job` now — more moving parts before scheduling semantics are designed. |
+| **Postgres has no host port** | Only the app needs database access in normal local production mode; no host `5432` reduces accidental exposure. | Publish `5432:5432` by default — convenient but broader than the app needs. |
+| **Separate `scanner-data` and `postgres-data` volumes** | Candle/cache resets should not wipe scan history, and DB resets should not require deleting app caches. | One shared volume — harder to reason about backups and resets. |
+| **Secrets mounted, not baked** | `.streamlit/secrets.toml` contains Google OIDC credentials and belongs outside Docker layers and build context. | `COPY` secrets into the image — leaks through image history and registries. |
+| **CI image + Compose smoke** | Local machines may lack Docker; CI proves both the image and the Compose stack start on every PR. | Trust docs/tests only — broken Compose could ship unnoticed. |
 
 ## 5. Failure modes / degradation
 
@@ -114,7 +114,7 @@ port on the developer machine.
 - [`tests/test_docker_artifacts.py`](../../../tests/test_docker_artifacts.py)
   asserts the Dockerfile contract, Compose service/volume contract,
   `.dockerignore` exclusions, `.env.example` values, README/operations examples,
-  and the HLD/LLD links - string-level contract checks that need no Docker
+  and the HLD/LLD links — string-level contract checks that need no Docker
   daemon.
 - [`tests/test_supply_chain_policy.py`](../../../tests/test_supply_chain_policy.py)
   asserts the CI workflow includes the Docker build, Compose config, Compose
@@ -132,7 +132,7 @@ port on the developer machine.
   designed. For now, the documented one-off command keeps the stack simple:
   `docker compose run --rm scanner-ui python -m backend.jobs.run_daily_scan`.
 - **Slim the image** further by adding `tests/`, `docs/`, `.github/` to
-  `.dockerignore` (deferred - marginal while the image is small).
+  `.dockerignore` (deferred — marginal while the image is small).
 - **Pin the base by digest** (`python:3.11-slim-bookworm@sha256:...`) for fully
   reproducible builds.
 - **Add system libraries** only if a future runtime dep needs them (insert an

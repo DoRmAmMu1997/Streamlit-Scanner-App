@@ -124,7 +124,17 @@ class TechnicalToolContext:
         levels: list[dict],
         params: dict | None = None,
     ) -> TechnicalToolContext:
-        """Assemble the context: resample weekly + relevance-score both timeframes."""
+        """Build the per-call context — the intended way to create one.
+
+        Always construct a ``TechnicalToolContext`` through this factory rather than
+        the dataclass directly: it performs the two non-obvious assembly steps the
+        tools depend on. (1) It aggregates the daily candles into a weekly frame
+        (``resample_to_weekly`` — no new data source, just a coarser view). (2) It
+        relevance-*ranks* the support/resistance levels on BOTH timeframes via
+        ``rank_levels``, decaying weekly recency ~5x faster because roughly five
+        daily bars pass per week. ``params`` overrides ``DEFAULT_TOOL_PARAMS``
+        (caller wins); pass ``None`` to use the defaults.
+        """
         cfg = resolve_params(params)
 
         # Weekly is just the daily candles aggregated — no new data source.
