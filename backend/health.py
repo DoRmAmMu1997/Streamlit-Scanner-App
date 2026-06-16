@@ -90,6 +90,8 @@ class DataQualityRunHealth:
     usable_symbols: int
     warning_symbols: int
     fatal_symbols: int
+    total_findings: int
+    findings_truncated: bool
     findings: tuple[DataQualityFindingHealth, ...]
 
 
@@ -248,6 +250,9 @@ def _copy_data_quality_run(run: Any) -> DataQualityRunHealth | None:
         usable_symbols=_as_int(receipt.get("usable_symbols")),
         warning_symbols=_as_int(receipt.get("warning_symbols")),
         fatal_symbols=_as_int(receipt.get("fatal_symbols")),
+        # Older receipts predate these keys; fall back to the copied rows.
+        total_findings=_as_int(receipt.get("total_findings", len(findings))),
+        findings_truncated=bool(receipt.get("findings_truncated", False)),
         findings=tuple(findings),
     )
 

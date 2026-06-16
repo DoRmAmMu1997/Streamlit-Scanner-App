@@ -405,7 +405,9 @@ def test_warning_only_candle_quality_passes_through_and_logs(tmp_path, caplog):
         result = loader.load_universe_history(
             mapped_universe(),
             date(2026, 5, 10),
-            date(2026, 5, 13),
+            # Latest candle is 2026-05-11; a 2026-05-18 end is a 7-day gap, past
+            # the stale tolerance, so the warning fires (a normal weekend would not).
+            date(2026, 5, 18),
         )
 
     assert list(result.frames) == ["RELIANCE"]

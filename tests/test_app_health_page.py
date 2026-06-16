@@ -67,7 +67,9 @@ class _FakeStreamlit:
         pass
 
 
-def _quality_run() -> DataQualityRunHealth:
+def _quality_run(
+    *, total_findings: int = 1, findings_truncated: bool = False
+) -> DataQualityRunHealth:
     return DataQualityRunHealth(
         run_id=21,
         started_at=dt.datetime(2026, 6, 10, 9, 0, tzinfo=dt.UTC),
@@ -78,6 +80,8 @@ def _quality_run() -> DataQualityRunHealth:
         usable_symbols=1,
         warning_symbols=1,
         fatal_symbols=1,
+        total_findings=total_findings,
+        findings_truncated=findings_truncated,
         findings=(
             DataQualityFindingHealth(
                 symbol="WIPRO",
@@ -224,3 +228,19 @@ def test_health_renderer_shows_latest_data_quality_summary(monkeypatch):
     assert "HIGH_BELOW_LOW" in table_text
     assert "quality-secret" not in rendered
     assert "***REDACTED***" in rendered
+
+
+def test_health_renderer_notes_when_findings_are_truncated(monkeypatch):
+    """A capped receipt tells the admin how many findings were omitted."""
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(health_page, "st", fake_st)
+
+    app._render_admin_health_page(
+        AuthenticatedUser("admin@example.com", "Admin", is_admin=True),
+        snapshot_loader=lambda: _snapshot(
+            quality_run=_quality_run(total_findings=120, findings_truncated=True)
+        ),
+    )
+
+    captions = " ".join(fake_st.captions)
+    assert "Showing 1 of 120 findings" in captions

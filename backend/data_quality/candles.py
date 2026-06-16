@@ -16,6 +16,13 @@ DataQualitySeverity = Literal["warning", "fatal"]
 DEFAULT_REQUIRED_COLUMNS: tuple[str, ...] = ("open", "high", "low", "close", "volume")
 MAX_CALENDAR_GAP_DAYS = 7
 SUSPICIOUS_OVERNIGHT_GAP_PCT = 50.0
+# How many calendar days the latest candle may trail ``expected_latest_date``
+# before it counts as stale. Callers commonly pass today's date as "expected",
+# but the newest *trading* candle is routinely a few days old on weekends,
+# market holidays, or before the vendor publishes the current day's EOD bar.
+# Tolerating a normal long weekend (Fri data on a Tue run = 4 days) keeps the
+# stale signal meaningful instead of flagging the whole universe every off-day.
+STALE_LATEST_TOLERANCE_DAYS = 4
 
 
 @dataclass(frozen=True)
@@ -54,8 +61,16 @@ def validate_candles(
     symbol: str,
     expected_latest_date: date | None = None,
     required_columns: Collection[str] | None = None,
+    stale_tolerance_days: int = STALE_LATEST_TOLERANCE_DAYS,
 ) -> CandleQualityReport:
-    """Validate a daily OHLCV frame without mutating caller-owned data."""
+    """Validate a daily OHLCV frame without mutating caller-owned data.
+
+    ``stale_tolerance_days`` is how far the latest candle may trail
+    ``expected_latest_date`` before a (warning-only) ``STALE_LATEST_CANDLE``
+    finding is raised. The default tolerates a normal long weekend so a run on a
+    non-trading day (or before the vendor publishes the current EOD bar) does not
+    flag every symbol as stale; pass ``0`` for an exact-date comparison.
+    """
     symbol_label = str(symbol or "").strip().upper() or "UNKNOWN"
     row_count = len(df.index)
     if df.empty:
@@ -192,7 +207,11 @@ def validate_candles(
             )
         )
 
-    if latest_date is not None and expected_latest_date is not None and latest_date < expected_latest_date:
+    if (
+        latest_date is not None
+        and expected_latest_date is not None
+        and (expected_latest_date - latest_date).days > max(0, stale_tolerance_days)
+    ):
         findings.append(
             DataQualityFinding(
                 code="STALE_LATEST_CANDLE",

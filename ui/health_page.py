@@ -106,6 +106,11 @@ def _render_data_quality_summary(run: DataQualityRunHealth | None) -> None:
         for finding in run.findings
     ]
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    if run.findings_truncated:
+        st.caption(
+            f"Showing {len(run.findings)} of {run.total_findings} findings "
+            "(fatal first); see logs for the full set."
+        )
 
 
 def _render_admin_health_page(

@@ -101,6 +101,7 @@ flowchart TB
 | Authentication | [authentication](components/authentication.md) | Google OIDC gate + email allowlist/admins |
 | Configuration | [configuration](components/configuration.md) | Typed env settings, prod fail-closed, secret list |
 | Data acquisition | [data-acquisition](components/data-acquisition.md) | DhanHQ client + Parquet candle cache |
+| Data quality | [data-quality](components/data-quality.md) | Candle OHLCV validation + loader-boundary quarantine + per-run quality receipt (DATA-001) |
 | Universe management | [universe-management](components/universe-management.md) | Build/load universe CSVs, symbol→security_id |
 | Screener framework | [screener-framework](components/screener-framework.md) | `BaseScanner` ABC + plugin registry |
 | Indicators | [indicators](components/indicators.md) | TA-Lib/pandas_ta + fallbacks, levels, weekly |
@@ -209,10 +210,11 @@ Runtime data under `DATA_DIR` (default `./data`, git-ignored): `cache/daily/*.pa
 | **Tamper-evident AI receipts** | AI verdicts persist hashed evidence + a semantic prompt version as an audit ledger (`ai_evaluations`); the on-disk verdict cache is HMAC-signed so a forged/edited entry is rejected and recomputed, never trusted. Raw scraped text and raw model responses are never stored. |
 | **Strict result contract, truthful status** | Rows are validated against the provenance contract *before* the DataFrame is built; contract-rejected rows and persistence failures downgrade the run to `PARTIAL`/`FAILED` rather than reporting a false success. |
 | **Validate within a bounded attempt budget (AI-004)** | Strict-schema parsing may retry malformed output within the configured 1–3 attempt budget (never SDK/usage-limit errors); a budget of 1 disables retries, and invalid output is rejected and counted, never persisted. |
+| **Quarantine bad candle data at the loader boundary (DATA-001)** | A pure validator screens every OHLCV frame; structurally impossible candles (high<low, NaN, dup dates) are withheld from scanners and downgrade the run (`PARTIAL`/`FAILED`), while stale/gappy data passes as a recorded warning. Each run persists a bounded, redacted quality receipt (`scan_runs.data_quality_json`) the health page surfaces. | Trust raw vendor candles — false signals from malformed/stale data with no audit trail. |
 
 ## 12. Risks & future evolution
 
 - **AI/external dependency** — Dhan/screener.in/SerpAPI/CLI changes can break features; mitigated by fallbacks, caches, and untrusted-evidence handling.
 - **Single-writer SQLite locally** — WAL + short sessions mitigate; Postgres for real concurrency.
-- **Recently shipped**: PROV-002 (deterministic per-screener receipts via `build_provenance`) and PROV-003 (AI verdict receipts + the `ai_evaluations` ledger + HMAC verdict-cache integrity) are now on `main`.
+- **Recently shipped**: PROV-002 (deterministic per-screener receipts via `build_provenance`), PROV-003 (AI verdict receipts + the `ai_evaluations` ledger + HMAC verdict-cache integrity), and DATA-001 (candle data-quality quarantine + per-run receipt) are now on `main`.
 - **Roadmap (backlog)**: RANK-* (`final_score` ranking), VALID-* (forward-return validation + `(symbol, signal_date)` index), AUTH-003 (role-gated features), DEPLOY-* (hosting). These land in reserved columns / JSON without flag-day migrations.

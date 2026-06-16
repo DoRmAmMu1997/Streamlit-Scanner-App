@@ -42,7 +42,7 @@ flowchart TD
 
 **`scan_runs`** (1) ──< **`scan_results`** (many) and **`scan_runs`** (1) ──< **`ai_evaluations`** (many); both FKs `ON DELETE CASCADE`.
 
-- `scan_runs` (audit header): `id`, `started_at`/`finished_at` (tz-aware UTC), `status` (`running`/`success`/`partial`/`failed`, stored as CHECK-backed VARCHAR), `screener_key`, `universe_key`, `params_json`, `data_snapshot_date`, `app_version`, `git_commit_sha`, `triggered_by`, `error_message`, **`symbols_scanned`** (SCAN-004).
+- `scan_runs` (audit header): `id`, `started_at`/`finished_at` (tz-aware UTC), `status` (`running`/`success`/`partial`/`failed`, stored as CHECK-backed VARCHAR), `screener_key`, `universe_key`, `params_json`, `data_snapshot_date`, `app_version`, `git_commit_sha`, `triggered_by`, `error_message`, **`symbols_scanned`** (SCAN-004), **`data_quality_json`** (nullable; DATA-001 candle-quality receipt — see [data-quality.md](data-quality.md)).
 - `scan_results` (shortlist line item): `id`, `run_id` (FK), `symbol`, `signal_date`, `close_price` (`Numeric`), `rating`, `final_score` (`Numeric`, reserved for RANK-*), `reason`, `raw_result_json`, `provenance_json`, `created_at`.
 - `ai_evaluations` (**PROV-003** AI verdict ledger — approved/rejected/error): `id`, `run_id` (FK), `symbol`, `signal_date`, `outcome` (CHECK), `verdict_label`, `confidence` (`Numeric(8,4)`), `model_name`, `prompt_version`, `validated_verdict_json`, `provenance_json` (the trusted receipt), `created_at`. Full column table in [scan-run-persistence.md §3.3](../scan-run-persistence.md).
 
@@ -78,7 +78,7 @@ Type-coercion helpers (`_as_date`, `_as_decimal`, `_as_optional_str`, `_is_missi
 
 ## 6. Migrations
 
-[`migrations/`](../../../migrations) (root-level, kept out of the lint target). Three revisions: `…scan002_create_scan_runs_and_scan_results`, `…scan004_add_symbols_scanned_to_scan_runs`, and `…prov003_create_ai_evaluations`. `migrations/env.py` reads the URL from `get_database_url()` (no hardcoded URL). A drift test guards ORM-vs-migration sync.
+[`migrations/`](../../../migrations) (root-level, kept out of the lint target). Four revisions, chained linearly: `…scan002_create_scan_runs_and_scan_results` → `…scan004_add_symbols_scanned_to_scan_runs` → `…prov003_create_ai_evaluations` → `…data001_add_scan_run_data_quality` (DATA-001, adds nullable `scan_runs.data_quality_json`). `migrations/env.py` reads the URL from `get_database_url()` (no hardcoded URL). A drift test guards ORM-vs-migration sync.
 
 ## 7. Failure modes
 

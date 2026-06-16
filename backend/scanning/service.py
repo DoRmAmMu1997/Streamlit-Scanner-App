@@ -392,6 +392,14 @@ def run_scan(
     )
 
 
+# Cap how many individual findings the per-run receipt persists. A full-universe
+# run can surface hundreds of findings (e.g. many stale/gapped symbols); the
+# aggregate counts still describe the whole set, so storing every finding row
+# would only bloat the JSON column and the health table. Fatal findings are
+# kept ahead of warnings so the most actionable issues always survive the cap.
+MAX_PERSISTED_FINDINGS = 50
+
+
 def _data_quality_receipt(
     data_loader: Any,
     *,
@@ -441,6 +449,12 @@ def _data_quality_receipt(
                 }
             )
 
+    total_findings = len(findings)
+    # Persist fatal findings before warnings, then cap. ``sort`` is stable, so
+    # the per-symbol order within each severity is preserved.
+    findings.sort(key=lambda item: 0 if item["severity"] == "fatal" else 1)
+    capped_findings = findings[:MAX_PERSISTED_FINDINGS]
+
     return {
         "schema_version": 1,
         "expected_latest_date": (
@@ -452,7 +466,9 @@ def _data_quality_receipt(
         "fatal_symbols": fatal_symbols,
         "warning_findings": warning_findings,
         "fatal_findings": fatal_findings,
-        "findings": findings,
+        "total_findings": total_findings,
+        "findings_truncated": total_findings > len(capped_findings),
+        "findings": capped_findings,
     }
 
 

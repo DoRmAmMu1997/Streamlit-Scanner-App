@@ -153,16 +153,39 @@ def test_negative_volume_is_fatal():
     assert report.findings[0].affected_rows == 1
 
 
-def test_stale_latest_date_is_warning():
+def test_stale_latest_date_beyond_tolerance_is_warning():
+    # Latest candle is 2026-06-03; expected 2026-06-10 is a 7-day gap (> 4).
     report = validate_candles(
         _valid_candles(),
         symbol="STALE",
-        expected_latest_date=date(2026, 6, 5),
+        expected_latest_date=date(2026, 6, 10),
     )
 
     assert _finding_codes(report) == ["STALE_LATEST_CANDLE"]
     assert report.findings[0].severity == "warning"
     assert report.is_usable
+
+
+def test_stale_within_tolerance_does_not_warn():
+    # A normal long-weekend gap (Fri 06-03 data, Tue 06-07 run = 4 days) is fine.
+    report = validate_candles(
+        _valid_candles(),
+        symbol="FRESH_ENOUGH",
+        expected_latest_date=date(2026, 6, 7),
+    )
+
+    assert report.findings == ()
+
+
+def test_stale_tolerance_zero_compares_exact_date():
+    report = validate_candles(
+        _valid_candles(),
+        symbol="EXACT",
+        expected_latest_date=date(2026, 6, 5),
+        stale_tolerance_days=0,
+    )
+
+    assert _finding_codes(report) == ["STALE_LATEST_CANDLE"]
 
 
 def test_calendar_gaps_over_seven_days_are_warnings():

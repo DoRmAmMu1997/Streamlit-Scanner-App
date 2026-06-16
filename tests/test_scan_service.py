@@ -399,6 +399,54 @@ def test_run_scan_marks_failed_when_fatal_quality_leaves_no_usable_symbols(
         assert run.data_quality_json["usable_symbols"] == 0
 
 
+def test_run_scan_caps_persisted_quality_findings_fatal_first(
+    db_engine, session_factory
+):
+    """Counts cover every symbol, but only a bounded fatal-first sample persists."""
+
+    def screener_run(_universe_df, _data_loader, _params):
+        return _two_buy_rows()
+
+    warning_reports = [
+        _quality_report(f"SYM{i:03d}", "warning", "STALE_LATEST_CANDLE")
+        for i in range(60)
+    ]
+    fatal_reports = [_quality_report("BADCO", "fatal", "HIGH_BELOW_LOW")]
+    loader = _FakeLoader(
+        last_failures=[
+            {
+                "symbol": "BADCO",
+                "message": "Candle data failed quality checks.",
+                "phase": "data_quality",
+            }
+        ],
+        # Warnings come first in input to prove the receipt re-sorts fatal-first.
+        last_data_quality_reports=warning_reports + fatal_reports,
+    )
+
+    run_scan(
+        screener_key="envelope",
+        universe_key="hemant_super_45",
+        run_callable=screener_run,
+        universe_df=pd.DataFrame({"symbol": ["RELIANCE", "TCS"]}),
+        data_loader=loader,
+        params=_base_params(),
+        session_factory=session_factory,
+    )
+
+    with Session(db_engine) as session:
+        receipt = get_latest_scan_runs(session)[0].data_quality_json
+    assert receipt["checked_symbols"] == 61
+    assert receipt["warning_symbols"] == 60
+    assert receipt["fatal_symbols"] == 1
+    assert receipt["total_findings"] == 61
+    assert receipt["findings_truncated"] is True
+    assert len(receipt["findings"]) == 50
+    # The single fatal finding must survive the cap, ahead of the warnings.
+    assert receipt["findings"][0]["severity"] == "fatal"
+    assert sum(1 for f in receipt["findings"] if f["severity"] == "fatal") == 1
+
+
 def test_run_scan_marks_partial_on_compute_failure(session_factory):
     """A per-symbol compute failure reported via the service callback => PARTIAL."""
 
