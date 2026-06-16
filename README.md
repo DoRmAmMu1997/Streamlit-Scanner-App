@@ -390,6 +390,51 @@ uses whatever data is already cached locally (no prefetch).
 
 ## Running with Docker
 
+The recommended local production-like path is Docker Compose: it starts the
+Streamlit app plus a private Postgres database, uses named volumes for durable
+runtime state, and keeps secrets outside the image.
+
+```bash
+cp .env.example .env
+cp .streamlit/secrets.example.toml .streamlit/secrets.toml
+# Edit .env and .streamlit/secrets.toml before running with real credentials.
+docker compose up --build
+```
+
+Open <http://localhost:8501>. Compose publishes only the UI with
+`-p 8501:8501` behavior via `SCANNER_UI_PORT=8501`; Postgres has no host port
+and is reachable only inside the Compose network as `postgres:5432`.
+
+Compose uses two named volumes:
+
+- `scanner-data` mounted at `/data` for candles, caches, SQLite fallback files,
+  and other app-generated state.
+- `postgres-data` mounted at `/var/lib/postgresql/data` for the local Postgres
+  cluster.
+
+Stop the stack without deleting data:
+
+```bash
+docker compose down
+```
+
+Reset both named volumes when you deliberately want a clean local production
+environment:
+
+```bash
+docker compose down --volumes
+```
+
+Run the daily scan job against the same Compose database and `/data` volume
+without adding a long-lived scheduler service:
+
+```bash
+docker compose run --rm scanner-ui python -m backend.jobs.run_daily_scan --config config/daily_scans.yaml
+```
+
+Use the single-container commands below when you only want to build or smoke-test
+the image without starting Postgres.
+
 Build the deployment image from the repository root:
 
 ```bash
@@ -677,6 +722,8 @@ Streamlit Scanner App/
 │   ├── config.toml              # Streamlit theme
 │   └── secrets.example.toml     # Google SSO template (copy to secrets.toml)
 ├── Dockerfile                    # Production Streamlit image (DEPLOY-001)
+├── docker-compose.yml            # Local production stack: scanner-ui + Postgres (DEPLOY-002)
+├── .env.example                  # Root Compose env template (copy to .env)
 ├── .dockerignore                 # Excludes secrets/generated runtime data
 ├── data/                        # Generated at runtime (git-ignored)
 │   ├── cache/daily/             # Cached candles (Parquet)
@@ -1006,6 +1053,9 @@ python -m pre_commit validate-config .pre-commit-config.yaml
 python -m pre_commit run --all-files
 # CI also verifies the deployment image:
 docker build --tag streamlit-scanner-app:ci .
+docker compose config
+docker compose up --build --wait --wait-timeout 180
+docker compose down --volumes --remove-orphans
 ```
 
 Beginner note: `requirements-optional.txt` is intentionally separate. Those

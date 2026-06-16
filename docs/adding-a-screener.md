@@ -148,6 +148,9 @@ python -m mypy
 python -m bandit -r app.py backend screeners ui Dependencies -q
 python -m pip_audit -r constraints.txt
 docker build --tag streamlit-scanner-app:ci .
+docker compose config
+docker compose up --build --wait --wait-timeout 180
+docker compose down --volumes --remove-orphans
 ```
 
 These are the exact CI gates. If you forked your branch a while ago, merge

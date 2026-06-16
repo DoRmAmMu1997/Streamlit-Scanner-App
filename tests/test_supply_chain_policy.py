@@ -23,6 +23,9 @@ CI_COMMANDS = (
     "python -m bandit -r app.py backend screeners ui Dependencies -q",
     "python -m pip_audit -r constraints.txt",
     "docker build --tag streamlit-scanner-app:ci .",
+    "docker compose config",
+    "docker compose up --build --wait --wait-timeout 180",
+    "docker compose down --volumes --remove-orphans",
 )
 
 
@@ -46,6 +49,11 @@ def test_ci_workflow_runs_quality_and_dependency_security_checks():
     assert "python -m bandit -r app.py backend screeners ui Dependencies -q" in text
     assert "python -m pip_audit -r constraints.txt" in text
     assert "docker build --tag streamlit-scanner-app:ci ." in text
+    assert "Copy Compose environment template" in text
+    assert "Copy Streamlit secrets template" in text
+    assert "docker compose config" in text
+    assert "docker compose up --build --wait --wait-timeout 180" in text
+    assert "docker compose down --volumes --remove-orphans" in text
     assert "python -m pip_audit -r requirements.txt -r requirements-dev.txt" not in text
 
 
@@ -156,6 +164,10 @@ def test_operations_guide_matches_scheduler_database_and_ci_contracts():
     assert "1 disables validation retries" in text
     assert "clamped to `1`-`3`" in text
     assert "Agent SDK credit" in text
+    assert "cp .env.example .env" in text
+    assert "cp .streamlit/secrets.example.toml .streamlit/secrets.toml" in text
+    assert "docker compose up --build" in text
+    assert "docker compose run --rm scanner-ui python -m backend.jobs.run_daily_scan" in text
     for command in CI_COMMANDS:
         assert command in text
     assert "python -m pip_audit -r requirements.txt -r requirements-dev.txt" not in text

@@ -91,3 +91,26 @@ jobs:
 
       - name: Build deployment image
         run: docker build --tag streamlit-scanner-app:ci .
+
+      # DEPLOY-002 Compose smoke test. Local dev machines may not have Docker, so
+      # this is where we prove the whole local-production stack actually starts.
+      # We seed the templates Compose expects (.env + secrets.toml), validate the
+      # interpolated config, then bring the stack up and wait (--wait) until every
+      # service reports healthy (or fail after --wait-timeout). Teardown runs with
+      # `if: always()` so a failed smoke test still removes the containers and the
+      # named volumes (--volumes) instead of leaking them between CI runs.
+      - name: Copy Compose environment template
+        run: cp .env.example .env
+
+      - name: Copy Streamlit secrets template
+        run: cp .streamlit/secrets.example.toml .streamlit/secrets.toml
+
+      - name: Validate Compose configuration
+        run: docker compose config
+
+      - name: Smoke-test Compose stack
+        run: docker compose up --build --wait --wait-timeout 180
+
+      - name: Tear down Compose stack
+        if: always()
+        run: docker compose down --volumes --remove-orphans
