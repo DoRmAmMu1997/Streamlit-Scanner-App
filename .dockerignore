@@ -1,0 +1,45 @@
+# Git and local worktree metadata.
+.git
+.gitignore
+
+# Python/runtime noise.
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Coverage measurement artifacts.
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments.
+.venv/
+venv/
+env/
+
+# Local credentials and generated broker files.
+.env
+Dependencies/.env
+Dependencies/all_instrument*.csv
+.streamlit/secrets.toml
+
+# Generated scanner data. Keep curated universe CSVs that are tracked source.
+data/cache/
+data/universes/*
+!data/universes/hemant_super_45.csv
+!data/universes/hemant_good_45.csv
+!data/universes/hemant_good_200.csv
+!data/universes/hemant_super_good_200_union.csv
+data/*.db
+data/*.db-wal
+data/*.db-shm
+*.sqlite
+*.sqlite3
+
+# Editor/OS noise.
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

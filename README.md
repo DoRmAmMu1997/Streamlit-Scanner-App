@@ -372,6 +372,63 @@ uses whatever data is already cached locally (no prefetch).
 
 ---
 
+## Running with Docker
+
+Build the deployment image from the repository root:
+
+```bash
+docker build -t streamlit-scanner-app .
+```
+
+For a local container smoke test, keep auth disabled and persist generated data
+in a named Docker volume:
+
+```bash
+docker run --rm \
+  -p 8501:8501 \
+  -e APP_ENV=development \
+  -e AUTH_REQUIRED=false \
+  -e DATA_DIR=/data \
+  -v streamlit-scanner-data:/data \
+  streamlit-scanner-app
+```
+
+Open <http://localhost:8501>. The image starts with `streamlit run app.py`
+instead of `python app.py`, so it serves the UI directly and does not run the
+local prefetch/relaunch wrapper at container boot.
+
+Production containers default to fail-closed settings (`APP_ENV=production`,
+`AUTH_REQUIRED=true`, `DATA_DIR=/data`). Supply the same runtime environment the
+non-container app expects, mount a persistent `/data` volume, and provide
+Streamlit's Google OIDC secrets file. The inline `-e` values below are
+placeholders for a manual run; prefer your host's managed secret/environment
+injection for real deployments:
+
+```bash
+docker run -d --name streamlit-scanner-app \
+  -p 8501:8501 \
+  -e APP_ENV=production \
+  -e AUTH_REQUIRED=true \
+  -e DATA_DIR=/data \
+  -e DATABASE_URL=postgresql+psycopg://scanner:<password>@db-host:5432/scanner \
+  -e DHAN_CLIENT_ID=your-dhan-client-id \
+  -e DHAN_ACCESS_TOKEN=your-dhan-access-token \
+  -e ALLOWED_EMAILS=you@gmail.com \
+  -e ADMIN_EMAILS=you@gmail.com \
+  -e LOG_FORMAT=json \
+  -v streamlit-scanner-data:/data \
+  -v /absolute/path/secrets.toml:/app/.streamlit/secrets.toml:ro \
+  streamlit-scanner-app
+```
+
+`Dockerfile` exposes port `8501` and includes a health check against
+`/_stcore/health`. `.dockerignore` keeps local secrets (`Dependencies/.env`,
+`.streamlit/secrets.toml`) and generated cache/database files out of the build
+context. See [docs/operations.md](docs/operations.md#docker--container-deployment)
+for container runbook details and daily-job commands.
+
+---
+
 ## Running the daily scan job
 
 JOB-001 adds a headless command for schedulers, terminals, and hosting
@@ -594,6 +651,8 @@ Streamlit Scanner App/
 ├── .streamlit/
 │   ├── config.toml              # Streamlit theme
 │   └── secrets.example.toml     # Google SSO template (copy to secrets.toml)
+├── Dockerfile                    # Production Streamlit image (DEPLOY-001)
+├── .dockerignore                 # Excludes secrets/generated runtime data
 ├── data/                        # Generated at runtime (git-ignored)
 │   ├── cache/daily/             # Cached candles (Parquet)
 │   ├── cache/fundamentals/      # Cached screener.in data + agent verdicts
@@ -919,6 +978,8 @@ python -m bandit -r app.py backend screeners ui Dependencies -q
 python -m pip_audit -r constraints.txt
 python -m pre_commit validate-config .pre-commit-config.yaml
 python -m pre_commit run --all-files
+# CI also verifies the deployment image:
+docker build --tag streamlit-scanner-app:ci .
 ```
 
 Beginner note: `requirements-optional.txt` is intentionally separate. Those

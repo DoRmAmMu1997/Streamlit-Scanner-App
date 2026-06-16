@@ -128,6 +128,7 @@ python -m ruff check app.py backend screeners ui Dependencies tests
 python -m mypy
 python -m bandit -r app.py backend screeners ui Dependencies -q
 python -m pip_audit -r constraints.txt
+docker build --tag streamlit-scanner-app:ci .
 ```
 
 These are the exact CI gates. If you forked your branch a while ago, merge

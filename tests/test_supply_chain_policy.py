@@ -22,6 +22,7 @@ CI_COMMANDS = (
     "python -m mypy",
     "python -m bandit -r app.py backend screeners ui Dependencies -q",
     "python -m pip_audit -r constraints.txt",
+    "docker build --tag streamlit-scanner-app:ci .",
 )
 
 
@@ -30,6 +31,7 @@ def test_ci_workflow_runs_quality_and_dependency_security_checks():
     workflow = ROOT / ".github" / "workflows" / "quality-and-security.yml"
     text = workflow.read_text(encoding="utf-8")
 
+    assert "permissions:\n  contents: read" in text
     assert "pip install -r requirements.txt -r requirements-dev.txt -c constraints.txt" in text
     assert 'python-version: ["3.11", "3.12"]' in text
     assert "python -m pre_commit validate-config .pre-commit-config.yaml" in text
@@ -43,6 +45,7 @@ def test_ci_workflow_runs_quality_and_dependency_security_checks():
     assert "python -m mypy" in text
     assert "python -m bandit -r app.py backend screeners ui Dependencies -q" in text
     assert "python -m pip_audit -r constraints.txt" in text
+    assert "docker build --tag streamlit-scanner-app:ci ." in text
     assert "python -m pip_audit -r requirements.txt -r requirements-dev.txt" not in text
 
 

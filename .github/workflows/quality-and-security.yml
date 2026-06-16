@@ -6,6 +6,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 jobs:
   verify:
     name: Python ${{ matrix.python-version }} quality and supply-chain checks
@@ -71,3 +74,15 @@ jobs:
           # unconstrained requirements would resolve newer packages and could
           # miss a vulnerability in the versions CI actually tested.
           python -m pip_audit -r constraints.txt
+
+  docker-build:
+    name: Docker image build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build deployment image
+        run: docker build --tag streamlit-scanner-app:ci .
