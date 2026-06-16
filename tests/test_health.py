@@ -60,10 +60,15 @@ def test_collect_admin_health_selects_latest_exact_success_and_failure(
         symbols_scanned=100,
         triggered_by="ui:admin@example.com",
         error_message="provider failed",
+        data_quality_json=None,
     )
+    success.data_quality_json = None
     seen_statuses: list[ScanStatus] = []
 
-    def fake_latest(_session, *, limit, status):
+    def fake_latest(_session, *, limit, status=None):
+        if status is None:
+            assert limit == 50
+            return []
         assert limit == 1
         seen_statuses.append(status)
         return [success] if status is ScanStatus.SUCCESS else [failure]
@@ -79,6 +84,74 @@ def test_collect_admin_health_selects_latest_exact_success_and_failure(
     assert snapshot.last_failed_scan is not None
     assert snapshot.last_failed_scan.run_id == 12
     assert snapshot.last_failed_scan.error_message == "provider failed"
+
+
+def test_collect_admin_health_copies_latest_data_quality_receipt(
+    monkeypatch, tmp_path
+):
+    """Health uses the newest persisted quality receipt without revalidating data."""
+    stale_run = SimpleNamespace(
+        id=20,
+        started_at=dt.datetime(2026, 6, 9, 9, 0, tzinfo=dt.UTC),
+        finished_at=dt.datetime(2026, 6, 9, 9, 2, tzinfo=dt.UTC),
+        status=ScanStatus.SUCCESS,
+        screener_key="older",
+        universe_key="nifty_50",
+        symbols_scanned=50,
+        triggered_by="job:daily",
+        error_message=None,
+        data_quality_json=None,
+    )
+    quality_run = SimpleNamespace(
+        id=21,
+        started_at=dt.datetime(2026, 6, 10, 9, 0, tzinfo=dt.UTC),
+        finished_at=dt.datetime(2026, 6, 10, 9, 2, tzinfo=dt.UTC),
+        status=ScanStatus.PARTIAL,
+        screener_key="envelope",
+        universe_key="nifty_500",
+        symbols_scanned=500,
+        triggered_by="job:daily",
+        error_message="1 symbol(s) had fatal candle data quality findings.",
+        data_quality_json={
+            "schema_version": 1,
+            "checked_symbols": 2,
+            "usable_symbols": 1,
+            "warning_symbols": 1,
+            "fatal_symbols": 1,
+            "findings": [
+                {
+                    "symbol": "WIPRO",
+                    "severity": "fatal",
+                    "code": "HIGH_BELOW_LOW",
+                    "message": "token=quality-secret",
+                    "affected_rows": 1,
+                    "latest_date": "2026-06-01",
+                }
+            ],
+        },
+    )
+
+    def fake_latest(_session, *, limit, status=None):
+        if status is ScanStatus.SUCCESS:
+            return []
+        if status is ScanStatus.FAILED:
+            return []
+        assert status is None
+        assert limit == 50
+        return [stale_run, quality_run]
+
+    monkeypatch.setattr(health, "session_scope", _fake_session_scope)
+    monkeypatch.setattr(health, "get_latest_scan_runs", fake_latest)
+
+    snapshot = health.collect_admin_health(_settings(tmp_path))
+
+    assert snapshot.latest_data_quality_run is not None
+    assert snapshot.latest_data_quality_run.run_id == 21
+    assert snapshot.latest_data_quality_run.checked_symbols == 2
+    assert snapshot.latest_data_quality_run.usable_symbols == 1
+    assert snapshot.latest_data_quality_run.fatal_symbols == 1
+    assert snapshot.latest_data_quality_run.findings[0].symbol == "WIPRO"
+    assert "quality-secret" not in repr(snapshot.latest_data_quality_run)
 
 
 def test_collect_admin_health_reads_latest_candle_date_from_parquet_metadata(

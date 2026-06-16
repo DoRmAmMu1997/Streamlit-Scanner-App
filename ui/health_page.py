@@ -16,7 +16,12 @@ import pandas as pd
 import streamlit as st
 
 from backend.auth.session import AuthenticatedUser
-from backend.health import AdminHealthSnapshot, ScanRunHealth, collect_admin_health
+from backend.health import (
+    AdminHealthSnapshot,
+    DataQualityRunHealth,
+    ScanRunHealth,
+    collect_admin_health,
+)
 from ui.common import _redact_secrets
 
 
@@ -64,6 +69,43 @@ def _format_bytes(value: int | None) -> str:
             return f"{amount:.0f} {unit}" if unit == "B" else f"{amount:.1f} {unit}"
         amount /= 1024
     return f"{amount:.1f} TiB"
+
+
+def _render_data_quality_summary(run: DataQualityRunHealth | None) -> None:
+    """Render the newest persisted candle-quality receipt, if one exists."""
+    st.markdown("### Candle data quality")
+    if run is None:
+        st.info("No scan has recorded candle data-quality findings yet.")
+        return
+
+    quality_columns = st.columns(3)
+    quality_columns[0].metric("Quality checked symbols", run.checked_symbols)
+    quality_columns[1].metric("Quality usable symbols", run.usable_symbols)
+    quality_columns[2].metric(
+        "Quality bad/stale symbols",
+        run.warning_symbols + run.fatal_symbols,
+    )
+    context = (
+        f"Run #{run.run_id} · {run.screener_key} · {run.universe_key} · "
+        f"{_format_health_time(run.finished_at)}"
+    )
+    quality_columns[0].caption(context)
+    if not run.findings:
+        st.caption("Latest quality receipt has no findings.")
+        return
+
+    rows = [
+        {
+            "Symbol": finding.symbol,
+            "Severity": finding.severity.upper(),
+            "Code": finding.code,
+            "Message": _redact_secrets(finding.message),
+            "Affected rows": finding.affected_rows,
+            "Latest date": finding.latest_date.isoformat() if finding.latest_date else "",
+        }
+        for finding in run.findings
+    ]
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
 
 def _render_admin_health_page(
@@ -154,6 +196,8 @@ def _render_admin_health_page(
             f"{snapshot.unreadable_cache_file_count} daily cache file(s) could "
             "not be inspected. Refresh the affected cache before relying on its data."
         )
+
+    _render_data_quality_summary(snapshot.latest_data_quality_run)
 
     st.markdown("### Service readiness")
     service_rows = [

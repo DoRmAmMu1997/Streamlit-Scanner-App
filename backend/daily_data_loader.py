@@ -26,8 +26,14 @@ from backend.config import (
     dhan_rate_limit_retry_delays,
     dhan_request_delay_seconds,
 )
+from backend.data_quality import CandleQualityReport, validate_candles
 from backend.dhan_client import DhanDataClient, DhanRateLimitError
-from backend.observability import EVENT_EXTERNAL_API_FAILED, log_event
+from backend.observability import (
+    EVENT_CANDLE_DATA_QUALITY_FAILED,
+    EVENT_CANDLE_DATA_QUALITY_WARNING,
+    EVENT_EXTERNAL_API_FAILED,
+    log_event,
+)
 from backend.security import redact_text
 
 # Module-level logger. Streamlit captures stderr, so logger output appears in the
@@ -166,6 +172,7 @@ class BatchLoadResult:
 
     frames: dict[str, pd.DataFrame] = field(default_factory=dict)
     failures: list[dict[str, object]] = field(default_factory=list)
+    data_quality_reports: list[CandleQualityReport] = field(default_factory=list)
     cache_hits: int = 0
     cache_misses: int = 0
     api_attempts: int = 0
@@ -247,6 +254,7 @@ class DailyDataLoader:
         self.last_cache_misses = 0
         self.last_api_attempts = 0
         self.last_rate_limit_retries = 0
+        self.last_data_quality_reports: list[CandleQualityReport] = []
         self._api_attempts = 0
         self._rate_limit_retries = 0
 
@@ -645,6 +653,7 @@ class DailyDataLoader:
         self._rate_limit_retries = 0
         self.last_api_attempts = 0
         self.last_rate_limit_retries = 0
+        self.last_data_quality_reports = []
 
         result = BatchLoadResult()
         rows = self._work_rows(universe_df, max_symbols)
@@ -706,6 +715,71 @@ class DailyDataLoader:
         result.failures.append(failure)
         return HistoryLoadItem(symbol=symbol, failure=failure)
 
+    def _quality_checked_item(
+        self,
+        result: BatchLoadResult,
+        row: dict,
+        item: HistoryLoadItem,
+        expected_latest_date: date | datetime | str,
+    ) -> HistoryLoadItem:
+        """Validate successful candle frames before scanners can consume them."""
+        if item.failure is not None:
+            return item
+
+        expected_date = _coerce_date(expected_latest_date)
+        report = validate_candles(
+            item.candles,
+            symbol=item.symbol,
+            expected_latest_date=expected_date,
+        )
+        result.data_quality_reports.append(report)
+        if not report.findings:
+            return item
+
+        finding_codes = [finding.code for finding in report.findings]
+        warning_count = sum(
+            1 for finding in report.findings if finding.severity == "warning"
+        )
+        fatal_count = sum(
+            1 for finding in report.findings if finding.severity == "fatal"
+        )
+        event_fields = {
+            "symbol": item.symbol,
+            "security_id": row.get("security_id", ""),
+            "finding_codes": finding_codes,
+            "warning_findings": warning_count,
+            "fatal_findings": fatal_count,
+            "latest_date": report.latest_date.isoformat() if report.latest_date else None,
+            "row_count": report.row_count,
+        }
+        if report.has_fatal_findings:
+            log_event(
+                logger,
+                EVENT_CANDLE_DATA_QUALITY_FAILED,
+                level=logging.WARNING,
+                **event_fields,
+            )
+            failure = {
+                "symbol": item.symbol,
+                "security_id": row.get("security_id", ""),
+                "phase": "data_quality",
+                "message": (
+                    "Candle data failed quality checks "
+                    f"({', '.join(finding_codes)})."
+                ),
+                "quality_codes": finding_codes,
+            }
+            result.failures.append(failure)
+            return HistoryLoadItem(symbol=item.symbol, failure=failure)
+
+        log_event(
+            logger,
+            EVENT_CANDLE_DATA_QUALITY_WARNING,
+            level=logging.WARNING,
+            **event_fields,
+        )
+        return item
+
     @staticmethod
     def _notify_progress(
         progress_callback: ProgressCallback | None, index: int, total: int, symbol: str
@@ -756,6 +830,7 @@ class DailyDataLoader:
                     item = self._failure_item(result, row, symbol, exc)
 
             self._notify_progress(progress_callback, index, total, symbol)
+            item = self._quality_checked_item(result, row, item, end_date)
             yield item
 
     def _iter_history_parallel(
@@ -840,6 +915,7 @@ class DailyDataLoader:
                 if not breaker_tripped:
                     submit_next()
                 self._notify_progress(progress_callback, index, total, symbol)
+                item = self._quality_checked_item(result, row, item, end_date)
                 yield item
 
             if breaker_tripped:
@@ -943,12 +1019,14 @@ class DailyDataLoader:
 
         result.api_attempts = self._api_attempts
         result.rate_limit_retries = self._rate_limit_retries
+        result.data_quality_reports = list(self.last_data_quality_reports)
         self._remember(result)
         return result
 
     def _remember(self, result: BatchLoadResult) -> None:
         """Expose the latest batch summary to the Streamlit UI."""
         self.last_failures = result.failures
+        self.last_data_quality_reports = result.data_quality_reports
         self.last_cache_hits = result.cache_hits
         self.last_cache_misses = result.cache_misses
         self.last_api_attempts = result.api_attempts

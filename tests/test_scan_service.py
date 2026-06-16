@@ -17,6 +17,7 @@ import pandas as pd
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
+from backend.data_quality.candles import CandleQualityReport, DataQualityFinding
 from backend.observability import (
     EVENT_SCAN_COMPLETED,
     EVENT_SCAN_FAILED,
@@ -40,8 +41,9 @@ from backend.storage.repository import (
 class _FakeLoader:
     """Minimal data loader exposing only the ``last_failures`` the service reads."""
 
-    def __init__(self, last_failures=None):
+    def __init__(self, last_failures=None, last_data_quality_reports=None):
         self.last_failures = list(last_failures or [])
+        self.last_data_quality_reports = list(last_data_quality_reports or [])
 
 
 def _base_params() -> dict:
@@ -65,6 +67,22 @@ def _two_buy_rows() -> pd.DataFrame:
              "close": 3890.0, "reason": "breakout",
              "provenance": provenance("breakout", 1.2)},
         ]
+    )
+
+
+def _quality_report(symbol: str, severity: str, code: str) -> CandleQualityReport:
+    return CandleQualityReport(
+        symbol=symbol,
+        row_count=2,
+        latest_date=date(2026, 6, 1),
+        findings=(
+            DataQualityFinding(
+                code=code,
+                severity=severity,
+                message=f"{symbol} quality finding token=quality-secret",
+                affected_rows=1,
+            ),
+        ),
     )
 
 
@@ -256,6 +274,129 @@ def test_run_scan_marks_partial_on_loader_failure(db_engine, session_factory):
     assert result.run_id is not None
     with Session(db_engine) as session:
         assert get_latest_scan_runs(session)[0].status is ScanStatus.PARTIAL
+
+
+def test_run_scan_persists_warning_only_data_quality_without_changing_success(
+    db_engine, session_factory, caplog
+):
+    """Warning-only quality reports are audit metadata, not partial failures."""
+
+    def screener_run(_universe_df, _data_loader, _params):
+        return _two_buy_rows()
+
+    loader = _FakeLoader(
+        last_data_quality_reports=[
+            _quality_report("RELIANCE", "warning", "STALE_LATEST_CANDLE")
+        ]
+    )
+    with caplog.at_level(logging.INFO):
+        result = run_scan(
+            screener_key="envelope",
+            universe_key="hemant_super_45",
+            run_callable=screener_run,
+            universe_df=pd.DataFrame({"symbol": ["RELIANCE", "TCS"]}),
+            data_loader=loader,
+            params=_base_params(),
+            session_factory=session_factory,
+        )
+
+    assert result.status is ScanStatus.SUCCESS
+    assert result.error_message is None
+    completed = _event_fields(caplog, EVENT_SCAN_COMPLETED)
+    assert completed[0]["data_quality_warning_findings"] == 1
+    assert completed[0]["data_quality_fatal_findings"] == 0
+    with Session(db_engine) as session:
+        run = get_latest_scan_runs(session)[0]
+        assert run.data_quality_json["checked_symbols"] == 1
+        assert run.data_quality_json["usable_symbols"] == 1
+        assert run.data_quality_json["warning_symbols"] == 1
+        assert run.data_quality_json["fatal_symbols"] == 0
+        assert "quality-secret" not in str(run.data_quality_json)
+
+
+def test_run_scan_marks_partial_for_fatal_quality_when_other_symbols_are_usable(
+    db_engine, session_factory, caplog
+):
+    """Fatal quality findings block a symbol while preserving usable results."""
+
+    def screener_run(_universe_df, _data_loader, _params):
+        return _two_buy_rows()
+
+    loader = _FakeLoader(
+        last_failures=[
+            {
+                "symbol": "WIPRO",
+                "message": "Candle data failed quality checks.",
+                "phase": "data_quality",
+            }
+        ],
+        last_data_quality_reports=[
+            _quality_report("WIPRO", "fatal", "HIGH_BELOW_LOW"),
+            _quality_report("RELIANCE", "warning", "STALE_LATEST_CANDLE"),
+        ],
+    )
+
+    with caplog.at_level(logging.INFO):
+        result = run_scan(
+            screener_key="envelope",
+            universe_key="hemant_super_45",
+            run_callable=screener_run,
+            universe_df=pd.DataFrame({"symbol": ["RELIANCE", "TCS", "WIPRO"]}),
+            data_loader=loader,
+            params=_base_params(),
+            session_factory=session_factory,
+        )
+
+    assert result.status is ScanStatus.PARTIAL
+    assert "1 symbol(s) had fatal candle data quality findings." in (
+        result.error_message or ""
+    )
+    partial = _event_fields(caplog, EVENT_SCAN_PARTIAL)
+    assert partial[0]["data_quality_checked_symbols"] == 2
+    assert partial[0]["data_quality_fatal_findings"] == 1
+    with Session(db_engine) as session:
+        run = get_latest_scan_runs(session)[0]
+        assert run.data_quality_json["fatal_symbols"] == 1
+        assert run.data_quality_json["warning_symbols"] == 1
+
+
+def test_run_scan_marks_failed_when_fatal_quality_leaves_no_usable_symbols(
+    db_engine, session_factory
+):
+    """All-fatal quality input should be a failed run, not an empty partial."""
+
+    def screener_run(_universe_df, _data_loader, _params):
+        return pd.DataFrame()
+
+    result = run_scan(
+        screener_key="envelope",
+        universe_key="hemant_super_45",
+        run_callable=screener_run,
+        universe_df=pd.DataFrame({"symbol": ["WIPRO"]}),
+        data_loader=_FakeLoader(
+            last_failures=[
+                {
+                    "symbol": "WIPRO",
+                    "message": "Candle data failed quality checks.",
+                    "phase": "data_quality",
+                }
+            ],
+            last_data_quality_reports=[
+                _quality_report("WIPRO", "fatal", "HIGH_BELOW_LOW")
+            ],
+        ),
+        params=_base_params(),
+        session_factory=session_factory,
+    )
+
+    assert result.status is ScanStatus.FAILED
+    assert "1 symbol(s) had fatal candle data quality findings." in (
+        result.error_message or ""
+    )
+    with Session(db_engine) as session:
+        run = get_latest_scan_runs(session)[0]
+        assert run.status is ScanStatus.FAILED
+        assert run.data_quality_json["usable_symbols"] == 0
 
 
 def test_run_scan_marks_partial_on_compute_failure(session_factory):

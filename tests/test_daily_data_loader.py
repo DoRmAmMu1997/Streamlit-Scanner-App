@@ -19,7 +19,11 @@ from backend.daily_data_loader import (
     history_start_date,
 )
 from backend.dhan_client import DhanRateLimitError
-from backend.observability import EVENT_EXTERNAL_API_FAILED
+from backend.observability import (
+    EVENT_CANDLE_DATA_QUALITY_FAILED,
+    EVENT_CANDLE_DATA_QUALITY_WARNING,
+    EVENT_EXTERNAL_API_FAILED,
+)
 
 
 def test_history_start_date_subtracts_years_and_handles_leap_day():
@@ -113,6 +117,16 @@ class SequenceDhanClient:
         if outcome == "rate_limit":
             raise DhanRateLimitError("DH-904 Rate_Limit")
         return candle_frame()
+
+
+class SingleFrameClient:
+    """Fake Dhan client that returns the same prepared frame for each request."""
+
+    def __init__(self, frame: pd.DataFrame):
+        self.frame = frame
+
+    def fetch_daily_candles(self, security_id, exchange_segment, instrument_type, from_date, to_date):
+        return self.frame.copy(deep=True)
 
 
 def test_daily_data_loader_uses_cache_on_second_fetch(tmp_path):
@@ -344,6 +358,70 @@ def test_load_universe_history_emits_external_api_failed_event(tmp_path, caplog)
     ]
     assert len(events) == 1
     assert events[0]["symbol"] == "RELIANCE"
+
+
+def test_iter_universe_history_blocks_fatal_candle_quality_before_scan(tmp_path, caplog):
+    """Fatal candle defects should become loader failures before scanner code runs."""
+    frame = candle_frame()
+    frame.loc[0, "high"] = frame.loc[0, "low"] - 1.0
+    loader = DailyDataLoader(SingleFrameClient(frame), cache_dir=tmp_path, request_delay_seconds=0.0)
+
+    with caplog.at_level(logging.WARNING):
+        items = list(
+            loader.iter_universe_history(
+                mapped_universe(),
+                date(2026, 5, 10),
+                date(2026, 5, 11),
+            )
+        )
+
+    assert len(items) == 1
+    assert items[0].failure is not None
+    assert items[0].failure["phase"] == "data_quality"
+    assert items[0].failure["quality_codes"] == ["HIGH_BELOW_LOW"]
+    assert "95.0" not in str(items[0].failure)
+    assert loader.last_failures == [items[0].failure]
+    assert len(loader.last_data_quality_reports) == 1
+    assert loader.last_data_quality_reports[0].findings[0].code == "HIGH_BELOW_LOW"
+    events = [
+        getattr(record, "structured_fields", {})
+        for record in caplog.records
+        if getattr(record, "event", None) == EVENT_CANDLE_DATA_QUALITY_FAILED
+    ]
+    assert len(events) == 1
+    assert events[0]["symbol"] == "RELIANCE"
+    assert events[0]["finding_codes"] == ["HIGH_BELOW_LOW"]
+
+
+def test_warning_only_candle_quality_passes_through_and_logs(tmp_path, caplog):
+    """Stale-but-usable data should be recorded without blocking the frame."""
+    loader = DailyDataLoader(
+        SingleFrameClient(candle_frame()),
+        cache_dir=tmp_path,
+        request_delay_seconds=0.0,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = loader.load_universe_history(
+            mapped_universe(),
+            date(2026, 5, 10),
+            date(2026, 5, 13),
+        )
+
+    assert list(result.frames) == ["RELIANCE"]
+    assert result.failures == []
+    assert len(loader.last_data_quality_reports) == 1
+    report = loader.last_data_quality_reports[0]
+    assert [finding.code for finding in report.findings] == ["STALE_LATEST_CANDLE"]
+    assert report.is_usable
+    events = [
+        getattr(record, "structured_fields", {})
+        for record in caplog.records
+        if getattr(record, "event", None) == EVENT_CANDLE_DATA_QUALITY_WARNING
+    ]
+    assert len(events) == 1
+    assert events[0]["symbol"] == "RELIANCE"
+    assert events[0]["finding_codes"] == ["STALE_LATEST_CANDLE"]
 
 
 def test_circuit_breaker_skips_remaining_symbols_after_failure_limit(tmp_path):

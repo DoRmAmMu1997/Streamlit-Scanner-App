@@ -519,6 +519,8 @@ def _run_one_screener(
         # SCAN-003 stores/returns secret-safe failed-screener messages that use
         # the exception type, not the raw exception text.
         message = result.error_message or "Screener failed."
+    elif result.status is ScanStatus.PARTIAL:
+        message = result.error_message or "Scan completed with partial symbol failures."
     else:
         message = "OK."
 

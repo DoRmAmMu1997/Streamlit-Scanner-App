@@ -256,6 +256,7 @@ def test_partial_scan_is_recorded_and_still_exits_zero(file_session_factory):
     assert summary.exit_code == 0
     assert summary.outcomes[0].status is ScanStatus.PARTIAL
     assert summary.outcomes[0].fatal is False
+    assert "failed to load" in summary.outcomes[0].message
 
 
 def test_failed_screener_is_recorded_and_exits_nonzero(file_session_factory, capsys):

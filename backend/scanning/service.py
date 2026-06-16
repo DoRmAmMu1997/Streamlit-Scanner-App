@@ -39,6 +39,7 @@ from typing import Any, cast
 import pandas as pd
 from sqlalchemy.orm import Session
 
+from backend.data_quality import CandleQualityReport
 from backend.observability import (
     EVENT_SCAN_COMPLETED,
     EVENT_SCAN_FAILED,
@@ -49,6 +50,7 @@ from backend.observability import (
     log_event,
 )
 from backend.scanning.result_contract import ResultContractError, normalize_screener_row
+from backend.security import redact_text
 from backend.storage.database import session_scope
 from backend.storage.models import ScanRun, ScanStatus
 from backend.storage.repository import (
@@ -94,6 +96,7 @@ class ScanRunResult:
     # strict validation within the configured attempt budget (a subset of
     # ``compute_failures`` tagged ``phase="ai_validation"``).
     ai_validation_failures: int = 0
+    data_quality_json: dict[str, Any] | None = None
     error_message: str | None = None
 
 
@@ -185,6 +188,7 @@ def run_scan(
     # Track per-symbol load failures across the try/except so the observability
     # events below can report them whether or not the screener itself raised.
     loader_failures: list[dict[str, Any]] = []
+    data_quality_json: dict[str, Any] | None = None
     try:
         results = run_callable(universe_df, data_loader, run_params)
     except Exception as exc:
@@ -213,6 +217,27 @@ def run_scan(
             )
         else:
             status = ScanStatus.SUCCESS
+
+    data_quality_json = _data_quality_receipt(
+        data_loader,
+        expected_latest_date=_as_date(params.get("end_date")),
+    )
+    data_quality_fatal_symbols = (
+        int(data_quality_json["fatal_symbols"]) if data_quality_json else 0
+    )
+    if data_quality_fatal_symbols:
+        if status is ScanStatus.SUCCESS:
+            status = ScanStatus.PARTIAL
+        if (
+            data_quality_json is not None
+            and int(data_quality_json["usable_symbols"]) == 0
+            and (results is None or results.empty)
+        ):
+            status = ScanStatus.FAILED
+        error_message = _combine_error_messages(
+            error_message,
+            f"{data_quality_fatal_symbols} symbol(s) had fatal candle data quality findings.",
+        )
 
     emitted_rejected_rows = sum(
         1
@@ -280,6 +305,7 @@ def run_scan(
         ai_evaluations=ai_evaluations,
         status=status,
         error_message=error_message,
+        data_quality_json=data_quality_json,
         session_factory=session_factory,
     )
     if persistence_exc_info is not None:
@@ -318,6 +344,15 @@ def run_scan(
         "loader_failures": len(loader_failures),
         "compute_failures": len(compute_failures),
         "ai_validation_failures": ai_validation_failures,
+        "data_quality_checked_symbols": (
+            data_quality_json["checked_symbols"] if data_quality_json else 0
+        ),
+        "data_quality_warning_findings": (
+            data_quality_json["warning_findings"] if data_quality_json else 0
+        ),
+        "data_quality_fatal_findings": (
+            data_quality_json["fatal_findings"] if data_quality_json else 0
+        ),
         "duration_seconds": round(time.monotonic() - started_at, 3),
     }
     if screener_exc_info is not None:
@@ -352,8 +387,73 @@ def run_scan(
         compute_failures=compute_failures,
         rejected_result_rows=rejected_result_rows,
         ai_validation_failures=ai_validation_failures,
+        data_quality_json=data_quality_json,
         error_message=error_message,
     )
+
+
+def _data_quality_receipt(
+    data_loader: Any,
+    *,
+    expected_latest_date: dt.date | None,
+) -> dict[str, Any] | None:
+    """Build the versioned DATA-001 receipt from loader-local reports."""
+    reports = list(
+        cast(
+            list[CandleQualityReport],
+            getattr(data_loader, "last_data_quality_reports", None) or [],
+        )
+    )
+    if not reports:
+        return None
+
+    findings: list[dict[str, Any]] = []
+    warning_symbols = 0
+    fatal_symbols = 0
+    warning_findings = 0
+    fatal_findings = 0
+    for report in reports:
+        has_warning = any(
+            finding.severity == "warning" for finding in report.findings
+        )
+        has_fatal = report.has_fatal_findings
+        if has_warning:
+            warning_symbols += 1
+        if has_fatal:
+            fatal_symbols += 1
+        for finding in report.findings:
+            if finding.severity == "fatal":
+                fatal_findings += 1
+            else:
+                warning_findings += 1
+            findings.append(
+                {
+                    "symbol": report.symbol,
+                    "severity": finding.severity,
+                    "code": finding.code,
+                    "message": redact_text(finding.message),
+                    "affected_rows": finding.affected_rows,
+                    "latest_date": (
+                        report.latest_date.isoformat()
+                        if report.latest_date is not None
+                        else None
+                    ),
+                }
+            )
+
+    return {
+        "schema_version": 1,
+        "expected_latest_date": (
+            expected_latest_date.isoformat() if expected_latest_date else None
+        ),
+        "checked_symbols": len(reports),
+        "usable_symbols": sum(1 for report in reports if report.is_usable),
+        "warning_symbols": warning_symbols,
+        "fatal_symbols": fatal_symbols,
+        "warning_findings": warning_findings,
+        "fatal_findings": fatal_findings,
+        "findings": findings,
+    }
 
 
 def _current_exc_info() -> ExceptionInfo:
@@ -410,6 +510,7 @@ def _persist_run_outcome(
     ai_evaluations: list[Any],
     status: ScanStatus,
     error_message: str | None,
+    data_quality_json: dict[str, Any] | None,
     session_factory: SessionFactory,
 ) -> ExceptionInfo | None:
     """Save result rows and stamp the final status for an existing run header.
@@ -447,7 +548,13 @@ def _persist_run_outcome(
                 normalized_rows,
             )
             save_ai_evaluations(session, run, ai_evaluations)
-            finish_scan_run(session, run, status=status, error_message=error_message)
+            finish_scan_run(
+                session,
+                run,
+                status=status,
+                error_message=error_message,
+                data_quality_json=data_quality_json,
+            )
     except Exception as exc:
         persistence_exc_info = _current_exc_info()
         _mark_run_failed_after_persistence_error(run_id, exc, session_factory)

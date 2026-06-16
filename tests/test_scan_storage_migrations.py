@@ -50,6 +50,9 @@ def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Pa
         "ix_scan_runs_status",
         "ix_scan_runs_universe_key",
     }
+    assert "data_quality_json" in {
+        column["name"] for column in inspector.get_columns("scan_runs")
+    }
     assert {index["name"] for index in inspector.get_indexes("scan_results")} >= {
         "ix_scan_results_run_id",
         "ix_scan_results_symbol",

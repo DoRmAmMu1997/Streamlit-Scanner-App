@@ -19,6 +19,7 @@ from __future__ import annotations
 import datetime as dt
 import importlib.util
 import shutil
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ from typing import Any
 import pyarrow.parquet as pq
 
 from backend.config.settings import AppSettings, get_settings
+from backend.security import redact_text
 from backend.storage import ScanStatus, get_latest_scan_runs, session_scope
 
 
@@ -64,11 +66,40 @@ class ScanRunHealth:
 
 
 @dataclass(frozen=True)
+class DataQualityFindingHealth:
+    """One persisted candle-quality finding copied for the health page."""
+
+    symbol: str
+    severity: str
+    code: str
+    message: str
+    affected_rows: int
+    latest_date: dt.date | None
+
+
+@dataclass(frozen=True)
+class DataQualityRunHealth:
+    """Detached summary of the newest scan carrying a DATA-001 receipt."""
+
+    run_id: int
+    started_at: dt.datetime
+    finished_at: dt.datetime | None
+    screener_key: str
+    universe_key: str
+    checked_symbols: int
+    usable_symbols: int
+    warning_symbols: int
+    fatal_symbols: int
+    findings: tuple[DataQualityFindingHealth, ...]
+
+
+@dataclass(frozen=True)
 class AdminHealthSnapshot:
     """One immutable, cacheable view of local application readiness."""
 
     last_successful_scan: ScanRunHealth | None
     last_failed_scan: ScanRunHealth | None
+    latest_data_quality_run: DataQualityRunHealth | None
     last_data_refresh: dt.datetime | None
     cached_symbol_count: int
     latest_candle_date: dt.date | None
@@ -117,6 +148,7 @@ def collect_admin_health(settings: AppSettings | None = None) -> AdminHealthSnap
 
     successful_scan: ScanRunHealth | None = None
     failed_scan: ScanRunHealth | None = None
+    latest_quality_run: DataQualityRunHealth | None = None
     try:
         with session_scope() as session:
             successful_runs = get_latest_scan_runs(
@@ -133,6 +165,10 @@ def collect_admin_health(settings: AppSettings | None = None) -> AdminHealthSnap
                 successful_scan = _copy_scan_run(successful_runs[0])
             if failed_runs:
                 failed_scan = _copy_scan_run(failed_runs[0])
+            for run in get_latest_scan_runs(session, limit=50):
+                latest_quality_run = _copy_data_quality_run(run)
+                if latest_quality_run is not None:
+                    break
         database_health = ServiceHealth(
             "Database",
             "ready",
@@ -148,6 +184,7 @@ def collect_admin_health(settings: AppSettings | None = None) -> AdminHealthSnap
     return AdminHealthSnapshot(
         last_successful_scan=successful_scan,
         last_failed_scan=failed_scan,
+        latest_data_quality_run=latest_quality_run,
         last_data_refresh=last_data_refresh,
         cached_symbol_count=cache.cached_symbol_count,
         latest_candle_date=cache.latest_candle_date,
@@ -175,6 +212,43 @@ def _copy_scan_run(run: Any) -> ScanRunHealth:
         symbols_scanned=run.symbols_scanned,
         triggered_by=run.triggered_by,
         error_message=run.error_message,
+    )
+
+
+def _copy_data_quality_run(run: Any) -> DataQualityRunHealth | None:
+    """Copy a persisted DATA-001 receipt, returning None for runs without one."""
+    receipt = getattr(run, "data_quality_json", None)
+    if not isinstance(receipt, Mapping):
+        return None
+
+    findings: list[DataQualityFindingHealth] = []
+    raw_findings = receipt.get("findings", [])
+    if isinstance(raw_findings, list):
+        for raw_finding in raw_findings:
+            if not isinstance(raw_finding, Mapping):
+                continue
+            findings.append(
+                DataQualityFindingHealth(
+                    symbol=str(raw_finding.get("symbol") or "UNKNOWN"),
+                    severity=str(raw_finding.get("severity") or "warning"),
+                    code=str(raw_finding.get("code") or "UNKNOWN"),
+                    message=redact_text(str(raw_finding.get("message") or "")),
+                    affected_rows=_as_int(raw_finding.get("affected_rows")),
+                    latest_date=_as_optional_date(raw_finding.get("latest_date")),
+                )
+            )
+
+    return DataQualityRunHealth(
+        run_id=int(run.id),
+        started_at=run.started_at,
+        finished_at=run.finished_at,
+        screener_key=str(run.screener_key),
+        universe_key=str(run.universe_key),
+        checked_symbols=_as_int(receipt.get("checked_symbols")),
+        usable_symbols=_as_int(receipt.get("usable_symbols")),
+        warning_symbols=_as_int(receipt.get("warning_symbols")),
+        fatal_symbols=_as_int(receipt.get("fatal_symbols")),
+        findings=tuple(findings),
     )
 
 
@@ -268,6 +342,24 @@ def _as_date(value: Any) -> dt.date | None:
     if hasattr(value, "to_pydatetime"):
         return value.to_pydatetime().date()
     return dt.datetime.fromisoformat(str(value)).date()
+
+
+def _as_optional_date(value: Any) -> dt.date | None:
+    """Parse optional persisted ISO dates without failing the health page."""
+    if value in (None, ""):
+        return None
+    try:
+        return _as_date(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_int(value: Any) -> int:
+    """Parse optional persisted counters defensively for display."""
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _latest_file_mtime(paths) -> dt.datetime | None:
