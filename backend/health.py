@@ -167,6 +167,10 @@ def collect_admin_health(settings: AppSettings | None = None) -> AdminHealthSnap
                 successful_scan = _copy_scan_run(successful_runs[0])
             if failed_runs:
                 failed_scan = _copy_scan_run(failed_runs[0])
+            # Show the newest run that actually carries a DATA-001 receipt. We scan
+            # the 50 most-recent runs (across all statuses) and take the first hit;
+            # most runs have a receipt, so this stops almost immediately. Bounded
+            # at 50 so a long quiet stretch can't make this walk the whole history.
             for run in get_latest_scan_runs(session, limit=50):
                 latest_quality_run = _copy_data_quality_run(run)
                 if latest_quality_run is not None:
@@ -218,7 +222,15 @@ def _copy_scan_run(run: Any) -> ScanRunHealth:
 
 
 def _copy_data_quality_run(run: Any) -> DataQualityRunHealth | None:
-    """Copy a persisted DATA-001 receipt, returning None for runs without one."""
+    """Copy a persisted DATA-001 receipt into a detached, render-ready value.
+
+    Everything here is read *defensively*: the receipt is JSON that was written by
+    a past app version, so we never assume a key exists or has the right type
+    (``isinstance`` guards, ``.get(...) or default``, the ``_as_*`` coercers).
+    A run with no receipt — or a malformed one — yields ``None`` so the health
+    page simply skips it instead of erroring. The copy also detaches us from the
+    ORM object, which becomes invalid once its session closes.
+    """
     receipt = getattr(run, "data_quality_json", None)
     if not isinstance(receipt, Mapping):
         return None
@@ -227,6 +239,7 @@ def _copy_data_quality_run(run: Any) -> DataQualityRunHealth | None:
     raw_findings = receipt.get("findings", [])
     if isinstance(raw_findings, list):
         for raw_finding in raw_findings:
+            # Skip anything that isn't a dict-like row rather than trusting the shape.
             if not isinstance(raw_finding, Mapping):
                 continue
             findings.append(
@@ -350,7 +363,11 @@ def _as_date(value: Any) -> dt.date | None:
 
 
 def _as_optional_date(value: Any) -> dt.date | None:
-    """Parse optional persisted ISO dates without failing the health page."""
+    """Parse an optional persisted ISO date, returning ``None`` on anything odd.
+
+    Like the other ``_as_*`` coercers, this never raises: a health page must
+    render even if one stored field is missing or malformed.
+    """
     if value in (None, ""):
         return None
     try:
@@ -360,7 +377,11 @@ def _as_optional_date(value: Any) -> dt.date | None:
 
 
 def _as_int(value: Any) -> int:
-    """Parse optional persisted counters defensively for display."""
+    """Coerce a persisted counter to a non-negative int for display.
+
+    Returns 0 for missing/garbage values, and ``max(0, ...)`` clamps any negative
+    leftover so a count never renders as a confusing negative number.
+    """
     try:
         return max(0, int(value))
     except (TypeError, ValueError):

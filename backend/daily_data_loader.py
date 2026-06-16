@@ -172,6 +172,8 @@ class BatchLoadResult:
 
     frames: dict[str, pd.DataFrame] = field(default_factory=dict)
     failures: list[dict[str, object]] = field(default_factory=list)
+    # DATA-001B: one CandleQualityReport per symbol that was loaded and checked.
+    # The scan service folds these into the per-run quality receipt.
     data_quality_reports: list[CandleQualityReport] = field(default_factory=list)
     cache_hits: int = 0
     cache_misses: int = 0
@@ -722,7 +724,21 @@ class DailyDataLoader:
         item: HistoryLoadItem,
         expected_latest_date: date | datetime | str,
     ) -> HistoryLoadItem:
-        """Validate successful candle frames before scanners can consume them."""
+        """Run DATA-001 candle-quality validation on one freshly-loaded frame.
+
+        This is the single choke point (DATA-001B) where bad candle data is
+        caught before any screener sees it. The contract:
+
+        - A frame with a **fatal** finding is *quarantined*: we turn the
+          successful item into a ``phase="data_quality"`` failure, so the symbol
+          is dropped from the scan exactly like a fetch error would be.
+        - A **warning-only** frame passes through unchanged (the screener still
+          scans it); we just record and log the warning.
+        - Either way the full ``CandleQualityReport`` is stashed on ``result`` so
+          the scan service can build its per-run receipt afterwards.
+        """
+        # An item that already failed to load (fetch error, circuit breaker) has
+        # no candles to check — leave it as-is.
         if item.failure is not None:
             return item
 
@@ -732,10 +748,14 @@ class DailyDataLoader:
             symbol=item.symbol,
             expected_latest_date=expected_date,
         )
+        # Record every report (even clean ones) so the receipt can count how many
+        # symbols were checked, not just how many had problems.
         result.data_quality_reports.append(report)
         if not report.findings:
             return item
 
+        # Build the structured log fields once; both the fatal and warning paths
+        # below reuse them. Only codes/counts are logged — never raw prices.
         finding_codes = [finding.code for finding in report.findings]
         warning_count = sum(
             1 for finding in report.findings if finding.severity == "warning"
@@ -753,6 +773,9 @@ class DailyDataLoader:
             "row_count": report.row_count,
         }
         if report.has_fatal_findings:
+            # Quarantine path: log it, record a loader failure (the codes go in the
+            # message, never the prices), and return a *failure* item so the
+            # streaming/batch consumers skip this symbol entirely.
             log_event(
                 logger,
                 EVENT_CANDLE_DATA_QUALITY_FAILED,
@@ -771,6 +794,8 @@ class DailyDataLoader:
             }
             result.failures.append(failure)
             return HistoryLoadItem(symbol=item.symbol, failure=failure)
+
+        # Warning-only path: record/log it but hand the original (usable) item back.
 
         log_event(
             logger,
@@ -1019,6 +1044,11 @@ class DailyDataLoader:
 
         result.api_attempts = self._api_attempts
         result.rate_limit_retries = self._rate_limit_retries
+        # The quality reports were accumulated on the *streaming* iterator's own
+        # result; draining the loop above also ran ``iter_universe_history``'s
+        # post-yield ``_remember``, which copied them onto ``last_data_quality_reports``.
+        # Copy them back onto this batch result so callers of either entry point
+        # (streaming or batch) see the same reports.
         result.data_quality_reports = list(self.last_data_quality_reports)
         self._remember(result)
         return result

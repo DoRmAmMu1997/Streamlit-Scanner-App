@@ -1,4 +1,30 @@
-"""Structured quality checks for daily OHLCV candle frames."""
+"""Structured quality checks for daily OHLCV candle frames (DATA-001A).
+
+Beginner note:
+A "candle" is one day's price bar — open, high, low, close, and traded volume
+(OHLCV) — and every screener in this app reads a pandas DataFrame of these bars.
+If that data is malformed (a high below the low, a NaN price, duplicate dates) or
+stale (the newest bar is weeks old), a strategy can fire a confident-looking but
+completely false signal. This module is the gatekeeper that catches such data
+*before* any strategy math runs.
+
+How it works:
+- ``validate_candles`` inspects one symbol's frame and returns an immutable
+  ``CandleQualityReport`` — a list of ``DataQualityFinding`` objects, each with a
+  stable ``code`` (e.g. ``HIGH_BELOW_LOW``) and a ``severity``.
+- Severity has exactly two levels:
+    * **fatal**  — the data is structurally unusable (high < low, NaN, duplicate
+      dates, ...). The caller must NOT scan this frame.
+    * **warning** — the data is usable but suspicious (stale, big calendar gaps,
+      huge overnight price jumps). The caller records it but still scans.
+- The function is *pure*: it never mutates the caller's DataFrame, never does I/O,
+  and never raises for bad data (it reports it). That makes it trivial to unit
+  test and safe to call from anywhere a candle frame enters the system.
+
+Returning structured findings (instead of printing or raising) lets the loader
+decide what to do per severity — see ``backend/daily_data_loader.py`` and
+``docs/architecture/components/data-quality.md``.
+"""
 
 from __future__ import annotations
 
@@ -11,11 +37,18 @@ from typing import Any, Literal, cast
 
 import pandas as pd
 
+# The two severities a finding can carry. Using a ``Literal`` (not a free string)
+# means a typo like "fatale" is a type error, not a silently-ignored severity.
 DataQualitySeverity = Literal["warning", "fatal"]
 
+# Columns every candle frame must contain. ``validate_candles`` lets a caller
+# override this, but the Dhan loader always produces exactly these five.
 DEFAULT_REQUIRED_COLUMNS: tuple[str, ...] = ("open", "high", "low", "close", "volume")
-MAX_CALENDAR_GAP_DAYS = 7
-SUSPICIOUS_OVERNIGHT_GAP_PCT = 50.0
+# Tuning knobs for the two "suspicious but usable" (warning) checks. They are
+# module constants so the thresholds live in one obvious place and tests can
+# reference them instead of hard-coding magic numbers.
+MAX_CALENDAR_GAP_DAYS = 7  # a gap larger than this between two bars is flagged
+SUSPICIOUS_OVERNIGHT_GAP_PCT = 50.0  # an open this far from the prior close is flagged
 # How many calendar days the latest candle may trail ``expected_latest_date``
 # before it counts as stale. Callers commonly pass today's date as "expected",
 # but the newest *trading* candle is routinely a few days old on weekends,
@@ -25,9 +58,19 @@ SUSPICIOUS_OVERNIGHT_GAP_PCT = 50.0
 STALE_LATEST_TOLERANCE_DAYS = 4
 
 
+# ``frozen=True`` makes these dataclasses immutable: once built, a report cannot
+# be edited. That is deliberate — a quality verdict is evidence, and evidence
+# that downstream code could quietly mutate would be worthless for an audit.
 @dataclass(frozen=True)
 class DataQualityFinding:
-    """One structured candle-quality issue found for a symbol."""
+    """One structured candle-quality issue found for a symbol.
+
+    - ``code``: a stable machine-readable label (e.g. ``NEGATIVE_VOLUME``) that
+      logs, the receipt, and tests can match on without parsing prose.
+    - ``severity``: ``"fatal"`` (don't scan) or ``"warning"`` (scan, but record).
+    - ``message``: a short human-readable explanation for the health page/logs.
+    - ``affected_rows``: how many rows tripped the check (0 when not row-specific).
+    """
 
     code: str
     severity: DataQualitySeverity
@@ -37,7 +80,12 @@ class DataQualityFinding:
 
 @dataclass(frozen=True)
 class CandleQualityReport:
-    """Quality result for one symbol's candle DataFrame."""
+    """The full quality verdict for one symbol's candle DataFrame.
+
+    ``findings`` is empty when the frame is clean. ``latest_date`` is the newest
+    parsed bar date (or ``None`` when there were no usable dates), handy for the
+    stale check and for display.
+    """
 
     symbol: str
     row_count: int
@@ -46,12 +94,15 @@ class CandleQualityReport:
 
     @property
     def has_fatal_findings(self) -> bool:
-        """Return True when any finding means the frame must not be scanned."""
+        """True when at least one finding is fatal — i.e. the frame must not be scanned."""
         return any(finding.severity == "fatal" for finding in self.findings)
 
     @property
     def is_usable(self) -> bool:
-        """Return True when downstream scanner code may consume the frame."""
+        """True when downstream scanner code may consume the frame (no fatal findings).
+
+        Warning-only frames are still usable; only fatal findings block scanning.
+        """
         return not self.has_fatal_findings
 
 
@@ -65,14 +116,33 @@ def validate_candles(
 ) -> CandleQualityReport:
     """Validate a daily OHLCV frame without mutating caller-owned data.
 
-    ``stale_tolerance_days`` is how far the latest candle may trail
-    ``expected_latest_date`` before a (warning-only) ``STALE_LATEST_CANDLE``
-    finding is raised. The default tolerates a normal long weekend so a run on a
-    non-trading day (or before the vendor publishes the current EOD bar) does not
-    flag every symbol as stale; pass ``0`` for an exact-date comparison.
+    Checks run from most-structural to least, and we *fail fast* on the
+    structural ones: if the frame is empty, missing columns, or has unparseable
+    dates, there is nothing meaningful to compare, so we return early with just
+    those fatal findings rather than emitting confusing follow-on errors. Once the
+    shape is known-good we run the per-row value checks (high<low, open/close
+    range, negative volume) and finally the warning-level checks (stale, calendar
+    gaps, price gaps).
+
+    Args:
+        df: the candle frame to inspect (never modified).
+        symbol: ticker, used only for labelling findings.
+        expected_latest_date: the date the newest bar *should* reach; enables the
+            stale check. ``None`` skips it.
+        required_columns: override ``DEFAULT_REQUIRED_COLUMNS`` if a caller's frame
+            uses a different schema.
+        stale_tolerance_days: how far the latest candle may trail
+            ``expected_latest_date`` before a (warning-only) ``STALE_LATEST_CANDLE``
+            finding is raised. The default tolerates a normal long weekend so a run
+            on a non-trading day (or before the vendor publishes the current EOD
+            bar) does not flag every symbol as stale; pass ``0`` for an exact
+            comparison.
     """
+    # Normalize the label once so every finding message reads the same, even if
+    # the caller passed "  reliance " or an empty string.
     symbol_label = str(symbol or "").strip().upper() or "UNKNOWN"
     row_count = len(df.index)
+    # No rows at all is the simplest fatal case and short-circuits everything else.
     if df.empty:
         return CandleQualityReport(
             symbol=symbol_label,
@@ -89,6 +159,8 @@ def validate_candles(
 
     findings: list[DataQualityFinding] = []
     required = tuple(required_columns or DEFAULT_REQUIRED_COLUMNS)
+    # Structural check 1: are the OHLCV columns even present? Without them the
+    # value checks below would raise a KeyError, so a miss here is fatal.
     missing_columns = [column for column in required if column not in df.columns]
     if missing_columns:
         findings.append(
@@ -103,6 +175,9 @@ def validate_candles(
             )
         )
 
+    # Structural check 2: every bar needs a date. ``_extract_dates`` returns None
+    # when there is no usable date axis at all, or a Series with NaT cells when
+    # some individual dates could not be parsed — both are fatal.
     parsed_dates = _extract_dates(df)
     if parsed_dates is None:
         findings.append(
@@ -126,10 +201,17 @@ def validate_candles(
             )
         )
 
+    # ``latest_date`` is computed even on the early-exit path so the report still
+    # carries whatever newest date we could parse (useful for the health page).
     latest_date = _latest_date(parsed_dates)
+    # Fail fast: if the columns or the date axis are broken, the value checks
+    # below cannot run meaningfully, so return with just the structural findings.
     if missing_columns or parsed_dates is None or parsed_dates.isna().any():
         return _report(symbol_label, row_count, latest_date, findings)
 
+    # Duplicate dates mean two bars claim the same day — an indicator math bug
+    # waiting to happen (e.g. a doubled volume), so it is fatal. ``keep=False``
+    # flags *every* member of a duplicate group, not just the repeats.
     duplicate_mask = parsed_dates.duplicated(keep=False)
     if duplicate_mask.any():
         findings.append(
@@ -141,6 +223,11 @@ def validate_candles(
             )
         )
 
+    # Coerce each OHLCV column to numbers; ``errors="coerce"`` turns anything
+    # un-parseable (e.g. the string "N/A") into NaN instead of raising. We then
+    # build one boolean mask that is True for any row whose value in *any* column
+    # is not an ordinary finite number (NaN, inf, or non-numeric). ``|=`` ORs the
+    # per-column masks together row-by-row.
     numeric = {column: pd.to_numeric(df[column], errors="coerce") for column in required}
     invalid_numeric_mask = pd.Series(False, index=df.index)
     for values in numeric.values():
@@ -154,14 +241,18 @@ def validate_candles(
                 affected_rows=int(invalid_numeric_mask.sum()),
             )
         )
+        # Comparisons like ``high < low`` are meaningless once a value is NaN/inf,
+        # so stop here rather than emit a pile of derived, confusing findings.
         return _report(symbol_label, row_count, latest_date, findings)
 
+    # All five columns are now guaranteed finite, so the comparisons below are safe.
     high = numeric["high"]
     low = numeric["low"]
     open_ = numeric["open"]
     close = numeric["close"]
     volume = numeric["volume"]
 
+    # A bar where high < low is physically impossible (the high is the day's peak).
     high_below_low = high < low
     if high_below_low.any():
         findings.append(
@@ -173,6 +264,10 @@ def validate_candles(
             )
         )
 
+    # "open/close must sit within [low, high]" only *means* anything on rows whose
+    # low/high are themselves sane. ``valid_range`` masks out the high<low rows so
+    # we don't double-report them as open/close-out-of-range too. ``&``/``|`` are
+    # element-wise boolean AND/OR across the Series.
     valid_range = ~high_below_low
     open_outside = valid_range & ((open_ < low) | (open_ > high))
     if open_outside.any():
@@ -207,6 +302,11 @@ def validate_candles(
             )
         )
 
+    # Warning-level check: is the newest bar too old? Only fires when the caller
+    # supplied an ``expected_latest_date`` AND the gap exceeds the tolerance (see
+    # the ``STALE_LATEST_TOLERANCE_DAYS`` note above for why a few days is normal).
+    # The ``... is not None`` guards also let the type checker prove the dates are
+    # real before the subtraction.
     if (
         latest_date is not None
         and expected_latest_date is not None
@@ -224,13 +324,23 @@ def validate_candles(
             )
         )
 
+    # The last two warning checks live in helpers because they each need the dates
+    # in sorted order; ``extend`` appends their (possibly empty) finding lists.
     findings.extend(_calendar_gap_findings(symbol_label, parsed_dates))
     findings.extend(_price_gap_findings(symbol_label, parsed_dates, open_, close))
     return _report(symbol_label, row_count, latest_date, findings)
 
 
 def _extract_dates(df: pd.DataFrame) -> pd.Series | None:
-    """Return parsed daily dates from supported candle date locations."""
+    """Return each row's date, from whichever date location the frame uses.
+
+    Different loaders shape the date differently, so we accept any of three: a
+    ``timestamp`` column (the Dhan loader's output), a ``date`` column, or a
+    ``DatetimeIndex``. Returns ``None`` when none is present (a fatal
+    ``MISSING_DATE_AXIS`` upstream). ``errors="coerce"`` turns an unparseable
+    value into ``NaT`` rather than raising, and ``.dt.date`` drops the time part
+    so two bars on the same day compare equal.
+    """
     if "timestamp" in df.columns:
         raw = df["timestamp"]
     elif "date" in df.columns:
@@ -243,7 +353,11 @@ def _extract_dates(df: pd.DataFrame) -> pd.Series | None:
 
 
 def _latest_date(parsed_dates: pd.Series | None) -> date | None:
-    """Return the latest parsed date, ignoring invalid date cells."""
+    """Return the newest valid bar date, or ``None`` if there are no valid dates.
+
+    ``dropna()`` discards any ``NaT`` cells first so a single bad date can't poison
+    the max.
+    """
     if parsed_dates is None:
         return None
     valid_dates = parsed_dates.dropna()
@@ -253,7 +367,12 @@ def _latest_date(parsed_dates: pd.Series | None) -> date | None:
 
 
 def _is_finite(value: object) -> bool:
-    """Return True for ordinary finite numeric values."""
+    """Return True only for an ordinary finite number (not NaN, inf, or junk).
+
+    Wrapped in try/except because ``float(value)`` raises for non-numeric input
+    (e.g. a stray string); we treat any such value as "not finite" rather than
+    letting the exception escape.
+    """
     try:
         return bool(pd.notna(value) and math.isfinite(float(cast(Any, value))))
     except (TypeError, ValueError):
@@ -261,6 +380,13 @@ def _is_finite(value: object) -> bool:
 
 
 def _calendar_gap_findings(symbol: str, parsed_dates: pd.Series) -> list[DataQualityFinding]:
+    """Flag (as a warning) any gap larger than ``MAX_CALENDAR_GAP_DAYS`` between
+    consecutive trading days — a sign the vendor may have dropped data.
+
+    ``sorted(...unique())`` gives the distinct dates in order; ``pairwise`` walks
+    them two-at-a-time as ``(previous, current)`` so each ``current - previous`` is
+    one inter-bar gap. Weekends (≈3 days) stay under the threshold by design.
+    """
     ordered = sorted(parsed_dates.dropna().unique())
     if len(ordered) < 2:
         return []
@@ -290,6 +416,15 @@ def _price_gap_findings(
     open_: pd.Series,
     close: pd.Series,
 ) -> list[DataQualityFinding]:
+    """Flag (as a warning) an open that jumps more than
+    ``SUSPICIOUS_OVERNIGHT_GAP_PCT`` from the prior day's close — usually a bad
+    tick or an un-adjusted split rather than a real move.
+
+    We sort by date (``mergesort`` is stable), then ``shift(1)`` lines up each
+    bar's *previous* close beside its open. ``denominator.gt(0)`` skips rows with a
+    zero/absent prior close so we never divide by zero (the first row's
+    ``previous_close`` is NaN, which the guard also drops).
+    """
     sortable = pd.DataFrame(
         {
             "date": parsed_dates,
@@ -323,6 +458,8 @@ def _report(
     latest_date: date | None,
     findings: list[DataQualityFinding],
 ) -> CandleQualityReport:
+    """Freeze the accumulated findings into the immutable report (one place so the
+    ``list -> tuple`` conversion isn't repeated at every early return)."""
     return CandleQualityReport(
         symbol=symbol,
         row_count=row_count,

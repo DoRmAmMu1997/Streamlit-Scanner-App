@@ -72,12 +72,21 @@ def _format_bytes(value: int | None) -> str:
 
 
 def _render_data_quality_summary(run: DataQualityRunHealth | None) -> None:
-    """Render the newest persisted candle-quality receipt, if one exists."""
+    """Render the newest persisted DATA-001 candle-quality receipt.
+
+    Purely a *display* of what an earlier scan already recorded — it never
+    re-validates candle data, so opening the health page stays cheap and passive.
+    Shows three headline metrics, then (if any) a redacted table of the capped
+    findings sample, with a note when more were omitted.
+    """
     st.markdown("### Candle data quality")
     if run is None:
         st.info("No scan has recorded candle data-quality findings yet.")
         return
 
+    # Headline counts: how many symbols were checked, how many were usable, and
+    # how many had a problem (warning + fatal). A symbol with both is counted in
+    # both buckets, so this sum can slightly exceed the checked count.
     quality_columns = st.columns(3)
     quality_columns[0].metric("Quality checked symbols", run.checked_symbols)
     quality_columns[1].metric("Quality usable symbols", run.usable_symbols)
@@ -94,6 +103,8 @@ def _render_data_quality_summary(run: DataQualityRunHealth | None) -> None:
         st.caption("Latest quality receipt has no findings.")
         return
 
+    # Build a small table of the findings. ``_redact_secrets`` is a belt-and-braces
+    # second redaction at the render boundary (the stored message is already safe).
     rows = [
         {
             "Symbol": finding.symbol,
@@ -106,6 +117,8 @@ def _render_data_quality_summary(run: DataQualityRunHealth | None) -> None:
         for finding in run.findings
     ]
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    # The receipt only persists a capped sample (fatal-first); tell the admin when
+    # the table isn't the whole story so they know to check the logs.
     if run.findings_truncated:
         st.caption(
             f"Showing {len(run.findings)} of {run.total_findings} findings "

@@ -56,6 +56,9 @@ EVENT_DAILY_JOB_CONFIG_LOADED = "daily_job_config_loaded"
 EVENT_DAILY_JOB_CONFIG_INVALID = "daily_job_config_invalid"
 EVENT_DAILY_JOB_COMPLETED = "daily_job_completed"
 EVENT_EXTERNAL_API_FAILED = "external_api_failed"
+# DATA-001 candle-quality events. ``_warning`` = a usable frame with suspicious
+# data; ``_failed`` = a frame quarantined before scanning. Both log finding
+# *codes* only, never raw prices.
 EVENT_CANDLE_DATA_QUALITY_WARNING = "candle_data_quality_warning"
 EVENT_CANDLE_DATA_QUALITY_FAILED = "candle_data_quality_failed"
 EVENT_AUTH_DENIED = "auth_denied"

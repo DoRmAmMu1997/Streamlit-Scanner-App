@@ -96,6 +96,7 @@ class ScanRunResult:
     # strict validation within the configured attempt budget (a subset of
     # ``compute_failures`` tagged ``phase="ai_validation"``).
     ai_validation_failures: int = 0
+    # DATA-001B candle-quality receipt for this run (None when nothing was checked).
     data_quality_json: dict[str, Any] | None = None
     error_message: str | None = None
 
@@ -218,6 +219,9 @@ def run_scan(
         else:
             status = ScanStatus.SUCCESS
 
+    # DATA-001B: summarize the loader's per-symbol quality reports into the
+    # receipt persisted on this run, then let fatal candle defects influence the
+    # final status so the run is reported truthfully (never a false "success").
     data_quality_json = _data_quality_receipt(
         data_loader,
         expected_latest_date=_as_date(params.get("end_date")),
@@ -226,6 +230,11 @@ def run_scan(
         int(data_quality_json["fatal_symbols"]) if data_quality_json else 0
     )
     if data_quality_fatal_symbols:
+        # At least one symbol was quarantined for bad data:
+        #   - a previously-clean run drops to PARTIAL (some data was dropped), and
+        #   - if NO symbol survived AND the screener produced no rows, the run is a
+        #     FAILED (there was effectively nothing to scan).
+        # An already-PARTIAL/FAILED status is left as-is (it's at least as severe).
         if status is ScanStatus.SUCCESS:
             status = ScanStatus.PARTIAL
         if (
@@ -405,7 +414,22 @@ def _data_quality_receipt(
     *,
     expected_latest_date: dt.date | None,
 ) -> dict[str, Any] | None:
-    """Build the versioned DATA-001 receipt from loader-local reports."""
+    """Summarize the loader's per-symbol quality reports into one persisted receipt.
+
+    The receipt (stored as ``scan_runs.data_quality_json``) is a small, versioned
+    JSON snapshot the health page and auditors read later. It has two layers:
+
+    - **aggregate counts** (``checked_symbols``, ``usable_symbols``,
+      ``warning_symbols``/``fatal_symbols``, ``warning_findings``/``fatal_findings``)
+      computed over *every* report — these always describe the full run; and
+    - a **capped, redacted ``findings`` sample** (fatal-first, see
+      ``MAX_PERSISTED_FINDINGS``) so a 500-symbol run can't bloat the column.
+
+    Returns ``None`` when the loader recorded no reports at all (e.g. a fully
+    cached run that fetched nothing), in which case there is no receipt to store.
+    ``getattr(..., None) or []`` tolerates loaders/fakes that don't expose the
+    attribute.
+    """
     reports = list(
         cast(
             list[CandleQualityReport],
@@ -421,6 +445,8 @@ def _data_quality_receipt(
     warning_findings = 0
     fatal_findings = 0
     for report in reports:
+        # Count a symbol once per severity it exhibits (a symbol can have both a
+        # warning and a fatal finding), and count findings individually.
         has_warning = any(
             finding.severity == "warning" for finding in report.findings
         )
@@ -439,6 +465,8 @@ def _data_quality_receipt(
                     "symbol": report.symbol,
                     "severity": finding.severity,
                     "code": finding.code,
+                    # Messages are app-generated (codes + thresholds, no prices),
+                    # but redact anyway — this JSON is written to durable history.
                     "message": redact_text(finding.message),
                     "affected_rows": finding.affected_rows,
                     "latest_date": (
