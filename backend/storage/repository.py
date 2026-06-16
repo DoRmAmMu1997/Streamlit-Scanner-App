@@ -154,17 +154,32 @@ def finish_scan_run(
     *,
     status: ScanStatus,
     error_message: str | None = None,
+    data_quality_json: Mapping[str, Any] | None = None,
 ) -> None:
     """Set the final scan status, finished timestamp, and optional error text.
 
     Use ``ScanStatus.SUCCESS`` when every symbol completed, ``PARTIAL`` when the
     scan produced usable rows but some symbols failed, and ``FAILED`` when the
     scan aborted. The free-text ``error_message`` gives the future history page a
-    human-readable explanation.
+    human-readable explanation. ``data_quality_json`` is the optional DATA-001
+    candle-quality receipt for this run.
     """
+    # Imported lazily to avoid a circular import (result_contract imports storage).
+    from backend.scanning.result_contract import normalize_secret_safe_json
+
     run.status = status
     run.finished_at = dt.datetime.now(dt.UTC)
     run.error_message = error_message
+    # Defense in depth: the receipt is already redacted upstream, but everything
+    # written to durable history goes through the shared secret-safe normalizer
+    # too (it also masks any credential-shaped keys). ``cast`` only re-states the
+    # type for mypy; it does not change the value.
+    run.data_quality_json = cast(
+        dict[str, Any] | None,
+        normalize_secret_safe_json(data_quality_json)
+        if data_quality_json is not None
+        else None,
+    )
     session.flush()
 
 

@@ -170,6 +170,12 @@ class ScanRun(Base):
         JSON, nullable=True, comment="Screener params snapshot for replay"
     )
 
+    # DATA-001B: versioned candle-quality receipt for this run. Kept nullable so
+    # old runs and non-scan bootstrap tests do not need a synthetic empty object.
+    data_quality_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True, comment="Candle data-quality receipt (DATA-001)"
+    )
+
     # The date the underlying candle data was current as of. The OTHER half of
     # reproducibility: it lets an auditor say "this used data through 2026-06-03",
     # so a stale-data symbol can never masquerade as a fresh signal.

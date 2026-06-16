@@ -59,6 +59,8 @@ flowchart TD
 | `scan_failed` | ERROR | screener/header/persistence failure (safe phase + exception **type** only) |
 | `symbol_scan_failed` | WARNING | one symbol failed to load/compute |
 | `external_api_failed` | WARNING | a Dhan candle fetch failed |
+| `candle_data_quality_warning` | WARNING | a frame passed with warning-only quality findings (codes only; DATA-001) |
+| `candle_data_quality_failed` | WARNING | a frame was quarantined for a fatal quality finding before scanning (codes only; DATA-001) |
 | `auth_denied` | WARNING | signed-in email not on allowlist (logs the email, never the list) |
 | `daily_job_started` / `daily_job_completed` | INFO/ERROR | headless command lifecycle |
 | `daily_job_config_loaded` / `daily_job_config_invalid` | INFO/ERROR | JOB-002 YAML schedule |

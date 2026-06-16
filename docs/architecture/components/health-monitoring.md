@@ -6,7 +6,7 @@
 | **Source** | [`backend/health.py`](../../../backend/health.py), [`ui/health_page.py`](../../../ui/health_page.py) |
 | **Layer** | Observability (`backend/`) + UI (`ui/`) |
 | **Status** | Stable (OBS-002) |
-| **Related** | [HLD](../high-level-design.md) · [observability.md](observability.md) · [authentication.md](authentication.md) · [storage-persistence.md](storage-persistence.md) · [app-orchestration.md](app-orchestration.md) · [security.md](security.md) |
+| **Related** | [HLD](../high-level-design.md) · [observability.md](observability.md) · [authentication.md](authentication.md) · [storage-persistence.md](storage-persistence.md) · [data-quality.md](data-quality.md) · [app-orchestration.md](app-orchestration.md) · [security.md](security.md) |
 
 ## 1. Purpose & responsibilities
 
@@ -37,7 +37,8 @@ flowchart TD
 | Symbol | Contract |
 |---|---|
 | `collect_admin_health(settings=None) -> AdminHealthSnapshot` | Passive snapshot; every exception boundary degrades (DB failure → `unavailable` service with **type only**, never a message). |
-| `AdminHealthSnapshot` | frozen: last successful/failed scan (`ScanRunHealth`), last data refresh, cached symbol count, latest candle date, unreadable-file count, cache/data sizes, disk free, `services`. |
+| `AdminHealthSnapshot` | frozen: last successful/failed scan (`ScanRunHealth`), latest data-quality run (`DataQualityRunHealth`, DATA-001), last data refresh, cached symbol count, latest candle date, unreadable-file count, cache/data sizes, disk free, `services`. |
+| `DataQualityRunHealth` / `DataQualityFindingHealth` | Detached copy of the newest persisted DATA-001 receipt: per-run counts + a capped, redacted findings sample (`findings_truncated`/`total_findings` flag omission). |
 | `ScanRunHealth` / `ServiceHealth` | Detached scalar copies (safe after session close) / `(name, status∈ready|warning|unavailable, detail)` (secret-safe). |
 | `_render_admin_health_page(user, *, snapshot_loader=_cached_admin_health_snapshot)` | Renders; **re-checks `is_admin`** before anything. |
 | `_cached_admin_health_snapshot()` | `@st.cache_data(ttl=60)`. |
@@ -47,6 +48,7 @@ flowchart TD
 | Decision | Rationale | Alternative rejected |
 |---|---|---|
 | **Passive only — never call Dhan/Claude/SerpAPI** | Opening an ops page must not spend quota, hit rate limits, or hang on a provider outage. "Ready" = credentials present / SDK installed, explicitly *not* live-tested. | Live pings — quota burn, slow page. |
+| **Data-quality summary reads the newest persisted receipt (DATA-001)** | Health scans recent runs for the latest `data_quality_json` and renders its counts + capped, redacted findings — it never re-validates candle data, keeping the page passive. | Re-run `validate_candles` on the page — slow, re-reads cache, not passive. |
 | **Re-check `is_admin` inside the renderer** | The view selector hides the page, but a direct caller or an auth-disabled dev session (`user=None`) must still be blocked — defense in depth. | Rely on the menu only — bypassable. |
 | **Never copy exception messages into health** | DB drivers/SDK setup errors echo URLs/credentials; only the exception **type** is shown; persisted failure text goes through the redactor. | Show `str(exc)` — leak. |
 | **Parquet max-timestamp from row-group statistics** | Reading per-file min/max stats answers "how current?" far cheaper than loading every timestamp column; only stat-less files fall back to a column read. | Read full columns — slow on hundreds of files. |

@@ -309,6 +309,37 @@ def test_create_scan_run_persists_symbols_scanned_and_defaults_to_none(db_sessio
     assert without_count.symbols_scanned is None
 
 
+def test_finish_scan_run_persists_secret_safe_data_quality_receipt(db_session):
+    """Data-quality metadata is stored as JSON without leaking raw secrets."""
+    from backend.storage.repository import create_scan_run, finish_scan_run
+
+    run = create_scan_run(
+        db_session,
+        screener_key="envelope",
+        universe_key="nifty_500",
+    )
+    finish_scan_run(
+        db_session,
+        run,
+        status=ScanStatus.PARTIAL,
+        error_message="quality failure",
+        data_quality_json={
+            "schema_version": 1,
+            "findings": [
+                {
+                    "symbol": "RELIANCE",
+                    "severity": "fatal",
+                    "code": "HIGH_BELOW_LOW",
+                    "message": "token=quality-secret",
+                }
+            ],
+        },
+    )
+    db_session.commit()
+
+    assert run.data_quality_json["findings"][0]["message"] == "token=***REDACTED***"
+
+
 def test_list_distinct_screener_keys_is_sorted_and_deduplicated(db_session):
     """The history filter dropdown gets each recorded screener exactly once."""
     from backend.storage.repository import list_distinct_screener_keys

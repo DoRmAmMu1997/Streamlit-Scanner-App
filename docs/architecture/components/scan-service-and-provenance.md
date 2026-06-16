@@ -6,7 +6,7 @@
 | **Source** | [`backend/scanning/service.py`](../../../backend/scanning/service.py), [`backend/scanning/result_contract.py`](../../../backend/scanning/result_contract.py) |
 | **Layer** | Screening engine ↔ persistence seam (`backend/`) |
 | **Status** | Stable (SCAN-003 service · PROV-001B strict result contract · PROV-002 deterministic receipts · PROV-003 AI verdict receipts) |
-| **Related** | [HLD](../high-level-design.md) · [screener-framework.md](screener-framework.md) · [storage-persistence.md](storage-persistence.md) · [scan-run-persistence.md](../scan-run-persistence.md) · [observability.md](observability.md) · [security.md](security.md) |
+| **Related** | [HLD](../high-level-design.md) · [screener-framework.md](screener-framework.md) · [storage-persistence.md](storage-persistence.md) · [scan-run-persistence.md](../scan-run-persistence.md) · [data-quality.md](data-quality.md) · [observability.md](observability.md) · [security.md](security.md) |
 
 ## 1. Purpose & responsibilities
 
@@ -83,6 +83,7 @@ sequenceDiagram
 | **Strict contract before the DataFrame** | `BaseScanner.build_result_frame` validates/normalizes each row at emit time and drops contract failures (PROV-001B); persistence re-validates. | Lenient store — silent bad provenance. |
 | **AI receipts are tamper-evident, not raw** | The `ai` block stores hashes + sanitized URLs + a semantic prompt version, never raw scraped/model text; the verdict cache feeding it is HMAC-signed (see [security.md](security.md)). | Store raw evidence — durable leak + unverifiable. |
 | **Truthful terminal status** | A persistence failure forces `FAILED`; contract-rejected rows yield `PARTIAL` (some) / `FAILED` (all). | Best-effort "success" — false audit. |
+| **Candle data-quality receipt (DATA-001)** | After the run, `_data_quality_receipt` summarizes the loader's per-symbol quality reports into a bounded, redacted `data_quality_json` (counts + fatal-first capped findings). Fatal candle symbols escalate `SUCCESS`→`PARTIAL`, or `→FAILED` when no usable symbols remain; counters ride the completion event. See [data-quality.md](data-quality.md). | Ignore loader quality signals — bad/stale data scanned with no record. |
 
 ## 6. Failure modes
 
@@ -91,6 +92,7 @@ sequenceDiagram
 - Result / AI-evaluation persistence fails → run marked `FAILED` (type-only message, not stuck RUNNING); in-memory results still returned to the UI.
 - Rows fail the contract → dropped and counted (`rejected_result_rows`); some → `PARTIAL`, all → `FAILED`.
 - AI verdict still malformed within the configured attempt budget → the screener emits an `error` `AIEvaluationRecord` (persisted for audit) **and** a `phase="ai_validation"` compute failure. The technical-analysis screener keeps an eligible deterministic gate-only row, so a mixed run can remain `PARTIAL`; the 67 ka funda screener produces no result row. `ai_validation_failures` is reported in either case.
+- Fatal candle quality (DATA-001) → the loader already quarantined the frame (`phase="data_quality"`); the run downgrades to `PARTIAL`, or `FAILED` when no usable symbols remain, and the receipt records the (redacted) finding codes.
 
 ## 7. Testing
 

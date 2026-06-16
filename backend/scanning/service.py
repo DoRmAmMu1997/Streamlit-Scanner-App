@@ -39,6 +39,7 @@ from typing import Any, cast
 import pandas as pd
 from sqlalchemy.orm import Session
 
+from backend.data_quality import CandleQualityReport
 from backend.observability import (
     EVENT_SCAN_COMPLETED,
     EVENT_SCAN_FAILED,
@@ -49,6 +50,7 @@ from backend.observability import (
     log_event,
 )
 from backend.scanning.result_contract import ResultContractError, normalize_screener_row
+from backend.security import redact_text
 from backend.storage.database import session_scope
 from backend.storage.models import ScanRun, ScanStatus
 from backend.storage.repository import (
@@ -94,6 +96,8 @@ class ScanRunResult:
     # strict validation within the configured attempt budget (a subset of
     # ``compute_failures`` tagged ``phase="ai_validation"``).
     ai_validation_failures: int = 0
+    # DATA-001B candle-quality receipt for this run (None when nothing was checked).
+    data_quality_json: dict[str, Any] | None = None
     error_message: str | None = None
 
 
@@ -185,6 +189,7 @@ def run_scan(
     # Track per-symbol load failures across the try/except so the observability
     # events below can report them whether or not the screener itself raised.
     loader_failures: list[dict[str, Any]] = []
+    data_quality_json: dict[str, Any] | None = None
     try:
         results = run_callable(universe_df, data_loader, run_params)
     except Exception as exc:
@@ -213,6 +218,35 @@ def run_scan(
             )
         else:
             status = ScanStatus.SUCCESS
+
+    # DATA-001B: summarize the loader's per-symbol quality reports into the
+    # receipt persisted on this run, then let fatal candle defects influence the
+    # final status so the run is reported truthfully (never a false "success").
+    data_quality_json = _data_quality_receipt(
+        data_loader,
+        expected_latest_date=_as_date(params.get("end_date")),
+    )
+    data_quality_fatal_symbols = (
+        int(data_quality_json["fatal_symbols"]) if data_quality_json else 0
+    )
+    if data_quality_fatal_symbols:
+        # At least one symbol was quarantined for bad data:
+        #   - a previously-clean run drops to PARTIAL (some data was dropped), and
+        #   - if NO symbol survived AND the screener produced no rows, the run is a
+        #     FAILED (there was effectively nothing to scan).
+        # An already-PARTIAL/FAILED status is left as-is (it's at least as severe).
+        if status is ScanStatus.SUCCESS:
+            status = ScanStatus.PARTIAL
+        if (
+            data_quality_json is not None
+            and int(data_quality_json["usable_symbols"]) == 0
+            and (results is None or results.empty)
+        ):
+            status = ScanStatus.FAILED
+        error_message = _combine_error_messages(
+            error_message,
+            f"{data_quality_fatal_symbols} symbol(s) had fatal candle data quality findings.",
+        )
 
     emitted_rejected_rows = sum(
         1
@@ -280,6 +314,7 @@ def run_scan(
         ai_evaluations=ai_evaluations,
         status=status,
         error_message=error_message,
+        data_quality_json=data_quality_json,
         session_factory=session_factory,
     )
     if persistence_exc_info is not None:
@@ -318,6 +353,15 @@ def run_scan(
         "loader_failures": len(loader_failures),
         "compute_failures": len(compute_failures),
         "ai_validation_failures": ai_validation_failures,
+        "data_quality_checked_symbols": (
+            data_quality_json["checked_symbols"] if data_quality_json else 0
+        ),
+        "data_quality_warning_findings": (
+            data_quality_json["warning_findings"] if data_quality_json else 0
+        ),
+        "data_quality_fatal_findings": (
+            data_quality_json["fatal_findings"] if data_quality_json else 0
+        ),
         "duration_seconds": round(time.monotonic() - started_at, 3),
     }
     if screener_exc_info is not None:
@@ -352,8 +396,108 @@ def run_scan(
         compute_failures=compute_failures,
         rejected_result_rows=rejected_result_rows,
         ai_validation_failures=ai_validation_failures,
+        data_quality_json=data_quality_json,
         error_message=error_message,
     )
+
+
+# Cap how many individual findings the per-run receipt persists. A full-universe
+# run can surface hundreds of findings (e.g. many stale/gapped symbols); the
+# aggregate counts still describe the whole set, so storing every finding row
+# would only bloat the JSON column and the health table. Fatal findings are
+# kept ahead of warnings so the most actionable issues always survive the cap.
+MAX_PERSISTED_FINDINGS = 50
+
+
+def _data_quality_receipt(
+    data_loader: Any,
+    *,
+    expected_latest_date: dt.date | None,
+) -> dict[str, Any] | None:
+    """Summarize the loader's per-symbol quality reports into one persisted receipt.
+
+    The receipt (stored as ``scan_runs.data_quality_json``) is a small, versioned
+    JSON snapshot the health page and auditors read later. It has two layers:
+
+    - **aggregate counts** (``checked_symbols``, ``usable_symbols``,
+      ``warning_symbols``/``fatal_symbols``, ``warning_findings``/``fatal_findings``)
+      computed over *every* report — these always describe the full run; and
+    - a **capped, redacted ``findings`` sample** (fatal-first, see
+      ``MAX_PERSISTED_FINDINGS``) so a 500-symbol run can't bloat the column.
+
+    Returns ``None`` when the loader recorded no reports at all (e.g. a fully
+    cached run that fetched nothing), in which case there is no receipt to store.
+    ``getattr(..., None) or []`` tolerates loaders/fakes that don't expose the
+    attribute.
+    """
+    reports = list(
+        cast(
+            list[CandleQualityReport],
+            getattr(data_loader, "last_data_quality_reports", None) or [],
+        )
+    )
+    if not reports:
+        return None
+
+    findings: list[dict[str, Any]] = []
+    warning_symbols = 0
+    fatal_symbols = 0
+    warning_findings = 0
+    fatal_findings = 0
+    for report in reports:
+        # Count a symbol once per severity it exhibits (a symbol can have both a
+        # warning and a fatal finding), and count findings individually.
+        has_warning = any(
+            finding.severity == "warning" for finding in report.findings
+        )
+        has_fatal = report.has_fatal_findings
+        if has_warning:
+            warning_symbols += 1
+        if has_fatal:
+            fatal_symbols += 1
+        for finding in report.findings:
+            if finding.severity == "fatal":
+                fatal_findings += 1
+            else:
+                warning_findings += 1
+            findings.append(
+                {
+                    "symbol": report.symbol,
+                    "severity": finding.severity,
+                    "code": finding.code,
+                    # Messages are app-generated (codes + thresholds, no prices),
+                    # but redact anyway — this JSON is written to durable history.
+                    "message": redact_text(finding.message),
+                    "affected_rows": finding.affected_rows,
+                    "latest_date": (
+                        report.latest_date.isoformat()
+                        if report.latest_date is not None
+                        else None
+                    ),
+                }
+            )
+
+    total_findings = len(findings)
+    # Persist fatal findings before warnings, then cap. ``sort`` is stable, so
+    # the per-symbol order within each severity is preserved.
+    findings.sort(key=lambda item: 0 if item["severity"] == "fatal" else 1)
+    capped_findings = findings[:MAX_PERSISTED_FINDINGS]
+
+    return {
+        "schema_version": 1,
+        "expected_latest_date": (
+            expected_latest_date.isoformat() if expected_latest_date else None
+        ),
+        "checked_symbols": len(reports),
+        "usable_symbols": sum(1 for report in reports if report.is_usable),
+        "warning_symbols": warning_symbols,
+        "fatal_symbols": fatal_symbols,
+        "warning_findings": warning_findings,
+        "fatal_findings": fatal_findings,
+        "total_findings": total_findings,
+        "findings_truncated": total_findings > len(capped_findings),
+        "findings": capped_findings,
+    }
 
 
 def _current_exc_info() -> ExceptionInfo:
@@ -410,6 +554,7 @@ def _persist_run_outcome(
     ai_evaluations: list[Any],
     status: ScanStatus,
     error_message: str | None,
+    data_quality_json: dict[str, Any] | None,
     session_factory: SessionFactory,
 ) -> ExceptionInfo | None:
     """Save result rows and stamp the final status for an existing run header.
@@ -447,7 +592,13 @@ def _persist_run_outcome(
                 normalized_rows,
             )
             save_ai_evaluations(session, run, ai_evaluations)
-            finish_scan_run(session, run, status=status, error_message=error_message)
+            finish_scan_run(
+                session,
+                run,
+                status=status,
+                error_message=error_message,
+                data_quality_json=data_quality_json,
+            )
     except Exception as exc:
         persistence_exc_info = _current_exc_info()
         _mark_run_failed_after_persistence_error(run_id, exc, session_factory)

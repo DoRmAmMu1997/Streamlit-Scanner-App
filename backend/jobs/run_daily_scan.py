@@ -519,6 +519,11 @@ def _run_one_screener(
         # SCAN-003 stores/returns secret-safe failed-screener messages that use
         # the exception type, not the raw exception text.
         message = result.error_message or "Screener failed."
+    elif result.status is ScanStatus.PARTIAL:
+        # A PARTIAL run succeeded overall but dropped some symbols (load/compute
+        # failures or DATA-001 fatal candle quality). Surface the service's
+        # secret-safe explanation so the job log says *why* it was partial.
+        message = result.error_message or "Scan completed with partial symbol failures."
     else:
         message = "OK."
 

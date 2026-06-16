@@ -6,7 +6,7 @@
 | **Source** | [`backend/dhan_client.py`](../../../backend/dhan_client.py), [`backend/daily_data_loader.py`](../../../backend/daily_data_loader.py), [`Dependencies/dhan_token_setup.py`](../../../Dependencies/dhan_token_setup.py) |
 | **Layer** | Data plumbing (`backend/`) |
 | **Status** | Stable (+ DH-904 rate-limit handling, perf-001 streaming) |
-| **Related** | [HLD](../high-level-design.md) · [configuration.md](configuration.md) · [universe-management.md](universe-management.md) · [screener-framework.md](screener-framework.md) · [app-orchestration.md](app-orchestration.md) |
+| **Related** | [HLD](../high-level-design.md) · [configuration.md](configuration.md) · [universe-management.md](universe-management.md) · [data-quality.md](data-quality.md) · [screener-framework.md](screener-framework.md) · [app-orchestration.md](app-orchestration.md) |
 
 ## 1. Purpose & responsibilities
 
@@ -79,12 +79,14 @@ flowchart TD
 | **`client=None` cache-only mode fails loudly on fetch** | Chart UI / cleanup can build a loader without creds, but a real fetch attempt raises a clear error not `AttributeError`. | Silent no-op — confusing empty results. |
 | **Circuit breaker (`max_consecutive_failures`)** | Protects the user and Dhan after repeated broker errors; still yields a failure item per skipped symbol for complete diagnostics. | Keep hammering — quota burn / hang. |
 | **Streaming `iter_universe_history`** | Strategy can compute per-symbol without holding the whole universe in memory. | Batch-only — memory pressure on large universes. |
+| **Candle quality gate at the load boundary (DATA-001)** | Each successful frame is run through `validate_candles` ([data-quality.md](data-quality.md)); a **fatal** defect becomes a `phase="data_quality"` failure so scanners never see corrupt data, while warnings pass through. Reports are exposed on `BatchLoadResult.data_quality_reports` / `last_data_quality_reports` for the scan-run receipt. | Hand raw vendor candles straight to screeners — false signals from malformed/stale data. |
 | **Opt-in parallel fetch + shared `_RequestPacer` (PERF-001)** | `fetch_workers>1` overlaps slow Dhan I/O, but one global pacer keeps the inter-request delay identical regardless of worker count — so parallelism never raises the actual Dhan request rate. Default stays 1 (sequential). | Per-worker delay — would multiply the global rate and risk DH-904. |
 | **Timestamps stored as IST-naive** | Matches local CSV conventions; avoids tz surprises in tables/charts. | Keep tz-aware UTC — display friction here. |
 
 ## 5. Failure modes / degradation
 
 - Per-symbol fetch exception → redacted message captured in `BatchLoadResult.failures` + `external_api_failed` log event ([observability.md](observability.md)); the scan continues (→ `partial`).
+- Fatal candle quality defect → frame withheld as a `phase="data_quality"` failure + `candle_data_quality_failed` event (codes only); warning-only frames pass through with a `candle_data_quality_warning` event (DATA-001).
 - Corrupt/empty/all-NaT parquet → treated as no cache, full re-download.
 - Rate limit beyond retry budget → `DhanRateLimitError` propagates.
 - Missing creds at fetch time (`required=True`) → `RuntimeError` with setup hint.
