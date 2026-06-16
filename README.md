@@ -89,6 +89,20 @@ by default or Postgres) that is ready to record every run for later replay and a
   `pdfplumber`) and returns a structured verdict with a 0–10 rating, a
   Valuation observation comparing current vs median P/E, and a three-part
   forward outlook.
+- **Hardened AI screeners** — all three Claude agents (Check Fundamentals,
+  Technical Analysis, 67 Ka Funda) treat scraped/search text as untrusted. A
+  shared quarantine (**TEST-003**, `backend/security/prompt_injection.py`) scans
+  external evidence (Screener.in scrapes, SerpAPI snippets, concall transcripts)
+  for model-directed instructions and **fails closed before the model sees it**,
+  and every AI verdict is parsed against a strict Pydantic schema with a bounded
+  retry budget — malformed output is rejected, never persisted (**AI-004**,
+  `SCANNER_AI_MAX_ATTEMPTS`).
+- **Candle data-quality checks (DATA-001)** — every OHLCV frame is validated at
+  the loader boundary before any screener runs. Structurally impossible candles
+  (high < low, NaN/inf, duplicate dates, negative volume) are **quarantined** and
+  downgrade the run to `PARTIAL`/`FAILED`, while stale or gappy data is recorded
+  as a warning. Findings persist in a per-run `data_quality_json` receipt and are
+  summarized on the Admin health page.
 - **Automatic data prefetch** — running `python app.py` first downloads the
   stock universes and ~10 years of daily candles, *then* opens the UI, so the
   app never blocks on downloads. Each successful prefetch keeps only the latest
@@ -120,9 +134,11 @@ by default or Postgres) that is ready to record every run for later replay and a
   it, error state) with screener/universe/status/date/trigger/symbol filters and
   click-through to each run's persisted results.
 - **Tested** — a `pytest` suite covers the indicators, data loader, universe
-  builder, screener registry, the screeners themselves, the auth gate, and the
-  persistence layer — plus **golden-snapshot** tests that catch screener output
-  drift and an Alembic migration drift-guard.
+  builder, screener registry, the screeners themselves, the auth gate, the
+  persistence layer, candle data-quality validation, the AI prompt-injection
+  quarantine corpus, structured AI-output validation, and the Docker artifacts —
+  plus **golden-snapshot** tests that catch screener output drift and an Alembic
+  migration drift-guard.
 
 ---
 
@@ -372,6 +388,63 @@ uses whatever data is already cached locally (no prefetch).
 
 ---
 
+## Running with Docker
+
+Build the deployment image from the repository root:
+
+```bash
+docker build -t streamlit-scanner-app .
+```
+
+For a local container smoke test, keep auth disabled and persist generated data
+in a named Docker volume:
+
+```bash
+docker run --rm \
+  -p 8501:8501 \
+  -e APP_ENV=development \
+  -e AUTH_REQUIRED=false \
+  -e DATA_DIR=/data \
+  -v streamlit-scanner-data:/data \
+  streamlit-scanner-app
+```
+
+Open <http://localhost:8501>. The image starts with `streamlit run app.py`
+instead of `python app.py`, so it serves the UI directly and does not run the
+local prefetch/relaunch wrapper at container boot.
+
+Production containers default to fail-closed settings (`APP_ENV=production`,
+`AUTH_REQUIRED=true`, `DATA_DIR=/data`). Supply the same runtime environment the
+non-container app expects, mount a persistent `/data` volume, and provide
+Streamlit's Google OIDC secrets file. The inline `-e` values below are
+placeholders for a manual run; prefer your host's managed secret/environment
+injection for real deployments:
+
+```bash
+docker run -d --name streamlit-scanner-app \
+  -p 8501:8501 \
+  -e APP_ENV=production \
+  -e AUTH_REQUIRED=true \
+  -e DATA_DIR=/data \
+  -e DATABASE_URL=postgresql+psycopg://scanner:<password>@db-host:5432/scanner \
+  -e DHAN_CLIENT_ID=your-dhan-client-id \
+  -e DHAN_ACCESS_TOKEN=your-dhan-access-token \
+  -e ALLOWED_EMAILS=you@gmail.com \
+  -e ADMIN_EMAILS=you@gmail.com \
+  -e LOG_FORMAT=json \
+  -v streamlit-scanner-data:/data \
+  -v /absolute/path/secrets.toml:/app/.streamlit/secrets.toml:ro \
+  streamlit-scanner-app
+```
+
+`Dockerfile` exposes port `8501` and includes a health check against
+`/_stcore/health`. `.dockerignore` keeps local secrets (`Dependencies/.env`,
+`.streamlit/secrets.toml`) and generated cache/database files out of the build
+context. See [docs/operations.md](docs/operations.md#docker--container-deployment)
+for container runbook details and daily-job commands.
+
+---
+
 ## Running the daily scan job
 
 JOB-001 adds a headless command for schedulers, terminals, and hosting
@@ -463,10 +536,12 @@ auth-disabled development session or a future direct caller cannot bypass the
 guard.
 
 The health snapshot reports the latest exact `SUCCESS` and `FAILED` scan runs,
-the newest generated universe/cache-file refresh, cached symbol count, latest
-candle date, unreadable cache files, cache/data sizes, disk free space, database
-query readiness, and passive Dhan/Claude Agent SDK/SerpAPI setup status. The
-snapshot is cached for 60 seconds to keep normal Streamlit reruns inexpensive.
+the newest persisted **candle data-quality receipt** (DATA-001 — checked/usable
+symbol counts plus a capped, redacted findings sample), the newest generated
+universe/cache-file refresh, cached symbol count, latest candle date, unreadable
+cache files, cache/data sizes, disk free space, database query readiness, and
+passive Dhan/Claude Agent SDK/SerpAPI setup status. The snapshot is cached for 60
+seconds to keep normal Streamlit reruns inexpensive.
 
 Provider readiness is intentionally **passive**: opening the page never calls
 Dhan, Claude, or SerpAPI and therefore never consumes quota. “Ready” means the
@@ -488,6 +563,8 @@ same secret redactor used elsewhere in the app.
 | `scan_failed` | ERROR | screener, header, or result persistence fails (safe phase and exception **type**, never the raw message) |
 | `symbol_scan_failed` | WARNING | a single symbol fails to load or compute (run and screener context plus `symbol`) |
 | `external_api_failed` | WARNING | a Dhan candle fetch fails for a `symbol` |
+| `candle_data_quality_warning` | WARNING | a frame passes with warning-only quality findings, e.g. stale data (DATA-001; finding codes only) |
+| `candle_data_quality_failed` | WARNING | a frame is quarantined for a fatal quality finding before scanning (DATA-001; finding codes only) |
 | `auth_denied` | WARNING | a signed-in email is not on the allowlist (logs the email, never the allowlist) |
 | `data_refresh_started` / `data_refresh_completed` | INFO or ERROR | the universe/candle prefetch starts / reaches a terminal success, skip, or failure state |
 
@@ -546,12 +623,17 @@ Streamlit Scanner App/
 │   ├── url_safety.py            # Shared guardrails for server-side fetches
 │   ├── charts.py                # Lightweight Charts chart-spec builders
 │   ├── health.py                # Passive admin health snapshot (OBS-002)
+│   ├── ai_validation.py         # Strict AI-output parsing + bounded retry (AI-004)
+│   ├── ai_cache_integrity.py    # HMAC sign/verify for the AI verdict cache (PROV-003)
+│   ├── data_quality/            # Candle OHLCV validation + per-run receipt (DATA-001)
+│   │   └── candles.py          # validate_candles + CandleQualityReport
 │   ├── scanning/                # Scan lifecycle + provenance (SCAN-003 / PROV-001A)
 │   │   ├── service.py          # run_scan: create -> run -> save -> finish
 │   │   └── result_contract.py  # Typed result/provenance normalization
 │   ├── observability/           # Structured, secret-safe logging (OBS-001)
-│   ├── security/                # Secret redaction filter (SEC-002)
-│   │   └── redaction.py        # redact_text / SecretRedactionFilter / is_secret_key_name
+│   ├── security/                # Secret redaction + AI prompt-injection quarantine
+│   │   ├── redaction.py        # redact_text / SecretRedactionFilter / is_secret_key_name (SEC-002)
+│   │   └── prompt_injection.py # External-evidence quarantine for the AI agents (TEST-003)
 │   ├── fundamentals/            # Check Fundamentals subsystem
 │   │   ├── screener_in_client.py# requests + BS4 scraper (peers via HTMX,
 │   │   │                        # announcements, concall metadata)
@@ -569,7 +651,7 @@ Streamlit Scanner App/
 │   │   ├── search_client.py    # SerpAPI Google search client
 │   │   └── agent.py            # Claude Agent SDK verifier + Pydantic schemas
 │   └── storage/                 # Scan-history persistence (SCAN-001/002)
-│       ├── models.py           # scan_runs / scan_results ORM schema
+│       ├── models.py           # scan_runs (+ data_quality_json) / scan_results / ai_evaluations ORM schema
 │       ├── database.py         # Engine + session factory (SQLite/Postgres)
 │       └── repository.py       # Create/finish runs, save/read scan results
 ├── screeners/                   # One file per screener (the strategy logic)
@@ -594,6 +676,8 @@ Streamlit Scanner App/
 ├── .streamlit/
 │   ├── config.toml              # Streamlit theme
 │   └── secrets.example.toml     # Google SSO template (copy to secrets.toml)
+├── Dockerfile                    # Production Streamlit image (DEPLOY-001)
+├── .dockerignore                 # Excludes secrets/generated runtime data
 ├── data/                        # Generated at runtime (git-ignored)
 │   ├── cache/daily/             # Cached candles (Parquet)
 │   ├── cache/fundamentals/      # Cached screener.in data + agent verdicts
@@ -736,10 +820,11 @@ A persistence layer records each scan execution and its shortlisted rows so the
 app can later answer *"why was this stock shortlisted on date D?"* without
 re-running today's data, universe, or model.
 
-- **Schema (SCAN-001)** — two SQLAlchemy tables in `backend/storage/models.py`:
+- **Schema (SCAN-001)** — three SQLAlchemy tables in `backend/storage/models.py`:
   `scan_runs` (the audit header — screener, universe, params, data snapshot,
-  app/git version, status, error), `scan_results` (one row per shortlisted
-  stock), and `ai_evaluations` (approved, rejected, and error AI decisions).
+  app/git version, status, error, and the DATA-001 candle-quality receipt in
+  `data_quality_json`), `scan_results` (one row per shortlisted stock), and
+  `ai_evaluations` (approved, rejected, and error AI decisions).
 - **Database layer (SCAN-002)** — `backend/storage/database.py` (engine + short
   `session_scope()` sessions; SQLite default at `data/scanner.db`, Postgres via
   `DATABASE_URL`) and `backend/storage/repository.py` (the only query/write
@@ -771,8 +856,8 @@ re-running today's data, universe, or model.
   (secret-redacted) error message.
 
 > **Upgrading an existing checkout?** The app applies migrations automatically
-> on startup, so the database gains the `symbols_scanned` column and
-> `ai_evaluations` ledger on first run.
+> on startup, so the database gains the `symbols_scanned` column, the
+> `ai_evaluations` ledger, and the `data_quality_json` column on first run.
 > Runs recorded before the upgrade show "—" in that column — the value was not
 > stored back then.
 
@@ -919,6 +1004,8 @@ python -m bandit -r app.py backend screeners ui Dependencies -q
 python -m pip_audit -r constraints.txt
 python -m pre_commit validate-config .pre-commit-config.yaml
 python -m pre_commit run --all-files
+# CI also verifies the deployment image:
+docker build --tag streamlit-scanner-app:ci .
 ```
 
 Beginner note: `requirements-optional.txt` is intentionally separate. Those

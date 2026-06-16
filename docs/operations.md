@@ -87,6 +87,40 @@ attempt re-runs the agentic loop and consumes Agent SDK credit. SDK, CLI,
 usage-limit, and unsafe-research failures are never retried because another
 model call cannot repair them.
 
+The AI agents also **quarantine untrusted research evidence** (TEST-003): scraped
+Screener.in / SerpAPI / concall text is scanned for model-directed instructions
+before it reaches the model, and on a hit the agent fails closed with a
+`PromptInjectionEvidence` error rather than producing a verdict. These surface as
+ordinary `error` AI evaluations in `ai_evaluations`; the hostile text is never
+logged.
+
+---
+
+## Candle data quality (DATA-001)
+
+Every OHLCV frame is validated at the loader boundary before a screener runs, so
+malformed or stale vendor data cannot produce a false signal. This changes how a
+run's status should be read:
+
+- **Fatal findings** (high < low, NaN/inf, duplicate dates, negative volume,
+  missing columns) **quarantine** that symbol's frame: it is dropped from the
+  scan and the run is downgraded to `PARTIAL` — or `FAILED` if no usable symbols
+  remain. So a `PARTIAL` run may mean "bad data for some symbols", not a bug.
+- **Warning findings** (stale latest candle, large calendar gaps, suspicious
+  overnight price jumps) do **not** block scanning; they are recorded only.
+
+Where to look:
+
+- **Admin health page** → *Candle data quality* shows the newest persisted
+  receipt (checked/usable counts + a capped, redacted findings sample).
+- **Logs**: `candle_data_quality_warning` / `candle_data_quality_failed` events
+  carry the finding codes (never raw prices).
+- **Database**: each run's `scan_runs.data_quality_json` holds the full receipt
+  for that run.
+
+Stale findings tolerate a normal long weekend (see `STALE_LATEST_TOLERANCE_DAYS`),
+so a routine off-day run does not flag the whole universe as stale.
+
 ---
 
 ## Database: SQLite locally, Postgres when shared
@@ -109,6 +143,82 @@ driver used by this URL. Deployment images should use the same
 The schema is managed by Alembic; both the app and the daily job run
 `alembic upgrade head` equivalent automatically at startup. To pre-provision
 or debug: `python -m alembic upgrade head`.
+
+---
+
+## Docker / container deployment
+
+Build the production image from the repository root:
+
+```bash
+docker build -t streamlit-scanner-app .
+```
+
+The image runs `streamlit run app.py` directly, listens on `0.0.0.0:8501`, and
+stores runtime data under `DATA_DIR=/data`. It defaults to production and
+auth-required mode so a deployed container fails closed until the required
+environment and Google OIDC secrets are supplied.
+
+For a local smoke test:
+
+```bash
+docker run --rm \
+  -p 8501:8501 \
+  -e APP_ENV=development \
+  -e AUTH_REQUIRED=false \
+  -e DATA_DIR=/data \
+  -v streamlit-scanner-data:/data \
+  streamlit-scanner-app
+```
+
+For production, keep `/data` on persistent storage and point `DATABASE_URL` at
+Postgres. The inline `-e` values are placeholders for a manual run; prefer the
+host platform's managed secret/environment injection for long-lived deployments:
+
+```bash
+docker run -d --name streamlit-scanner-app \
+  -p 8501:8501 \
+  -e APP_ENV=production \
+  -e AUTH_REQUIRED=true \
+  -e DATA_DIR=/data \
+  -e DATABASE_URL=postgresql+psycopg://scanner:<password>@db-host:5432/scanner \
+  -e DHAN_CLIENT_ID=<client-id> \
+  -e DHAN_ACCESS_TOKEN=<access-token> \
+  -e ALLOWED_EMAILS=you@gmail.com \
+  -e ADMIN_EMAILS=you@gmail.com \
+  -e LOG_FORMAT=json \
+  -v streamlit-scanner-data:/data \
+  -v /absolute/path/secrets.toml:/app/.streamlit/secrets.toml:ro \
+  streamlit-scanner-app
+```
+
+Container checklist:
+
+- `DATA_DIR=/data` must be backed by a persistent Docker volume or host mount.
+- `DATABASE_URL` should be Postgres for shared/deployed use; the pinned runtime
+  install includes `psycopg[binary]`.
+- `.streamlit/secrets.toml` must be supplied by a read-only bind mount or the
+  hosting platform's secret injection. Do not bake it into the image.
+- Dhan and optional SerpAPI/Claude settings should be environment variables or
+  managed secrets, not files copied into the image.
+- The image health check reads `http://127.0.0.1:8501/_stcore/health`.
+
+Run the headless daily job with the same image and runtime configuration:
+
+```bash
+docker run --rm \
+  --entrypoint python \
+  -e APP_ENV=production \
+  -e AUTH_REQUIRED=true \
+  -e DATA_DIR=/data \
+  -e DATABASE_URL=postgresql+psycopg://scanner:<password>@db-host:5432/scanner \
+  -e DHAN_CLIENT_ID=<client-id> \
+  -e DHAN_ACCESS_TOKEN=<access-token> \
+  -v streamlit-scanner-data:/data \
+  -v /absolute/path/secrets.toml:/app/.streamlit/secrets.toml:ro \
+  streamlit-scanner-app \
+  -m backend.jobs.run_daily_scan --config config/daily_scans.yaml
+```
 
 ### Backing up scan history
 
@@ -149,6 +259,7 @@ python -m ruff check app.py backend screeners ui Dependencies tests
 python -m mypy
 python -m bandit -r app.py backend screeners ui Dependencies -q
 python -m pip_audit -r constraints.txt
+docker build --tag streamlit-scanner-app:ci .
 ```
 
 These gates were ratcheted up over several PRs (QUAL-001/002/003, REF-001).

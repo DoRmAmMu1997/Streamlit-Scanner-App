@@ -53,8 +53,27 @@ class MyScanner(BaseScanner):
             "close": float(frame["close"].iloc[-1]),
             "reason": "Plain-English why, shown in the UI and stored in history.",
             "my_metric": 1.23,
+            # PROV-002: record *why* the stock shortlisted. `build_provenance`
+            # stamps the screener key/version and is folded into the persisted
+            # `provenance_json`. Every built-in screener provides this; the
+            # reserved `provenance` column is appended automatically (do not list
+            # it in EXTRA_RESULT_COLUMNS).
+            "provenance": self.build_provenance(
+                triggered_rules=["my_rule_fired"],
+                indicator_values={
+                    "my_metric": 1.23,
+                    "close": float(frame["close"].iloc[-1]),
+                },
+                # source defaults to "deterministic"; AI/hybrid screeners pass "ai"/"hybrid".
+            ),
         }
 ```
+
+Provenance is technically optional at the persistence boundary (a row without it
+gets conservative empty defaults), but **PROV-002 expects every screener to
+supply it** so the history page can answer "why was this shortlisted?" —
+`build_provenance` requires non-empty `triggered_rules`, so it fails loudly if you
+forget the rule names.
 
 What the base class gives you for free: the per-symbol candle loop, progress
 reporting, per-symbol failure isolation (one bad stock cannot kill the scan -
@@ -128,6 +147,7 @@ python -m ruff check app.py backend screeners ui Dependencies tests
 python -m mypy
 python -m bandit -r app.py backend screeners ui Dependencies -q
 python -m pip_audit -r constraints.txt
+docker build --tag streamlit-scanner-app:ci .
 ```
 
 These are the exact CI gates. If you forked your branch a while ago, merge

@@ -6,6 +6,11 @@ on:
     branches:
       - main
 
+# Least privilege: this workflow only reads the repo (checkout + run tools), so we
+# pin the GITHUB_TOKEN to read-only here instead of inheriting broader defaults.
+permissions:
+  contents: read
+
 jobs:
   verify:
     name: Python ${{ matrix.python-version }} quality and supply-chain checks
@@ -71,3 +76,18 @@ jobs:
           # unconstrained requirements would resolve newer packages and could
           # miss a vulnerability in the versions CI actually tested.
           python -m pip_audit -r constraints.txt
+
+  # Verify the deployment image actually assembles. Developer machines may not
+  # have Docker installed, so this is the gate that catches a broken Dockerfile or
+  # an undeclared system/runtime dependency before it reaches a deployment.
+  docker-build:
+    name: Docker image build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build deployment image
+        run: docker build --tag streamlit-scanner-app:ci .
