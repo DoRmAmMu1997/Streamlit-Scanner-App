@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -27,6 +29,17 @@ def _dockerignore_entries() -> set[str]:
         for line in _read(".dockerignore").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     }
+
+
+def _compose() -> dict:
+    """Parse the checked-in Compose file as data, not just text.
+
+    Beginner note:
+    Docker Compose YAML is executable deployment configuration. Reading it with a
+    parser lets these tests assert the service graph and volume wiring directly
+    instead of relying only on fragile substring checks.
+    """
+    return yaml.safe_load(_read("docker-compose.yml"))
 
 
 def test_dockerfile_has_secure_streamlit_runtime_contract() -> None:
@@ -137,3 +150,108 @@ def test_architecture_docs_link_deployment_runtime_lld() -> None:
     assert "non-root" in lld
     assert "/_stcore/health" in lld
     assert "docker-build" in hld
+
+
+def test_docker_compose_defines_local_production_stack() -> None:
+    """DEPLOY-002 should provide a two-service local production stack.
+
+    The app service is the only thing exposed to the host. Postgres stays on the
+    private Compose network so a local database password is not also an open
+    laptop port.
+    """
+    compose = _compose()
+
+    services = compose["services"]
+    assert set(services) == {"scanner-ui", "postgres"}
+    assert set(compose["volumes"]) == {"scanner-data", "postgres-data"}
+
+    scanner = services["scanner-ui"]
+    assert scanner["build"] == {"context": ".", "dockerfile": "Dockerfile"}
+    assert scanner["ports"] == ["${SCANNER_UI_PORT:-8501}:8501"]
+    assert "scanner-data:/data" in scanner["volumes"]
+    assert (
+        "${STREAMLIT_SECRETS_FILE:-.streamlit/secrets.toml}:"
+        "/app/.streamlit/secrets.toml:ro"
+        in scanner["volumes"]
+    )
+    assert scanner["depends_on"]["postgres"]["condition"] == "service_healthy"
+
+    environment = set(scanner["environment"])
+    assert "APP_ENV=production" in environment
+    assert "AUTH_REQUIRED=true" in environment
+    assert "DATA_DIR=/data" in environment
+    assert (
+        "DATABASE_URL=postgresql+psycopg://${POSTGRES_USER:-scanner}:"
+        "${POSTGRES_PASSWORD:-scanner_dev_password_change_me}@postgres:5432/"
+        "${POSTGRES_DB:-scanner}"
+        in environment
+    )
+    assert "DHAN_CLIENT_ID=${DHAN_CLIENT_ID}" in environment
+    assert "DHAN_ACCESS_TOKEN=${DHAN_ACCESS_TOKEN}" in environment
+    assert "ALLOWED_EMAILS=${ALLOWED_EMAILS:-}" in environment
+    assert "ADMIN_EMAILS=${ADMIN_EMAILS:-}" in environment
+
+    postgres = services["postgres"]
+    assert postgres["image"] == "postgres:16-bookworm"
+    assert "ports" not in postgres
+    assert "postgres-data:/var/lib/postgresql/data" in postgres["volumes"]
+    healthcheck_command = " ".join(postgres["healthcheck"]["test"])
+    assert "pg_isready" in healthcheck_command
+    assert "$$POSTGRES_USER" in healthcheck_command
+    assert "$$POSTGRES_DB" in healthcheck_command
+
+
+def test_compose_env_template_documents_required_local_production_values() -> None:
+    """The root `.env.example` is for Compose; `Dependencies/.env.example` stays
+    as the non-container local Python template."""
+    text = _read(".env.example")
+    gitignore = _read(".gitignore")
+    dockerignore_entries = _dockerignore_entries()
+
+    assert "SCANNER_UI_PORT=8501" in text
+    assert "POSTGRES_DB=scanner" in text
+    assert "POSTGRES_USER=scanner" in text
+    assert "POSTGRES_PASSWORD=scanner_dev_password_change_me" in text
+    assert "STREAMLIT_SECRETS_FILE=.streamlit/secrets.toml" in text
+    assert "DHAN_CLIENT_ID=" in text
+    assert "DHAN_ACCESS_TOKEN=" in text
+    assert "ALLOWED_EMAILS=" in text
+    assert "ADMIN_EMAILS=" in text
+    assert "SERPAPI_API_KEY=" in text
+    assert "CLAUDE_AGENT_MODEL=claude-sonnet-4-6" in text
+    assert "SCANNER_AGENT_FAST_MODE=0" in text
+    assert "SCANNER_DHAN_FETCH_WORKERS=1" in text
+    assert "LOG_FORMAT=json" in text
+    assert "\n.env\n" in gitignore
+    assert ".env" in dockerignore_entries
+
+
+def test_docs_explain_docker_compose_local_production_workflow() -> None:
+    """README, operations, HLD, and the deployment LLD should teach the same
+    Compose workflow and make the single-container-vs-Compose distinction clear."""
+    readme = _read("README.md")
+    operations = _read("docs/operations.md")
+    architecture_index = _read("docs/architecture/README.md")
+    hld = _read("docs/architecture/high-level-design.md")
+    lld = _read("docs/architecture/components/deployment-runtime.md")
+
+    for text in (readme, operations):
+        assert "docker compose up --build" in text
+        assert "cp .env.example .env" in text
+        assert "cp .streamlit/secrets.example.toml .streamlit/secrets.toml" in text
+        assert "docker compose down" in text
+        assert "docker compose down --volumes" in text
+        assert (
+            "docker compose run --rm scanner-ui python -m "
+            "backend.jobs.run_daily_scan"
+            in text
+        )
+        assert "scanner-data" in text
+        assert "postgres-data" in text
+
+    assert "Docker Compose" in architecture_index
+    assert "scanner-ui" in hld
+    assert "postgres" in hld
+    assert "scanner-ui -> postgres" in lld
+    assert "postgres-data" in lld
+    assert "no host port" in lld.lower()

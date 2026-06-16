@@ -1,0 +1,85 @@
+# Local production-like stack for the Streamlit Scanner App (DEPLOY-002).
+#
+# Beginner note:
+# Docker Compose reads this file plus the root `.env` file. The `.env` values are
+# only interpolation inputs for Compose; the `environment:` block below is what
+# actually reaches the container process.
+
+services:
+  scanner-ui:
+    # Reuse the production image recipe from DEPLOY-001 so local Compose and
+    # single-container deploys exercise the same runtime.
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    # Expose only the Streamlit UI. Postgres deliberately has no host port below:
+    # the app reaches it on the private Compose network by the service name
+    # `postgres`, and your laptop does not get an extra open database port.
+    ports:
+      - "${SCANNER_UI_PORT:-8501}:8501"
+
+    # Wait until Postgres is accepting connections before Streamlit starts. This
+    # is not a replacement for app-level retry logic; it simply avoids the noisy
+    # first-boot race where the UI starts while the database is still initializing.
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    environment:
+      - APP_ENV=production
+      - AUTH_REQUIRED=true
+      - DATA_DIR=/data
+      - DATABASE_URL=postgresql+psycopg://${POSTGRES_USER:-scanner}:${POSTGRES_PASSWORD:-scanner_dev_password_change_me}@postgres:5432/${POSTGRES_DB:-scanner}
+      - DHAN_CLIENT_ID=${DHAN_CLIENT_ID}
+      - DHAN_ACCESS_TOKEN=${DHAN_ACCESS_TOKEN}
+      - ALLOWED_EMAILS=${ALLOWED_EMAILS:-}
+      - ADMIN_EMAILS=${ADMIN_EMAILS:-}
+      - LOG_LEVEL=${LOG_LEVEL:-WARNING}
+      - LOG_FORMAT=${LOG_FORMAT:-json}
+      - SERPAPI_API_KEY=${SERPAPI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - CLAUDE_AGENT_MODEL=${CLAUDE_AGENT_MODEL:-claude-sonnet-4-6}
+      - SCANNER_AGENT_FAST_MODE=${SCANNER_AGENT_FAST_MODE:-0}
+      - SCANNER_AI_MAX_ATTEMPTS=${SCANNER_AI_MAX_ATTEMPTS:-2}
+      - SCANNER_DHAN_FETCH_WORKERS=${SCANNER_DHAN_FETCH_WORKERS:-1}
+      - SCANNER_DHAN_REQUEST_DELAY_SECONDS=${SCANNER_DHAN_REQUEST_DELAY_SECONDS:-0.5}
+      - SCANNER_DHAN_RATE_LIMIT_RETRY_DELAYS=${SCANNER_DHAN_RATE_LIMIT_RETRY_DELAYS:-2,5,10}
+      - SCANNER_SCREENER_IN_DELAY_SECONDS=${SCANNER_SCREENER_IN_DELAY_SECONDS:-1.5}
+      - SCANNER_FUNDAMENTALS_TTL_DAYS=${SCANNER_FUNDAMENTALS_TTL_DAYS:-30}
+
+    volumes:
+      # App-generated data (candle cache, fundamentals cache, local artifacts)
+      # lives separately from Postgres data so you can reset one without wiping
+      # the other.
+      - scanner-data:/data
+      # Streamlit OIDC secrets stay outside the image. Mounting them read-only
+      # prevents accidentally baking Google client secrets into a Docker layer.
+      - "${STREAMLIT_SECRETS_FILE:-.streamlit/secrets.toml}:/app/.streamlit/secrets.toml:ro"
+
+  postgres:
+    image: postgres:16-bookworm
+
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-scanner}
+      - POSTGRES_USER=${POSTGRES_USER:-scanner}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-scanner_dev_password_change_me}
+
+    # No `ports:` on purpose. Other Compose services can reach this database at
+    # `postgres:5432`; host tools can use `docker compose exec postgres psql ...`
+    # when needed without exposing the database to the whole host network.
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+    healthcheck:
+      # The double-dollar syntax is intentional: Compose converts `$$` to `$`
+      # inside the container so Postgres sees its own runtime env variables.
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  scanner-data:
+  postgres-data:

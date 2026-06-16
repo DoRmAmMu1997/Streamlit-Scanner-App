@@ -148,6 +148,78 @@ or debug: `python -m alembic upgrade head`.
 
 ## Docker / container deployment
 
+### Local production mode with Docker Compose
+
+Use Compose when you want the app and database to run locally the same way they
+would in a small production deployment:
+
+```bash
+cp .env.example .env
+cp .streamlit/secrets.example.toml .streamlit/secrets.toml
+```
+
+Edit `.env` with real Dhan credentials and either `ADMIN_EMAILS` or
+`ALLOWED_EMAILS`, then edit `.streamlit/secrets.toml` with the Google OIDC
+client details. Secrets stay in local files: `docker-compose.yml` mounts
+`.streamlit/secrets.toml` read-only at `/app/.streamlit/secrets.toml` instead of
+baking it into the image.
+
+Start the stack:
+
+```bash
+docker compose up --build
+```
+
+The two long-lived services are:
+
+- `scanner-ui` - builds the local `Dockerfile`, listens on
+  `${SCANNER_UI_PORT:-8501}:8501`, runs with `APP_ENV=production`,
+  `AUTH_REQUIRED=true`, and stores app-generated files under `/data`.
+- `postgres` - runs `postgres:16-bookworm` on the private Compose network with
+  no host port. The UI reaches it through
+  `postgresql+psycopg://...@postgres:5432/...`.
+
+The volumes are intentionally separate:
+
+- `scanner-data` backs `/data` for candle caches, fundamentals caches, and any
+  local fallback artifacts.
+- `postgres-data` backs `/var/lib/postgresql/data` so scan history survives
+  container replacement.
+
+Stop the stack without deleting those volumes:
+
+```bash
+docker compose down
+```
+
+Delete the containers and both named volumes when you deliberately want a clean
+local production environment:
+
+```bash
+docker compose down --volumes
+```
+
+Run the daily job against the same Postgres database and `/data` volume:
+
+```bash
+docker compose run --rm scanner-ui python -m backend.jobs.run_daily_scan --config config/daily_scans.yaml
+```
+
+Troubleshooting notes:
+
+- `docker compose config` prints the fully interpolated stack and catches a
+  missing or malformed `.env` before containers start. Once `.env` contains real
+  credentials, treat that output as sensitive and do not paste it into tickets or
+  chat.
+- `docker compose ps` shows whether `postgres` is healthy; the UI waits for that
+  health check before booting to avoid first-start database races.
+- `docker compose logs scanner-ui` is the fastest place to check production
+  config failures, auth setup errors, or migration failures.
+- Use `docker compose exec postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"`
+  if you need a database shell; there is no host `5432` exposure by design.
+
+### Single-container image checks
+
 Build the production image from the repository root:
 
 ```bash
@@ -229,6 +301,17 @@ method:
 sqlite3 data/scanner.db ".backup data/scanner-backup.db"
 ```
 
+Compose/Postgres: keep `postgres-data` as the durable volume and back it up with
+Postgres tooling rather than copying live database files:
+
+```bash
+docker compose exec postgres pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" > scanner.sql
+```
+
+For a local restore into a fresh Compose database, start from
+`docker compose down --volumes`, bring the stack back up, then load the dump with
+`docker compose exec -T postgres psql -U "$POSTGRES_USER" "$POSTGRES_DB" < scanner.sql`.
+
 The candle cache (`data/cache/daily/*.parquet`) is *re-downloadable* and does
 not need backup; the scan-history database is the part you cannot regenerate.
 
@@ -260,6 +343,9 @@ python -m mypy
 python -m bandit -r app.py backend screeners ui Dependencies -q
 python -m pip_audit -r constraints.txt
 docker build --tag streamlit-scanner-app:ci .
+docker compose config
+docker compose up --build --wait --wait-timeout 180
+docker compose down --volumes --remove-orphans
 ```
 
 These gates were ratcheted up over several PRs (QUAL-001/002/003, REF-001).
