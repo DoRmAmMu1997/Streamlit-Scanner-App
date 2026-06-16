@@ -6,6 +6,8 @@ on:
     branches:
       - main
 
+# Least privilege: this workflow only reads the repo (checkout + run tools), so we
+# pin the GITHUB_TOKEN to read-only here instead of inheriting broader defaults.
 permissions:
   contents: read
 
@@ -75,6 +77,9 @@ jobs:
           # miss a vulnerability in the versions CI actually tested.
           python -m pip_audit -r constraints.txt
 
+  # Verify the deployment image actually assembles. Developer machines may not
+  # have Docker installed, so this is the gate that catches a broken Dockerfile or
+  # an undeclared system/runtime dependency before it reaches a deployment.
   docker-build:
     name: Docker image build
     runs-on: ubuntu-latest

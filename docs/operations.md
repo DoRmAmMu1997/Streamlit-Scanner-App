@@ -87,6 +87,40 @@ attempt re-runs the agentic loop and consumes Agent SDK credit. SDK, CLI,
 usage-limit, and unsafe-research failures are never retried because another
 model call cannot repair them.
 
+The AI agents also **quarantine untrusted research evidence** (TEST-003): scraped
+Screener.in / SerpAPI / concall text is scanned for model-directed instructions
+before it reaches the model, and on a hit the agent fails closed with a
+`PromptInjectionEvidence` error rather than producing a verdict. These surface as
+ordinary `error` AI evaluations in `ai_evaluations`; the hostile text is never
+logged.
+
+---
+
+## Candle data quality (DATA-001)
+
+Every OHLCV frame is validated at the loader boundary before a screener runs, so
+malformed or stale vendor data cannot produce a false signal. This changes how a
+run's status should be read:
+
+- **Fatal findings** (high < low, NaN/inf, duplicate dates, negative volume,
+  missing columns) **quarantine** that symbol's frame: it is dropped from the
+  scan and the run is downgraded to `PARTIAL` — or `FAILED` if no usable symbols
+  remain. So a `PARTIAL` run may mean "bad data for some symbols", not a bug.
+- **Warning findings** (stale latest candle, large calendar gaps, suspicious
+  overnight price jumps) do **not** block scanning; they are recorded only.
+
+Where to look:
+
+- **Admin health page** → *Candle data quality* shows the newest persisted
+  receipt (checked/usable counts + a capped, redacted findings sample).
+- **Logs**: `candle_data_quality_warning` / `candle_data_quality_failed` events
+  carry the finding codes (never raw prices).
+- **Database**: each run's `scan_runs.data_quality_json` holds the full receipt
+  for that run.
+
+Stale findings tolerate a normal long weekend (see `STALE_LATEST_TOLERANCE_DAYS`),
+so a routine off-day run does not flag the whole universe as stale.
+
 ---
 
 ## Database: SQLite locally, Postgres when shared

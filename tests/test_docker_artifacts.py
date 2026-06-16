@@ -1,3 +1,13 @@
+"""Contract tests for the DEPLOY-001 Docker artifacts and their docs.
+
+These are deliberately *string-level* checks against the checked-in files
+(`Dockerfile`, `.dockerignore`, README/operations, the architecture docs) — they
+need no Docker daemon, so they run in the normal pytest suite on any machine.
+Actually *building* the image is verified separately by the CI `docker-build`
+job. The point of these tests is to lock the contract in place: if someone edits
+the Dockerfile or moves a doc section, a mismatch fails here loudly.
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -6,10 +16,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _read(path: str) -> str:
+    """Read a repo-relative text file (resolved against the repo root)."""
     return (REPO_ROOT / path).read_text(encoding="utf-8")
 
 
 def _dockerignore_entries() -> set[str]:
+    """Return the non-comment, non-blank patterns from `.dockerignore` as a set."""
     return {
         line.strip()
         for line in _read(".dockerignore").splitlines()
@@ -18,6 +30,9 @@ def _dockerignore_entries() -> set[str]:
 
 
 def test_dockerfile_has_secure_streamlit_runtime_contract() -> None:
+    """Lock the Dockerfile's key choices: slim base, constrained install, non-root
+    user, production/auth defaults, exposed port, health check, the `streamlit run`
+    entrypoint, and no local-path leakage."""
     dockerfile = _read("Dockerfile")
 
     assert "FROM python:3.11-slim-bookworm" in dockerfile
@@ -46,6 +61,8 @@ def test_dockerfile_has_secure_streamlit_runtime_contract() -> None:
 
 
 def test_dockerignore_excludes_secrets_and_generated_runtime_state() -> None:
+    """Ensure secrets, generated broker/cache/DB files, and dev caches stay out of
+    the build context, while the tracked Hemant universe CSVs are re-included."""
     entries = _dockerignore_entries()
 
     required_entries = {
@@ -80,6 +97,8 @@ def test_dockerignore_excludes_secrets_and_generated_runtime_state() -> None:
 
 
 def test_readme_and_operations_document_docker_runtime() -> None:
+    """The README and operations runbook must keep the documented Docker workflow
+    (build, local smoke run, production run, daily-job entrypoint) in sync."""
     readme = _read("README.md")
     operations = _read("docs/operations.md")
 
@@ -103,6 +122,8 @@ def test_readme_and_operations_document_docker_runtime() -> None:
 
 
 def test_architecture_docs_link_deployment_runtime_lld() -> None:
+    """The architecture index + HLD must link the deployment-runtime LLD, and that
+    LLD must describe the core runtime contract (image, port, /data, health)."""
     architecture_index = _read("docs/architecture/README.md")
     hld = _read("docs/architecture/high-level-design.md")
     lld = _read("docs/architecture/components/deployment-runtime.md")
