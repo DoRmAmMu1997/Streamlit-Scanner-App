@@ -5,7 +5,7 @@
 | **Component** | Scan-run persistence (engine, session, repository, migrations) |
 | **Source** | [`backend/storage/models.py`](../../../backend/storage/models.py), [`backend/storage/database.py`](../../../backend/storage/database.py), [`backend/storage/repository.py`](../../../backend/storage/repository.py), [`migrations/`](../../../migrations) |
 | **Layer** | Persistence (`backend/`) |
-| **Status** | Stable (SCAN-001 schema · SCAN-002 DB layer · SCAN-004 `symbols_scanned` · PROV-003 `ai_evaluations`) |
+| **Status** | Stable (SCAN-001 schema · SCAN-002 DB layer · SCAN-004 `symbols_scanned` · PROV-003 `ai_evaluations` · OBS-003 `audit_logs`/`app_config`) |
 | **Related** | **[scan-run-persistence.md](../scan-run-persistence.md)** (full SCAN-001 design) · [scan-002-handoff.md](../scan-002-handoff.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [ui-pages.md](ui-pages.md) · [HLD](../high-level-design.md) |
 
 > **This LLD summarizes the *current* persistence layer and how it is used.** The
@@ -20,7 +20,7 @@ Record every scan execution and its shortlisted rows so the app can later answer
 universe, or model.
 
 **Three sub-layers (strict direction):**
-1. **`models.py`** — table *shapes* only (`Base`, `ScanRun`, `ScanResult`, `AIEvaluation`, `ScanStatus`, `BigIntPrimaryKey`). No connections.
+1. **`models.py`** — table *shapes* only (`Base`, `ScanRun`, `ScanResult`, `AIEvaluation`, `AuditLog`, `AppConfig`, `ScanStatus`, `BigIntPrimaryKey`). No connections.
 2. **`database.py`** — *where* data lives: engine, `SessionLocal`, `session_scope()`, SQLite pragmas, `ensure_database_schema()` (auto-migrate).
 3. **`repository.py`** — the *only* place that builds queries; typed read/write helpers. Does **not** own sessions.
 
@@ -48,6 +48,12 @@ flowchart TD
 
 Indexes: `scan_runs(status, screener_key, universe_key)`, `scan_results(run_id, symbol)`, `ai_evaluations(run_id, symbol, outcome)`.
 
+**OBS-003 standalone tables** (no FK to `scan_runs`):
+- `audit_logs` (user-action trail): `id`, `created_at` (tz-aware UTC), `event` (String), `user_email` (nullable — NULL for system actions), `metadata_json` (redacted). Indexes on `created_at`, `event`, `user_email`.
+- `app_config` (admin runtime overrides): `key` (PK env-var name), `value` (Text), `updated_at`, `updated_by`.
+
+Full design: [obs-003-audit-log.md](../obs-003-audit-log.md).
+
 ## 4. Public interface (`repository.py`)
 
 | Function | Contract |
@@ -61,6 +67,10 @@ Indexes: `scan_runs(status, screener_key, universe_key)`, `scan_results(run_id, 
 | `get_ai_evaluations(session, run_id)` | AI receipts for a run, ordered `(symbol, id)`. |
 | `count_scan_results_for_runs(session, run_ids)` | One grouped COUNT; every id present (0 default). |
 | `list_distinct_{screener,universe}_keys`, `list_distinct_triggered_by_values` | History-page filter options (read from history, not the live registry). |
+| `create_audit_log_entry(session, *, event, user_email, metadata)` | Insert one `audit_logs` row; metadata routed through `normalize_secret_safe_json` (OBS-003). |
+| `get_recent_audit_logs(session, limit=100, *, event, user_email)` | Newest-first audit rows; optional event + case-insensitive email filters; `(created_at desc, id desc)` order. |
+| `list_distinct_audit_events(session)` | Distinct event names for the audit viewer's filter. |
+| `get_config_overrides(session)` / `set_config_override(session, *, key, value, updated_by)` | Read all overrides as `{key: value}`; upsert one and return the previous value (OBS-003). |
 
 Type-coercion helpers (`_as_date`, `_as_decimal`, `_as_optional_str`, `_is_missing`, plus `_full_sha256`/`_as_utc_datetime` for receipts) keep typed columns strongly typed; `normalize_secret_safe_json` (from `result_contract`) makes every JSON blob JSON-safe + secret-masked (Decimal→str, dates→ISO, NumPy `.item()`, NaN→NULL).
 
@@ -78,7 +88,7 @@ Type-coercion helpers (`_as_date`, `_as_decimal`, `_as_optional_str`, `_is_missi
 
 ## 6. Migrations
 
-[`migrations/`](../../../migrations) (root-level, kept out of the lint target). Four revisions, chained linearly: `…scan002_create_scan_runs_and_scan_results` → `…scan004_add_symbols_scanned_to_scan_runs` → `…prov003_create_ai_evaluations` → `…data001_add_scan_run_data_quality` (DATA-001, adds nullable `scan_runs.data_quality_json`). `migrations/env.py` reads the URL from `get_database_url()` (no hardcoded URL). A drift test guards ORM-vs-migration sync.
+[`migrations/`](../../../migrations) (root-level, kept out of the lint target). Five revisions, chained linearly: `…scan002_create_scan_runs_and_scan_results` → `…scan004_add_symbols_scanned_to_scan_runs` → `…prov003_create_ai_evaluations` → `…data001_add_scan_run_data_quality` (DATA-001, adds nullable `scan_runs.data_quality_json`) → `…obs003_create_audit_logs` (OBS-003, creates `audit_logs` + `app_config`). `migrations/env.py` reads the URL from `get_database_url()` (no hardcoded URL). A drift test guards ORM-vs-migration sync.
 
 ## 7. Failure modes
 
@@ -92,7 +102,8 @@ Type-coercion helpers (`_as_date`, `_as_decimal`, `_as_optional_str`, `_is_missi
 - [`tests/test_scan_persistence_models.py`](../../../tests/test_scan_persistence_models.py) — schema round-trip, enum value, Decimal precision, cascade.
 - [`tests/test_scan_storage_database.py`](../../../tests/test_scan_storage_database.py) — engine/pragmas/session_scope.
 - [`tests/test_scan_storage_repository.py`](../../../tests/test_scan_storage_repository.py) — CRUD + filters.
-- [`tests/test_scan_storage_migrations.py`](../../../tests/test_scan_storage_migrations.py) — `alembic upgrade head` + drift guard.
+- [`tests/test_scan_storage_migrations.py`](../../../tests/test_scan_storage_migrations.py) — `alembic upgrade head` + drift guard (covers `audit_logs`/`app_config`).
+- [`tests/test_audit_repository.py`](../../../tests/test_audit_repository.py) — OBS-003 audit + config-override CRUD, filters, redaction.
 
 ## 9. Extension points
 

@@ -64,6 +64,16 @@ EVENT_CANDLE_DATA_QUALITY_FAILED = "candle_data_quality_failed"
 EVENT_AUTH_DENIED = "auth_denied"
 EVENT_DATA_REFRESH_STARTED = "data_refresh_started"
 EVENT_DATA_REFRESH_COMPLETED = "data_refresh_completed"
+# OBS-003 audit-trail events. These name the user actions persisted to the
+# ``audit_logs`` table (and also emitted here so they appear in normal logs).
+# ``login_denied`` is the audit-trail name for a rejected sign-in; the existing
+# ``auth_denied`` log event above stays for log-only diagnostics.
+EVENT_LOGIN_SUCCESS = "login_success"
+EVENT_LOGIN_DENIED = "login_denied"
+EVENT_MANUAL_SCAN_STARTED = "manual_scan_started"
+EVENT_CONFIG_CHANGED = "config_changed"
+EVENT_EXPORT_DOWNLOADED = "export_downloaded"
+EVENT_ADMIN_PAGE_ACCESSED = "admin_page_accessed"
 
 # The custom attributes we attach to each ``logging.LogRecord``. Kept as private
 # constants so ``log_event`` and both formatters agree on the exact names. Neither
@@ -81,16 +91,22 @@ _TEXT_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 ExceptionInfo = tuple[type[BaseException], BaseException, TracebackType]
 
 __all__ = [
+    "EVENT_ADMIN_PAGE_ACCESSED",
     "EVENT_AUTH_DENIED",
     "EVENT_CANDLE_DATA_QUALITY_FAILED",
     "EVENT_CANDLE_DATA_QUALITY_WARNING",
+    "EVENT_CONFIG_CHANGED",
     "EVENT_DAILY_JOB_COMPLETED",
     "EVENT_DAILY_JOB_CONFIG_INVALID",
     "EVENT_DAILY_JOB_CONFIG_LOADED",
     "EVENT_DAILY_JOB_STARTED",
     "EVENT_DATA_REFRESH_COMPLETED",
     "EVENT_DATA_REFRESH_STARTED",
+    "EVENT_EXPORT_DOWNLOADED",
     "EVENT_EXTERNAL_API_FAILED",
+    "EVENT_LOGIN_DENIED",
+    "EVENT_LOGIN_SUCCESS",
+    "EVENT_MANUAL_SCAN_STARTED",
     "EVENT_SCAN_COMPLETED",
     "EVENT_SCAN_FAILED",
     "EVENT_SCAN_PARTIAL",

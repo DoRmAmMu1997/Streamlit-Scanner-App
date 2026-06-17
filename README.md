@@ -612,6 +612,15 @@ same secret redactor used elsewhere in the app.
 | `candle_data_quality_failed` | WARNING | a frame is quarantined for a fatal quality finding before scanning (DATA-001; finding codes only) |
 | `auth_denied` | WARNING | a signed-in email is not on the allowlist (logs the email, never the allowlist) |
 | `data_refresh_started` / `data_refresh_completed` | INFO or ERROR | the universe/candle prefetch starts / reaches a terminal success, skip, or failure state |
+| `login_success` / `login_denied` | INFO or WARNING | a sign-in is accepted / rejected (OBS-003 audit; also persisted to `audit_logs`) |
+| `manual_scan_started` | INFO | a user presses **Run screener** (OBS-003 audit; distinct from the service `scan_started`) |
+| `config_changed` | INFO | an admin changes a runtime setting via the settings form (OBS-003 audit; old/new redacted) |
+| `export_downloaded` | INFO | a results/history CSV is downloaded (OBS-003 audit) |
+| `admin_page_accessed` | INFO | an admin opens an admin page (OBS-003 audit; once per page per session) |
+
+The last five events are the OBS-003 **audit trail** — emitted to the log stream
+*and* written to a durable `audit_logs` table. See
+[Audit log](#audit-log-obs-003) below.
 
 **Plain text vs JSON.** `LOG_FORMAT` controls rendering:
 
@@ -649,12 +658,14 @@ Streamlit Scanner App/
 ├── requirements-dev.txt         # Local verification tools
 ├── constraints.txt              # Verified direct dependency pins
 ├── alembic.ini                  # Alembic config for scan-history migrations
-├── migrations/                  # Alembic migration scripts (scan-history schema)
+├── migrations/                  # Alembic migration scripts (scan-history + audit log schema)
 ├── docs/                        # Project documentation
 │   ├── operations.md            # Operations / runbook guide
 │   ├── adding-a-screener.md     # Screener authoring walkthrough
 │   └── architecture/            # HLD + per-component LLDs + 2026-06 audit register (start at README.md)
 ├── backend/                     # Data + infrastructure (no strategy logic)
+│   ├── admin/                   # Admin runtime-config override service (OBS-003)
+│   ├── audit/                   # Best-effort, secret-safe audit recorder (OBS-003)
 │   ├── auth/                    # Streamlit OIDC login/session gate
 │   ├── config/                  # Runtime settings package + legacy exports
 │   ├── dhan_client.py           # DhanHQ API wrapper
@@ -695,10 +706,10 @@ Streamlit Scanner App/
 │   │   ├── shortlister.py      # Deterministic 67% drawdown gate
 │   │   ├── search_client.py    # SerpAPI Google search client
 │   │   └── agent.py            # Claude Agent SDK verifier + Pydantic schemas
-│   └── storage/                 # Scan-history persistence (SCAN-001/002)
-│       ├── models.py           # scan_runs (+ data_quality_json) / scan_results / ai_evaluations ORM schema
+│   └── storage/                 # Scan-history persistence (SCAN-001/002) + audit log (OBS-003)
+│       ├── models.py           # scan_runs / scan_results / ai_evaluations / audit_logs / app_config ORM schema
 │       ├── database.py         # Engine + session factory (SQLite/Postgres)
-│       └── repository.py       # Create/finish runs, save/read scan results
+│       └── repository.py       # Create/finish runs, save/read results + audit/config helpers
 ├── screeners/                   # One file per screener (the strategy logic)
 │   ├── heikin_ashi_supertrend.py
 │   ├── bollinger_band_reversal.py
@@ -714,7 +725,9 @@ Streamlit Scanner App/
 │   ├── common.py               # Shared helpers (emoji badges, CSV-safe, redaction)
 │   ├── chart_cache.py          # Per-session rendered-chart cache
 │   ├── history_page.py         # Scan history view (SCAN-004)
-│   └── health_page.py          # Admin health view (OBS-002)
+│   ├── health_page.py          # Admin health view (OBS-002)
+│   ├── audit_page.py           # Admin audit log viewer (OBS-003)
+│   └── config_page.py          # Admin runtime settings form (OBS-003)
 ├── Dependencies/
 │   ├── .env.example             # Credential template (copy to .env)
 │   └── dhan_token_setup.py      # One-time OAuth token helper
@@ -960,6 +973,41 @@ verdict-plus-receipt envelope. The 67 Ka Funda research collector rejects
 model-directed instructions in external evidence and never persists raw model
 responses or scraped snippets; result summaries use sanitized source
 labels/domains.
+
+---
+
+## Audit log (OBS-003)
+
+Important user actions are recorded to a durable, queryable **audit log** so an
+operator can later answer *"who exported that file?"* or *"when was the log level
+changed, and by whom?"* Every audit row carries the **user email**, a UTC
+**timestamp**, **action metadata**, and has **sensitive values redacted**.
+
+- **Schema** — two SQLAlchemy tables in `backend/storage/models.py`: `audit_logs`
+  (the trail — `event`, `user_email`, `created_at`, redacted `metadata_json`) and
+  `app_config` (admin runtime-config overrides). They are created by the
+  `…obs003_create_audit_logs` Alembic migration and apply automatically on
+  startup.
+- **Recorder** — `backend/audit` writes each event to the `audit_logs` table
+  **and** emits the matching structured log event. Recording is **best-effort**
+  (a database hiccup never breaks the user's action) and routes metadata through
+  the same redactor as scan provenance, so a token can never become durable audit
+  evidence. System actions that run before sign-in (the startup data refresh)
+  record `user_email` as `system`.
+- **Events recorded** — `login_success`, `login_denied`, `manual_scan_started`,
+  `data_refresh_started`, `config_changed`, `export_downloaded`, and
+  `admin_page_accessed` (see the event table under
+  [Observability & logging](#observability--logging)).
+- **Admin pages** — admins gain two views in the top selector (alongside Admin
+  health): **Audit log** (browse/filter the trail) and **Admin settings** (change
+  the operational settings `LOG_LEVEL` / `LOG_FORMAT` at runtime). A settings
+  change is validated, persisted to `app_config`, applied immediately
+  (`get_settings()` reads the environment live), and recorded as `config_changed`.
+  Only those non-secret operational keys are editable — credentials and auth/infra
+  settings are deliberately out of scope.
+
+Full design: [`docs/architecture/obs-003-audit-log.md`](docs/architecture/obs-003-audit-log.md)
+and the LLD [`docs/architecture/components/audit-log.md`](docs/architecture/components/audit-log.md).
 
 ## Adding your own screener
 

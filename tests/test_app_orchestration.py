@@ -353,6 +353,7 @@ def test_main_bootstraps_schema_after_auth_and_before_view_selection(monkeypatch
             title=lambda *_args, **_kwargs: None,
             caption=lambda *_args, **_kwargs: None,
             radio=stop_at_view,
+            session_state={},
         ),
     )
 
@@ -370,7 +371,13 @@ def test_admin_health_view_is_available_and_returns_before_screener_discovery(
     calls: list[str] = []
 
     def choose_admin_health(_label, options, **_kwargs):
-        assert options == ("Scanner", "Scan history", "Admin health")
+        assert options == (
+            "Scanner",
+            "Scan history",
+            "Admin health",
+            "Admin settings",
+            "Audit log",
+        )
         calls.append("view")
         return "Admin health"
 
@@ -412,6 +419,7 @@ def test_admin_health_view_is_available_and_returns_before_screener_discovery(
             title=lambda *_args, **_kwargs: None,
             caption=lambda *_args, **_kwargs: None,
             radio=choose_admin_health,
+            session_state={},
         ),
     )
 
@@ -461,6 +469,7 @@ def test_non_admin_cannot_select_admin_health(monkeypatch):
             title=lambda *_args, **_kwargs: None,
             caption=lambda *_args, **_kwargs: None,
             radio=choose_scanner,
+            session_state={},
         ),
     )
 
@@ -623,6 +632,7 @@ def test_main_skips_auth_gate_when_auth_not_required(monkeypatch):
             # SCAN-004 added a view switcher; staying on "Scanner" lets main()
             # continue to the discovery call this test watches for.
             radio=lambda *_args, **_kwargs: "Scanner",
+            session_state={},
         ),
     )
 

@@ -48,7 +48,9 @@ the **design, the migration plan, and the model boundaries**.
 - Full AI verdict/evidence provenance → **PROV-003** *(implemented for the
   Technical Analysis and 67 Ka Funda screeners through the `ai_evaluations`
   ledger and approved-result receipts)*.
-- Populating `final_score` → **RANK-***. Audit log / user identity → **OBS-003 / AUTH-***.
+- Populating `final_score` → **RANK-***. User-action audit log → **OBS-003** *(implemented:
+  standalone `audit_logs` + `app_config` tables on this same `Base` — see
+  [obs-003-audit-log.md](obs-003-audit-log.md))*; per-user identity/roles → **AUTH-***.
 
 The starter models intentionally stop at "schema only" so this design can be reviewed and
 agreed before the implementation tickets wire a database into the app.

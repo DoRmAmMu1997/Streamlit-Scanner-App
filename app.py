@@ -38,6 +38,8 @@ import streamlit as st
 import streamlit.components.v1 as components
 from streamlit.runtime.scriptrunner import get_script_run_ctx
 
+from backend.admin import apply_config_overrides
+from backend.audit import record_audit_event, should_record_once
 from backend.auth.session import (
     AuthenticatedUser,
     auth_secret_values,
@@ -65,8 +67,12 @@ from backend.fundamentals import (
     FundamentalsUsageLimitError,
 )
 from backend.observability import (
+    EVENT_ADMIN_PAGE_ACCESSED,
     EVENT_DATA_REFRESH_COMPLETED,
     EVENT_DATA_REFRESH_STARTED,
+    EVENT_EXPORT_DOWNLOADED,
+    EVENT_LOGIN_SUCCESS,
+    EVENT_MANUAL_SCAN_STARTED,
     configure_logging,
     log_event,
 )
@@ -92,6 +98,7 @@ from backend.universe_loader import (
 # test suite (and any external caller) accesses them as `app.<name>`, and
 # main() calls the page renderers through these module globals so tests can
 # monkeypatch `app._render_history_page` and friends.
+from ui.audit_page import _render_audit_log_page
 from ui.chart_cache import (  # noqa: F401
     _CHART_HTML_CACHE_LIMIT,
     _CHART_HTML_CACHE_STATE_KEY,
@@ -113,6 +120,7 @@ from ui.common import (  # noqa: F401
     _escape_cell,
     _redact_secrets,
 )
+from ui.config_page import _render_config_page
 from ui.health_page import (  # noqa: F401
     _cached_admin_health_snapshot,
     _format_bytes,
@@ -206,9 +214,12 @@ def prefetch_data_assets() -> None:
     install_secret_redaction_filter(logging.getLogger())
     ensure_project_dirs()
 
-    # OBS-001: mark the start of a data refresh. The matching data_refresh_completed
-    # events below report how it ended (ok / skipped / no credentials).
-    log_event(logger, EVENT_DATA_REFRESH_STARTED)
+    # OBS-001/OBS-003: mark the start of a data refresh. The matching
+    # data_refresh_completed events below report how it ended (ok / skipped / no
+    # credentials). The recorder also writes a system audit row (no signed-in
+    # user — the prefetch runs before the UI/auth boot) best-effort, so a fresh
+    # checkout without a migrated database simply skips the durable row.
+    record_audit_event(event=EVENT_DATA_REFRESH_STARTED, user_email=None)
 
     print("[prefetch] Refreshing Dhan instrument master and universe CSVs...", flush=True)
     try:
@@ -878,6 +889,23 @@ def _configure_logging() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _record_admin_page_access(
+    authenticated_user: AuthenticatedUser | None, page: str
+) -> None:
+    """Record admin_page_accessed once per admin page per session (OBS-003).
+
+    Streamlit reruns the script on every interaction, so without the session
+    dedup an admin idling on a page would mint a new audit row each rerun.
+    """
+    email = authenticated_user.email if authenticated_user is not None else None
+    if should_record_once(st.session_state, f"_audit_admin_page:{page}"):
+        record_audit_event(
+            event=EVENT_ADMIN_PAGE_ACCESSED,
+            user_email=email,
+            metadata={"page": page},
+        )
+
+
 def main() -> None:
     """Run the Streamlit app after validating runtime settings.
 
@@ -924,12 +952,35 @@ def main() -> None:
     authenticated_user: AuthenticatedUser | None = None
     if settings.auth_required:
         authenticated_user = require_authorized_user(st)
+        # OBS-003: record a successful sign-in once per browser session. main()
+        # re-runs on every interaction, so the session dedup keeps exactly one
+        # login_success row per signed-in session instead of one per rerun.
+        if should_record_once(
+            st.session_state, f"_audit_login:{authenticated_user.email}"
+        ):
+            record_audit_event(
+                event=EVENT_LOGIN_SUCCESS, user_email=authenticated_user.email
+            )
+
+    # OBS-003: stash the signed-in email so export handlers in the Scanner and
+    # Scan history views (which do not receive the user object) can attribute a
+    # download. None when auth is disabled — those exports record as system.
+    st.session_state["_audit_user_email"] = (
+        authenticated_user.email if authenticated_user is not None else None
+    )
 
     # Scan history needs the SCAN-002 schema. Apply migrations only after the
     # authorization gate: opening an unauthenticated browser tab must not be
     # enough to create a database connection or run DDL. This still happens
     # before either app view reads or writes scan-history tables.
     ensure_database_schema()
+
+    # OBS-003: replay admin-set runtime overrides (e.g. LOG_LEVEL) now that the
+    # schema exists and we are past the auth gate, then refresh logging so a
+    # changed level/format takes effect on this run. get_settings() reads
+    # os.environ live, so the override is picked up everywhere after this point.
+    apply_config_overrides()
+    _configure_logging()
 
     # SCAN-004: one radio switches between the live scanner and the history
     # audit view. It sits after the auth gate (so history inherits the same
@@ -939,7 +990,9 @@ def main() -> None:
     if authenticated_user is not None and getattr(
         authenticated_user, "is_admin", False
     ):
-        view_options.append("Admin health")
+        # OBS-003 adds two admin pages alongside the OBS-002 health view: a
+        # runtime settings form and the audit log viewer.
+        view_options.extend(["Admin health", "Admin settings", "Audit log"])
 
     view = st.radio(
         "View",
@@ -952,7 +1005,16 @@ def main() -> None:
         _render_history_page()
         return
     if view == "Admin health":
+        _record_admin_page_access(authenticated_user, "Admin health")
         _render_admin_health_page(authenticated_user)
+        return
+    if view == "Admin settings":
+        _record_admin_page_access(authenticated_user, "Admin settings")
+        _render_config_page(authenticated_user)
+        return
+    if view == "Audit log":
+        _record_admin_page_access(authenticated_user, "Audit log")
+        _render_audit_log_page(authenticated_user)
         return
 
     try:
@@ -983,6 +1045,17 @@ def main() -> None:
     #   simply re-render from `scan_cache` so the user does not lose state.
     # - Switching screeners invalidates the cache via the key mismatch check.
     if st.session_state.pop("pending_run", False):
+        # OBS-003: the user explicitly pressed Run. Record the manual action
+        # (edge-triggered by the button, so no dedup is needed). This is distinct
+        # from the service-level scan_started lifecycle event, which also fires
+        # for the headless daily job.
+        record_audit_event(
+            event=EVENT_MANUAL_SCAN_STARTED,
+            user_email=(
+                authenticated_user.email if authenticated_user is not None else None
+            ),
+            metadata={"screener_key": selected.key, "universe_key": selected.universe},
+        )
         cache = _execute_screener(
             selected,
             triggered_by=_scan_trigger(authenticated_user),
@@ -1219,12 +1292,24 @@ def _render_scan_output(selected: ScreenerDefinition, cache: dict[str, Any]) -> 
         # CSV-safe wrapper neutralizes formula injection before download. The
         # raw DataFrame still has full precision; only the on-screen Styler
         # rounds to 2 decimals, so the CSV mirrors the source data.
-        st.download_button(
+        results_file_name = f"{selected.key}_results.csv"
+        # st.download_button returns True on the rerun where the user clicks it,
+        # so it doubles as the OBS-003 export trigger (edge-triggered, no dedup).
+        if st.download_button(
             "Download results CSV",
             data=_csv_safe(_drop_provenance(results)).to_csv(index=False).encode("utf-8"),
-            file_name=f"{selected.key}_results.csv",
+            file_name=results_file_name,
             mime="text/csv",
-        )
+        ):
+            record_audit_event(
+                event=EVENT_EXPORT_DOWNLOADED,
+                user_email=st.session_state.get("_audit_user_email"),
+                metadata={
+                    "file_name": results_file_name,
+                    "row_count": len(results),
+                    "kind": "scan_results",
+                },
+            )
 
     if failures:
         with st.expander("Fetch failures", expanded=True):

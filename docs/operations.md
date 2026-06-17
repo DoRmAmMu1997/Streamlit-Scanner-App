@@ -123,6 +123,34 @@ so a routine off-day run does not flag the whole universe as stale.
 
 ---
 
+## Audit log (OBS-003)
+
+Important user actions — sign-ins (`login_success` / `login_denied`), manual scans
+(`manual_scan_started`), the startup data refresh (`data_refresh_started`), config
+changes (`config_changed`), CSV exports (`export_downloaded`), and admin-page
+access (`admin_page_accessed`) — are recorded with the actor email, a UTC
+timestamp, and redacted metadata.
+
+Where to look:
+
+- **Audit log page** (admins) → top view selector → *Audit log*: filter by event,
+  email, and row limit. System actions (the startup refresh) appear as `system`.
+- **Logs**: the same events are emitted to the structured log stream.
+- **Database**: the `audit_logs` table (same database as scan history). It is
+  covered by the same backup as scan history (see *Backing up scan history*); no
+  separate step.
+
+Recording is best-effort: a database hiccup never blocks the user's action, so a
+missing row means the write was skipped, not that the action failed.
+
+**Runtime settings (admins).** The *Admin settings* page edits `LOG_LEVEL` /
+`LOG_FORMAT` at runtime; changes are validated, stored in `app_config`, applied
+immediately, replayed on restart, and recorded as `config_changed`. Credentials
+and auth/infra settings are intentionally not editable there — change those via
+environment variables and restart.
+
+---
+
 ## Database: SQLite locally, Postgres when shared
 
 Local default: `sqlite:///data/scanner.db` (WAL mode, created automatically,
