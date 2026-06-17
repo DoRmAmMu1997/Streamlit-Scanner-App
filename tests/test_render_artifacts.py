@@ -53,6 +53,10 @@ def test_blueprint_defines_web_cron_and_managed_database() -> None:
 
     database_names = {db["name"] for db in blueprint["databases"]}
     assert database_names == {"scanner-db"}
+    database = blueprint["databases"][0]
+    # Render services use the internal connection string, so public Postgres
+    # ingress should be closed instead of left on Render's default allow-all rule.
+    assert database["ipAllowList"] == []
 
     services = {s["name"]: s["type"] for s in blueprint["services"]}
     assert services == {"scanner-web": "web", "scanner-daily-scan": "cron"}
@@ -65,9 +69,14 @@ def test_web_service_reuses_dockerfile_and_binds_render_port() -> None:
     assert web["runtime"] == "docker"
     assert web["dockerfilePath"] == "./Dockerfile"
     assert web["healthCheckPath"] == "/_stcore/health"
+    command = web["dockerCommand"]
     # Must bind $PORT (the image CMD hard-codes 8501, which Render would not route).
-    assert "--server.port=$PORT" in web["dockerCommand"]
-    assert "streamlit run app.py" in web["dockerCommand"]
+    assert "--server.port=$PORT" in command
+    assert "streamlit run app.py" in command
+    # Docker secret files appear under /etc/secrets on Render. Streamlit must be
+    # pointed at that file explicitly; its default search path is project-local.
+    assert "--secrets.files=/etc/secrets/streamlit-secrets.toml" in command
+    assert "--secrets.files=.streamlit/secrets.toml" in command
 
 
 def test_web_service_persists_data_on_a_configurable_disk() -> None:
@@ -76,10 +85,12 @@ def test_web_service_persists_data_on_a_configurable_disk() -> None:
 
     disk = web["disk"]
     assert disk["name"] == "scanner-data"
+    assert disk["mountPath"] == "/data"
     assert disk["sizeGB"] >= 1
     env = _env_map(web)
     # The acceptance criterion: the persistent disk path is configurable via env.
     assert env["DATA_DIR"]["value"] == disk["mountPath"]
+    assert env["DATA_DIR"]["value"] == "/data"
 
 
 def test_database_url_is_auto_wired_from_the_managed_database() -> None:
@@ -108,6 +119,8 @@ def test_cron_refreshes_universes_then_runs_the_daily_scan() -> None:
     command = cron["dockerCommand"]
     assert "refresh_universe_files" in command
     assert "python -m backend.jobs.run_daily_scan" in command
+    assert "--secrets.files" not in command
+    assert _env_map(cron)["DATA_DIR"]["value"] == "/data"
     # The cron deliberately has no persistent disk (Render disks are single-attach).
     assert "disk" not in cron
 
@@ -134,7 +147,11 @@ def test_docs_document_the_render_deployment() -> None:
     assert "render.yaml" in readme
     assert "Deploying to Render" in operations
     assert "render.yaml" in operations
+    assert "/etc/secrets/streamlit-secrets.toml" in readme
+    assert "/etc/secrets/streamlit-secrets.toml" in operations
     # The HLD/LLD record the topology decision and the DB-URL normalization.
     assert "DEPLOY-003" in hld
     assert "render.yaml" in lld
+    assert "/etc/secrets/streamlit-secrets.toml" in lld
+    assert "ipAllowList: []" in lld
     assert "single-attach" in lld.lower() or "single attach" in lld.lower()

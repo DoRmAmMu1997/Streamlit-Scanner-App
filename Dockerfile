@@ -30,9 +30,12 @@ WORKDIR /app
 
 # Create a non-root user to run the app (least privilege). We pre-create /data and
 # the user's home and hand them to appuser so the running process can write its
-# volume and Streamlit's cache without root.
+# volume and Streamlit's cache without root. Render exposes Docker secret files
+# through group 1000, so appuser joins that group while still running non-root.
 RUN groupadd --system appuser \
     && useradd --system --gid appuser --create-home --home-dir /home/appuser appuser \
+    && (getent group 1000 || groupadd --gid 1000 render-secrets) \
+    && usermod -a -G 1000 appuser \
     && mkdir -p /data \
     && chown -R appuser:appuser /data /home/appuser
 

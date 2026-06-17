@@ -578,14 +578,17 @@ local Docker:
   candle cache;
 - a managed **Postgres** database (`scanner-db`) auto-wired into `DATABASE_URL`
   (Render emits `postgresql://…`; the app rewrites it to the pinned
-  `postgresql+psycopg://` driver at startup);
+  `postgresql+psycopg://` driver at startup) with public database ingress closed
+  by `ipAllowList: []`;
 - a **cron job** (`scanner-daily-scan`) that refreshes universes and runs
   `python -m backend.jobs.run_daily_scan`, writing results to the shared Postgres.
 
 Every secret is `sync: false` in the Blueprint (provided in the Render dashboard,
 never committed); Google OIDC secrets go in a Render Secret File at
-`.streamlit/secrets.toml`. Full step-by-step: [docs/operations.md → "Deploying to
-Render"](docs/operations.md#deploying-to-render-managed). Topology rationale: [the
+`streamlit-secrets.toml`, which Render exposes to Docker at
+`/etc/secrets/streamlit-secrets.toml`. The web `dockerCommand` passes that file
+through `--secrets.files` so `st.login` can read the `[auth]` tables. Full
+step-by-step: [docs/operations.md → "Deploying to Render"](docs/operations.md#deploying-to-render-managed). Topology rationale: [the
 deployment-runtime LLD](docs/architecture/components/deployment-runtime.md).
 
 ---

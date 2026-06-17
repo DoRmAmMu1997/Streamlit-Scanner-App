@@ -26,6 +26,9 @@ databases:
     databaseName: scanner
     user: scanner
     plan: basic-256mb
+    # Services receive the internal connection string through fromDatabase below,
+    # so the managed database does not need public internet ingress.
+    ipAllowList: []
 
 services:
   # --- Streamlit web UI -----------------------------------------------------
@@ -37,7 +40,8 @@ services:
     plan: starter
     # The image CMD hard-binds port 8501; Render routes to $PORT, so override the
     # command to bind it. Render runs dockerCommand via a shell, so $PORT expands.
-    dockerCommand: streamlit run app.py --server.address=0.0.0.0 --server.port=$PORT --server.headless=true --browser.gatherUsageStats=false
+    dockerCommand: >-
+      streamlit run app.py --server.address=0.0.0.0 --server.port=$PORT --server.headless=true --browser.gatherUsageStats=false --secrets.files=/etc/secrets/streamlit-secrets.toml --secrets.files=.streamlit/secrets.toml
     healthCheckPath: /_stcore/health
     # Persistent disk holds the candle cache + generated universe CSVs that power
     # the UI's screener selection and charts. Render disks attach to exactly ONE
@@ -45,16 +49,16 @@ services:
     # re-fetches from Dhan — see the deployment-runtime LLD).
     disk:
       name: scanner-data
-      mountPath: /var/data
+      mountPath: /data
       sizeGB: 10
     envVars:
       - key: APP_ENV
         value: production
       # DATA_DIR is the configurable persistent-data path; keep it equal to the
-      # disk mountPath above. (The image defaults DATA_DIR=/data; this overrides
-      # it to the mounted disk.)
+      # disk mountPath above. It matches the image-owned /data directory so the
+      # non-root appuser can also create the same tree in the diskless cron.
       - key: DATA_DIR
-        value: /var/data
+        value: /data
       # Auto-wired from the managed database above. Render emits a bare
       # postgresql:// URL; settings._normalize_database_url rewrites it to the
       # pinned psycopg v3 driver at startup, so no manual editing is needed.
@@ -98,7 +102,7 @@ services:
       - key: APP_ENV
         value: production
       - key: DATA_DIR
-        value: /var/data
+        value: /data
       - key: DATABASE_URL
         fromDatabase:
           name: scanner-db

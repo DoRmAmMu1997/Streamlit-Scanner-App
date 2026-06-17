@@ -159,7 +159,7 @@ flowchart LR
     Blueprint["render.yaml"] --> Web["scanner-web (web)"]
     Blueprint --> Cron["scanner-daily-scan (cron)"]
     Blueprint --> PG[("scanner-db: managed Postgres")]
-    Web -->|disk| Disk[("scanner-data: /var/data candle cache")]
+    Web -->|disk| Disk[("scanner-data: /data candle cache")]
     Web -->|DATABASE_URL fromDatabase| PG
     Cron -->|DATABASE_URL fromDatabase| PG
     Cron -.->|ephemeral FS, re-fetch candles| Dhan["DhanHQ"]
@@ -167,11 +167,11 @@ flowchart LR
 
 | Surface | Contract |
 |---|---|
-| **Web service** | `runtime: docker` from `./Dockerfile`; `dockerCommand` overrides the image CMD to bind `$PORT` (`streamlit run app.py --server.port=$PORT …`); `healthCheckPath: /_stcore/health`. |
-| **Persistent disk** | `scanner-data` mounts at `/var/data`; `DATA_DIR=/var/data` (the two must match; change together — this is the configurable disk path). Single-attach, so it is on the web service only. |
-| **Managed database** | `scanner-db` Postgres; `DATABASE_URL` is auto-wired via `fromDatabase … connectionString` and normalized to `postgresql+psycopg://` at startup. |
+| **Web service** | `runtime: docker` from `./Dockerfile`; `dockerCommand` overrides the image CMD to bind `$PORT` (`streamlit run app.py --server.port=$PORT …`) and passes Render's Docker secret file through `--secrets.files=/etc/secrets/streamlit-secrets.toml`; `healthCheckPath: /_stcore/health`. |
+| **Persistent disk** | `scanner-data` mounts at `/data`; `DATA_DIR=/data` (the two must match; change together — this is the configurable disk path). Single-attach, so it is on the web service only. |
+| **Managed database** | `scanner-db` Postgres; `DATABASE_URL` is auto-wired via `fromDatabase … connectionString` and normalized to `postgresql+psycopg://` at startup. `ipAllowList: []` closes public database ingress because web/cron use the internal Render connection string. |
 | **Cron job** | `type: cron` on a UTC `schedule`; ephemeral (no disk); `dockerCommand` refreshes universe CSVs, then runs `python -m backend.jobs.run_daily_scan --config config/daily_scans.yaml`. |
-| **Secrets** | `DHAN_*`, `ALLOWED_EMAILS`/`ADMIN_EMAILS`, `SERPAPI_API_KEY` are `sync: false` (dashboard-provided). Google OIDC secrets are a Render Secret File at `.streamlit/secrets.toml`; `redirect_uri` is the service's `…onrender.com/oauth2callback` URL. |
+| **Secrets** | `DHAN_*`, `ALLOWED_EMAILS`/`ADMIN_EMAILS`, `SERPAPI_API_KEY` are `sync: false` (dashboard-provided). Google OIDC secrets are a Render Secret File named `streamlit-secrets.toml`, exposed to Docker at `/etc/secrets/streamlit-secrets.toml`; `redirect_uri` is the service's `…onrender.com/oauth2callback` URL. |
 
 **Shared-vs-per-service state.** Scan history (the only must-share state) lives
 in the managed Postgres, read/written by both services. The candle cache and

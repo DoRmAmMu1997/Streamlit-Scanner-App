@@ -59,6 +59,9 @@ def test_dockerfile_has_secure_streamlit_runtime_contract() -> None:
     assert "DATA_DIR=/data" in dockerfile
     assert "EXPOSE 8501" in dockerfile
     assert "USER appuser" in dockerfile
+    # Render exposes Docker secret files through group 1000, so the non-root
+    # runtime user must belong to that group without becoming root.
+    assert "usermod -a -G 1000 appuser" in dockerfile
     assert "HEALTHCHECK" in dockerfile
     assert "_stcore/health" in dockerfile
     assert '"streamlit"' in dockerfile

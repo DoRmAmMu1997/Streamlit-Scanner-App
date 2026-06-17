@@ -366,19 +366,24 @@ Render runs the exact image you can build locally. The design rationale lives in
    `ADMIN_EMAILS`, and optionally `SERPAPI_API_KEY`. `DATABASE_URL` is wired
    automatically from `scanner-db` — Render emits a bare `postgresql://` URL and
    the app rewrites it to the pinned psycopg v3 driver at startup, so no manual
-   editing is needed.
+   editing is needed. The database uses `ipAllowList: []`, so public internet
+   database connections are closed while Render services keep using the internal
+   `fromDatabase` connection string.
 3. Add the Google OIDC secrets as a Render **Secret File** on `scanner-web` at
-   path `.streamlit/secrets.toml` (same `[auth]` + `[auth.google]` shape as
-   `.streamlit/secrets.example.toml`). Set `redirect_uri` to your service URL,
-   e.g. `https://scanner-web.onrender.com/oauth2callback`, and add that URL to
-   the Google OAuth client's authorized redirect URIs.
+   filename `streamlit-secrets.toml` (same `[auth]` + `[auth.google]` shape as
+   `.streamlit/secrets.example.toml`). Render exposes Docker secret files at
+   `/etc/secrets/streamlit-secrets.toml`; the Blueprint's web `dockerCommand`
+   passes that path with `--secrets.files` so Streamlit can load it. Set
+   `redirect_uri` to your service URL, e.g.
+   `https://scanner-web.onrender.com/oauth2callback`, and add that URL to the
+   Google OAuth client's authorized redirect URIs.
 4. Apply the Blueprint. On first boot either service runs `alembic upgrade head`
    automatically, so the fresh Postgres is initialized.
 
 ### Persistent disk and the candle cache
 
 The disk attaches to `scanner-web` only (Render disks are single-attach) and is
-mounted at `DATA_DIR`. Both default to `/var/data`; change them together to
+mounted at `DATA_DIR`. Both default to `/data`; change them together to
 relocate the persistent path. The disk starts empty, so after the first deploy
 open a **Render Shell** on `scanner-web` and seed the universe CSVs the UI needs
 for screener selection:
@@ -407,7 +412,7 @@ cron time, not correctness.
   Blueprint's `dockerCommand` does); the image's own `8501` CMD is overridden.
 - **Production config error on boot**: `scanner-web` fails closed until
   `DHAN_*`, `AUTH_REQUIRED=true`, and an allow/admin email are set, and the OIDC
-  Secret File is present.
+  Secret File exists as `/etc/secrets/streamlit-secrets.toml`.
 - **Health check failing**: Render polls `/_stcore/health`; check
   `scanner-web` logs for a config or migration error.
 
