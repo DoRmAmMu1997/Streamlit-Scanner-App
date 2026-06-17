@@ -1,0 +1,149 @@
+"""Tests for the OBS-003 admin runtime-config page (ui.config_page).
+
+Focus: the admin guard (security) and the submit/feedback flow with the config
+service fully faked so no real database or environment write happens here.
+"""
+
+from __future__ import annotations
+
+from backend.admin import ConfigUpdateResult
+from backend.auth.session import AuthenticatedUser
+from backend.config.settings import SettingsError
+from ui import config_page
+
+
+class _FakeForm:
+    """Context manager standing in for ``st.form``."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc_info):
+        return False
+
+
+class _FakeStreamlit:
+    """Minimal Streamlit surface used by the config page renderer tests."""
+
+    def __init__(self, *, submit: bool):
+        self._submit = submit
+        self.successes: list[str] = []
+        self.infos: list[str] = []
+        self.errors: list[str] = []
+
+    def subheader(self, *_args, **_kwargs):
+        pass
+
+    def caption(self, *_args, **_kwargs):
+        pass
+
+    def form(self, *_args, **_kwargs):
+        return _FakeForm()
+
+    def selectbox(self, _label, choices, index=0, **_kwargs):
+        return choices[index]
+
+    def form_submit_button(self, *_args, **_kwargs):
+        return self._submit
+
+    def success(self, text, **_kwargs):
+        self.successes.append(str(text))
+
+    def info(self, text, **_kwargs):
+        self.infos.append(str(text))
+
+    def error(self, text, **_kwargs):
+        self.errors.append(str(text))
+
+
+def test_config_page_rejects_non_admin(monkeypatch):
+    fake_st = _FakeStreamlit(submit=False)
+    monkeypatch.setattr(config_page, "st", fake_st)
+
+    config_page._render_config_page(
+        AuthenticatedUser("person@example.com", "Person", is_admin=False)
+    )
+
+    assert fake_st.errors == ["Admin access is required to change settings."]
+
+
+def test_config_page_rejects_auth_disabled_session(monkeypatch):
+    fake_st = _FakeStreamlit(submit=False)
+    monkeypatch.setattr(config_page, "st", fake_st)
+
+    config_page._render_config_page(None)
+
+    assert fake_st.errors == ["Admin access is required to change settings."]
+
+
+def test_config_page_does_nothing_until_submitted(monkeypatch):
+    fake_st = _FakeStreamlit(submit=False)
+    monkeypatch.setattr(config_page, "st", fake_st)
+    monkeypatch.setattr(
+        config_page,
+        "update_config_value",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("must not save before submit")
+        ),
+    )
+
+    config_page._render_config_page(
+        AuthenticatedUser("admin@example.com", "Admin", is_admin=True)
+    )
+
+    assert fake_st.successes == []
+    assert fake_st.infos == []
+
+
+def test_config_page_reports_a_change_on_submit(monkeypatch):
+    fake_st = _FakeStreamlit(submit=True)
+    monkeypatch.setattr(config_page, "st", fake_st)
+    monkeypatch.setattr(
+        config_page,
+        "update_config_value",
+        lambda key, value, *, updated_by: ConfigUpdateResult(
+            key=key, old_value="WARNING", new_value=value, changed=True
+        ),
+    )
+
+    config_page._render_config_page(
+        AuthenticatedUser("admin@example.com", "Admin", is_admin=True)
+    )
+
+    assert fake_st.successes  # at least one "old -> new" confirmation
+    assert fake_st.errors == []
+
+
+def test_config_page_reports_no_changes(monkeypatch):
+    fake_st = _FakeStreamlit(submit=True)
+    monkeypatch.setattr(config_page, "st", fake_st)
+    monkeypatch.setattr(
+        config_page,
+        "update_config_value",
+        lambda key, value, *, updated_by: ConfigUpdateResult(
+            key=key, old_value=value, new_value=value, changed=False
+        ),
+    )
+
+    config_page._render_config_page(
+        AuthenticatedUser("admin@example.com", "Admin", is_admin=True)
+    )
+
+    assert fake_st.infos == ["No changes to save."]
+
+
+def test_config_page_surfaces_validation_errors(monkeypatch):
+    fake_st = _FakeStreamlit(submit=True)
+    monkeypatch.setattr(config_page, "st", fake_st)
+
+    def boom(key, value, *, updated_by):
+        raise SettingsError(f"bad value for {key}")
+
+    monkeypatch.setattr(config_page, "update_config_value", boom)
+
+    config_page._render_config_page(
+        AuthenticatedUser("admin@example.com", "Admin", is_admin=True)
+    )
+
+    assert fake_st.errors
+    assert fake_st.successes == []

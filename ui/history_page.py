@@ -19,6 +19,8 @@ import pandas as pd
 import streamlit as st
 from sqlalchemy.exc import OperationalError
 
+from backend.audit import record_audit_event
+from backend.observability import EVENT_EXPORT_DOWNLOADED
 from backend.scanning import ScanStatus
 from backend.storage import (
     ScanRun,
@@ -417,10 +419,23 @@ def _render_history_run_details(row: dict[str, Any], *, symbol_filter: str = "")
         column_config=_decimal_column_config(results_df),
         key=f"history_results_{row['run_id']}",
     )
-    st.download_button(
+    history_file_name = f"scan_run_{row['run_id']}_results.csv"
+    # download_button returns True on the click rerun, doubling as the OBS-003
+    # export trigger. The signed-in email is stashed in session_state by main().
+    if st.download_button(
         "Download run results CSV",
         data=_csv_safe(results_df).to_csv(index=False).encode("utf-8"),
-        file_name=f"scan_run_{row['run_id']}_results.csv",
+        file_name=history_file_name,
         mime="text/csv",
         key=f"history_csv_{row['run_id']}",
-    )
+    ):
+        record_audit_event(
+            event=EVENT_EXPORT_DOWNLOADED,
+            user_email=st.session_state.get("_audit_user_email"),
+            metadata={
+                "file_name": history_file_name,
+                "row_count": len(results_df),
+                "kind": "history_results",
+                "run_id": int(row["run_id"]),
+            },
+        )

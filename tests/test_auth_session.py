@@ -371,6 +371,41 @@ def test_require_authorized_user_emits_auth_denied_event(monkeypatch, caplog):
     assert events[0]["reason"] == "not_on_allowlist"
 
 
+def test_require_authorized_user_bootstraps_schema_before_denied_audit(
+    monkeypatch,
+):
+    """OBS-003 should make the durable denial row possible before stopping."""
+    monkeypatch.setenv("ALLOWED_EMAILS", "sunny@example.com")
+    monkeypatch.setenv("ADMIN_EMAILS", "")
+    monkeypatch.setenv("SCANNER_ENV", "production")
+    fake_st = _signed_in("intruder@example.com")
+    fake_st.session_state = {}
+    calls: list[str] = []
+
+    def record_denied_once(**kwargs):
+        assert kwargs["session_state"] is fake_st.session_state
+        assert kwargs["dedup_key"] == "_audit_login_denied:intruder@example.com"
+        assert kwargs["event"] == "login_denied"
+        assert kwargs["user_email"] == "intruder@example.com"
+        calls.append("audit")
+        return True
+
+    monkeypatch.setattr(
+        session, "ensure_database_schema", lambda: calls.append("schema") or True, raising=False
+    )
+    monkeypatch.setattr(session, "record_audit_event_once", record_denied_once, raising=False)
+    monkeypatch.setattr(
+        session,
+        "record_audit_event",
+        lambda **_kwargs: calls.append("legacy_audit"),
+    )
+
+    with pytest.raises(_StopCalled):
+        require_authorized_user(fake_st)
+
+    assert calls == ["schema", "audit"]
+
+
 def test_require_authorized_user_empty_allowlist_denies_in_production(monkeypatch):
     """Empty allowlist in production fails closed for non-admins."""
     monkeypatch.setenv("ALLOWED_EMAILS", "")

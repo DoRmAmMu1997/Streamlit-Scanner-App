@@ -6,7 +6,7 @@
 | **Source** | [`backend/auth/session.py`](../../../backend/auth/session.py) |
 | **Layer** | Cross-cutting security (`backend/`) |
 | **Status** | Stable (AUTH-001 sign-in · AUTH-002 allowlist/admins) |
-| **Related** | [HLD](../high-level-design.md) · [configuration.md](configuration.md) · [app-orchestration.md](app-orchestration.md) · [observability.md](observability.md) · [health-monitoring.md](health-monitoring.md) · [security.md](security.md) |
+| **Related** | [HLD](../high-level-design.md) · [configuration.md](configuration.md) · [app-orchestration.md](app-orchestration.md) · [observability.md](observability.md) · [health-monitoring.md](health-monitoring.md) · [security.md](security.md) · [audit-log.md](audit-log.md) |
 
 ## 1. Purpose & responsibilities
 
@@ -18,6 +18,8 @@ download renders.
 - **Authorization (AUTH-002)** — `ALLOWED_EMAILS` decides who may use the app; `ADMIN_EMAILS` are always allowed and flagged `is_admin` (gates the Admin health view). Dev-permits-empty / prod-fails-closed.
 
 **Non-responsibilities**: parses no env directly (reads [configuration.md](configuration.md)); general role-based feature gating is out of scope (only the admin flag exists).
+
+> **Audit (OBS-003).** A rejected sign-in records a `login_denied` audit row (next to the existing `auth_denied` log) in the denial branch; a successful authorization records `login_success` once per session from `main()`. See [audit-log.md](audit-log.md).
 
 ## 2. Position in the system
 
