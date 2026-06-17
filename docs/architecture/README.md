@@ -50,7 +50,7 @@ testing · extension points.
 ### Cross-cutting
 - [authentication.md](components/authentication.md) — Google OIDC gate + allowlist/admins.
 - [configuration.md](components/configuration.md) — typed runtime settings + prod fail-closed.
-- [deployment-runtime.md](components/deployment-runtime.md) — Docker image, Docker Compose local production stack, build context, container env, port, health check.
+- [deployment-runtime.md](components/deployment-runtime.md) — Docker image, Docker Compose local production stack, the Render Blueprint (DEPLOY-003), build context, container env, port, health check.
 - [observability.md](components/observability.md) — structured, secret-safe logging.
 - [security.md](components/security.md) — secret redaction + SSRF guards + AI verdict-cache integrity (`ai_cache_integrity.py`, HMAC).
 - [health-monitoring.md](components/health-monitoring.md) — passive admin health snapshot/page.

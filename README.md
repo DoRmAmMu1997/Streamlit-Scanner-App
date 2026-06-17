@@ -567,6 +567,29 @@ status and run ids, but not raw secrets.
 
 ---
 
+## Deploying to Render
+
+[`render.yaml`](render.yaml) is a Render **Blueprint** (DEPLOY-003) that
+provisions the production stack from one file, reusing the same `Dockerfile` as
+local Docker:
+
+- a **web service** (`scanner-web`) running `streamlit run app.py` bound to
+  Render's `$PORT`, with a **persistent disk** mounted at `DATA_DIR` for the
+  candle cache;
+- a managed **Postgres** database (`scanner-db`) auto-wired into `DATABASE_URL`
+  (Render emits `postgresql://…`; the app rewrites it to the pinned
+  `postgresql+psycopg://` driver at startup);
+- a **cron job** (`scanner-daily-scan`) that refreshes universes and runs
+  `python -m backend.jobs.run_daily_scan`, writing results to the shared Postgres.
+
+Every secret is `sync: false` in the Blueprint (provided in the Render dashboard,
+never committed); Google OIDC secrets go in a Render Secret File at
+`.streamlit/secrets.toml`. Full step-by-step: [docs/operations.md → "Deploying to
+Render"](docs/operations.md#deploying-to-render-managed). Topology rationale: [the
+deployment-runtime LLD](docs/architecture/components/deployment-runtime.md).
+
+---
+
 ## Observability & logging
 
 To make failures diagnosable in production (OBS-001), the app emits **named,

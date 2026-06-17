@@ -1,0 +1,113 @@
+# Render Blueprint for the Streamlit Scanner App (DEPLOY-003).
+#
+# Beginner note:
+# A Blueprint is infrastructure-as-code for Render. `render.yaml` declares the
+# services and database so the whole stack is created/updated from this file
+# instead of clicked together by hand. The step-by-step runbook (secrets, the
+# OIDC redirect URL, the one-off cache prefetch) lives in
+# docs/operations.md → "Deploying to Render"; the design rationale (why the disk
+# attaches to the web service only and the cron runs ephemerally) is in
+# docs/architecture/components/deployment-runtime.md.
+#
+# This Blueprint reuses the DEPLOY-001 production Dockerfile so Render runs the
+# exact image that `docker compose` and a single-container deploy run. It changes
+# only the *orchestration*: the web service binds Render's $PORT, the cron runs
+# the daily-scan command, and a managed Postgres is auto-wired into DATABASE_URL.
+#
+# Secrets are NEVER written here: every secret env var is `sync: false`, meaning
+# "prompt me for this value in the Render dashboard" rather than committing it.
+
+databases:
+  # Managed Postgres — the shared scan-history store both services write/read.
+  # It is the only state that must be shared between the web UI and the cron job,
+  # so it lives here (not on a disk). A small paid plan is intentional: Render's
+  # free database expires after a fixed window.
+  - name: scanner-db
+    databaseName: scanner
+    user: scanner
+    plan: basic-256mb
+
+services:
+  # --- Streamlit web UI -----------------------------------------------------
+  - type: web
+    name: scanner-web
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: starter
+    # The image CMD hard-binds port 8501; Render routes to $PORT, so override the
+    # command to bind it. Render runs dockerCommand via a shell, so $PORT expands.
+    dockerCommand: streamlit run app.py --server.address=0.0.0.0 --server.port=$PORT --server.headless=true --browser.gatherUsageStats=false
+    healthCheckPath: /_stcore/health
+    # Persistent disk holds the candle cache + generated universe CSVs that power
+    # the UI's screener selection and charts. Render disks attach to exactly ONE
+    # service, so the disk lives on the web service (the cron runs ephemerally and
+    # re-fetches from Dhan — see the deployment-runtime LLD).
+    disk:
+      name: scanner-data
+      mountPath: /var/data
+      sizeGB: 10
+    envVars:
+      - key: APP_ENV
+        value: production
+      # DATA_DIR is the configurable persistent-data path; keep it equal to the
+      # disk mountPath above. (The image defaults DATA_DIR=/data; this overrides
+      # it to the mounted disk.)
+      - key: DATA_DIR
+        value: /var/data
+      # Auto-wired from the managed database above. Render emits a bare
+      # postgresql:// URL; settings._normalize_database_url rewrites it to the
+      # pinned psycopg v3 driver at startup, so no manual editing is needed.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: scanner-db
+          property: connectionString
+      - key: AUTH_REQUIRED
+        value: "true"
+      - key: LOG_FORMAT
+        value: json
+      # Secrets / per-deploy values: set these in the Render dashboard.
+      - key: DHAN_CLIENT_ID
+        sync: false
+      - key: DHAN_ACCESS_TOKEN
+        sync: false
+      - key: ALLOWED_EMAILS
+        sync: false
+      - key: ADMIN_EMAILS
+        sync: false
+      - key: SERPAPI_API_KEY
+        sync: false
+
+  # --- Daily scan cron job --------------------------------------------------
+  - type: cron
+    name: scanner-daily-scan
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: starter
+    # 13:30 UTC = 19:00 IST on weekdays, after market close + data settlement.
+    # Adjust to taste; Render cron schedules are evaluated in UTC.
+    schedule: "30 13 * * 1-5"
+    # The cron runs on an ephemeral filesystem with no persistent disk, so it
+    # first regenerates the universe CSVs (the nifty/fno lists are downloaded,
+    # not baked into the image), then runs the daily scan, which fetches candles
+    # fresh from Dhan and writes results to the shared Postgres above.
+    dockerCommand: >-
+      sh -c "python -c 'from backend.universe_builder import refresh_universe_files; refresh_universe_files()' && python -m backend.jobs.run_daily_scan --config config/daily_scans.yaml"
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: DATA_DIR
+        value: /var/data
+      - key: DATABASE_URL
+        fromDatabase:
+          name: scanner-db
+          property: connectionString
+      - key: LOG_FORMAT
+        value: json
+      - key: DHAN_CLIENT_ID
+        sync: false
+      - key: DHAN_ACCESS_TOKEN
+        sync: false
+      - key: SERPAPI_API_KEY
+        sync: false

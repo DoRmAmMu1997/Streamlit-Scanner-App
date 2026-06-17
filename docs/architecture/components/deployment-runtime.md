@@ -2,10 +2,10 @@
 
 | | |
 |---|---|
-| **Component** | Production container image + local production Docker Compose stack + CI image/stack gates (DEPLOY-001, DEPLOY-002) |
-| **Source** | [`Dockerfile`](../../../Dockerfile), [`docker-compose.yml`](../../../docker-compose.yml), [`.dockerignore`](../../../.dockerignore), [`.env.example`](../../../.env.example), [`.github/workflows/quality-and-security.yml`](../../../.github/workflows/quality-and-security.yml) (`docker-build` job) |
+| **Component** | Production container image + local production Docker Compose stack + Render managed Blueprint + CI image/stack gates (DEPLOY-001, DEPLOY-002, DEPLOY-003) |
+| **Source** | [`Dockerfile`](../../../Dockerfile), [`docker-compose.yml`](../../../docker-compose.yml), [`render.yaml`](../../../render.yaml), [`.dockerignore`](../../../.dockerignore), [`.env.example`](../../../.env.example), [`.github/workflows/quality-and-security.yml`](../../../.github/workflows/quality-and-security.yml) (`docker-build` job) |
 | **Layer** | Deployment / packaging (no app logic — scanner behavior, schema, auth, and the daily job stay in the app layers) |
-| **Status** | Stable (DEPLOY-001 image, DEPLOY-002 local production Compose stack) |
+| **Status** | Stable (DEPLOY-001 image, DEPLOY-002 local production Compose stack, DEPLOY-003 Render Blueprint) |
 | **Related** | [HLD](../high-level-design.md) · [operations.md](../../operations.md) · [configuration.md](configuration.md) · [authentication.md](authentication.md) · [storage-persistence.md](storage-persistence.md) |
 
 ## 1. Purpose & responsibilities
@@ -67,6 +67,8 @@ port on the developer machine.
 | **Separate `scanner-data` and `postgres-data` volumes** | Candle/cache resets should not wipe scan history, and DB resets should not require deleting app caches. | One shared volume — harder to reason about backups and resets. |
 | **Secrets mounted, not baked** | `.streamlit/secrets.toml` contains Google OIDC credentials and belongs outside Docker layers and build context. | `COPY` secrets into the image — leaks through image history and registries. |
 | **CI image + Compose smoke** | Local machines may lack Docker; CI proves both the image and the Compose stack start on every PR. | Trust docs/tests only — broken Compose could ship unnoticed. |
+| **Render Blueprint reuses the image; disk on web only, cron ephemeral (DEPLOY-003)** | A Render persistent disk is **single-attach**, and the only state both processes must share is scan history — which already lives in the managed Postgres. So the disk (candle cache) attaches to the web service, and the cron runs ephemerally, re-fetching candles and writing results to the shared database. | Give the cron its own disk (a second copy of the cache, still cold daily) / put the cache in object storage (more infra for a first deploy). |
+| **Normalize the auto-wired DATABASE_URL (DEPLOY-003)** | Render's `fromDatabase` emits a bare `postgresql://` URL, which SQLAlchemy maps to the absent psycopg2 driver. `settings._normalize_database_url` rewrites it to the pinned `postgresql+psycopg://` so the Blueprint self-wires and survives DB password rotation. | Hand-paste `postgresql+psycopg://…` in the dashboard — fragile, breaks on rotation. |
 
 ## 5. Failure modes / degradation
 
@@ -116,6 +118,13 @@ port on the developer machine.
   `.dockerignore` exclusions, `.env.example` values, README/operations examples,
   and the HLD/LLD links — string-level contract checks that need no Docker
   daemon.
+- [`tests/test_render_artifacts.py`](../../../tests/test_render_artifacts.py)
+  parses `render.yaml` and asserts the Blueprint contract: web + cron + managed
+  database, the `$PORT`-aware web command, the configurable disk path, the
+  `fromDatabase` `DATABASE_URL` wiring, the universe-refresh cron command, and —
+  critically — that every secret env var is `sync: false` with no committed
+  value. [`tests/test_settings.py`](../../../tests/test_settings.py) covers the
+  `DATABASE_URL` driver normalization.
 - [`tests/test_supply_chain_policy.py`](../../../tests/test_supply_chain_policy.py)
   asserts the CI workflow includes the Docker build, Compose config, Compose
   smoke, cleanup commands, and `contents: read` permission.
@@ -138,3 +147,36 @@ port on the developer machine.
 - **Add system libraries** only if a future runtime dep needs them (insert an
   `apt-get install ... && rm -rf /var/lib/apt/lists/*` layer before the pip
   install); today's pinned deps install from wheels with no apt packages.
+
+## 9. Render managed deployment (DEPLOY-003)
+
+[`render.yaml`](../../../render.yaml) is a Render **Blueprint** that provisions
+the production stack from one file, reusing this same `Dockerfile` (so Render
+runs the exact image as Compose). It changes only orchestration.
+
+```mermaid
+flowchart LR
+    Blueprint["render.yaml"] --> Web["scanner-web (web)"]
+    Blueprint --> Cron["scanner-daily-scan (cron)"]
+    Blueprint --> PG[("scanner-db: managed Postgres")]
+    Web -->|disk| Disk[("scanner-data: /var/data candle cache")]
+    Web -->|DATABASE_URL fromDatabase| PG
+    Cron -->|DATABASE_URL fromDatabase| PG
+    Cron -.->|ephemeral FS, re-fetch candles| Dhan["DhanHQ"]
+```
+
+| Surface | Contract |
+|---|---|
+| **Web service** | `runtime: docker` from `./Dockerfile`; `dockerCommand` overrides the image CMD to bind `$PORT` (`streamlit run app.py --server.port=$PORT …`); `healthCheckPath: /_stcore/health`. |
+| **Persistent disk** | `scanner-data` mounts at `/var/data`; `DATA_DIR=/var/data` (the two must match; change together — this is the configurable disk path). Single-attach, so it is on the web service only. |
+| **Managed database** | `scanner-db` Postgres; `DATABASE_URL` is auto-wired via `fromDatabase … connectionString` and normalized to `postgresql+psycopg://` at startup. |
+| **Cron job** | `type: cron` on a UTC `schedule`; ephemeral (no disk); `dockerCommand` refreshes universe CSVs, then runs `python -m backend.jobs.run_daily_scan --config config/daily_scans.yaml`. |
+| **Secrets** | `DHAN_*`, `ALLOWED_EMAILS`/`ADMIN_EMAILS`, `SERPAPI_API_KEY` are `sync: false` (dashboard-provided). Google OIDC secrets are a Render Secret File at `.streamlit/secrets.toml`; `redirect_uri` is the service's `…onrender.com/oauth2callback` URL. |
+
+**Shared-vs-per-service state.** Scan history (the only must-share state) lives
+in the managed Postgres, read/written by both services. The candle cache and
+universe CSVs are per-service: persistent on the web disk, ephemeral on the cron
+(rebuilt each run). Fundamentals caches are web-only.
+
+The operator runbook (first deploy, secret file, seeding universes) is in
+[operations.md → "Deploying to Render"](../../operations.md#deploying-to-render-managed).
