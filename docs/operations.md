@@ -140,8 +140,9 @@ Where to look:
   covered by the same backup as scan history (see *Backing up scan history*); no
   separate step.
 
-Recording is best-effort: a database hiccup never blocks the user's action, so a
-missing row means the write was skipped, not that the action failed.
+Recording is best-effort: a database hiccup never blocks the user's action. First
+run paths bootstrap the schema before audit writes, so a missing row means the
+database could not be made ready or the write failed, not that the action failed.
 
 **Runtime settings (admins).** The *Admin settings* page edits `LOG_LEVEL` /
 `LOG_FORMAT` at runtime; changes are validated, stored in `app_config`, applied

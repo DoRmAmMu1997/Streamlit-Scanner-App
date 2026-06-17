@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 
-from backend.audit import record_audit_event, should_record_once
+from backend.audit import record_audit_event, record_audit_event_once, should_record_once
 from backend.security import MASK
 from backend.storage.repository import get_recent_audit_logs
 
@@ -93,6 +93,57 @@ def test_record_audit_event_is_best_effort_on_db_failure(caplog):
         for r in caplog.records
         if r.levelno == logging.WARNING
     )
+
+
+def test_record_audit_event_once_does_not_mark_failed_write(caplog):
+    """A transient audit DB failure must not permanently suppress a retry."""
+
+    def boom_factory():
+        raise RuntimeError("database is down")
+
+    state: dict[str, object] = {}
+    with caplog.at_level(logging.INFO):
+        wrote = record_audit_event_once(
+            session_state=state,
+            dedup_key="login:a@example.com",
+            event="login_success",
+            user_email="a@example.com",
+            session_factory=boom_factory,
+        )
+
+    assert wrote is False
+    assert "login:a@example.com" not in state
+    assert any(getattr(r, "event", None) == "login_success" for r in caplog.records)
+
+
+def test_record_audit_event_once_marks_after_success_and_suppresses_rerun(
+    file_session_factory,
+):
+    """Once-per-session audit dedup should start only after the row is durable."""
+    state: dict[str, object] = {}
+
+    first_write = record_audit_event_once(
+        session_state=state,
+        dedup_key="login:a@example.com",
+        event="login_success",
+        user_email="a@example.com",
+        session_factory=file_session_factory,
+    )
+    second_write = record_audit_event_once(
+        session_state=state,
+        dedup_key="login:a@example.com",
+        event="login_success",
+        user_email="a@example.com",
+        session_factory=file_session_factory,
+    )
+
+    assert first_write is True
+    assert second_write is False
+    assert state == {"login:a@example.com": True}
+    with file_session_factory() as session:
+        rows = get_recent_audit_logs(session)
+        assert len(rows) == 1
+        assert rows[0].event == "login_success"
 
 
 def test_should_record_once_dedups_per_key():

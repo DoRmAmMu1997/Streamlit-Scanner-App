@@ -618,8 +618,10 @@ same secret redactor used elsewhere in the app.
 | `export_downloaded` | INFO | a results/history CSV is downloaded (OBS-003 audit) |
 | `admin_page_accessed` | INFO | an admin opens an admin page (OBS-003 audit; once per page per session) |
 
-The last five events are the OBS-003 **audit trail** — emitted to the log stream
-*and* written to a durable `audit_logs` table. See
+The seven OBS-003 audit events are `login_success`, `login_denied`,
+`manual_scan_started`, `data_refresh_started`, `config_changed`,
+`export_downloaded`, and `admin_page_accessed`. They are emitted to the log
+stream *and* written to a durable `audit_logs` table. See
 [Audit log](#audit-log-obs-003) below.
 
 **Plain text vs JSON.** `LOG_FORMAT` controls rendering:
@@ -993,7 +995,8 @@ changed, and by whom?"* Every audit row carries the **user email**, a UTC
   (a database hiccup never breaks the user's action) and routes metadata through
   the same redactor as scan provenance, so a token can never become durable audit
   evidence. System actions that run before sign-in (the startup data refresh)
-  record `user_email` as `system`.
+  record `user_email` as `system`; first-run audit call sites bootstrap the
+  schema before writing so fresh local databases can still keep the durable row.
 - **Events recorded** — `login_success`, `login_denied`, `manual_scan_started`,
   `data_refresh_started`, `config_changed`, `export_downloaded`, and
   `admin_page_accessed` (see the event table under

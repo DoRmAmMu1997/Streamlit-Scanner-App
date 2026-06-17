@@ -50,6 +50,7 @@ flowchart TD
 | Symbol | Contract |
 |---|---|
 | `record_audit_event(*, event, user_email=None, metadata=None, level=INFO, session_factory=session_scope) -> bool` | Redact metadata, emit `log_event`, best-effort persist a row. Returns `False` (not raises) on DB failure. |
+| `record_audit_event_once(*, session_state, dedup_key, event, ...) -> bool` | For audit-critical level-triggered events: check a session key, call `record_audit_event`, and mark the key only after the durable row is written. |
 | `should_record_once(session_state, key) -> bool` | `True` the first time `key` is seen in a session; marks it. Framework-free (takes a dict / `st.session_state`). |
 | `apply_config_overrides(*, session_factory=session_scope) -> dict[str,str]` | Replay stored whitelisted overrides into `os.environ`; best-effort. |
 | `update_config_value(key, raw_value, *, updated_by, session_factory=session_scope) -> ConfigUpdateResult` | Validate (startup parsers) → persist `app_config` → set `os.environ` → record `config_changed`. Raises `SettingsError` on invalid/non-editable. |
@@ -74,7 +75,7 @@ flowchart TD
 | **Best-effort persistence** | An audit write must never break a login/scan/download; DB errors are swallowed + logged. | Hard-fail — a DB hiccup blocks user actions. |
 | **Two sinks (DB + `log_event`)** | Audit actions also appear in the live log stream with one redaction implementation. | DB only — invisible to log aggregators. |
 | **Redact at the recorder boundary** | Reuses `normalize_secret_safe_json` (same as `params_json`); satisfies the "values redacted" AC for every event. | Per-page redaction — drift, gaps. |
-| **`should_record_once` is framework-free** | Streamlit reruns every interaction; dedup keeps one row per session without importing Streamlit into `backend`. | Record per rerun — flooded trail. |
+| **Success-only audit dedup** | Streamlit reruns every interaction; `record_audit_event_once` keeps one row per session but marks the key only after persistence succeeds. | Mark before write — a transient DB failure permanently hides the retry. |
 | **Config whitelist = operational only** | Editing only `LOG_LEVEL`/`LOG_FORMAT` keeps the form from becoming an auth-bypass lever or secret store. | Editable secrets/auth — security risk. |
 | **Overrides via `os.environ`** | `get_settings()` reads env live, so an override applies without rewriting the settings system; replayed at startup. | New settings layer — large, invasive. |
 
@@ -89,7 +90,7 @@ takes effect on the same run).
 ## 7. Testing
 
 - [`tests/test_audit_repository.py`](../../../tests/test_audit_repository.py) — model/repository round-trip, filters, id tie-break, system event, redaction.
-- [`tests/test_audit_recorder.py`](../../../tests/test_audit_recorder.py) — dual-sink, redaction, best-effort swallow, dedup.
+- [`tests/test_audit_recorder.py`](../../../tests/test_audit_recorder.py) — dual-sink, redaction, best-effort swallow, success-only dedup.
 - [`tests/test_config_service.py`](../../../tests/test_config_service.py) — validate/persist/apply/audit, invalid/unchanged/non-editable, `apply_config_overrides`.
 - [`tests/test_app_audit_page.py`](../../../tests/test_app_audit_page.py) · [`tests/test_app_config_page.py`](../../../tests/test_app_config_page.py) — admin guard + render flows.
 
@@ -97,6 +98,7 @@ takes effect on the same run).
 
 Add a tracked event: declare an `EVENT_*` constant in
 [observability.md](observability.md), then call `record_audit_event(event=…,
-user_email=…, metadata=…)` at the site (use `should_record_once` for level-triggered
-ones). Add an editable setting: one `EDITABLE_CONFIG_KEYS` entry with the existing
+user_email=…, metadata=…)` at the site (use `record_audit_event_once` for
+level-triggered events that should retry after transient persistence failure).
+Add an editable setting: one `EDITABLE_CONFIG_KEYS` entry with the existing
 parser — but keep secrets/auth/infra keys out (§5).

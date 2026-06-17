@@ -242,6 +242,31 @@ def test_prefetch_redacts_dhan_setup_errors(monkeypatch, capsys):
     assert "***REDACTED***" in output
 
 
+def test_prefetch_bootstraps_schema_before_data_refresh_audit(monkeypatch):
+    """The system audit row should get migrations before the first write."""
+
+    class StopAfterAudit(RuntimeError):
+        """Test-only signal that data_refresh_started was reached."""
+
+    calls: list[str] = []
+
+    def record_audit(**kwargs):
+        assert kwargs["event"] == "data_refresh_started"
+        calls.append("audit")
+        raise StopAfterAudit()
+
+    monkeypatch.setattr(app, "ensure_project_dirs", lambda: calls.append("dirs"))
+    monkeypatch.setattr(
+        app, "ensure_database_schema", lambda: calls.append("schema") or True
+    )
+    monkeypatch.setattr(app, "record_audit_event", record_audit)
+
+    with pytest.raises(StopAfterAudit):
+        app.prefetch_data_assets()
+
+    assert calls == ["dirs", "schema", "audit"]
+
+
 def test_prefetch_universe_failure_emits_terminal_structured_event(
     monkeypatch, caplog
 ):
@@ -317,8 +342,8 @@ def test_main_requires_auth_before_discovering_screeners(monkeypatch):
         app.main()
 
 
-def test_main_bootstraps_schema_after_auth_and_before_view_selection(monkeypatch):
-    """An authorized run applies migrations before rendering either app view."""
+def test_main_bootstraps_schema_before_login_audit_and_view_selection(monkeypatch):
+    """An authorized run migrates before login_success and either app view."""
 
     class StopAtView(RuntimeError):
         """Test-only signal that execution reached the view selector."""
@@ -339,10 +364,24 @@ def test_main_bootstraps_schema_after_auth_and_before_view_selection(monkeypatch
         calls.append("view")
         raise StopAtView()
 
+    def record_audit(**kwargs) -> bool:
+        assert kwargs["event"] == "login_success"
+        calls.append("audit")
+        return True
+
+    def record_audit_once(**kwargs) -> bool:
+        assert kwargs["event"] == "login_success"
+        assert kwargs["dedup_key"] == "_audit_login:person@example.com"
+        calls.append("audit")
+        return True
+
     monkeypatch.setattr(app, "ensure_database_schema", record_schema_bootstrap)
     monkeypatch.setattr(app, "require_authorized_user", authenticate)
+    monkeypatch.setattr(app, "record_audit_event", record_audit)
+    monkeypatch.setattr(app, "record_audit_event_once", record_audit_once, raising=False)
     monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
     monkeypatch.setattr(app, "_configure_logging", lambda: None)
+    monkeypatch.setattr(app, "apply_config_overrides", lambda: {})
     monkeypatch.setenv("AUTH_REQUIRED", "true")
     monkeypatch.setattr(
         app,
@@ -360,7 +399,7 @@ def test_main_bootstraps_schema_after_auth_and_before_view_selection(monkeypatch
     with pytest.raises(StopAtView):
         app.main()
 
-    assert calls == ["auth", "schema", "view"]
+    assert calls == ["auth", "schema", "audit", "view"]
 
 
 def test_admin_health_view_is_available_and_returns_before_screener_discovery(

@@ -39,7 +39,7 @@ import streamlit.components.v1 as components
 from streamlit.runtime.scriptrunner import get_script_run_ctx
 
 from backend.admin import apply_config_overrides
-from backend.audit import record_audit_event, should_record_once
+from backend.audit import record_audit_event, record_audit_event_once
 from backend.auth.session import (
     AuthenticatedUser,
     auth_secret_values,
@@ -216,9 +216,10 @@ def prefetch_data_assets() -> None:
 
     # OBS-001/OBS-003: mark the start of a data refresh. The matching
     # data_refresh_completed events below report how it ended (ok / skipped / no
-    # credentials). The recorder also writes a system audit row (no signed-in
-    # user — the prefetch runs before the UI/auth boot) best-effort, so a fresh
-    # checkout without a migrated database simply skips the durable row.
+    # credentials). Because this is one of OBS-003's seven durable audit events,
+    # try the schema bootstrap before the write; the recorder remains
+    # best-effort if the database itself is unavailable.
+    ensure_database_schema()
     record_audit_event(event=EVENT_DATA_REFRESH_STARTED, user_email=None)
 
     print("[prefetch] Refreshing Dhan instrument master and universe CSVs...", flush=True)
@@ -898,12 +899,13 @@ def _record_admin_page_access(
     dedup an admin idling on a page would mint a new audit row each rerun.
     """
     email = authenticated_user.email if authenticated_user is not None else None
-    if should_record_once(st.session_state, f"_audit_admin_page:{page}"):
-        record_audit_event(
-            event=EVENT_ADMIN_PAGE_ACCESSED,
-            user_email=email,
-            metadata={"page": page},
-        )
+    record_audit_event_once(
+        session_state=st.session_state,
+        dedup_key=f"_audit_admin_page:{page}",
+        event=EVENT_ADMIN_PAGE_ACCESSED,
+        user_email=email,
+        metadata={"page": page},
+    )
 
 
 def main() -> None:
@@ -952,15 +954,23 @@ def main() -> None:
     authenticated_user: AuthenticatedUser | None = None
     if settings.auth_required:
         authenticated_user = require_authorized_user(st)
-        # OBS-003: record a successful sign-in once per browser session. main()
-        # re-runs on every interaction, so the session dedup keeps exactly one
-        # login_success row per signed-in session instead of one per rerun.
-        if should_record_once(
-            st.session_state, f"_audit_login:{authenticated_user.email}"
-        ):
-            record_audit_event(
-                event=EVENT_LOGIN_SUCCESS, user_email=authenticated_user.email
-            )
+
+    # Scan history and OBS-003 audit tables need the schema before any durable
+    # write. Run this only after the auth gate so an unauthenticated tab still
+    # cannot create DB connections or DDL, but before login_success so the first
+    # signed-in session is auditable on a fresh database.
+    ensure_database_schema()
+
+    if authenticated_user is not None:
+        # OBS-003: record a successful sign-in once per browser session. The
+        # once-helper marks the session only after the durable row is written, so
+        # a transient DB failure can retry on the next Streamlit rerun.
+        record_audit_event_once(
+            session_state=st.session_state,
+            dedup_key=f"_audit_login:{authenticated_user.email}",
+            event=EVENT_LOGIN_SUCCESS,
+            user_email=authenticated_user.email,
+        )
 
     # OBS-003: stash the signed-in email so export handlers in the Scanner and
     # Scan history views (which do not receive the user object) can attribute a
@@ -968,12 +978,6 @@ def main() -> None:
     st.session_state["_audit_user_email"] = (
         authenticated_user.email if authenticated_user is not None else None
     )
-
-    # Scan history needs the SCAN-002 schema. Apply migrations only after the
-    # authorization gate: opening an unauthenticated browser tab must not be
-    # enough to create a database connection or run DDL. This still happens
-    # before either app view reads or writes scan-history tables.
-    ensure_database_schema()
 
     # OBS-003: replay admin-set runtime overrides (e.g. LOG_LEVEL) now that the
     # schema exists and we are past the auth gate, then refresh logging so a

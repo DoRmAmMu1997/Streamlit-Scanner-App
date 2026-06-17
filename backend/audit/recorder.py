@@ -24,9 +24,9 @@ Two design rules:
 Design note (why this file imports no Streamlit):
 ``backend`` never imports Streamlit. The recorder takes plain values
 (``event``, ``user_email``, ``metadata``); the once-per-session de-duplication
-that the UI needs lives in the UI layer and calls ``should_record_once`` with a
-plain mapping (``st.session_state``), so this module stays framework-free and
-unit-testable.
+that the UI needs accepts a plain mapping (``st.session_state``), so this module
+stays framework-free and unit-testable while still letting audit-critical callers
+mark dedup keys only after persistence succeeds.
 """
 
 from __future__ import annotations
@@ -95,6 +95,39 @@ def record_audit_event(
         )
         return False
     return True
+
+
+def record_audit_event_once(
+    *,
+    session_state: Any,
+    dedup_key: str,
+    event: str,
+    user_email: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
+    level: int = logging.INFO,
+    session_factory: SessionFactory = session_scope,
+) -> bool:
+    """Record a level-triggered event once after the durable write succeeds.
+
+    ``should_record_once`` marks the key before the caller records anything,
+    which is fine for low-risk UI noise but unsafe for audit-critical events:
+    a transient DB failure would permanently suppress the retry on the next
+    Streamlit rerun. This helper flips the order. It checks the key first, tries
+    the normal best-effort recorder, and only then marks the session as recorded.
+    """
+    if session_state.get(dedup_key):
+        return False
+
+    wrote = record_audit_event(
+        event=event,
+        user_email=user_email,
+        metadata=metadata,
+        level=level,
+        session_factory=session_factory,
+    )
+    if wrote:
+        session_state[dedup_key] = True
+    return wrote
 
 
 def should_record_once(session_state: Any, key: str) -> bool:
