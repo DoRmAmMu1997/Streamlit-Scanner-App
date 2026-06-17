@@ -6,7 +6,7 @@
 | **Source** | [`backend/observability/__init__.py`](../../../backend/observability/__init__.py) |
 | **Layer** | Foundation (leaf utility — imports only stdlib + config + security) |
 | **Status** | Stable (OBS-001) |
-| **Related** | [HLD](../high-level-design.md) · [configuration.md](configuration.md) · [security.md](security.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [daily-scan-job.md](daily-scan-job.md) · [health-monitoring.md](health-monitoring.md) |
+| **Related** | [HLD](../high-level-design.md) · [configuration.md](configuration.md) · [security.md](security.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [daily-scan-job.md](daily-scan-job.md) · [health-monitoring.md](health-monitoring.md) · [audit-log.md](audit-log.md) |
 
 ## 1. Purpose & responsibilities
 
@@ -65,6 +65,13 @@ flowchart TD
 | `daily_job_started` / `daily_job_completed` | INFO/ERROR | headless command lifecycle |
 | `daily_job_config_loaded` / `daily_job_config_invalid` | INFO/ERROR | JOB-002 YAML schedule |
 | `data_refresh_started` / `data_refresh_completed` | INFO/ERROR | universe/candle prefetch lifecycle |
+| `login_success` / `login_denied` | INFO/WARNING | OBS-003 audit: sign-in accepted / rejected (also persisted) |
+| `manual_scan_started` / `export_downloaded` / `admin_page_accessed` | INFO | OBS-003 audit: user actions (also persisted) |
+| `config_changed` | INFO | OBS-003 audit: admin changed a runtime setting (also persisted) |
+
+> The OBS-003 events above are emitted here **and** written to the durable
+> `audit_logs` table by the [audit recorder](audit-log.md); the recorder routes
+> metadata through the same redactor before either sink.
 
 ## 5. Key design decisions & trade-offs
 

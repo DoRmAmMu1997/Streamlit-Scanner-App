@@ -48,6 +48,7 @@ testing · extension points.
 - [sixty-seven-ka-funda-ai.md](components/sixty-seven-ka-funda-ai.md) — drawdown gate + SerpAPI + Claude verifier.
 
 ### Cross-cutting
+- [audit-log.md](components/audit-log.md) — durable user-action audit trail + admin runtime-config form/viewer (OBS-003).
 - [authentication.md](components/authentication.md) — Google OIDC gate + allowlist/admins.
 - [configuration.md](components/configuration.md) — typed runtime settings + prod fail-closed.
 - [deployment-runtime.md](components/deployment-runtime.md) — Docker image, Docker Compose local production stack, the Render Blueprint (DEPLOY-003), build context, container env, port, health check.
@@ -59,6 +60,7 @@ testing · extension points.
 
 - **[scan-run-persistence.md](scan-run-persistence.md)** — SCAN-001 scan-run persistence schema (the column-by-column rationale the Storage LLD links to).
 - **[scan-002-handoff.md](scan-002-handoff.md)** — SCAN-002 database-layer implementation handoff brief.
+- **[obs-003-audit-log.md](obs-003-audit-log.md)** — OBS-003 audit log + runtime-config schema, recorder design, and the seven tracked events.
 - **[audit-2026-06.md](audit-2026-06.md)** — June 2026 codebase audit & hardening register (QUAL-001/002/003, REF-001, PERF-001, DOC-001): what was found, fixed, and deferred.
 
 ## Conventions

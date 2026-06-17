@@ -65,8 +65,9 @@ class Base(DeclarativeBase):
     Beginner note: SQLAlchemy collects every table defined on this ``Base`` into
     ``Base.metadata``. SCAN-002's migration/`create_all()` step will hand exactly
     that metadata object to the database to create the tables. Keeping a single
-    ``Base`` here means future tables (users, audit_log, watchlists, ...) can live
-    in sibling modules and still be created together.
+    ``Base`` here means sibling tables can live alongside these and still be
+    created together — the OBS-003 ``audit_logs``/``app_config`` tables below are
+    exactly that (future tables: users, watchlists, ...).
     """
 
 
@@ -193,7 +194,8 @@ class ScanRun(Base):
     )
 
     # Who/what started the run: "ui:user@example.com", "cron", "cli", etc. Free text
-    # for now; the auth/audit tickets (AUTH-*, OBS-003) can tighten this later.
+    # by design; OBS-003's dedicated ``audit_logs`` table now records richer
+    # per-action identity, so this column stays a lightweight run-origin label.
     triggered_by: Mapped[str | None] = mapped_column(
         String(100), nullable=True, comment="Origin of the run (ui/cron/cli/...)"
     )
@@ -360,6 +362,122 @@ class AIEvaluation(Base):
     )
 
     run: Mapped[ScanRun] = relationship(back_populates="ai_evaluations")
+
+
+class AuditLog(Base):
+    """OBS-003 — one row per recorded user action (the audit trail).
+
+    Where ``scan_runs`` answers *"what scans happened?"*, ``audit_logs`` answers
+    *"who did what, and when?"* — logins, manual scans, config changes, CSV
+    exports, and admin-page access. Each row carries the actor's email, a UTC
+    timestamp, and a small JSON ``metadata_json`` blob that the recorder has
+    already passed through the app's secret redactor, so a token can never become
+    durable audit evidence.
+
+    System actions that run before anyone signs in (the startup data refresh)
+    record ``user_email = NULL``; the viewer renders those as "system".
+
+    This is exactly the kind of sibling table the ``Base`` docstring anticipated:
+    it shares the same declarative base, so one migration pass creates it
+    alongside ``scan_runs``/``scan_results``.
+    """
+
+    __tablename__ = "audit_logs"
+
+    # Surrogate primary key (auto-increments). Reuses the SCAN-001 BigInt/SQLite
+    # variant so the id behaves the same on SQLite and Postgres.
+    id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
+
+    # When the action happened. Indexed because the audit viewer always orders
+    # newest-first and filters by time window. tz-aware UTC like every other
+    # timestamp in this schema, so laptop/cron/cloud rows compare correctly.
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: dt.datetime.now(dt.UTC),
+        index=True,
+        comment="UTC time the action occurred",
+    )
+
+    # The stable event name (e.g. 'login_success'). Indexed because the viewer
+    # filters by event type. A short String, not an enum, so a new tracked action
+    # is one constant in backend.observability — no migration, no ALTER TYPE.
+    event: Mapped[str] = mapped_column(
+        String(50), nullable=False, index=True, comment="Audit event name"
+    )
+
+    # The actor. Indexed for "everything <email> did" queries. Nullable because
+    # some tracked actions (the startup data refresh) run before authentication;
+    # those are system events with no user. 320 is the maximum email length.
+    user_email: Mapped[str | None] = mapped_column(
+        String(320),
+        nullable=True,
+        index=True,
+        comment="Actor email; NULL for system events",
+    )
+
+    # Already-redacted, JSON-safe context for the action (screener_key, file_name,
+    # changed setting, ...). JSON keeps the shape flexible per event without a
+    # migration, mirroring ``scan_runs.params_json``. NEVER store raw secrets
+    # here — the recorder routes this through ``normalize_secret_safe_json`` first.
+    # The attribute is ``metadata_json`` (not ``metadata``) because SQLAlchemy's
+    # DeclarativeBase reserves the ``metadata`` attribute name.
+    metadata_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True, comment="Redacted, JSON-safe action metadata"
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"AuditLog(id={self.id!r}, event={self.event!r}, "
+            f"user_email={self.user_email!r})"
+        )
+
+
+class AppConfig(Base):
+    """OBS-003 — durable overrides for the admin runtime-config form.
+
+    The app's settings are read from environment variables (see
+    ``backend.config.settings``). This tiny key/value table lets an admin change
+    a small whitelist of *operational* settings (currently ``LOG_LEVEL`` /
+    ``LOG_FORMAT``) at runtime: the value is stored here and re-applied into the
+    process environment on startup, so ``get_settings()`` — which reads
+    ``os.environ`` live — picks it up. The change itself is recorded as a
+    ``config_changed`` audit row.
+
+    Only non-secret operational keys are stored here on purpose; credentials and
+    auth/infra settings are intentionally out of scope (see the OBS-003 design
+    doc), so this table never becomes a secret store.
+    """
+
+    __tablename__ = "app_config"
+
+    # The environment variable name being overridden (e.g. 'LOG_LEVEL'). The key
+    # IS the identity, so it is the primary key — one override row per setting.
+    key: Mapped[str] = mapped_column(
+        String(64), primary_key=True, comment="Env var name being overridden"
+    )
+
+    # The override value as a raw env-style string; parsed/validated by the same
+    # backend.config.settings parsers used at startup. Nullable so an override can
+    # represent an explicit empty value.
+    value: Mapped[str | None] = mapped_column(
+        Text, nullable=True, comment="Raw env-style override value"
+    )
+
+    # Audit columns so the table is self-describing even outside audit_logs.
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: dt.datetime.now(dt.UTC),
+        onupdate=lambda: dt.datetime.now(dt.UTC),
+        comment="UTC time the override was last changed",
+    )
+    updated_by: Mapped[str | None] = mapped_column(
+        String(320), nullable=True, comment="Admin email who set the override"
+    )
+
+    def __repr__(self) -> str:
+        return f"AppConfig(key={self.key!r}, updated_by={self.updated_by!r})"
 
 
 # ============================================================================

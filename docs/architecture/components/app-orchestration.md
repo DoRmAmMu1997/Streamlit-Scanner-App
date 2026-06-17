@@ -33,10 +33,13 @@ flowchart TD
     MAIN --> VAL["validate_production_settings"]
     MAIN --> AUTH["require_authorized_user (if auth_required)"]
     MAIN --> MIG["ensure_database_schema()"]
+    MAIN --> OVR["apply_config_overrides() (OBS-003)"]
     MAIN --> VIEW{"View radio"}
     VIEW -->|Scanner| SCAN["discover_screeners → sidebar → run_scan → table+chart+fundamentals"]
     VIEW -->|Scan history| HIST["_render_history_page"]
     VIEW -->|Admin health| HLT["_render_admin_health_page (admins only)"]
+    VIEW -->|Admin settings| CFG["_render_config_page (admins only, OBS-003)"]
+    VIEW -->|Audit log| AUD["_render_audit_log_page (admins only, OBS-003)"]
     SCAN --> SVC["backend.scanning.run_scan"]
     SCAN --> CHART["ui.chart_cache → backend.charts"]
     SCAN --> FUND["FundamentalAgent.check (on click)"]
@@ -49,7 +52,7 @@ flowchart TD
 | `running_inside_streamlit()` | `get_script_run_ctx` check that picks the launch path. |
 | `prefetch_data_assets()` | Refresh universes → union → cleanup legacy cache → `ensure_daily_history` per stock; emits `data_refresh_*` events; never blocks the UI. |
 | `launch_streamlit_from_plain_python()` | `configure_logging()` → prefetch → re-exec via `streamlit.web.cli`. |
-| `main()` | The per-rerun flow: validate → auth gate → migrate → view router → scan state machine. |
+| `main()` | The per-rerun flow: validate → auth gate (records `login_success`) → migrate → `apply_config_overrides` → view router → scan state machine. Records OBS-003 audit events (`manual_scan_started`, `export_downloaded`, `admin_page_accessed`) via `backend.audit`. |
 | `_execute_screener(selected, *, triggered_by)` | Build loader + params (+ overrides, progress callback), call `run_scan`, return a `scan_cache` payload (or `None`). |
 | `_render_scan_output` / `_render_results_with_chart` | Stats expander, selectable table, table↔dropdown sync, embedded chart. |
 | `_render_fundamentals_panel` / `_render_verdict_block` | Per-row Check Fundamentals (criteria vs universal mode), verdict rendering. |

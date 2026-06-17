@@ -108,7 +108,7 @@ flowchart TB
 | Indicators | [indicators](components/indicators.md) | TA-Lib/pandas_ta + fallbacks, levels, weekly |
 | Screener catalog | [screener-catalog](components/screener-catalog.md) | The 10 strategies |
 | Scan service & provenance | [scan-service-and-provenance](components/scan-service-and-provenance.md) | `run_scan` lifecycle + strict result/provenance contract + AI evaluation receipts |
-| Storage & persistence | [storage-persistence](components/storage-persistence.md) | ORM (`scan_runs`/`scan_results`/`ai_evaluations`), engine/session, repository, Alembic |
+| Storage & persistence | [storage-persistence](components/storage-persistence.md) | ORM (`scan_runs`/`scan_results`/`ai_evaluations`/`audit_logs`/`app_config`), engine/session, repository, Alembic |
 | Daily scan job | [daily-scan-job](components/daily-scan-job.md) | Headless CLI + YAML schedule |
 | Check Fundamentals (AI) | [fundamentals-ai](components/fundamentals-ai.md) | Claude agent + screener.in scraper + PDF + cache |
 | Technical Analysis (AI) | [technical-analysis-ai](components/technical-analysis-ai.md) | Claude agent + price-action detectors + MCP tools |
@@ -116,6 +116,7 @@ flowchart TB
 | Charts & visualization | [charts-visualization](components/charts-visualization.md) | Lightweight-Charts specs + chart cache |
 | UI pages | [ui-pages](components/ui-pages.md) | Scan-history page + shared UI helpers |
 | Observability | [observability](components/observability.md) | Structured, secret-safe logging |
+| Audit log | [audit-log](components/audit-log.md) | Durable user-action trail (`audit_logs`) + admin runtime-config form (`app_config`) + viewer (OBS-003) |
 | Security | [security](components/security.md) | Secret redaction + SSRF guards + AI verdict-cache integrity (HMAC) |
 | Health monitoring | [health-monitoring](components/health-monitoring.md) | Passive admin health snapshot/page |
 
@@ -176,6 +177,7 @@ flowchart LR
 
 - **Auth** — one gate at the top of `main()`; nothing renders before it. ([authentication](components/authentication.md))
 - **Observability** — named structured events, JSON in prod, identical across all three entrypoints. ([observability](components/observability.md))
+- **Audit trail (OBS-003)** — important user actions (sign-ins, manual scans, the startup data refresh, config changes, CSV exports, admin-page access) are recorded to a durable `audit_logs` table with the actor email, a UTC timestamp, and redacted metadata. Recording is best-effort (never breaks the action) and routes through the same redactor as scan provenance; admins browse it in an in-app viewer. ([audit-log](components/audit-log.md))
 - **Security** — secret redaction on every sink (logs, UI errors, persisted messages); SSRF guards on scraped fetches; CSV-injection escaping; a shared prompt-injection quarantine (TEST-003) that scans external evidence before model exposure and fails the AI screeners closed on a hit. ([security](components/security.md))
 - **Persistence & provenance** — every shortlisted row carries a deterministic receipt (PROV-002: `triggered_rules` + `indicator_values` + `source`, built by `BaseScanner.build_provenance`); AI screeners add a tamper-evident verdict receipt (PROV-003: model, semantic prompt version, prompt/evidence/context SHA-256, sanitized source URLs — never raw scraped/model text) persisted to the `ai_evaluations` ledger. Shared JSON receipt envelopes let deterministic and AI audit detail evolve without per-strategy tables. ([scan-service-and-provenance](components/scan-service-and-provenance.md), [storage-persistence](components/storage-persistence.md))
 - **Caching** — Parquet candle cache (incremental), per-day AI verdict cache (**HMAC-signed and verified before reuse** — a tampered entry is rejected and recomputed), per-session chart cache, 30/60s Streamlit data caches.
@@ -188,7 +190,7 @@ Python 3.11+ · Streamlit · pandas / pyarrow · SQLAlchemy 2 + Alembic · `dhan
 
 ## 9. Data & storage
 
-Runtime data under `DATA_DIR` (default `./data`, git-ignored): `cache/daily/*.parquet` (candles), `cache/fundamentals/` (JSON data + verdicts + concall PDFs), `universes/*.csv`, `scanner.db` (SQLite). Scan history = `scan_runs` (1) ──< `scan_results` (many) and `scan_runs` (1) ──< `ai_evaluations` (many — the AI verdict ledger of approved/rejected/error receipts); deterministic columns for queries + `raw_result_json`/`provenance_json` for flexible audit. Full design: [scan-run-persistence.md](scan-run-persistence.md).
+Runtime data under `DATA_DIR` (default `./data`, git-ignored): `cache/daily/*.parquet` (candles), `cache/fundamentals/` (JSON data + verdicts + concall PDFs), `universes/*.csv`, `scanner.db` (SQLite). Scan history = `scan_runs` (1) ──< `scan_results` (many) and `scan_runs` (1) ──< `ai_evaluations` (many — the AI verdict ledger of approved/rejected/error receipts); deterministic columns for queries + `raw_result_json`/`provenance_json` for flexible audit. Full design: [scan-run-persistence.md](scan-run-persistence.md). OBS-003 adds two standalone tables on the same database: `audit_logs` (the user-action trail) and `app_config` (admin runtime-config overrides) — design: [obs-003-audit-log.md](obs-003-audit-log.md).
 
 ## 10. Deployment & runtime
 
@@ -223,5 +225,5 @@ Runtime data under `DATA_DIR` (default `./data`, git-ignored): `cache/daily/*.pa
 
 - **AI/external dependency** — Dhan/screener.in/SerpAPI/CLI changes can break features; mitigated by fallbacks, caches, and untrusted-evidence handling.
 - **Single-writer SQLite locally** — WAL + short sessions mitigate; Postgres for real concurrency.
-- **Recently shipped**: PROV-002 (deterministic per-screener receipts via `build_provenance`), PROV-003 (AI verdict receipts + the `ai_evaluations` ledger + HMAC verdict-cache integrity), DATA-001 (candle data-quality quarantine + per-run receipt), DEPLOY-001 (Docker runtime packaging), DEPLOY-002 (Docker Compose local production stack), and DEPLOY-003 (Render Blueprint + DB-URL driver normalization) are now on `main`.
+- **Recently shipped**: PROV-002 (deterministic per-screener receipts via `build_provenance`), PROV-003 (AI verdict receipts + the `ai_evaluations` ledger + HMAC verdict-cache integrity), DATA-001 (candle data-quality quarantine + per-run receipt), DEPLOY-001 (Docker runtime packaging), DEPLOY-002 (Docker Compose local production stack), DEPLOY-003 (Render Blueprint + DB-URL driver normalization), and OBS-003 (user-action audit log + admin runtime-config form/viewer) are now on `main`.
 - **Roadmap (backlog)**: RANK-* (`final_score` ranking), VALID-* (forward-return validation + `(symbol, signal_date)` index), AUTH-003 (role-gated features), and later DEPLOY-* hosting automation. These land in reserved columns / JSON or runtime docs without flag-day migrations.

@@ -6,7 +6,7 @@
 | **Source** | [`backend/config/settings.py`](../../../backend/config/settings.py), [`backend/config/__init__.py`](../../../backend/config/__init__.py) |
 | **Layer** | Foundation (leaf utility — imported by almost everything) |
 | **Status** | Stable (DEPLOY-004) |
-| **Related** | [HLD](../high-level-design.md) · [security.md](security.md) · [observability.md](observability.md) · [authentication.md](authentication.md) · [data-acquisition.md](data-acquisition.md) |
+| **Related** | [HLD](../high-level-design.md) · [security.md](security.md) · [observability.md](observability.md) · [authentication.md](authentication.md) · [data-acquisition.md](data-acquisition.md) · [audit-log.md](audit-log.md) |
 
 ## 1. Purpose & responsibilities
 
@@ -27,6 +27,8 @@ for *where data lives*, *which credentials exist*, *how logging renders*, and
 - Does **not** read `st.secrets` (Google OIDC config lives there — see [authentication.md](authentication.md)).
 - Does **not** create the DB engine (that is [storage-persistence.md](storage-persistence.md)).
 - Does **not** itself perform redaction — it only *supplies* the secret values to [security.md](security.md).
+
+> **Runtime override (OBS-003).** `get_settings()` reads `os.environ` on every call (no caching), which lets an admin override the operational keys `LOG_LEVEL` / `LOG_FORMAT` at runtime: the value is validated with these same parsers, stored in `app_config`, applied into `os.environ`, and replayed on startup by `apply_config_overrides()`. Secrets and auth/infra keys are intentionally **not** overridable. See [audit-log.md](audit-log.md).
 
 ## 2. Position in the system
 

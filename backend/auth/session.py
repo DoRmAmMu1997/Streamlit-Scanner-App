@@ -24,8 +24,10 @@ import logging
 from dataclasses import dataclass, replace
 from typing import Any, NoReturn
 
+from backend.audit import record_audit_event, record_audit_event_once
 from backend.config import get_settings
-from backend.observability import EVENT_AUTH_DENIED, log_event
+from backend.observability import EVENT_AUTH_DENIED, EVENT_LOGIN_DENIED, log_event
+from backend.storage import ensure_database_schema
 
 logger = logging.getLogger(__name__)
 
@@ -238,6 +240,29 @@ def require_authorized_user(st_module: Any) -> AuthenticatedUser:
             email=email,
             reason="not_on_allowlist",
         )
+        # OBS-003: also record the denied attempt in the durable audit trail. A
+        # denied user stops before app.main() reaches its schema bootstrap, so a
+        # real Streamlit session gets one local bootstrap attempt here before the
+        # audit write. The once-helper marks the session only after persistence
+        # succeeds, letting a transient DB failure retry on the next rerun.
+        session_state = getattr(st_module, "session_state", None)
+        if not hasattr(session_state, "get"):
+            record_audit_event(
+                event=EVENT_LOGIN_DENIED,
+                user_email=email,
+                metadata={"reason": "not_on_allowlist"},
+                level=logging.WARNING,
+            )
+        else:
+            ensure_database_schema()
+            record_audit_event_once(
+                session_state=session_state,
+                dedup_key=f"_audit_login_denied:{email}",
+                event=EVENT_LOGIN_DENIED,
+                user_email=email,
+                metadata={"reason": "not_on_allowlist"},
+                level=logging.WARNING,
+            )
         st_module.error(
             "You are not authorized to access this app. "
             "Ask the administrator to add your email to the allowlist."

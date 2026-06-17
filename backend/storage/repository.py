@@ -24,7 +24,14 @@ from typing import Any, cast
 from sqlalchemy import exists, func, select
 from sqlalchemy.orm import Session
 
-from backend.storage.models import AIEvaluation, ScanResult, ScanRun, ScanStatus
+from backend.storage.models import (
+    AIEvaluation,
+    AppConfig,
+    AuditLog,
+    ScanResult,
+    ScanRun,
+    ScanStatus,
+)
 
 _AI_EVALUATION_OUTCOMES = frozenset({"approved", "rejected", "error"})
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -333,6 +340,111 @@ def get_ai_evaluations(session: Session, run_id: int) -> list[AIEvaluation]:
         .order_by(AIEvaluation.symbol.asc(), AIEvaluation.id.asc())
     )
     return list(session.scalars(stmt))
+
+
+# ---------------------------------------------------------------------------
+# OBS-003 — audit log + runtime config overrides
+# ---------------------------------------------------------------------------
+
+
+def create_audit_log_entry(
+    session: Session,
+    *,
+    event: str,
+    user_email: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
+) -> AuditLog:
+    """Insert one ``audit_logs`` row and return it.
+
+    ``metadata`` is passed through ``normalize_secret_safe_json`` exactly like
+    ``scan_runs.params_json`` so credential-named keys are masked, strings are
+    redacted, and the stored blob is strict JSON. ``user_email`` is left as-is
+    (``None`` for system actions such as the startup data refresh). ``flush``
+    assigns ``entry.id`` without ending the caller's transaction.
+    """
+    from backend.scanning.result_contract import normalize_secret_safe_json
+
+    entry = AuditLog(
+        event=event,
+        user_email=_as_optional_str(user_email),
+        metadata_json=cast(
+            dict[str, Any] | None,
+            normalize_secret_safe_json(dict(metadata)) if metadata else None,
+        ),
+    )
+    session.add(entry)
+    session.flush()
+    return entry
+
+
+def get_recent_audit_logs(
+    session: Session,
+    limit: int = 100,
+    *,
+    event: str | None = None,
+    user_email: str | None = None,
+) -> list[AuditLog]:
+    """Return the newest audit rows first, optionally filtered.
+
+    The admin Audit log page calls this. ``limit`` keeps the query bounded as the
+    trail grows. ``event`` is an exact match on the event name; ``user_email`` is
+    a case-insensitive exact match (audit emails are stored lowercase, but a
+    filter value typed in the UI may not be). Two rows written in the same
+    millisecond keep a deterministic order via the primary-key tie-breaker.
+    """
+    stmt = select(AuditLog)
+    if event:
+        stmt = stmt.where(AuditLog.event == event)
+    if user_email and user_email.strip():
+        stmt = stmt.where(func.lower(AuditLog.user_email) == user_email.strip().lower())
+    stmt = stmt.order_by(AuditLog.created_at.desc(), AuditLog.id.desc()).limit(limit)
+    return list(session.scalars(stmt))
+
+
+def list_distinct_audit_events(session: Session) -> list[str]:
+    """Return every event name present in the audit trail, sorted.
+
+    The audit viewer's event filter uses this (not the constant list) so it only
+    offers values that actually appear in history.
+    """
+    stmt = select(AuditLog.event).distinct().order_by(AuditLog.event.asc())
+    return list(session.scalars(stmt))
+
+
+def get_config_overrides(session: Session) -> dict[str, str]:
+    """Return all persisted runtime-config overrides as a ``{key: value}`` dict.
+
+    ``apply_config_overrides`` (in backend.admin) calls this on startup to seed
+    ``os.environ``. Rows whose value is NULL are skipped — an absent override is
+    the same as "use the environment default".
+    """
+    rows = session.scalars(select(AppConfig)).all()
+    return {row.key: row.value for row in rows if row.value is not None}
+
+
+def set_config_override(
+    session: Session,
+    *,
+    key: str,
+    value: str | None,
+    updated_by: str | None,
+) -> str | None:
+    """Upsert one override row and return the PREVIOUS value (or None).
+
+    Returning the old value lets the caller record a precise ``config_changed``
+    audit entry (old -> new) without a second query. ``flush`` persists the row
+    so the same transaction can read it back.
+    """
+    existing = session.get(AppConfig, key)
+    previous = existing.value if existing is not None else None
+    if existing is None:
+        session.add(AppConfig(key=key, value=value, updated_by=updated_by))
+    else:
+        existing.value = value
+        existing.updated_by = updated_by
+        existing.updated_at = dt.datetime.now(dt.UTC)
+    session.flush()
+    return previous
 
 
 def _build_ai_evaluation(

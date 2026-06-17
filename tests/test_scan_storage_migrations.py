@@ -42,8 +42,15 @@ def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Pa
     assert set(inspector.get_table_names()) == {
         "ai_evaluations",
         "alembic_version",
+        "app_config",
+        "audit_logs",
         "scan_runs",
         "scan_results",
+    }
+    assert {index["name"] for index in inspector.get_indexes("audit_logs")} >= {
+        "ix_audit_logs_created_at",
+        "ix_audit_logs_event",
+        "ix_audit_logs_user_email",
     }
     assert {index["name"] for index in inspector.get_indexes("scan_runs")} >= {
         "ix_scan_runs_screener_key",
@@ -119,6 +126,8 @@ def test_ensure_database_schema_creates_tables_and_short_circuits(monkeypatch, t
     assert set(inspect(engine).get_table_names()) == {
         "ai_evaluations",
         "alembic_version",
+        "app_config",
+        "audit_logs",
         "scan_runs",
         "scan_results",
     }
