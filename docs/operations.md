@@ -346,6 +346,78 @@ not need backup; the scan-history database is the part you cannot regenerate.
 
 ---
 
+## Deploying to Render (managed)
+
+`render.yaml` (DEPLOY-003) is a Render **Blueprint** that provisions the whole
+stack from one file: a Streamlit **web service**, a managed **Postgres** database,
+a **persistent disk** for the web service's candle cache, and a **cron job** for
+the daily scan. It reuses the same production `Dockerfile` as Docker Compose, so
+Render runs the exact image you can build locally. The design rationale lives in
+[the deployment-runtime LLD](architecture/components/deployment-runtime.md#9-render-managed-deployment-deploy-003).
+
+### First deploy
+
+1. Push the repo to GitHub/GitLab and, in the Render dashboard, create a new
+   **Blueprint** pointing at it. Render reads `render.yaml` and proposes the
+   `scanner-db` database, `scanner-web` web service, and `scanner-daily-scan`
+   cron job.
+2. Fill in the `sync: false` env vars Render prompts for (they are never
+   committed): `DHAN_CLIENT_ID`, `DHAN_ACCESS_TOKEN`, `ALLOWED_EMAILS` and/or
+   `ADMIN_EMAILS`, and optionally `SERPAPI_API_KEY`. `DATABASE_URL` is wired
+   automatically from `scanner-db` — Render emits a bare `postgresql://` URL and
+   the app rewrites it to the pinned psycopg v3 driver at startup, so no manual
+   editing is needed. The database uses `ipAllowList: []`, so public internet
+   database connections are closed while Render services keep using the internal
+   `fromDatabase` connection string.
+3. Add the Google OIDC secrets as a Render **Secret File** on `scanner-web` at
+   filename `streamlit-secrets.toml` (same `[auth]` + `[auth.google]` shape as
+   `.streamlit/secrets.example.toml`). Render exposes Docker secret files at
+   `/etc/secrets/streamlit-secrets.toml`; the Blueprint's web `dockerCommand`
+   passes that path with `--secrets.files` so Streamlit can load it. Set
+   `redirect_uri` to your service URL, e.g.
+   `https://scanner-web.onrender.com/oauth2callback`, and add that URL to the
+   Google OAuth client's authorized redirect URIs.
+4. Apply the Blueprint. On first boot either service runs `alembic upgrade head`
+   automatically, so the fresh Postgres is initialized.
+
+### Persistent disk and the candle cache
+
+The disk attaches to `scanner-web` only (Render disks are single-attach) and is
+mounted at `DATA_DIR`. Both default to `/data`; change them together to
+relocate the persistent path. The disk starts empty, so after the first deploy
+open a **Render Shell** on `scanner-web` and seed the universe CSVs the UI needs
+for screener selection:
+
+```bash
+python -c "from backend.universe_builder import refresh_universe_files; refresh_universe_files()"
+```
+
+The candle cache then warms lazily as scans run and charts are viewed; to
+pre-warm the full 10-year cache, run the same prefetch the local CLI uses against
+the mounted disk.
+
+### The daily-scan cron
+
+`scanner-daily-scan` runs on Render's UTC schedule (default `30 13 * * 1-5` =
+19:00 IST weekdays). It runs on an **ephemeral** filesystem with no disk, so its
+`dockerCommand` first regenerates the universe CSVs, then runs
+`python -m backend.jobs.run_daily_scan --config config/daily_scans.yaml`; it
+fetches candles fresh from Dhan and writes results to the **shared Postgres**,
+which is what the web UI's Scan history page reads. A cold candle cache costs the
+cron time, not correctness.
+
+### Troubleshooting
+
+- **Web service won't bind**: confirm the start command serves `$PORT` (the
+  Blueprint's `dockerCommand` does); the image's own `8501` CMD is overridden.
+- **Production config error on boot**: `scanner-web` fails closed until
+  `DHAN_*`, `AUTH_REQUIRED=true`, and an allow/admin email are set, and the OIDC
+  Secret File exists as `/etc/secrets/streamlit-secrets.toml`.
+- **Health check failing**: Render polls `/_stcore/health`; check
+  `scanner-web` logs for a config or migration error.
+
+---
+
 ## Credential rotation
 
 | Credential | Where it lives | How to rotate |

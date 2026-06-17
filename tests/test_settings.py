@@ -18,10 +18,43 @@ import pytest
 from backend.config.settings import (
     PROJECT_ROOT,
     SettingsError,
+    _normalize_database_url,
     get_settings,
     secret_values,
     validate_production_settings,
 )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # Bare schemes a managed-Postgres provider (Render/Heroku) auto-wires.
+        ("postgresql://u:p@host:5432/db", "postgresql+psycopg://u:p@host:5432/db"),
+        ("postgres://u:p@host:5432/db", "postgresql+psycopg://u:p@host:5432/db"),
+        # Already-qualified driver URLs must pass through untouched.
+        ("postgresql+psycopg://u:p@host/db", "postgresql+psycopg://u:p@host/db"),
+        ("postgresql+psycopg2://u:p@host/db", "postgresql+psycopg2://u:p@host/db"),
+        # SQLite (and anything else) is left alone.
+        ("sqlite:///data/scanner.db", "sqlite:///data/scanner.db"),
+    ],
+)
+def test_normalize_database_url_targets_installed_psycopg_v3_driver(raw, expected):
+    """Bare Postgres URLs are rewritten to the pinned psycopg v3 driver."""
+    assert _normalize_database_url(raw) == expected
+
+
+def test_get_settings_normalizes_provider_injected_database_url():
+    """A Render-style postgresql:// DATABASE_URL is usable by SQLAlchemy as-is.
+
+    The raw env value is still treated as "provided", so production validation
+    (which requires DATABASE_URL to come from the environment) keeps passing.
+    """
+    settings = get_settings(
+        env={"DATABASE_URL": "postgresql://scanner:secret@db.internal:5432/scanner"}
+    )
+
+    assert settings.database_url == "postgresql+psycopg://scanner:secret@db.internal:5432/scanner"
+    assert settings.database_url_from_env is True
 
 
 def test_local_defaults_are_safe_for_development():
@@ -199,8 +232,11 @@ def test_settings_repr_and_safe_dict_never_print_secret_values(tmp_path: Path):
     assert safe["has_dhan_client_id"] is True
     assert safe["has_dhan_access_token"] is True
 
+    # The redactor masks the DB URL the engine actually connects with, which is
+    # the normalized psycopg-v3 form (a bare postgresql:// input is rewritten at
+    # settings build time), so that is the value that could leak in a driver error.
     assert set(secret_values(settings)) >= {
-        "postgresql://user:db-secret@db/scanner",
+        "postgresql+psycopg://user:db-secret@db/scanner",
         "anthropic-secret",
         "serp-secret",
         "client-secret",

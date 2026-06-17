@@ -227,6 +227,23 @@ def _normalize_app_env(raw: str) -> str:
     return value or "development"
 
 
+def _normalize_database_url(url: str) -> str:
+    """Name the installed psycopg v3 driver in bare Postgres URLs.
+
+    Managed-Postgres providers (Render, Heroku, ...) auto-wire connection strings
+    as ``postgres://`` or ``postgresql://``. SQLAlchemy maps both bare schemes to
+    the psycopg2 driver, which this project does not install (only psycopg v3 is
+    pinned). Rewriting the scheme to ``postgresql+psycopg://`` lets a
+    provider-injected ``DATABASE_URL`` work unedited. SQLite URLs and URLs that
+    already name a driver (``postgresql+psycopg://``, ``postgresql+psycopg2://``)
+    are returned unchanged.
+    """
+    for prefix in ("postgresql://", "postgres://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg://" + url[len(prefix) :]
+    return url
+
+
 def _parse_bool(raw: str, *, default: bool) -> bool:
     """Parse an env boolean with a caller-chosen default.
 
@@ -323,6 +340,11 @@ def get_settings(
     # checkout. Production validation below requires it to be explicit.
     database_url_value = _env_value(source, "DATABASE_URL")
     database_url = database_url_value or f"sqlite:///{(data_dir / 'scanner.db').as_posix()}"
+    # Managed-Postgres providers (e.g. Render's auto-wired DATABASE_URL) inject a
+    # bare postgresql:// URL; rewrite it to the psycopg v3 driver this project
+    # pins so the value works unedited. database_url_from_env still reflects the
+    # raw env presence below, so production validation is unaffected.
+    database_url = _normalize_database_url(database_url)
 
     # LOG_LEVEL is the normal deploy knob. SCANNER_DEBUG=1 remains a small
     # backwards-compatible shortcut for local debugging.
