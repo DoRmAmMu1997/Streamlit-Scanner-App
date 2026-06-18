@@ -10,6 +10,7 @@ is ``sync: false``). Actual Render provisioning happens on the platform.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
@@ -45,6 +46,11 @@ def _service(blueprint: dict, name: str) -> dict:
 def _env_map(service: dict) -> dict[str, dict]:
     """Map a service's envVars list to {key: entry} for easy assertions."""
     return {entry["key"]: entry for entry in service.get("envVars", [])}
+
+
+def _config_paths(command: str) -> list[str]:
+    """Return repo-relative paths passed as ``--config <path>`` arguments."""
+    return re.findall(r"--config\s+([^\s\"']+)", command)
 
 
 def test_blueprint_defines_web_cron_and_managed_database() -> None:
@@ -125,6 +131,22 @@ def test_cron_refreshes_universes_then_runs_the_daily_scan() -> None:
     assert "disk" not in cron
 
 
+def test_blueprint_config_arguments_point_at_committed_files() -> None:
+    """Any Render command using ``--config`` must reference a file in the image."""
+    blueprint = _blueprint()
+    seen_config_paths: list[str] = []
+
+    for service in blueprint["services"]:
+        command = service.get("dockerCommand", "")
+        for config_path in _config_paths(command):
+            seen_config_paths.append(config_path)
+            assert (REPO_ROOT / config_path).is_file(), (
+                f"{service['name']} references missing --config file: {config_path}"
+            )
+
+    assert seen_config_paths == ["config/daily_scans.yaml"]
+
+
 def test_blueprint_commits_no_secret_values() -> None:
     """Every secret is `sync: false` (dashboard-provided), never a committed value."""
     blueprint = _blueprint()
@@ -149,9 +171,13 @@ def test_docs_document_the_render_deployment() -> None:
     assert "render.yaml" in operations
     assert "/etc/secrets/streamlit-secrets.toml" in readme
     assert "/etc/secrets/streamlit-secrets.toml" in operations
+    assert "committed Render/default schedule" in readme
+    assert "AI-heavy jobs remain disabled by default" in operations
     # The HLD/LLD record the topology decision and the DB-URL normalization.
     assert "DEPLOY-003" in hld
     assert "render.yaml" in lld
     assert "/etc/secrets/streamlit-secrets.toml" in lld
     assert "ipAllowList: []" in lld
+    assert "DEPLOY-003B" in hld
+    assert "config/daily_scans.yaml" in lld
     assert "single-attach" in lld.lower() or "single attach" in lld.lower()

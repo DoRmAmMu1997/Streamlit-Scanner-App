@@ -526,8 +526,12 @@ flag lists, point the command at a YAML config (JOB-002):
 python -m backend.jobs.run_daily_scan --config config/daily_scans.yaml
 ```
 
-Copy `config/daily_scans.example.yaml` and edit it. Each entry under
-`daily_scans` is one named scan batch:
+`config/daily_scans.yaml` is the committed Render/default schedule used by the
+Blueprint cron. It contains no secrets, enables the deterministic daily set, and
+keeps AI-heavy jobs disabled by default. Copy/edit it for your deployment, or
+point `--config` at another repo-available file. Keep
+`config/daily_scans.example.yaml` as the documented template when you want more
+inline guidance. Each entry under `daily_scans` is one named scan batch:
 
 ```yaml
 daily_scans:
@@ -556,8 +560,8 @@ scheduler notices the problem.
 > **AI-heavy jobs are opt-in.** The `sixty_seven_ka_funda` and
 > `technical_analysis` screeners call the Claude Agent SDK (and SerpAPI), so they
 > cost API quota and depend on optional external services. They ship **disabled**
-> in the example config; enable them deliberately and consider lowering
-> `max_ai_candidates` to cap per-run cost.
+> in the committed Render/default schedule and the example config; enable them
+> deliberately and consider lowering `max_ai_candidates` to cap per-run cost.
 
 Exit code `0` means every selected scan persisted history and finished
 `success` or `partial`. Exit code `1` means a fatal problem occurred, such as an
@@ -581,13 +585,17 @@ local Docker:
   `postgresql+psycopg://` driver at startup) with public database ingress closed
   by `ipAllowList: []`;
 - a **cron job** (`scanner-daily-scan`) that refreshes universes and runs
-  `python -m backend.jobs.run_daily_scan`, writing results to the shared Postgres.
+  `python -m backend.jobs.run_daily_scan --config config/daily_scans.yaml`,
+  writing results to the shared Postgres.
 
 Every secret is `sync: false` in the Blueprint (provided in the Render dashboard,
 never committed); Google OIDC secrets go in a Render Secret File at
 `streamlit-secrets.toml`, which Render exposes to Docker at
 `/etc/secrets/streamlit-secrets.toml`. The web `dockerCommand` passes that file
-through `--secrets.files` so `st.login` can read the `[auth]` tables. Full
+through `--secrets.files` so `st.login` can read the `[auth]` tables. The cron's
+`--config` target is the committed Render/default schedule, so the deployed image
+contains the file Render runs; change the path only when your replacement config
+is also present in the image. Full
 step-by-step: [docs/operations.md → "Deploying to Render"](docs/operations.md#deploying-to-render-managed). Topology rationale: [the
 deployment-runtime LLD](docs/architecture/components/deployment-runtime.md).
 

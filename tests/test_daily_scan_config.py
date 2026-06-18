@@ -187,3 +187,16 @@ def test_example_config_file_is_valid_and_ships_ai_disabled():
         entry.enabled and entry.screener_key not in {"sixty_seven_ka_funda", "technical_analysis"}
         for entry in entries
     )
+
+
+def test_render_default_config_file_is_valid_and_ships_ai_disabled():
+    """The committed Render/default schedule must exist and keep AI jobs opt-in."""
+    repo_root = Path(__file__).resolve().parents[1]
+    entries = load_daily_scan_config(repo_root / "config" / "daily_scans.yaml")
+
+    by_key = {entry.screener_key: entry for entry in entries}
+    assert by_key["bollinger_band_reversal"].enabled is True
+    assert by_key["heikin_ashi_supertrend"].enabled is True
+    assert by_key["envelope_knoxville_buy"].enabled is True
+    assert by_key["sixty_seven_ka_funda"].enabled is False
+    assert by_key["technical_analysis"].enabled is False

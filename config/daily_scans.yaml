@@ -1,0 +1,46 @@
+# Committed daily scan schedule for Render and other default cron deployments.
+#
+# This file is safe to ship in the image: it contains no secrets, only screener
+# names and non-secret tuning values. Copy/edit it for a custom deployment, or
+# point `python -m backend.jobs.run_daily_scan --config ...` at another file.
+#
+# `config/daily_scans.example.yaml` remains the more heavily commented template.
+
+daily_scans:
+  # --- Deterministic, dependency-light screeners (safe to run every day) ---
+
+  - name: Bollinger Band Reversal (daily)
+    screener_key: bollinger_band_reversal
+    enabled: true
+    description: F&O mean-reversion gate. Uses the registry default universe (fno).
+
+  - name: Heikin Ashi Supertrend (daily)
+    screener_key: heikin_ashi_supertrend
+    enabled: true
+
+  - name: Envelope Knoxville Buy (daily)
+    screener_key: envelope_knoxville_buy
+    enabled: true
+    universe_key: hemant_super_45
+    params:
+      percent: 14.0
+
+  # --- AI-heavy screeners: OPT-IN ONLY ---
+  # These call the Claude Agent SDK (and SerpAPI, for 67 Ka Funda). They cost
+  # money / API quota and depend on optional external services, so they ship
+  # DISABLED. Enable them deliberately, and consider lowering max_ai_candidates
+  # to cap per-run cost.
+
+  - name: 67 Ka Funda (AI)
+    screener_key: sixty_seven_ka_funda
+    enabled: false
+    description: AI verifier over a 67% drawdown gate. Costs API calls; opt in.
+    params:
+      max_ai_candidates: 5
+
+  - name: Technical Analysis (AI)
+    screener_key: technical_analysis
+    enabled: false
+    description: AI confirmation of chart patterns. Costs API calls; opt in.
+    params:
+      max_ai_candidates: 5

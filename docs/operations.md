@@ -15,6 +15,11 @@ python -m backend.jobs.run_daily_scan            # built-in deterministic set
 python -m backend.jobs.run_daily_scan --config config/daily_scans.yaml
 ```
 
+`config/daily_scans.yaml` is the committed Render/default schedule. It contains
+no secrets, enables deterministic screeners, and keeps AI-heavy jobs disabled by
+default. Copy/edit it or point `--config` at another file when a deployment needs
+a custom schedule.
+
 Exit code `0` means every scheduled scan finished without a fatal error;
 non-zero means at least one scan failed, which is what schedulers should alert
 on. Results land in the same scan-history database the UI reads (SCAN-002),
@@ -405,6 +410,12 @@ the mounted disk.
 fetches candles fresh from Dhan and writes results to the **shared Postgres**,
 which is what the web UI's Scan history page reads. A cold candle cache costs the
 cron time, not correctness.
+
+The referenced `config/daily_scans.yaml` is committed so the Render image always
+contains the cron schedule it runs. Use it as the production default, copy/edit it
+for custom deployments, or change the Blueprint command to another committed
+config path. AI-heavy jobs remain disabled by default; enable them deliberately
+only after setting the optional AI/search secrets and cost limits you want.
 
 ### Troubleshooting
 
