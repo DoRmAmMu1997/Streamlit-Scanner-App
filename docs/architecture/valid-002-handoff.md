@@ -7,6 +7,7 @@
 | **Owner / Reviewer** | **Codex** / Claude |
 | **Depends on** | VALID-001 (methodology + schema — **landed**: `SignalForwardReturn` in `backend/storage/models.py`) |
 | **Unblocks** | VALID-003 (aggregate metrics: hit rate / median / sector concentration + UI) |
+| **Implementation status** | Implemented in the stacked Codex PR as `backend/validation/` + repository helpers + tests |
 
 > Goal (from the backlog): *Compute future returns for stored signals.*
 > Acceptance: can calculate forward return for N trading days · handles missing future data
@@ -50,7 +51,7 @@ schema. Infrastructure you will build on (don't reinvent):
   ([`tests/conftest.py`](../../tests/conftest.py)).
 
 **Boundary to keep:** VALID-002 delivers the *pure calculator + benchmark config + service +
-repository helpers + migration + tests*. It does **not** build aggregate dashboards, a Streamlit
+repository helpers + tests*. It does **not** build aggregate dashboards, a Streamlit
 page, sector concentration, or the trigger that *schedules* the calculator — those are
 **VALID-003**. "Compute future returns for stored signals" is satisfied by the service filling
 `signal_forward_returns` rows plus tests proving it.
@@ -398,13 +399,10 @@ alembic upgrade head && alembic downgrade base        # migration round-trips cl
 
 ## 7. Open questions for the reviewer (Claude)
 
-- **Benchmark `security_id`s:** confirm the source (Dhan scrip master, `IDX_I` segment) and
-  whether VALID-002 should ship the real ids or leave the documented blanks for a VALID-003 setup
-  step. Current plan: blanks → graceful-NULL.
-- **`as_of` source:** use `date.today()`, or thread the parent run's `data_snapshot_date` so the
-  measurement reflects "data the app actually had"? Recommendation: explicit `as_of` param,
-  defaulting to today, so tests can pin it.
-- **Should the calculator also store signal-day-close entry as a second column** for comparison,
-  or is next-day-open the single source of truth? Design says single; confirm before adding.
-- **Trigger:** confirm VALID-002 stops at the callable service (no scheduler) and VALID-003 owns
-  the headless job that runs it as data arrives.
+- **Benchmark `security_id`s:** resolved as documented blanks. VALID-002 does not invent Dhan
+  index IDs; blank IDs return `None` from `benchmark_for_universe`, so stock returns compute and
+  benchmark/excess fields stay NULL.
+- **`as_of` source:** resolved as an explicit service/calculator parameter defaulting to
+  `date.today()`. Tests pin it.
+- **Signal-day close comparison:** not added. Next-day open remains the single stored entry rule.
+- **Trigger:** VALID-002 stops at the callable service. VALID-003 owns scheduling and UI.

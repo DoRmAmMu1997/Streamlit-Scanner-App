@@ -382,10 +382,10 @@ class SignalForwardReturn(Base):
     calculator be re-run idempotently: it upserts a ``pending`` row to ``computed`` once
     the window elapses, rather than appending a duplicate each pass.
 
-    Design boundary (mirrors SCAN-001): this module is **schema only**. The forward-return
-    *math* (next-open entry, Nth-bar exit, MAE/MFE, benchmark alignment), the service that
-    loads candles and fills these rows, the repository helpers, and the Alembic migration
-    are all **VALID-002 (owner: Codex)**. See the design doc for the methodology
+    Design boundary (mirrors SCAN-001): this module is **schema only**. The VALID-001
+    migration creates the table; VALID-002 owns the forward-return *math* (next-open
+    entry, Nth-bar exit, MAE/MFE, benchmark alignment), the service that loads candles
+    and fills these rows, and the repository helpers. See the design doc for the methodology
     (``docs/architecture/valid-001-forward-return-validation.md``) and the handoff brief
     (``docs/architecture/valid-002-handoff.md``).
     """

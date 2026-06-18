@@ -62,6 +62,10 @@ guarantees**. The calculator that fills the rows is **VALID-002 (Codex)**; its b
 The schema stub deliberately stops at "schema only" — exactly as SCAN-001 did for SCAN-002 —
 so this methodology can be reviewed and agreed before VALID-002 wires the calculator in.
 
+**VALID-002 implementation note.** The stacked VALID-002 change implements the calculator in
+`backend/validation/`, keeps benchmark `security_id`s blank until verified, and treats recently
+missing future bars as retryable `pending` rows before terminal `insufficient_data`.
+
 ---
 
 ## 3. Methodology

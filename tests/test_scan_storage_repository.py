@@ -530,3 +530,92 @@ def test_storage_package_exports_ai_evaluation_api():
     assert storage.AIEvaluation is not None
     assert callable(storage.save_ai_evaluations)
     assert callable(storage.get_ai_evaluations)
+
+
+def test_get_signals_needing_forward_returns_returns_missing_and_pending_only(db_session):
+    """VALID-002 should retry missing/pending horizons and skip terminal rows."""
+    from backend.storage.models import ForwardReturnStatus, SignalForwardReturn
+    from backend.storage.repository import (
+        create_scan_run,
+        get_signals_needing_forward_returns,
+        save_scan_results,
+    )
+
+    run = create_scan_run(db_session, screener_key="envelope", universe_key="nifty_500")
+    missing, pending, computed, insufficient = save_scan_results(
+        db_session,
+        run,
+        [
+            {"symbol": "MISSING", "signal_date": dt.date(2026, 1, 5)},
+            {"symbol": "PENDING", "signal_date": dt.date(2026, 1, 5)},
+            {"symbol": "COMPUTED", "signal_date": dt.date(2026, 1, 5)},
+            {"symbol": "INSUFF", "signal_date": dt.date(2026, 1, 5)},
+        ],
+    )
+    db_session.add_all(
+        [
+            SignalForwardReturn(result_id=pending.id, horizon_days=20),
+            SignalForwardReturn(
+                result_id=computed.id,
+                horizon_days=20,
+                status=ForwardReturnStatus.COMPUTED,
+            ),
+            SignalForwardReturn(
+                result_id=insufficient.id,
+                horizon_days=20,
+                status=ForwardReturnStatus.INSUFFICIENT_DATA,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    rows = get_signals_needing_forward_returns(db_session, horizons=(20,))
+
+    assert [row.id for row in rows] == [missing.id, pending.id]
+    assert rows[0].run.universe_key == "nifty_500"
+
+
+def test_upsert_forward_return_updates_pending_row_in_place(db_session):
+    """VALID-002 re-runs must update by (result_id, horizon_days), not duplicate."""
+    from sqlalchemy import select
+
+    from backend.storage.models import ForwardReturnStatus, SignalForwardReturn
+    from backend.storage.repository import (
+        create_scan_run,
+        save_scan_results,
+        upsert_forward_return,
+    )
+    from backend.validation.forward_return import ForwardReturnPoint
+
+    run = create_scan_run(db_session, screener_key="envelope", universe_key="nifty_500")
+    [result] = save_scan_results(
+        db_session,
+        run,
+        [{"symbol": "RELIANCE", "signal_date": dt.date(2026, 1, 5)}],
+    )
+    db_session.add(SignalForwardReturn(result_id=result.id, horizon_days=20))
+    db_session.commit()
+
+    row = upsert_forward_return(
+        db_session,
+        result_id=result.id,
+        point=ForwardReturnPoint(
+            horizon_days=20,
+            status=ForwardReturnStatus.COMPUTED,
+            entry_date=dt.date(2026, 1, 6),
+            exit_date=dt.date(2026, 2, 3),
+            entry_price=Decimal("100.0000"),
+            exit_price=Decimal("112.5000"),
+            forward_return_pct=Decimal("12.5000"),
+            max_adverse_excursion_pct=Decimal("-4.2000"),
+            max_favorable_excursion_pct=Decimal("15.1000"),
+        ),
+    )
+    db_session.commit()
+
+    rows = list(db_session.scalars(select(SignalForwardReturn)))
+    assert len(rows) == 1
+    assert rows[0].id == row.id
+    assert rows[0].status is ForwardReturnStatus.COMPUTED
+    assert rows[0].forward_return_pct == Decimal("12.5000")
+    assert rows[0].computed_at is not None

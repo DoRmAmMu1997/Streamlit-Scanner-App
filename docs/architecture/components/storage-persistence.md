@@ -5,8 +5,8 @@
 | **Component** | Scan-run persistence (engine, session, repository, migrations) |
 | **Source** | [`backend/storage/models.py`](../../../backend/storage/models.py), [`backend/storage/database.py`](../../../backend/storage/database.py), [`backend/storage/repository.py`](../../../backend/storage/repository.py), [`migrations/`](../../../migrations) |
 | **Layer** | Persistence (`backend/`) |
-| **Status** | Stable (SCAN-001 schema · SCAN-002 DB layer · SCAN-004 `symbols_scanned` · PROV-003 `ai_evaluations` · OBS-003 `audit_logs`/`app_config`) |
-| **Related** | **[scan-run-persistence.md](../scan-run-persistence.md)** (full SCAN-001 design) · [scan-002-handoff.md](../scan-002-handoff.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [ui-pages.md](ui-pages.md) · [HLD](../high-level-design.md) |
+| **Status** | Stable (SCAN-001 schema · SCAN-002 DB layer · SCAN-004 `symbols_scanned` · PROV-003 `ai_evaluations` · OBS-003 `audit_logs`/`app_config` · VALID-001/002 `signal_forward_returns`) |
+| **Related** | **[scan-run-persistence.md](../scan-run-persistence.md)** (full SCAN-001 design) · [scan-002-handoff.md](../scan-002-handoff.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [validation.md](validation.md) · [ui-pages.md](ui-pages.md) · [HLD](../high-level-design.md) |
 
 > **This LLD summarizes the *current* persistence layer and how it is used.** The
 > authoritative schema rationale (column-by-column design, why `Numeric` not float,
@@ -20,7 +20,7 @@ Record every scan execution and its shortlisted rows so the app can later answer
 universe, or model.
 
 **Three sub-layers (strict direction):**
-1. **`models.py`** — table *shapes* only (`Base`, `ScanRun`, `ScanResult`, `AIEvaluation`, `AuditLog`, `AppConfig`, `ScanStatus`, `BigIntPrimaryKey`). No connections.
+1. **`models.py`** — table *shapes* only (`Base`, `ScanRun`, `ScanResult`, `SignalForwardReturn`, `AIEvaluation`, `AuditLog`, `AppConfig`, `ScanStatus`, `ForwardReturnStatus`, `BigIntPrimaryKey`). No connections.
 2. **`database.py`** — *where* data lives: engine, `SessionLocal`, `session_scope()`, SQLite pragmas, `ensure_database_schema()` (auto-migrate).
 3. **`repository.py`** — the *only* place that builds queries; typed read/write helpers. Does **not** own sessions.
 
@@ -30,7 +30,8 @@ universe, or model.
 flowchart TD
     UI["Streamlit history page"] -->|reads| REPO["repository.py (queries only)"]
     SVC["scanning.service.run_scan"] -->|create→save→finish| REPO
-    REPO --> MODELS["models.py (ScanRun, ScanResult, AIEvaluation)"]
+    VAL["validation.service"] -->|upserts forward returns| REPO
+    REPO --> MODELS["models.py (ScanRun, ScanResult, AIEvaluation, SignalForwardReturn)"]
     REPO -.uses session.- SS["session_scope()"]
     SS --> ENG["engine (database.py)"]
     ENG -->|DATABASE_URL| SQLITE[("SQLite data/scanner.db (dev)")]
@@ -40,13 +41,14 @@ flowchart TD
 
 ## 3. Schema (summary — see [scan-run-persistence.md](../scan-run-persistence.md) for full detail)
 
-**`scan_runs`** (1) ──< **`scan_results`** (many) and **`scan_runs`** (1) ──< **`ai_evaluations`** (many); both FKs `ON DELETE CASCADE`.
+**`scan_runs`** (1) ──< **`scan_results`** (many), **`scan_results`** (1) ──< **`signal_forward_returns`** (many), and **`scan_runs`** (1) ──< **`ai_evaluations`** (many); child FKs use `ON DELETE CASCADE`.
 
 - `scan_runs` (audit header): `id`, `started_at`/`finished_at` (tz-aware UTC), `status` (`running`/`success`/`partial`/`failed`, stored as CHECK-backed VARCHAR), `screener_key`, `universe_key`, `params_json`, `data_snapshot_date`, `app_version`, `git_commit_sha`, `triggered_by`, `error_message`, **`symbols_scanned`** (SCAN-004), **`data_quality_json`** (nullable; DATA-001 candle-quality receipt — see [data-quality.md](data-quality.md)).
 - `scan_results` (shortlist line item): `id`, `run_id` (FK), `symbol`, `signal_date`, `close_price` (`Numeric`), `rating`, `final_score` (`Numeric`, reserved for RANK-*), `reason`, `raw_result_json`, `provenance_json`, `created_at`.
+- `signal_forward_returns` (VALID-001/002 validation row): `id`, `result_id` (FK to `scan_results`), `horizon_days`, `status` (`pending`/`computed`/`insufficient_data`), entry/exit dates and prices, stock return, benchmark return, excess return, MAE/MFE, `computed_at`, `created_at`.
 - `ai_evaluations` (**PROV-003** AI verdict ledger — approved/rejected/error): `id`, `run_id` (FK), `symbol`, `signal_date`, `outcome` (CHECK), `verdict_label`, `confidence` (`Numeric(8,4)`), `model_name`, `prompt_version`, `validated_verdict_json`, `provenance_json` (the trusted receipt), `created_at`. Full column table in [scan-run-persistence.md §3.3](../scan-run-persistence.md).
 
-Indexes: `scan_runs(status, screener_key, universe_key)`, `scan_results(run_id, symbol)`, `ai_evaluations(run_id, symbol, outcome)`.
+Indexes: `scan_runs(status, screener_key, universe_key)`, `scan_results(run_id, symbol, symbol+signal_date)`, `signal_forward_returns(status)` with unique `(result_id, horizon_days)`, and `ai_evaluations(run_id, symbol, outcome)`.
 
 **OBS-003 standalone tables** (no FK to `scan_runs`):
 - `audit_logs` (user-action trail): `id`, `created_at` (tz-aware UTC), `event` (String), `user_email` (nullable — NULL for system actions), `metadata_json` (redacted). Indexes on `created_at`, `event`, `user_email`.
@@ -67,6 +69,8 @@ Full design: [obs-003-audit-log.md](../obs-003-audit-log.md).
 | `get_ai_evaluations(session, run_id)` | AI receipts for a run, ordered `(symbol, id)`. |
 | `count_scan_results_for_runs(session, run_ids)` | One grouped COUNT; every id present (0 default). |
 | `list_distinct_{screener,universe}_keys`, `list_distinct_triggered_by_values` | History-page filter options (read from history, not the live registry). |
+| `get_signals_needing_forward_returns(session, *, horizons, limit=None)` | VALID-002 selection query: non-null `signal_date` rows whose requested horizons are missing or still `pending`; eager-loads the parent run for universe resolution. |
+| `upsert_forward_return(session, *, result_id, point, benchmark=None)` | Idempotent `(result_id, horizon_days)` insert/update into `signal_forward_returns`; terminal rows get `computed_at`, pending rows stay retryable. |
 | `create_audit_log_entry(session, *, event, user_email, metadata)` | Insert one `audit_logs` row; metadata routed through `normalize_secret_safe_json` (OBS-003). |
 | `get_recent_audit_logs(session, limit=100, *, event, user_email)` | Newest-first audit rows; optional event + case-insensitive email filters; `(created_at desc, id desc)` order. |
 | `list_distinct_audit_events(session)` | Distinct event names for the audit viewer's filter. |
@@ -88,7 +92,7 @@ Type-coercion helpers (`_as_date`, `_as_decimal`, `_as_optional_str`, `_is_missi
 
 ## 6. Migrations
 
-[`migrations/`](../../../migrations) (root-level, kept out of the lint target). Five revisions, chained linearly: `…scan002_create_scan_runs_and_scan_results` → `…scan004_add_symbols_scanned_to_scan_runs` → `…prov003_create_ai_evaluations` → `…data001_add_scan_run_data_quality` (DATA-001, adds nullable `scan_runs.data_quality_json`) → `…obs003_create_audit_logs` (OBS-003, creates `audit_logs` + `app_config`). `migrations/env.py` reads the URL from `get_database_url()` (no hardcoded URL). A drift test guards ORM-vs-migration sync.
+[`migrations/`](../../../migrations) (root-level, kept out of the lint target). Revisions are chained linearly through `…obs003_create_audit_logs` (OBS-003, creates `audit_logs` + `app_config`) and `20260618valid001_create_signal_forward_returns` (VALID-001, creates `signal_forward_returns` + `scan_results(symbol, signal_date)`). `migrations/env.py` reads the URL from `get_database_url()` (no hardcoded URL). A drift test guards ORM-vs-migration sync.
 
 ## 7. Failure modes
 
@@ -96,6 +100,7 @@ Type-coercion helpers (`_as_date`, `_as_decimal`, `_as_optional_str`, `_is_missi
 - DB lock contention → `busy_timeout` waits; WAL allows concurrent read.
 - Bad/exotic value in a result row → the strict `result_contract` normalizer raises `ResultContractError`; the scan service drops that row (counted as rejected) rather than persisting malformed JSON.
 - Invalid AI receipt (bad hash, contradictory verdict) → `save_ai_evaluations` raises; the run is marked `FAILED` by the service.
+- Forward-return rerun sees an existing pending row → `upsert_forward_return` updates it in place; the unique `(result_id, horizon_days)` constraint prevents duplicates.
 
 ## 8. Testing
 
@@ -104,7 +109,8 @@ Type-coercion helpers (`_as_date`, `_as_decimal`, `_as_optional_str`, `_is_missi
 - [`tests/test_scan_storage_repository.py`](../../../tests/test_scan_storage_repository.py) — CRUD + filters.
 - [`tests/test_scan_storage_migrations.py`](../../../tests/test_scan_storage_migrations.py) — `alembic upgrade head` + drift guard (covers `audit_logs`/`app_config`).
 - [`tests/test_audit_repository.py`](../../../tests/test_audit_repository.py) — OBS-003 audit + config-override CRUD, filters, redaction.
+- [`tests/test_forward_return_service.py`](../../../tests/test_forward_return_service.py) — VALID-002 service orchestration + idempotent persistence.
 
 ## 9. Extension points
 
-`final_score` is reserved for RANK-*; the PROV-003 `ai_evaluations` ledger is in place and richer AI evidence rides in its `provenance_json` without a flag-day. A schema change is a real change: add an Alembic migration **and** update `models.py` **and** [scan-run-persistence.md](../scan-run-persistence.md).
+`final_score` is reserved for RANK-*; VALID-003 can aggregate `signal_forward_returns` into hit rate, median/average return, and sector concentration without changing the per-signal schema. The PROV-003 `ai_evaluations` ledger is in place and richer AI evidence rides in its `provenance_json` without a flag-day. A schema change is a real change: add an Alembic migration **and** update `models.py` **and** [scan-run-persistence.md](../scan-run-persistence.md).
