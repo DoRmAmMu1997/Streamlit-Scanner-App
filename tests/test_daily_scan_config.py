@@ -1,10 +1,15 @@
 """Tests for JOB-002's daily scan schedule config loader.
 
-These are pure, offline unit tests for ``backend.jobs.daily_scan_config``. The
+Most are pure, offline unit tests for ``backend.jobs.daily_scan_config``. The
 loader only validates the *shape* of a YAML schedule (required fields, types), so
-none of these tests need the screener registry, a universe CSV, Dhan, or a
-database. They write a tiny YAML file to ``tmp_path`` and assert on the parsed
-:class:`DailyScanEntry` list (or the clear :class:`DailyScanConfigError`).
+those tests need no screener registry, universe CSV, Dhan, or database: they write
+a tiny YAML file to ``tmp_path`` and assert on the parsed :class:`DailyScanEntry`
+list (or the clear :class:`DailyScanConfigError`).
+
+A few tests additionally validate the *committed* config files
+(``config/daily_scans.yaml`` and ``config/daily_scans.example.yaml``) against the
+real screener registry and universe catalog, so the shipped Render/default
+schedule cannot reference a screener or universe that no longer exists.
 """
 
 from __future__ import annotations
@@ -200,3 +205,37 @@ def test_render_default_config_file_is_valid_and_ships_ai_disabled():
     assert by_key["envelope_knoxville_buy"].enabled is True
     assert by_key["sixty_seven_ka_funda"].enabled is False
     assert by_key["technical_analysis"].enabled is False
+
+
+@pytest.mark.parametrize(
+    "config_name",
+    ["daily_scans.yaml", "daily_scans.example.yaml"],
+)
+def test_committed_config_keys_resolve_against_registry_and_universes(config_name):
+    """Committed configs must reference screeners and universes that actually exist.
+
+    The loader validates only the config *shape* (by design — see its module
+    docstring), so a typo or a renamed screener would parse cleanly yet break the
+    Render cron at run time. Resolving every entry's ``screener_key`` against the
+    screener registry, and every ``universe_key`` override against the universe
+    catalog, turns that latent production failure into a CI failure instead.
+
+    Disabled entries are checked too: they are documented examples an operator may
+    enable later, so they must still point at real screeners/universes.
+    """
+    from backend.screener_registry import discover_screeners
+    from backend.universe_builder import UNIVERSE_CONFIG
+
+    repo_root = Path(__file__).resolve().parents[1]
+    entries = load_daily_scan_config(repo_root / "config" / config_name)
+    registry = discover_screeners()
+
+    assert entries, f"{config_name} has no scan entries"
+    for entry in entries:
+        assert entry.screener_key in registry, (
+            f"{config_name}: unknown screener_key {entry.screener_key!r}"
+        )
+        if entry.universe_key is not None:
+            assert entry.universe_key in UNIVERSE_CONFIG, (
+                f"{config_name}: unknown universe_key {entry.universe_key!r}"
+            )

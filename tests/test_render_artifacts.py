@@ -49,8 +49,12 @@ def _env_map(service: dict) -> dict[str, dict]:
 
 
 def _config_paths(command: str) -> list[str]:
-    """Return repo-relative paths passed as ``--config <path>`` arguments."""
-    return re.findall(r"--config\s+([^\s\"']+)", command)
+    """Return repo-relative paths passed as ``--config`` arguments.
+
+    Handles both the space form (``--config path``) and the equals form
+    (``--config=path``) so a future Blueprint edit using either is still checked.
+    """
+    return re.findall(r"--config(?:\s+|=)([^\s\"']+)", command)
 
 
 def test_blueprint_defines_web_cron_and_managed_database() -> None:
@@ -144,7 +148,12 @@ def test_blueprint_config_arguments_point_at_committed_files() -> None:
                 f"{service['name']} references missing --config file: {config_path}"
             )
 
-    assert seen_config_paths == ["config/daily_scans.yaml"]
+    # The AC is "every --config path exists" (the per-path is_file() check above).
+    # Assert membership, not an exact list, so adding a second --config later does
+    # not falsely fail this test — while still pinning the DEPLOY-003B contract
+    # that the cron points at the committed default schedule.
+    assert seen_config_paths, "no --config path found in any Blueprint command"
+    assert "config/daily_scans.yaml" in seen_config_paths
 
 
 def test_blueprint_commits_no_secret_values() -> None:
