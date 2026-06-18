@@ -18,7 +18,14 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
-from backend.storage.models import AIEvaluation, ScanResult, ScanRun, ScanStatus
+from backend.storage.models import (
+    AIEvaluation,
+    ForwardReturnStatus,
+    ScanResult,
+    ScanRun,
+    ScanStatus,
+    SignalForwardReturn,
+)
 
 # The ``db_session`` fixture these tests use lives in tests/conftest.py,
 # shared with the other scan-history test modules.
@@ -212,3 +219,144 @@ def test_ai_evaluation_round_trip_and_run_delete_cascade(db_session):
     db_session.delete(run)
     db_session.commit()
     assert db_session.scalar(select(text("count(*)")).select_from(AIEvaluation)) == 0
+
+
+# ---------------------------------------------------------------------------
+# VALID-001 — forward-return measurements (signal_forward_returns)
+#
+# These mirror the SCAN-001 tests above and double as the VALID-002 (Codex)
+# template: the same db_session fixture, the same round-trip / enum / Decimal /
+# cascade assertions, now over the forward-return table.
+# ---------------------------------------------------------------------------
+
+
+def _make_signal(db_session, **overrides) -> ScanResult:
+    """Persist a run + one shortlisted result and return the result (id populated)."""
+    run = _make_run()
+    values = {
+        "symbol": "RELIANCE",
+        "signal_date": dt.date(2026, 1, 5),
+        "close_price": Decimal("1234.5000"),
+        "rating": "BUY",
+    }
+    values.update(overrides)
+    result = ScanResult(**values)
+    run.results.append(result)
+    db_session.add(run)
+    db_session.commit()
+    return result
+
+
+def test_forward_return_round_trip_with_pending_and_computed_rows(db_session):
+    result = _make_signal(db_session)
+
+    # One horizon already measured (computed), one still waiting (pending default).
+    computed = SignalForwardReturn(
+        result_id=result.id,
+        horizon_days=20,
+        status=ForwardReturnStatus.COMPUTED,
+        entry_date=dt.date(2026, 1, 6),
+        exit_date=dt.date(2026, 2, 3),
+        entry_price=Decimal("100.0000"),
+        exit_price=Decimal("112.5000"),
+        forward_return_pct=Decimal("12.5000"),
+        benchmark_key="nifty_50",
+        benchmark_return_pct=Decimal("3.0000"),
+        excess_return_pct=Decimal("9.5000"),
+        max_adverse_excursion_pct=Decimal("-4.2000"),
+        max_favorable_excursion_pct=Decimal("15.1000"),
+        computed_at=dt.datetime(2026, 2, 3, 12, 0, tzinfo=dt.UTC),
+    )
+    pending = SignalForwardReturn(result_id=result.id, horizon_days=120)
+
+    db_session.add_all([computed, pending])
+    db_session.commit()
+
+    db_session.expire_all()
+    loaded = db_session.scalars(select(ScanResult)).one()
+    by_horizon = {fr.horizon_days: fr for fr in loaded.forward_returns}
+    assert set(by_horizon) == {20, 120}
+
+    # The computed leg round-tripped, including the benchmark/excess and MAE/MFE.
+    twenty = by_horizon[20]
+    assert twenty.status is ForwardReturnStatus.COMPUTED
+    assert twenty.forward_return_pct == Decimal("12.5000")
+    assert twenty.excess_return_pct == Decimal("9.5000")
+    assert twenty.max_adverse_excursion_pct == Decimal("-4.2000")
+    # The back-reference resolves to the parent signal.
+    assert twenty.result.symbol == "RELIANCE"
+
+    # The pending leg defaulted its status and left prices NULL (no lookahead guess).
+    assert by_horizon[120].status is ForwardReturnStatus.PENDING
+    assert by_horizon[120].forward_return_pct is None
+    assert by_horizon[120].computed_at is None
+
+
+def test_forward_return_status_stored_as_lowercase_value(db_session):
+    result = _make_signal(db_session)
+    db_session.add(
+        SignalForwardReturn(
+            result_id=result.id,
+            horizon_days=60,
+            status=ForwardReturnStatus.INSUFFICIENT_DATA,
+        )
+    )
+    db_session.commit()
+
+    # Stored as the lowercase ``.value`` ("insufficient_data"), not the Python name —
+    # the values_callable guarantee, same as ScanStatus.
+    raw_value = db_session.execute(
+        text("SELECT status FROM signal_forward_returns")
+    ).scalar_one()
+    assert raw_value == "insufficient_data"
+
+
+def test_forward_return_status_rejects_values_outside_the_enum(db_session):
+    """The database CHECK rejects typo statuses, not just the Python enum layer."""
+    result = _make_signal(db_session)
+    with pytest.raises(IntegrityError):
+        db_session.execute(
+            text(
+                """
+                INSERT INTO signal_forward_returns (result_id, horizon_days, status, created_at)
+                VALUES (:result_id, 20, 'done', :created_at)
+                """
+            ),
+            {"result_id": result.id, "created_at": "2026-02-03 12:00:00"},
+        )
+        db_session.commit()
+
+
+def test_forward_return_is_unique_per_result_and_horizon(db_session):
+    """One measurement per (signal, horizon) — the idempotent-upsert contract."""
+    result = _make_signal(db_session)
+    db_session.add(SignalForwardReturn(result_id=result.id, horizon_days=20))
+    db_session.commit()
+
+    with pytest.raises(IntegrityError):
+        db_session.add(SignalForwardReturn(result_id=result.id, horizon_days=20))
+        db_session.commit()
+
+
+def test_deleting_run_cascades_through_results_to_forward_returns(db_session):
+    result = _make_signal(db_session)
+    db_session.add_all(
+        [
+            SignalForwardReturn(result_id=result.id, horizon_days=20),
+            SignalForwardReturn(result_id=result.id, horizon_days=60),
+        ]
+    )
+    db_session.commit()
+    assert (
+        db_session.scalar(select(text("count(*)")).select_from(SignalForwardReturn)) == 2
+    )
+
+    # Deleting the parent run must reach all the way down: run → results → forward returns.
+    run = db_session.scalars(select(ScanRun)).one()
+    db_session.delete(run)
+    db_session.commit()
+
+    assert (
+        db_session.scalar(select(text("count(*)")).select_from(SignalForwardReturn)) == 0
+    )
+    assert db_session.scalar(select(text("count(*)")).select_from(ScanResult)) == 0

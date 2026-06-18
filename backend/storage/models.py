@@ -51,10 +51,12 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -87,6 +89,27 @@ class ScanStatus(enum.Enum):
     SUCCESS = "success"  # Every symbol scanned without a fatal error.
     PARTIAL = "partial"  # Finished, but some symbols failed (details in error_message / results).
     FAILED = "failed"    # Aborted before producing a usable result set.
+
+
+class ForwardReturnStatus(enum.Enum):
+    """Lifecycle state of one forward-return measurement (VALID-001).
+
+    A forward return cannot always be computed the moment a signal is stored: the
+    holding window may not have elapsed yet, or the future bars an entry/exit need
+    may simply not exist (a delisted or halted stock). Modelling that as an explicit
+    status — rather than a bare NULL price — is what lets the VALID-002 calculator be
+    safely *re-run*: ``pending`` rows are retried as data arrives, ``computed`` rows
+    are skipped, and ``insufficient_data`` rows are recorded as a permanent fact
+    instead of being mistaken for "not tried yet".
+
+    The no-lookahead rule lives in this enum: a row only becomes ``computed`` once the
+    exit bar genuinely exists in history. Like ``ScanStatus``, the stored value is the
+    lowercase ``.value`` (see ``values_callable`` on the column below).
+    """
+
+    PENDING = "pending"                      # Window not elapsed yet; retry later.
+    COMPUTED = "computed"                     # Entry+exit bars existed; return measured.
+    INSUFFICIENT_DATA = "insufficient_data"   # No entry/exit bar (delisted/halted/gap).
 
 
 # A primary-key integer type that adapts to the database engine:
@@ -240,6 +263,15 @@ class ScanResult(Base):
 
     __tablename__ = "scan_results"
 
+    # Composite index for the forward-return workload (VALID-001/VALID-002): the
+    # validator looks up "every signal for symbol S on/after date D" to fetch the bars
+    # that follow each signal. The single-column ``symbol`` index alone can't serve that
+    # date-bounded scan efficiently. SCAN-001 deliberately parked this index until the
+    # VALID-* work actually queried by date — this is that moment.
+    __table_args__ = (
+        Index("ix_scan_results_symbol_signal_date", "symbol", "signal_date"),
+    )
+
     # Surrogate primary key (auto-increments).
     id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
 
@@ -263,8 +295,8 @@ class ScanResult(Base):
     )
 
     # The candle date the signal fired on. Nullable because a few AI/insight rows are
-    # not tied to a single bar. (A dedicated (symbol, signal_date) index is intentionally
-    # deferred to the VALID-* forward-return work that will actually query by date.)
+    # not tied to a single bar. The (symbol, signal_date) composite index that the
+    # forward-return workload needs is declared in __table_args__ above (VALID-001).
     signal_date: Mapped[dt.date | None] = mapped_column(
         Date, nullable=True, comment="Date the signal triggered"
     )
@@ -319,10 +351,167 @@ class ScanResult(Base):
     # ``result.run`` walks back to the parent ScanRun object.
     run: Mapped[ScanRun] = relationship(back_populates="results")
 
+    # VALID-001: the forward-return measurements for this signal (one per horizon —
+    # 20/60/120 trading days). Same cascade contract as ScanRun.results: deleting a
+    # signal removes its forward-return rows so no orphans survive.
+    forward_returns: Mapped[list[SignalForwardReturn]] = relationship(
+        back_populates="result",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
     def __repr__(self) -> str:
         return (
             f"ScanResult(id={self.id!r}, run_id={self.run_id!r}, "
             f"symbol={self.symbol!r}, rating={self.rating!r})"
+        )
+
+
+class SignalForwardReturn(Base):
+    """One forward-return measurement for one stored signal at one horizon (VALID-001).
+
+    Read this row as a sentence: *"Signal ``result_id`` was entered at ``entry_price``
+    on ``entry_date`` and, ``horizon_days`` trading days later, was worth ``exit_price``
+    on ``exit_date`` — a ``forward_return_pct`` move, versus ``benchmark_return_pct`` for
+    its index, for ``excess_return_pct`` of alpha."* The parent ``ScanResult`` says what
+    was shortlisted and why; this table says **what happened next**, which is the whole
+    point of EPIC 5.
+
+    One ``ScanResult`` fans out to several rows here — one per horizon (20 / 60 / 120
+    trading days). The ``(result_id, horizon_days)`` uniqueness lets the VALID-002
+    calculator be re-run idempotently: it upserts a ``pending`` row to ``computed`` once
+    the window elapses, rather than appending a duplicate each pass.
+
+    Design boundary (mirrors SCAN-001): this module is **schema only**. The forward-return
+    *math* (next-open entry, Nth-bar exit, MAE/MFE, benchmark alignment), the service that
+    loads candles and fills these rows, the repository helpers, and the Alembic migration
+    are all **VALID-002 (owner: Codex)**. See the design doc for the methodology
+    (``docs/architecture/valid-001-forward-return-validation.md``) and the handoff brief
+    (``docs/architecture/valid-002-handoff.md``).
+    """
+
+    __tablename__ = "signal_forward_returns"
+
+    # A signal is measured at most once per horizon. The unique constraint both enforces
+    # that and — because (result_id, horizon_days) leads with result_id — serves the
+    # "all horizons for this signal" lookup, so no separate result_id index is needed.
+    __table_args__ = (
+        UniqueConstraint("result_id", "horizon_days", name="uq_forward_return_result_horizon"),
+    )
+
+    # Surrogate primary key (auto-increments).
+    id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
+
+    # The signal this measurement belongs to. ondelete="CASCADE" so deleting a run (and
+    # thus its results) also clears these rows; the ORM relationship cascade matches.
+    result_id: Mapped[int] = mapped_column(
+        BigIntPrimaryKey,
+        ForeignKey("scan_results.id", ondelete="CASCADE"),
+        nullable=False,
+        comment="Parent scan_results.id",
+    )
+
+    # The horizon, in TRADING days (not calendar days), counted off the symbol's own
+    # candle frame so market holidays never inflate the count. 20 / 60 / 120 per EPIC 5.
+    horizon_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, comment="Forward window in trading days (e.g. 20/60/120)"
+    )
+
+    # Lifecycle. Indexed because the calculator's core query is "give me the pending rows".
+    # native_enum=False stores a small VARCHAR + CHECK on both engines (same rationale as
+    # ScanRun.status) so the allowed set is evolvable without an ALTER TYPE migration.
+    status: Mapped[ForwardReturnStatus] = mapped_column(
+        Enum(
+            ForwardReturnStatus,
+            name="forward_return_status",
+            native_enum=False,
+            create_constraint=True,
+            length=20,
+            values_callable=lambda enum_cls: [member.value for member in enum_cls],
+        ),
+        nullable=False,
+        default=ForwardReturnStatus.PENDING,
+        index=True,
+        comment="pending | computed | insufficient_data",
+    )
+
+    # Entry = the bar AFTER the signal (next-day open); exit = the bar `horizon_days`
+    # trading days on (its close). Both NULL until the row is computed. Storing the dates
+    # (not just the prices) makes the measurement auditable and lets the benchmark be
+    # aligned to the exact same window.
+    entry_date: Mapped[dt.date | None] = mapped_column(
+        Date, nullable=True, comment="Date of the entry bar (next trading day after signal)"
+    )
+    exit_date: Mapped[dt.date | None] = mapped_column(
+        Date, nullable=True, comment="Date of the exit bar (horizon_days trading days later)"
+    )
+
+    # Numeric (fixed-point), never float, for every price/percentage — money math with
+    # binary floats accumulates rounding error. Numeric(18,4) matches close_price.
+    entry_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 4), nullable=True, comment="Open of the entry bar"
+    )
+    exit_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 4), nullable=True, comment="Close of the exit bar"
+    )
+
+    # Signed percentage move from entry to exit. Numeric(9,4) holds returns far beyond
+    # any realistic single-name move (±99999.9999%).
+    forward_return_pct: Mapped[Decimal | None] = mapped_column(
+        Numeric(9, 4), nullable=True, comment="(exit-entry)/entry * 100"
+    )
+
+    # The benchmark leg (VALID-001 "benchmark-relative return"). benchmark_key records
+    # WHICH index was used (resolved per-universe) so the comparison is reproducible even
+    # if the benchmark mapping changes later. All NULL when no benchmark data is available
+    # for the window — the forward return is still valid; only the relative leg degrades.
+    benchmark_key: Mapped[str | None] = mapped_column(
+        String(50), nullable=True, comment="Benchmark used, e.g. 'nifty_50'"
+    )
+    benchmark_entry_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 4), nullable=True, comment="Benchmark price on entry_date"
+    )
+    benchmark_exit_price: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 4), nullable=True, comment="Benchmark price on exit_date"
+    )
+    benchmark_return_pct: Mapped[Decimal | None] = mapped_column(
+        Numeric(9, 4), nullable=True, comment="Benchmark return over the same window"
+    )
+    excess_return_pct: Mapped[Decimal | None] = mapped_column(
+        Numeric(9, 4), nullable=True, comment="forward_return_pct - benchmark_return_pct"
+    )
+
+    # Path metrics over the holding window [entry, exit], relative to entry_price
+    # (EPIC 5 "max adverse / favorable excursion"). MAE is the worst drawdown the trade
+    # would have shown; MFE the best unrealised gain.
+    max_adverse_excursion_pct: Mapped[Decimal | None] = mapped_column(
+        Numeric(9, 4), nullable=True, comment="Worst intra-window move vs entry (MAE)"
+    )
+    max_favorable_excursion_pct: Mapped[Decimal | None] = mapped_column(
+        Numeric(9, 4), nullable=True, comment="Best intra-window move vs entry (MFE)"
+    )
+
+    # When the measurement was last (re)computed; NULL while still pending. Distinct from
+    # created_at so a re-run that flips pending → computed is visible in the audit trail.
+    computed_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="UTC time the row was last computed"
+    )
+
+    # When this row was first written. tz-aware UTC, ORM-side default, same as ScanResult.
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: dt.datetime.now(dt.UTC),
+        comment="UTC row-creation time",
+    )
+
+    # ``forward_return.result`` walks back to the parent ScanResult.
+    result: Mapped[ScanResult] = relationship(back_populates="forward_returns")
+
+    def __repr__(self) -> str:
+        return (
+            f"SignalForwardReturn(id={self.id!r}, result_id={self.result_id!r}, "
+            f"horizon_days={self.horizon_days!r}, status={self.status.value!r})"
         )
 
 

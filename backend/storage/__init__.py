@@ -17,6 +17,8 @@ Public surface:
 - `ScanRun` — one row per scan execution (the audit header).
 - `ScanResult` — one row per shortlisted stock (the audit line item).
 - `ScanStatus` — allowed run states (running / success / partial / failed).
+- `SignalForwardReturn` — one forward-return measurement per signal/horizon (VALID-001).
+- `ForwardReturnStatus` — allowed measurement states (pending / computed / insufficient_data).
 - `SessionLocal` / `session_scope` — short-lived SQLAlchemy sessions.
 - Repository helpers — the only public query/write helpers for scan history.
 """
@@ -34,9 +36,11 @@ from backend.storage.models import (
     AppConfig,
     AuditLog,
     Base,
+    ForwardReturnStatus,
     ScanResult,
     ScanRun,
     ScanStatus,
+    SignalForwardReturn,
 )
 from backend.storage.repository import (
     count_scan_results_for_runs,
@@ -62,10 +66,12 @@ __all__ = [
     "AppConfig",
     "AuditLog",
     "Base",
+    "ForwardReturnStatus",
     "ScanResult",
     "ScanRun",
     "ScanStatus",
     "SessionLocal",
+    "SignalForwardReturn",
     "count_scan_results_for_runs",
     "create_audit_log_entry",
     "create_scan_run",
