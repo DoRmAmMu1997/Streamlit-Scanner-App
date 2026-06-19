@@ -25,6 +25,36 @@ non-zero means at least one scan failed, which is what schedulers should alert
 on. Results land in the same scan-history database the UI reads (SCAN-002),
 so runs show up on the Scan history page automatically.
 
+## Computing forward-return validation rows
+
+The validation dashboard is read-only: it shows rows already present in
+`signal_forward_returns` and never starts a Dhan-backed compute pass from a
+browser rerun. Run the VALID-004 job after daily scans, or on a separate
+schedule, to fill missing/pending measurements:
+
+```bash
+python -m backend.jobs.compute_forward_returns --limit 500
+```
+
+Useful options:
+
+```bash
+python -m backend.jobs.compute_forward_returns --limit 1000 --as-of 2026-06-19
+python -m backend.jobs.compute_forward_returns --horizon 20 --horizon 60
+```
+
+Exit code `0` means the batch ran and committed its best-effort results;
+pending and insufficient rows are normal validation states, not scheduler
+failures. Exit code `1` means setup or the batch boundary failed (for example,
+credentials, schema, or database/session setup), and the scheduler should alert.
+
+The command bootstraps the database schema, builds the same Dhan-backed
+`DailyDataLoader` used by scans, calls the idempotent
+`compute_pending_forward_returns()` service, and prints a secret-safe summary.
+It does not re-run screeners, mutate scan history, or enable any AI jobs. Render
+does not get a second cron service in this task; deployments can schedule this
+command explicitly when they are ready for validation backfills.
+
 ### Scheduling on Windows (Task Scheduler)
 
 ```powershell

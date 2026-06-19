@@ -20,9 +20,14 @@ import ui.validation_page as validation_page
 from backend.storage.models import ForwardReturnStatus
 from backend.validation.metrics import (
     BestWorstSignal,
+    ValidationBenchmarkRow,
+    ValidationDashboardSummary,
     ValidationMetricFilters,
     ValidationMetricRow,
+    ValidationReturnBucket,
+    ValidationSectorConcentrationRow,
     ValidationSummary,
+    ValidationTimeSeriesPoint,
 )
 from ui.validation_page import (
     _SUMMARY_COLUMNS,
@@ -158,6 +163,68 @@ def _summary(rows: list[ValidationMetricRow]) -> ValidationSummary:
     )
 
 
+def _dashboard(rows: list[ValidationMetricRow]) -> ValidationDashboardSummary:
+    return ValidationDashboardSummary(
+        metric_summary=_summary(rows),
+        return_distribution=(
+            ValidationReturnBucket(
+                screener_key="envelope",
+                universe_key="nifty_500",
+                horizon_days=20,
+                bucket_label="0% to 10%",
+                computed_count=1,
+            ),
+        ),
+        horizon_win_rates=(
+            ValidationBenchmarkRow(
+                screener_key="envelope",
+                universe_key="nifty_500",
+                horizon_days=20,
+                computed_count=1,
+                hit_rate_pct=Decimal("100.0000"),
+                average_excess_return_pct=Decimal("2.0000"),
+                median_excess_return_pct=Decimal("2.0000"),
+            ),
+        ),
+        benchmark_relative_rows=(
+            ValidationBenchmarkRow(
+                screener_key="envelope",
+                universe_key="nifty_500",
+                horizon_days=20,
+                computed_count=1,
+                hit_rate_pct=Decimal("100.0000"),
+                average_excess_return_pct=Decimal("2.0000"),
+                median_excess_return_pct=Decimal("2.0000"),
+            ),
+        ),
+        signal_count_over_time=(
+            ValidationTimeSeriesPoint(
+                screener_key="envelope",
+                universe_key="nifty_500",
+                horizon_days=20,
+                period_start=dt.date(2026, 1, 1),
+                total_signals=1,
+                computed_count=1,
+                pending_count=0,
+                insufficient_data_count=0,
+            ),
+        ),
+        sector_concentration=(
+            ValidationSectorConcentrationRow(
+                screener_key="envelope",
+                universe_key="nifty_500",
+                horizon_days=20,
+                sector="Technology",
+                total_signals=1,
+                computed_count=1,
+                share_of_group_pct=Decimal("100.0000"),
+                hit_rate_pct=Decimal("100.0000"),
+                average_forward_return_pct=Decimal("10.0000"),
+            ),
+        ),
+    )
+
+
 def test_summary_frame_empty_has_columns_but_no_rows():
     """An empty summary still produces the full, stable column contract."""
     frame = _validation_summary_frame(_summary([]))
@@ -254,14 +321,20 @@ class _FakeValidationSt:
         }
         self.date_range = date_range
         self.tables: list[SimpleNamespace] = []
+        self.downloads: list[dict[str, object]] = []
         self.errors: list[str] = []
         self.infos: list[str] = []
         self.captions: list[str] = []
+        self.subheaders: list[str] = []
+        self.download_clicked = False
 
-    def subheader(self, *_args, **_kwargs):
-        return None
+    def subheader(self, message, *_args, **_kwargs):
+        self.subheaders.append(str(message))
 
     def caption(self, message, *_args, **_kwargs):
+        self.captions.append(str(message))
+
+    def markdown(self, message, *_args, **_kwargs):
         self.captions.append(str(message))
 
     def columns(self, count):
@@ -276,6 +349,10 @@ class _FakeValidationSt:
     def dataframe(self, frame, **kwargs):
         self.tables.append(SimpleNamespace(frame=frame, kwargs=kwargs))
 
+    def download_button(self, **kwargs):
+        self.downloads.append(kwargs)
+        return self.download_clicked
+
     def info(self, message, *_args, **_kwargs):
         self.infos.append(str(message))
 
@@ -288,8 +365,8 @@ def _fake_session_scope():
     yield object()
 
 
-def test_render_validation_page_passes_widget_filters_to_summary_service(monkeypatch):
-    """The rendered page must call the VALID-003A service, not rebuild queries."""
+def test_render_validation_page_passes_widget_filters_to_dashboard_service(monkeypatch):
+    """The rendered page must call the backend read model, not rebuild queries."""
     fake_st = _FakeValidationSt(
         screener="envelope",
         universe="nifty_500",
@@ -300,7 +377,7 @@ def test_render_validation_page_passes_widget_filters_to_summary_service(monkeyp
 
     def summarize(_session, **kwargs):
         captured_kwargs.update(kwargs)
-        return _summary([_row(horizon_days=60)])
+        return _dashboard([_row(horizon_days=60)])
 
     monkeypatch.setattr(validation_page, "st", fake_st)
     monkeypatch.setattr(validation_page, "session_scope", _fake_session_scope)
@@ -310,7 +387,7 @@ def test_render_validation_page_passes_widget_filters_to_summary_service(monkeyp
     monkeypatch.setattr(
         validation_page, "list_distinct_universe_keys", lambda _session: ["nifty_500"]
     )
-    monkeypatch.setattr(validation_page, "summarize_validation_metrics", summarize)
+    monkeypatch.setattr(validation_page, "summarize_validation_dashboard", summarize)
 
     _render_validation_page()
 
@@ -320,8 +397,9 @@ def test_render_validation_page_passes_widget_filters_to_summary_service(monkeyp
         "horizon_days": 60,
         "signal_date_from": dt.date(2026, 1, 5),
         "signal_date_to": dt.date(2026, 1, 10),
+        "sector_lookup": {},
     }
-    assert len(fake_st.tables) == 1
+    assert len(fake_st.tables) >= 1
     assert fake_st.tables[0].frame.iloc[0]["Horizon"] == "60D"
 
 
@@ -336,7 +414,7 @@ def test_render_validation_page_handles_summary_schema_operational_error(monkeyp
     monkeypatch.setattr(validation_page, "session_scope", _fake_session_scope)
     monkeypatch.setattr(validation_page, "list_distinct_screener_keys", lambda _session: [])
     monkeypatch.setattr(validation_page, "list_distinct_universe_keys", lambda _session: [])
-    monkeypatch.setattr(validation_page, "summarize_validation_metrics", summarize)
+    monkeypatch.setattr(validation_page, "summarize_validation_dashboard", summarize)
 
     _render_validation_page()
 
@@ -386,7 +464,9 @@ def test_render_validation_page_explains_no_computed_rows_without_blaming_hit_ra
     monkeypatch.setattr(validation_page, "list_distinct_screener_keys", lambda _session: [])
     monkeypatch.setattr(validation_page, "list_distinct_universe_keys", lambda _session: [])
     monkeypatch.setattr(
-        validation_page, "summarize_validation_metrics", lambda _session, **_kwargs: _summary([row])
+        validation_page,
+        "summarize_validation_dashboard",
+        lambda _session, **_kwargs: _dashboard([row]),
     )
 
     _render_validation_page()
@@ -407,10 +487,53 @@ def test_render_validation_page_reports_benchmark_gap_only_after_computed_rows(
     monkeypatch.setattr(validation_page, "list_distinct_screener_keys", lambda _session: [])
     monkeypatch.setattr(validation_page, "list_distinct_universe_keys", lambda _session: [])
     monkeypatch.setattr(
-        validation_page, "summarize_validation_metrics", lambda _session, **_kwargs: _summary([row])
+        validation_page,
+        "summarize_validation_dashboard",
+        lambda _session, **_kwargs: _dashboard([row]),
     )
 
     _render_validation_page()
 
     assert not fake_st.infos
     assert any("Benchmark/excess returns are unavailable" in text for text in fake_st.captions)
+
+
+def test_render_validation_page_renders_dashboard_sections_and_safe_export(monkeypatch):
+    fake_st = _FakeValidationSt()
+    fake_st.download_clicked = True
+    audits: list[dict[str, object]] = []
+    row = _row(
+        best_signal=_signal(symbol="=HACK", forward_return_pct=Decimal("10.0000")),
+        worst_signal=_signal(symbol="-RISK", forward_return_pct=Decimal("-4.0000")),
+    )
+
+    monkeypatch.setattr(validation_page, "st", fake_st)
+    monkeypatch.setattr(validation_page, "session_scope", _fake_session_scope)
+    monkeypatch.setattr(validation_page, "list_distinct_screener_keys", lambda _session: [])
+    monkeypatch.setattr(validation_page, "list_distinct_universe_keys", lambda _session: [])
+    monkeypatch.setattr(
+        validation_page,
+        "summarize_validation_dashboard",
+        lambda _session, **_kwargs: _dashboard([row]),
+    )
+    monkeypatch.setattr(
+        validation_page,
+        "record_audit_event",
+        lambda **kwargs: audits.append(kwargs),
+    )
+
+    _render_validation_page()
+
+    assert any("Return distribution" in title for title in fake_st.subheaders)
+    assert any("Win rate by holding period" in title for title in fake_st.subheaders)
+    assert any("Signal count over time" in title for title in fake_st.subheaders)
+    assert any("Sector concentration" in title for title in fake_st.subheaders)
+    assert len(fake_st.tables) >= 6
+    assert fake_st.downloads
+    csv_bytes = fake_st.downloads[0]["data"]
+    assert isinstance(csv_bytes, bytes)
+    csv_text = csv_bytes.decode("utf-8")
+    assert "'=HACK" in csv_text
+    assert "'-RISK" in csv_text
+    assert audits
+    assert audits[0]["event"] == "export_downloaded"

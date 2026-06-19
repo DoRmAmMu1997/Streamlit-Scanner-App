@@ -5,7 +5,7 @@
 | **Component** | Scan-run persistence (engine, session, repository, migrations) |
 | **Source** | [`backend/storage/models.py`](../../../backend/storage/models.py), [`backend/storage/database.py`](../../../backend/storage/database.py), [`backend/storage/repository.py`](../../../backend/storage/repository.py), [`migrations/`](../../../migrations) |
 | **Layer** | Persistence (`backend/`) |
-| **Status** | Stable (SCAN-001 schema · SCAN-002 DB layer · SCAN-004 `symbols_scanned` · PROV-003 `ai_evaluations` · OBS-003 `audit_logs`/`app_config` · VALID-001/002 `signal_forward_returns` · VALID-003A aggregate read model) |
+| **Status** | Stable (SCAN-001 schema · SCAN-002 DB layer · SCAN-004 `symbols_scanned` · PROV-003 `ai_evaluations` · OBS-003 `audit_logs`/`app_config` · VALID-001/002 `signal_forward_returns` · VALID-003A/004 aggregate and dashboard read models) |
 | **Related** | **[scan-run-persistence.md](../scan-run-persistence.md)** (full SCAN-001 design) · [scan-002-handoff.md](../scan-002-handoff.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [validation.md](validation.md) · [ui-pages.md](ui-pages.md) · [HLD](../high-level-design.md) |
 
 > **This LLD summarizes the *current* persistence layer and how it is used.** The
@@ -112,8 +112,8 @@ Type-coercion helpers (`_as_date`, `_as_decimal`, `_as_optional_str`, `_is_missi
 - [`tests/test_scan_storage_migrations.py`](../../../tests/test_scan_storage_migrations.py) — `alembic upgrade head` + drift guard (covers `audit_logs`/`app_config`).
 - [`tests/test_audit_repository.py`](../../../tests/test_audit_repository.py) — OBS-003 audit + config-override CRUD, filters, redaction.
 - [`tests/test_forward_return_service.py`](../../../tests/test_forward_return_service.py) — VALID-002 service orchestration + idempotent persistence.
-- [`tests/test_validation_metrics.py`](../../../tests/test_validation_metrics.py) — VALID-003A aggregate read model over stored forward returns.
+- [`tests/test_validation_metrics.py`](../../../tests/test_validation_metrics.py) — VALID-003A/004 aggregate and dashboard read models over stored forward returns.
 
 ## 9. Extension points
 
-`final_score` is reserved for RANK-*; VALID-003A now aggregates `signal_forward_returns` into hit rate, median/average return, benchmark-relative metrics, MAE/MFE, and best/worst signals without changing the per-signal schema. Sector concentration and the Streamlit validation page remain later VALID-003 work. The PROV-003 `ai_evaluations` ledger is in place and richer AI evidence rides in its `provenance_json` without a flag-day. A schema change is a real change: add an Alembic migration **and** update `models.py` **and** [scan-run-persistence.md](../scan-run-persistence.md).
+`final_score` is reserved for RANK-*; VALID-003A/004 aggregates `signal_forward_returns` into hit rate, median/average return, benchmark-relative metrics, MAE/MFE, best/worst signals, return distribution, monthly signal counts, and sector concentration without changing the per-signal schema. Sector labels are best-effort local metadata and fall back to `Unknown` when current universe CSVs lack sector columns. The PROV-003 `ai_evaluations` ledger is in place and richer AI evidence rides in its `provenance_json` without a flag-day. A schema change is a real change: add an Alembic migration **and** update `models.py` **and** [scan-run-persistence.md](../scan-run-persistence.md).

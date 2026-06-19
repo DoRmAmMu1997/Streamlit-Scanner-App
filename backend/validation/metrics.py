@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import datetime as dt
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -87,6 +88,76 @@ class ValidationSummary:
     insufficient_data_measurements: int
 
 
+@dataclass(frozen=True)
+class ValidationReturnBucket:
+    """Computed-return histogram bucket for one screener/universe/horizon group."""
+
+    screener_key: str
+    universe_key: str
+    horizon_days: int
+    bucket_label: str
+    computed_count: int
+
+
+@dataclass(frozen=True)
+class ValidationBenchmarkRow:
+    """Benchmark-relative dashboard row for one screener/universe/horizon group."""
+
+    screener_key: str
+    universe_key: str
+    horizon_days: int
+    computed_count: int
+    hit_rate_pct: Decimal | None
+    average_excess_return_pct: Decimal | None
+    median_excess_return_pct: Decimal | None
+
+
+@dataclass(frozen=True)
+class ValidationTimeSeriesPoint:
+    """One monthly signal-count point for the dashboard timeline."""
+
+    screener_key: str
+    universe_key: str
+    horizon_days: int
+    period_start: dt.date
+    total_signals: int
+    computed_count: int
+    pending_count: int
+    insufficient_data_count: int
+
+
+@dataclass(frozen=True)
+class ValidationSectorConcentrationRow:
+    """Sector-level signal concentration for one screener/universe/horizon group."""
+
+    screener_key: str
+    universe_key: str
+    horizon_days: int
+    sector: str
+    total_signals: int
+    computed_count: int
+    share_of_group_pct: Decimal
+    hit_rate_pct: Decimal | None
+    average_forward_return_pct: Decimal | None
+
+
+@dataclass(frozen=True)
+class ValidationDashboardSummary:
+    """Richer read model used by the VALID-004 Streamlit dashboard.
+
+    ``metric_summary`` is the existing VALID-003A summary table contract. The
+    extra tuples are derived from the same de-duplicated records so the dashboard
+    sections agree with one another and never re-count overlapping reruns.
+    """
+
+    metric_summary: ValidationSummary
+    return_distribution: tuple[ValidationReturnBucket, ...]
+    horizon_win_rates: tuple[ValidationBenchmarkRow, ...]
+    benchmark_relative_rows: tuple[ValidationBenchmarkRow, ...]
+    signal_count_over_time: tuple[ValidationTimeSeriesPoint, ...]
+    sector_concentration: tuple[ValidationSectorConcentrationRow, ...]
+
+
 def summarize_validation_metrics(
     session: Session,
     *,
@@ -110,16 +181,66 @@ def summarize_validation_metrics(
         signal_date_from=signal_date_from,
         signal_date_to=signal_date_to,
     )
-    records = _dedupe_latest_run(
+    records = _metric_records_for_filters(session, filters)
+    return _build_summary(filters, records)
+
+
+def summarize_validation_dashboard(
+    session: Session,
+    *,
+    screener_key: str | None = None,
+    universe_key: str | None = None,
+    horizon_days: int | None = None,
+    signal_date_from: dt.date | None = None,
+    signal_date_to: dt.date | None = None,
+    sector_lookup: Mapping[Any, str] | None = None,
+) -> ValidationDashboardSummary:
+    """Build all read-only dashboard sections from stored validation rows.
+
+    No prices are fetched here. VALID-004's dashboard is a read model over rows
+    the compute job already stored; the only optional enrichment is a local
+    ``sector_lookup`` mapping. Missing sector metadata becomes ``"Unknown"`` so
+    the UI can be honest without inventing classifications.
+    """
+    filters = ValidationMetricFilters(
+        screener_key=screener_key,
+        universe_key=universe_key,
+        horizon_days=horizon_days,
+        signal_date_from=signal_date_from,
+        signal_date_to=signal_date_to,
+    )
+    records = _metric_records_for_filters(session, filters)
+    metric_summary = _build_summary(filters, records)
+    benchmark_rows = _benchmark_rows(metric_summary.rows)
+    return ValidationDashboardSummary(
+        metric_summary=metric_summary,
+        return_distribution=_return_distribution(records),
+        horizon_win_rates=benchmark_rows,
+        benchmark_relative_rows=benchmark_rows,
+        signal_count_over_time=_signal_count_over_time(records),
+        sector_concentration=_sector_concentration(records, sector_lookup=sector_lookup),
+    )
+
+
+def _metric_records_for_filters(
+    session: Session, filters: ValidationMetricFilters
+) -> list[ForwardReturnMetricRecord]:
+    return _dedupe_latest_run(
         get_forward_return_metric_records(
             session,
-            screener_key=screener_key,
-            universe_key=universe_key,
-            horizon_days=horizon_days,
-            signal_date_from=signal_date_from,
-            signal_date_to=signal_date_to,
+            screener_key=filters.screener_key,
+            universe_key=filters.universe_key,
+            horizon_days=filters.horizon_days,
+            signal_date_from=filters.signal_date_from,
+            signal_date_to=filters.signal_date_to,
         )
     )
+
+
+def _build_summary(
+    filters: ValidationMetricFilters,
+    records: list[ForwardReturnMetricRecord],
+) -> ValidationSummary:
     groups: dict[tuple[str, str, int], list[ForwardReturnMetricRecord]] = defaultdict(list)
     for record in records:
         groups[(record.screener_key, record.universe_key, record.horizon_days)].append(record)
@@ -144,6 +265,206 @@ def summarize_validation_metrics(
             if record.status is ForwardReturnStatus.INSUFFICIENT_DATA
         ),
     )
+
+
+def _benchmark_rows(
+    rows: tuple[ValidationMetricRow, ...],
+) -> tuple[ValidationBenchmarkRow, ...]:
+    return tuple(
+        ValidationBenchmarkRow(
+            screener_key=row.screener_key,
+            universe_key=row.universe_key,
+            horizon_days=row.horizon_days,
+            computed_count=row.computed_count,
+            hit_rate_pct=row.hit_rate_pct,
+            average_excess_return_pct=row.average_excess_return_pct,
+            median_excess_return_pct=row.median_excess_return_pct,
+        )
+        for row in rows
+    )
+
+
+def _return_distribution(
+    records: list[ForwardReturnMetricRecord],
+) -> tuple[ValidationReturnBucket, ...]:
+    buckets: dict[tuple[str, str, int, str], int] = defaultdict(int)
+    for record in records:
+        if (
+            record.status is not ForwardReturnStatus.COMPUTED
+            or record.forward_return_pct is None
+        ):
+            continue
+        buckets[
+            (
+                record.screener_key,
+                record.universe_key,
+                record.horizon_days,
+                _return_bucket_label(record.forward_return_pct),
+            )
+        ] += 1
+
+    return tuple(
+        ValidationReturnBucket(
+            screener_key=screener_key,
+            universe_key=universe_key,
+            horizon_days=horizon_days,
+            bucket_label=bucket_label,
+            computed_count=count,
+        )
+        for (screener_key, universe_key, horizon_days, bucket_label), count in sorted(
+            buckets.items(),
+            key=lambda item: (
+                item[0][0],
+                item[0][1],
+                item[0][2],
+                _BUCKET_ORDER[item[0][3]],
+            ),
+        )
+    )
+
+
+def _signal_count_over_time(
+    records: list[ForwardReturnMetricRecord],
+) -> tuple[ValidationTimeSeriesPoint, ...]:
+    grouped: dict[
+        tuple[str, str, int, dt.date], list[ForwardReturnMetricRecord]
+    ] = defaultdict(list)
+    for record in records:
+        if record.signal_date is None:
+            continue
+        grouped[
+            (
+                record.screener_key,
+                record.universe_key,
+                record.horizon_days,
+                dt.date(record.signal_date.year, record.signal_date.month, 1),
+            )
+        ].append(record)
+
+    return tuple(
+        ValidationTimeSeriesPoint(
+            screener_key=screener_key,
+            universe_key=universe_key,
+            horizon_days=horizon_days,
+            period_start=period_start,
+            total_signals=len(group_records),
+            computed_count=sum(
+                1
+                for record in group_records
+                if record.status is ForwardReturnStatus.COMPUTED
+            ),
+            pending_count=sum(
+                1
+                for record in group_records
+                if record.status is ForwardReturnStatus.PENDING
+            ),
+            insufficient_data_count=sum(
+                1
+                for record in group_records
+                if record.status is ForwardReturnStatus.INSUFFICIENT_DATA
+            ),
+        )
+        for (screener_key, universe_key, horizon_days, period_start), group_records in sorted(
+            grouped.items(), key=lambda item: item[0]
+        )
+    )
+
+
+def _sector_concentration(
+    records: list[ForwardReturnMetricRecord],
+    *,
+    sector_lookup: Mapping[Any, str] | None,
+) -> tuple[ValidationSectorConcentrationRow, ...]:
+    group_totals: dict[tuple[str, str, int], int] = defaultdict(int)
+    sector_groups: dict[
+        tuple[str, str, int, str], list[ForwardReturnMetricRecord]
+    ] = defaultdict(list)
+    for record in records:
+        group_key = (record.screener_key, record.universe_key, record.horizon_days)
+        group_totals[group_key] += 1
+        sector_groups[
+            (
+                record.screener_key,
+                record.universe_key,
+                record.horizon_days,
+                _sector_for_record(record, sector_lookup),
+            )
+        ].append(record)
+
+    rows: list[ValidationSectorConcentrationRow] = []
+    for (
+        screener_key,
+        universe_key,
+        horizon_days,
+        sector,
+    ), group_records in sorted(sector_groups.items(), key=lambda item: item[0]):
+        computed_returns = _values(
+            record.forward_return_pct
+            for record in group_records
+            if record.status is ForwardReturnStatus.COMPUTED
+        )
+        rows.append(
+            ValidationSectorConcentrationRow(
+                screener_key=screener_key,
+                universe_key=universe_key,
+                horizon_days=horizon_days,
+                sector=sector,
+                total_signals=len(group_records),
+                computed_count=len(computed_returns),
+                share_of_group_pct=_pct(
+                    len(group_records),
+                    group_totals[(screener_key, universe_key, horizon_days)],
+                ),
+                hit_rate_pct=_hit_rate(computed_returns),
+                average_forward_return_pct=_average(computed_returns),
+            )
+        )
+    return tuple(rows)
+
+
+_BUCKET_LABELS = (
+    "<= -10%",
+    "-10% to 0%",
+    "0% to 10%",
+    "10% to 20%",
+    ">= 20%",
+)
+_BUCKET_ORDER = {label: index for index, label in enumerate(_BUCKET_LABELS)}
+
+
+def _return_bucket_label(value: Decimal) -> str:
+    if value <= Decimal("-10"):
+        return "<= -10%"
+    if value < Decimal("0"):
+        return "-10% to 0%"
+    if value < Decimal("10"):
+        return "0% to 10%"
+    if value < Decimal("20"):
+        return "10% to 20%"
+    return ">= 20%"
+
+
+def _pct(part: int, whole: int) -> Decimal:
+    if whole <= 0:
+        return Decimal("0").quantize(PCT_QUANT)
+    return ((Decimal(part) / Decimal(whole)) * Decimal("100")).quantize(PCT_QUANT)
+
+
+def _sector_for_record(
+    record: ForwardReturnMetricRecord,
+    sector_lookup: Mapping[Any, str] | None,
+) -> str:
+    if not sector_lookup:
+        return "Unknown"
+    symbol = record.symbol.upper().strip()
+    sector = (
+        sector_lookup.get((record.universe_key, symbol))
+        or sector_lookup.get(symbol)
+        or sector_lookup.get(record.symbol)
+    )
+    if sector is None or not str(sector).strip():
+        return "Unknown"
+    return str(sector).strip()
 
 
 def _dedupe_latest_run(

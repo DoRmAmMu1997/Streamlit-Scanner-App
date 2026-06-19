@@ -397,3 +397,110 @@ def test_validation_package_exports_metrics_api():
     assert validation.ValidationMetricRow is not None
     assert validation.ValidationSummary is not None
     assert callable(validation.summarize_validation_metrics)
+
+
+def test_dashboard_summary_builds_distribution_time_series_and_sector_rows(db_session):
+    from backend.validation.metrics import summarize_validation_dashboard
+
+    run = _seed_run(db_session, screener_key="envelope", universe_key="nifty_500")
+    reliance = _seed_result(
+        db_session, run=run, symbol="RELIANCE", signal_date=dt.date(2026, 1, 5)
+    )
+    tcs = _seed_result(db_session, run=run, symbol="TCS", signal_date=dt.date(2026, 1, 6))
+    infy = _seed_result(db_session, run=run, symbol="INFY", signal_date=dt.date(2026, 2, 7))
+    wipro = _seed_result(
+        db_session, run=run, symbol="WIPRO", signal_date=dt.date(2026, 2, 8)
+    )
+    pending = _seed_result(
+        db_session, run=run, symbol="PENDING", signal_date=dt.date(2026, 2, 9)
+    )
+    insufficient = _seed_result(
+        db_session, run=run, symbol="NODATA", signal_date=dt.date(2026, 2, 10)
+    )
+    _add_forward_return(db_session, result=reliance, forward_return_pct=Decimal("-12.0000"))
+    _add_forward_return(db_session, result=tcs, forward_return_pct=Decimal("-2.0000"))
+    _add_forward_return(db_session, result=infy, forward_return_pct=Decimal("4.0000"))
+    _add_forward_return(
+        db_session,
+        result=wipro,
+        forward_return_pct=Decimal("24.0000"),
+        excess_return_pct=None,
+    )
+    _add_forward_return(db_session, result=pending, status=ForwardReturnStatus.PENDING)
+    _add_forward_return(
+        db_session, result=insufficient, status=ForwardReturnStatus.INSUFFICIENT_DATA
+    )
+    db_session.commit()
+
+    dashboard = summarize_validation_dashboard(
+        db_session,
+        sector_lookup={
+            ("nifty_500", "RELIANCE"): "Energy",
+            ("nifty_500", "TCS"): "Technology",
+            ("nifty_500", "INFY"): "Technology",
+        },
+    )
+
+    assert dashboard.metric_summary.total_measurements == 6
+    assert [
+        (row.bucket_label, row.computed_count)
+        for row in dashboard.return_distribution
+        if row.computed_count
+    ] == [
+        ("<= -10%", 1),
+        ("-10% to 0%", 1),
+        ("0% to 10%", 1),
+        (">= 20%", 1),
+    ]
+    assert [
+        (
+            point.period_start,
+            point.total_signals,
+            point.computed_count,
+            point.pending_count,
+            point.insufficient_data_count,
+        )
+        for point in dashboard.signal_count_over_time
+    ] == [
+        (dt.date(2026, 1, 1), 2, 2, 0, 0),
+        (dt.date(2026, 2, 1), 4, 2, 1, 1),
+    ]
+    assert [
+        (row.sector, row.total_signals, row.share_of_group_pct)
+        for row in dashboard.sector_concentration
+    ] == [
+        ("Energy", 1, Decimal("16.6667")),
+        ("Technology", 2, Decimal("33.3333")),
+        ("Unknown", 3, Decimal("50.0000")),
+    ]
+    benchmark = dashboard.benchmark_relative_rows[0]
+    assert benchmark.average_excess_return_pct is None
+    assert benchmark.median_excess_return_pct is None
+
+
+def test_dashboard_summary_preserves_latest_run_deduplication(db_session):
+    from backend.validation.metrics import summarize_validation_dashboard
+
+    earlier_run = _seed_run(db_session, screener_key="envelope", universe_key="nifty_500")
+    later_run = _seed_run(db_session, screener_key="envelope", universe_key="nifty_500")
+    earlier_run.started_at = dt.datetime(2026, 1, 10, tzinfo=dt.UTC)
+    later_run.started_at = dt.datetime(2026, 1, 11, tzinfo=dt.UTC)
+    earlier = _seed_result(
+        db_session, run=earlier_run, symbol="RELIANCE", signal_date=dt.date(2026, 1, 5)
+    )
+    later = _seed_result(
+        db_session, run=later_run, symbol="RELIANCE", signal_date=dt.date(2026, 1, 5)
+    )
+    _add_forward_return(db_session, result=earlier, forward_return_pct=Decimal("-5.0000"))
+    _add_forward_return(db_session, result=later, forward_return_pct=Decimal("15.0000"))
+    db_session.commit()
+
+    dashboard = summarize_validation_dashboard(db_session)
+
+    assert dashboard.metric_summary.total_measurements == 1
+    assert dashboard.metric_summary.rows[0].average_forward_return_pct == Decimal("15.0000")
+    assert [
+        (row.bucket_label, row.computed_count)
+        for row in dashboard.return_distribution
+        if row.computed_count
+    ] == [("10% to 20%", 1)]
