@@ -9,8 +9,15 @@ run without a browser, a database, or a Streamlit runtime.
 from __future__ import annotations
 
 import datetime as dt
+from contextlib import contextmanager
 from decimal import Decimal
+from types import SimpleNamespace
 
+import pytest
+from sqlalchemy.exc import OperationalError
+
+import ui.validation_page as validation_page
+from backend.storage.models import ForwardReturnStatus
 from backend.validation.metrics import (
     BestWorstSignal,
     ValidationMetricFilters,
@@ -21,6 +28,7 @@ from ui.validation_page import (
     _SUMMARY_COLUMNS,
     _format_pct,
     _format_signal,
+    _render_validation_page,
     _validation_filter_kwargs,
     _validation_summary_frame,
 )
@@ -206,3 +214,203 @@ def test_summary_frame_missing_metrics_show_em_dash_not_zero():
     assert cells["Avg excess %"] == "—"
     assert cells["Best signal"] == "—"
     assert cells["Worst signal"] == "—"
+
+
+# ---------------------------------------------------------------------------
+# _render_validation_page: Streamlit widgets -> summarize() -> rendered states
+# ---------------------------------------------------------------------------
+
+
+class _FakeColumn:
+    """Minimal context manager for ``with st.columns(...)[i]:`` blocks."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc_info):
+        return False
+
+
+class _FakeValidationSt:
+    """Small fake Streamlit surface for render-level page tests.
+
+    The real page is intentionally boring: choose filters, call the backend read
+    model, then display a table or explanatory empty state. This fake keeps the
+    tests focused on that contract without starting a Streamlit runtime.
+    """
+
+    def __init__(
+        self,
+        *,
+        screener="All",
+        universe="All",
+        horizon="All",
+        date_range=(),
+    ):
+        self.choices = {
+            "Screener": screener,
+            "Universe": universe,
+            "Horizon": horizon,
+        }
+        self.date_range = date_range
+        self.tables: list[SimpleNamespace] = []
+        self.errors: list[str] = []
+        self.infos: list[str] = []
+        self.captions: list[str] = []
+
+    def subheader(self, *_args, **_kwargs):
+        return None
+
+    def caption(self, message, *_args, **_kwargs):
+        self.captions.append(str(message))
+
+    def columns(self, count):
+        return [_FakeColumn() for _ in range(count)]
+
+    def selectbox(self, label, _options, **_kwargs):
+        return self.choices[label]
+
+    def date_input(self, *_args, **_kwargs):
+        return self.date_range
+
+    def dataframe(self, frame, **kwargs):
+        self.tables.append(SimpleNamespace(frame=frame, kwargs=kwargs))
+
+    def info(self, message, *_args, **_kwargs):
+        self.infos.append(str(message))
+
+    def error(self, message, *_args, **_kwargs):
+        self.errors.append(str(message))
+
+
+@contextmanager
+def _fake_session_scope():
+    yield object()
+
+
+def test_render_validation_page_passes_widget_filters_to_summary_service(monkeypatch):
+    """The rendered page must call the VALID-003A service, not rebuild queries."""
+    fake_st = _FakeValidationSt(
+        screener="envelope",
+        universe="nifty_500",
+        horizon="60",
+        date_range=(dt.date(2026, 1, 5), dt.date(2026, 1, 10)),
+    )
+    captured_kwargs: dict[str, object] = {}
+
+    def summarize(_session, **kwargs):
+        captured_kwargs.update(kwargs)
+        return _summary([_row(horizon_days=60)])
+
+    monkeypatch.setattr(validation_page, "st", fake_st)
+    monkeypatch.setattr(validation_page, "session_scope", _fake_session_scope)
+    monkeypatch.setattr(
+        validation_page, "list_distinct_screener_keys", lambda _session: ["envelope"]
+    )
+    monkeypatch.setattr(
+        validation_page, "list_distinct_universe_keys", lambda _session: ["nifty_500"]
+    )
+    monkeypatch.setattr(validation_page, "summarize_validation_metrics", summarize)
+
+    _render_validation_page()
+
+    assert captured_kwargs == {
+        "screener_key": "envelope",
+        "universe_key": "nifty_500",
+        "horizon_days": 60,
+        "signal_date_from": dt.date(2026, 1, 5),
+        "signal_date_to": dt.date(2026, 1, 10),
+    }
+    assert len(fake_st.tables) == 1
+    assert fake_st.tables[0].frame.iloc[0]["Horizon"] == "60D"
+
+
+def test_render_validation_page_handles_summary_schema_operational_error(monkeypatch):
+    """A partially migrated DB should show a friendly hint, not a traceback."""
+    fake_st = _FakeValidationSt()
+
+    def summarize(_session, **_kwargs):
+        raise OperationalError("SELECT signal_forward_returns", {}, Exception("missing"))
+
+    monkeypatch.setattr(validation_page, "st", fake_st)
+    monkeypatch.setattr(validation_page, "session_scope", _fake_session_scope)
+    monkeypatch.setattr(validation_page, "list_distinct_screener_keys", lambda _session: [])
+    monkeypatch.setattr(validation_page, "list_distinct_universe_keys", lambda _session: [])
+    monkeypatch.setattr(validation_page, "summarize_validation_metrics", summarize)
+
+    _render_validation_page()
+
+    assert fake_st.errors == [
+        "Validation tables are missing or outdated. "
+        "Run `python -m alembic upgrade head` and reload this page."
+    ]
+    assert fake_st.tables == []
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_message"),
+    [
+        (
+            ForwardReturnStatus.PENDING,
+            "Signals are recorded, but none have a computed forward return yet",
+        ),
+        (
+            ForwardReturnStatus.INSUFFICIENT_DATA,
+            "pending or marked insufficient",
+        ),
+    ],
+)
+def test_render_validation_page_explains_no_computed_rows_without_blaming_hit_rate(
+    monkeypatch, status, expected_message
+):
+    """Pending and insufficient rows stay visible but never count as losses."""
+    fake_st = _FakeValidationSt()
+    row = _row(
+        total_signals=1,
+        computed_count=0,
+        pending_count=1 if status is ForwardReturnStatus.PENDING else 0,
+        insufficient_data_count=1 if status is ForwardReturnStatus.INSUFFICIENT_DATA else 0,
+        hit_rate_pct=None,
+        average_forward_return_pct=None,
+        median_forward_return_pct=None,
+        average_excess_return_pct=None,
+        median_excess_return_pct=None,
+        average_mae_pct=None,
+        average_mfe_pct=None,
+        best_signal=None,
+        worst_signal=None,
+    )
+
+    monkeypatch.setattr(validation_page, "st", fake_st)
+    monkeypatch.setattr(validation_page, "session_scope", _fake_session_scope)
+    monkeypatch.setattr(validation_page, "list_distinct_screener_keys", lambda _session: [])
+    monkeypatch.setattr(validation_page, "list_distinct_universe_keys", lambda _session: [])
+    monkeypatch.setattr(
+        validation_page, "summarize_validation_metrics", lambda _session, **_kwargs: _summary([row])
+    )
+
+    _render_validation_page()
+
+    assert any(expected_message in message for message in fake_st.infos)
+    assert fake_st.tables
+
+
+def test_render_validation_page_reports_benchmark_gap_only_after_computed_rows(
+    monkeypatch,
+):
+    """Benchmark/excess empty state is separate from the no-computed state."""
+    fake_st = _FakeValidationSt()
+    row = _row(average_excess_return_pct=None, median_excess_return_pct=None)
+
+    monkeypatch.setattr(validation_page, "st", fake_st)
+    monkeypatch.setattr(validation_page, "session_scope", _fake_session_scope)
+    monkeypatch.setattr(validation_page, "list_distinct_screener_keys", lambda _session: [])
+    monkeypatch.setattr(validation_page, "list_distinct_universe_keys", lambda _session: [])
+    monkeypatch.setattr(
+        validation_page, "summarize_validation_metrics", lambda _session, **_kwargs: _summary([row])
+    )
+
+    _render_validation_page()
+
+    assert not fake_st.infos
+    assert any("Benchmark/excess returns are unavailable" in text for text in fake_st.captions)

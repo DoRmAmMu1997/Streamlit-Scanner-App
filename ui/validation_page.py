@@ -215,10 +215,23 @@ def _render_validation_page() -> None:
     filters = _validation_filter_kwargs(
         screener_choice, universe_choice, horizon_choice, date_range
     )
-    with session_scope() as session:
-        # ``summarize_validation_metrics`` returns plain frozen dataclasses (no
-        # ORM rows), so the summary is safe to use after the session closes.
-        summary = summarize_validation_metrics(session, **filters)
+    try:
+        with session_scope() as session:
+            # This is the dashboard's only validation-data read. Keeping the
+            # call here (instead of hand-written UI queries) preserves the
+            # VALID-003A contract: repository code owns SQL, the page owns
+            # widgets and display states. The returned frozen dataclasses have
+            # no lazy ORM attributes, so they are safe after the session closes.
+            summary = summarize_validation_metrics(session, **filters)
+    except OperationalError:
+        # A partially migrated database can still list old scan history but fail
+        # once the VALID tables are joined. Show the same operator hint as the
+        # filter bootstrap path rather than leaking a raw SQLAlchemy traceback.
+        st.error(
+            "Validation tables are missing or outdated. "
+            "Run `python -m alembic upgrade head` and reload this page."
+        )
+        return
 
     if not summary.rows:
         if filters:
@@ -245,7 +258,8 @@ def _render_validation_page() -> None:
     if summary.computed_measurements == 0:
         st.info(
             "Signals are recorded, but none have a computed forward return yet — "
-            "the holding windows are still pending."
+            "rows are still pending or marked insufficient, so hit rate and "
+            "return metrics stay blank instead of treating them as losses."
         )
     elif all(row.average_excess_return_pct is None for row in summary.rows):
         st.caption(

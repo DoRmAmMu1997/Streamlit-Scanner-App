@@ -8,7 +8,7 @@
 | **Status** | Stable (SCAN-004 history · REF-001 split · VALID-003B validation dashboard) |
 | **Related** | [HLD](../high-level-design.md) · [app-orchestration.md](app-orchestration.md) · [storage-persistence.md](storage-persistence.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [charts-visualization.md](charts-visualization.md) · [health-monitoring.md](health-monitoring.md) · [security.md](security.md) · [audit-log.md](audit-log.md) |
 
-> The `ui/` package also contains [`chart_cache.py`](charts-visualization.md) (charts), [`health_page.py`](health-monitoring.md) (admin health), and the OBS-003 admin pages [`audit_page.py` + `config_page.py`](audit-log.md) (Audit log viewer + runtime settings form) — documented in their own LLDs. The scanner page itself lives in [`app.py`](app-orchestration.md). This LLD covers the **scan-history page** and the **shared display helpers** in `ui/common.py`.
+> The `ui/` package also contains [`chart_cache.py`](charts-visualization.md) (charts), [`health_page.py`](health-monitoring.md) (admin health), and the OBS-003 admin pages [`audit_page.py` + `config_page.py`](audit-log.md) (Audit log viewer + runtime settings form) — documented in their own LLDs. The scanner page itself lives in [`app.py`](app-orchestration.md). This LLD covers the **scan-history page**, the **validation dashboard**, and the **shared display helpers** in `ui/common.py`.
 
 ## 1. Purpose & responsibilities
 
@@ -45,7 +45,7 @@ flowchart TD
 
 | Decision | Rationale | Alternative rejected |
 |---|---|---|
-| **Pure helpers split from rendering** | `_history_filter_kwargs`/`_signature`/`_runs_frame` test without Streamlit. | Inline in the render fn — untestable. |
+| **Pure helpers split from rendering** | History and validation filter/frame helpers test without Streamlit, while render-level tests still prove the service-call plumbing. | Inline in the render fn — untestable and easier to miswire. |
 | **Filter options from history, not the live registry** | A deleted/renamed screener's history stays inspectable; a broken screener module can't take down the audit view. | Use `discover_screeners` — couples audit to live code. |
 | **Convert ORM → plain dicts inside the session** | After `session_scope()` closes, touching lazy attrs (esp. `run.results`) raises `DetachedInstanceError`; capture everything while open. | Pass ORM objects to render — detached errors. |
 | **Table keyed by filter signature** | Streamlit keeps selection by widget key; a new filter set mints a fresh table so a stale row-2 selection can't open the wrong run. | Reuse key — wrong-run selection. |
@@ -57,7 +57,7 @@ flowchart TD
 
 ## 5. Failure modes
 
-- DB not migrated → caught `OperationalError`, shows the `alembic upgrade head` hint.
+- DB not migrated → caught `OperationalError`, shows the `alembic upgrade head` hint. The validation page catches both the filter-option read and the later metrics-summary read because a partially migrated DB can fail at either point.
 - No runs / no match → contextual info message.
 - Stale selection index → bounds-checked, render skipped (with the signature key as belt-and-braces).
 - Failed/partial run → full **redacted** error shown prominently; results table still attempted.
@@ -65,7 +65,7 @@ flowchart TD
 ## 6. Testing
 
 - [`tests/test_app_history_page.py`](../../../tests/test_app_history_page.py) — filter mapping, signature stability, row shaping, run details, redaction/truncation order.
-- [`tests/test_app_validation_page.py`](../../../tests/test_app_validation_page.py) — VALID-003B percentage/signal formatting, filter plumbing, empty + mixed-status summary frames. View wiring (selector options + dispatch) is covered in [`tests/test_app_orchestration.py`](../../../tests/test_app_orchestration.py).
+- [`tests/test_app_validation_page.py`](../../../tests/test_app_validation_page.py) — VALID-003B percentage/signal formatting, filter mapping, summary-frame shaping, render-level `summarize_validation_metrics` plumbing, friendly schema-error handling, and empty-state copy. View wiring (selector options + dispatch) is covered in [`tests/test_app_orchestration.py`](../../../tests/test_app_orchestration.py).
 - `ui/common` helpers are exercised via the scanner and history page tests (`test_app_orchestration.py`, golden CSV checks).
 
 ## 7. Extension points
