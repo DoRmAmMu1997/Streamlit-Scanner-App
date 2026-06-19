@@ -530,6 +530,8 @@ def test_storage_package_exports_ai_evaluation_api():
     assert storage.AIEvaluation is not None
     assert callable(storage.save_ai_evaluations)
     assert callable(storage.get_ai_evaluations)
+    assert storage.ForwardReturnMetricRecord is not None
+    assert callable(storage.get_forward_return_metric_records)
 
 
 def test_get_signals_needing_forward_returns_returns_missing_and_pending_only(db_session):
@@ -619,3 +621,101 @@ def test_upsert_forward_return_updates_pending_row_in_place(db_session):
     assert rows[0].status is ForwardReturnStatus.COMPUTED
     assert rows[0].forward_return_pct == Decimal("12.5000")
     assert rows[0].computed_at is not None
+
+
+def test_get_forward_return_metric_records_joins_and_filters_signal_dates(db_session):
+    """VALID-003A aggregate code should consume repository-owned joined rows."""
+    from backend.storage.models import ForwardReturnStatus, SignalForwardReturn
+    from backend.storage.repository import (
+        create_scan_run,
+        get_forward_return_metric_records,
+        save_scan_results,
+    )
+
+    run = create_scan_run(db_session, screener_key="envelope", universe_key="nifty_500")
+    run.status = ScanStatus.SUCCESS  # Metrics join only reads SUCCESS/PARTIAL runs.
+    outside, inside = save_scan_results(
+        db_session,
+        run,
+        [
+            {"symbol": "OUTSIDE", "signal_date": dt.date(2026, 1, 4)},
+            {"symbol": "INSIDE", "signal_date": dt.date(2026, 1, 5)},
+        ],
+    )
+    db_session.add_all(
+        [
+            SignalForwardReturn(
+                result_id=outside.id,
+                horizon_days=20,
+                status=ForwardReturnStatus.COMPUTED,
+                forward_return_pct=Decimal("1.0000"),
+            ),
+            SignalForwardReturn(
+                result_id=inside.id,
+                horizon_days=20,
+                status=ForwardReturnStatus.COMPUTED,
+                forward_return_pct=Decimal("2.5000"),
+                excess_return_pct=Decimal("0.5000"),
+            ),
+        ]
+    )
+    db_session.commit()
+
+    rows = get_forward_return_metric_records(
+        db_session,
+        screener_key="envelope",
+        universe_key="nifty_500",
+        horizon_days=20,
+        signal_date_from=dt.date(2026, 1, 5),
+        signal_date_to=dt.date(2026, 1, 5),
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.run_id == run.id
+    assert row.result_id == inside.id
+    assert row.screener_key == "envelope"
+    assert row.universe_key == "nifty_500"
+    assert row.symbol == "INSIDE"
+    assert row.signal_date == dt.date(2026, 1, 5)
+    assert row.horizon_days == 20
+    assert row.status is ForwardReturnStatus.COMPUTED
+    assert row.forward_return_pct == Decimal("2.5000")
+    assert row.excess_return_pct == Decimal("0.5000")
+    assert row.run_started_at is not None
+
+
+def test_get_forward_return_metric_records_excludes_non_success_runs(db_session):
+    """Only SUCCESS/PARTIAL runs feed the validation metrics join."""
+    from backend.storage.models import ForwardReturnStatus, SignalForwardReturn
+    from backend.storage.repository import (
+        create_scan_run,
+        get_forward_return_metric_records,
+        save_scan_results,
+    )
+
+    for status, symbol in [
+        (ScanStatus.SUCCESS, "OKAY"),
+        (ScanStatus.PARTIAL, "PART"),
+        (ScanStatus.FAILED, "FAIL"),
+        (ScanStatus.RUNNING, "RUN"),
+    ]:
+        run = create_scan_run(db_session, screener_key="envelope", universe_key="nifty_500")
+        run.status = status
+        [result] = save_scan_results(
+            db_session, run, [{"symbol": symbol, "signal_date": dt.date(2026, 1, 5)}]
+        )
+        db_session.add(
+            SignalForwardReturn(
+                result_id=result.id,
+                horizon_days=20,
+                status=ForwardReturnStatus.COMPUTED,
+                forward_return_pct=Decimal("1.0000"),
+            )
+        )
+    db_session.commit()
+
+    rows = get_forward_return_metric_records(db_session)
+
+    # FAILED (aborted) and RUNNING (in-flight) runs never colour the metrics.
+    assert sorted(row.symbol for row in rows) == ["OKAY", "PART"]

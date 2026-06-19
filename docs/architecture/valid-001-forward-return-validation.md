@@ -362,7 +362,7 @@ repository helpers, tests).
   earliest *realisable* fill with no same-bar lookahead. If you want signal-day close as an
   additional column for comparison, flag it — it's an additive change.
 - **Benchmark `security_id`s are placeholders.** Do not invent them; an unresolved id must take
-  the graceful-NULL path (§4 rule 4, §6), and a VALID-003 setup step fills the real values.
+  the graceful-NULL path (§4 rule 4, §6), and a future benchmark setup step fills the real values.
 - **Horizons are a service constant, not a schema CHECK** (§5.3) — keep them as
   `FORWARD_RETURN_HORIZONS = (20, 60, 120)` so VALID-003 can add one without a migration.
 - **MAE/MFE precision:** `Numeric(9,4)` matches `forward_return_pct`; revisit if you ever store

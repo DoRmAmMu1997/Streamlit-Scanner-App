@@ -17,7 +17,7 @@ from __future__ import annotations
 import datetime as dt
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, cast
 
@@ -41,6 +41,25 @@ if TYPE_CHECKING:
 
 _AI_EVALUATION_OUTCOMES = frozenset({"approved", "rejected", "error"})
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+@dataclass(frozen=True)
+class ForwardReturnMetricRecord:
+    """Read-only joined row for VALID-003A aggregate validation metrics."""
+
+    run_id: int
+    run_started_at: dt.datetime
+    result_id: int
+    screener_key: str
+    universe_key: str
+    symbol: str
+    signal_date: dt.date | None
+    horizon_days: int
+    status: ForwardReturnStatus
+    forward_return_pct: Decimal | None
+    excess_return_pct: Decimal | None
+    max_adverse_excursion_pct: Decimal | None
+    max_favorable_excursion_pct: Decimal | None
 
 
 def create_scan_run(
@@ -451,6 +470,93 @@ def upsert_forward_return(
 
     session.flush()
     return row
+
+
+# ---------------------------------------------------------------------------
+# VALID-003A - forward-return aggregate read helpers
+# ---------------------------------------------------------------------------
+
+
+def get_forward_return_metric_records(
+    session: Session,
+    *,
+    screener_key: str | None = None,
+    universe_key: str | None = None,
+    horizon_days: int | None = None,
+    signal_date_from: dt.date | None = None,
+    signal_date_to: dt.date | None = None,
+) -> list[ForwardReturnMetricRecord]:
+    """Return joined forward-return rows for aggregate validation metrics.
+
+    VALID-003A keeps raw SQL out of services and future UI code. This helper owns
+    the ``scan_runs`` -> ``scan_results`` -> ``signal_forward_returns`` join and
+    returns primitive DTOs that can be grouped safely after the session closes.
+    Date filters are inclusive and deliberately use ``scan_results.signal_date``
+    because the metrics answer "how did signals from this signal window perform?"
+
+    Only ``SUCCESS``/``PARTIAL`` runs feed the metrics: a ``RUNNING`` run is still
+    in flight and a ``FAILED`` run aborted before producing a trustworthy result
+    set, so neither should colour a screener's performance numbers. ``run_started_at``
+    is selected so callers can pick the most recent run when the same signal was
+    re-measured across reruns (see ``summarize_validation_metrics`` de-duplication).
+    """
+    stmt = (
+        select(
+            ScanRun.id.label("run_id"),
+            ScanRun.started_at.label("run_started_at"),
+            ScanResult.id.label("result_id"),
+            ScanRun.screener_key,
+            ScanRun.universe_key,
+            ScanResult.symbol,
+            ScanResult.signal_date,
+            SignalForwardReturn.horizon_days,
+            SignalForwardReturn.status,
+            SignalForwardReturn.forward_return_pct,
+            SignalForwardReturn.excess_return_pct,
+            SignalForwardReturn.max_adverse_excursion_pct,
+            SignalForwardReturn.max_favorable_excursion_pct,
+        )
+        .join(ScanResult, ScanResult.run_id == ScanRun.id)
+        .join(SignalForwardReturn, SignalForwardReturn.result_id == ScanResult.id)
+        .where(ScanRun.status.in_((ScanStatus.SUCCESS, ScanStatus.PARTIAL)))
+    )
+    if screener_key is not None:
+        stmt = stmt.where(ScanRun.screener_key == screener_key)
+    if universe_key is not None:
+        stmt = stmt.where(ScanRun.universe_key == universe_key)
+    if horizon_days is not None:
+        stmt = stmt.where(SignalForwardReturn.horizon_days == int(horizon_days))
+    if signal_date_from is not None:
+        stmt = stmt.where(ScanResult.signal_date >= signal_date_from)
+    if signal_date_to is not None:
+        stmt = stmt.where(ScanResult.signal_date <= signal_date_to)
+
+    stmt = stmt.order_by(
+        ScanRun.screener_key.asc(),
+        ScanRun.universe_key.asc(),
+        SignalForwardReturn.horizon_days.asc(),
+        ScanResult.signal_date.asc(),
+        ScanResult.id.asc(),
+    )
+
+    return [
+        ForwardReturnMetricRecord(
+            run_id=row.run_id,
+            run_started_at=row.run_started_at,
+            result_id=row.result_id,
+            screener_key=row.screener_key,
+            universe_key=row.universe_key,
+            symbol=row.symbol,
+            signal_date=row.signal_date,
+            horizon_days=row.horizon_days,
+            status=row.status,
+            forward_return_pct=row.forward_return_pct,
+            excess_return_pct=row.excess_return_pct,
+            max_adverse_excursion_pct=row.max_adverse_excursion_pct,
+            max_favorable_excursion_pct=row.max_favorable_excursion_pct,
+        )
+        for row in session.execute(stmt)
+    ]
 
 
 # ---------------------------------------------------------------------------
