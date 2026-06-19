@@ -132,11 +132,14 @@ by default or Postgres) that is ready to record every run for later replay and a
   repository API. A built-in **Scan history** view lists recent runs (status,
   started/finished timestamps, symbols scanned, shortlisted count, who triggered
   it, error state) with screener/universe/status/date/trigger/symbol filters and
-  click-through to each run's persisted results.
+  click-through to each run's persisted results. Historical validation stores
+  per-signal forward returns and exposes backend aggregate metrics by screener,
+  universe, and horizon; the Streamlit validation page is still future work.
 - **Tested** — a `pytest` suite covers the indicators, data loader, universe
   builder, screener registry, the screeners themselves, the auth gate, the
-  persistence layer, candle data-quality validation, the AI prompt-injection
-  quarantine corpus, structured AI-output validation, and the Docker artifacts —
+  persistence layer, forward-return validation metrics, candle data-quality
+  validation, the AI prompt-injection quarantine corpus, structured AI-output
+  validation, and the Docker artifacts —
   plus **golden-snapshot** tests that catch screener output drift and an Alembic
   migration drift-guard.
 
@@ -708,6 +711,7 @@ Streamlit Scanner App/
 │   ├── daily_data_loader.py     # Candle fetching + Parquet cache
 │   ├── universe_builder.py      # Builds the stock-universe CSVs
 │   ├── universe_loader.py       # Reads the universe CSVs
+│   ├── validation/              # Forward-return calculators, service, and aggregate metrics
 │   ├── screener_registry.py     # Discovers + validates screeners
 │   ├── scanner_base.py          # BaseScanner ABC every screener subclasses
 │   ├── jobs/                    # Headless commands such as daily scans

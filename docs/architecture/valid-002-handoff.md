@@ -6,7 +6,7 @@
 | **Type / Priority** | Story · P1 |
 | **Owner / Reviewer** | **Codex** / Claude |
 | **Depends on** | VALID-001 (methodology + schema — **landed**: `SignalForwardReturn` in `backend/storage/models.py`) |
-| **Unblocks** | VALID-003 (aggregate metrics: hit rate / median / sector concentration + UI) |
+| **Unblocks** | VALID-003A (backend aggregate metrics) and later VALID-003 UI / sector concentration |
 | **Implementation status** | Implemented in the stacked Codex PR as `backend/validation/` + repository helpers + tests |
 
 > Goal (from the backlog): *Compute future returns for stored signals.*
@@ -186,7 +186,7 @@ class BenchmarkSpec:
 
 
 # Leave security_id blank where unknown; a blank id takes the graceful-NULL path
-# (design §4 rule 4), it does NOT crash. VALID-003 fills the real ids.
+# (design §4 rule 4), it does NOT crash. A future benchmark setup task fills real ids.
 BENCHMARKS: dict[str, BenchmarkSpec] = {
     "fno":             BenchmarkSpec(key="nifty_50",  symbol="NIFTY 50",  security_id=""),
     "nifty_500":       BenchmarkSpec(key="nifty_500", symbol="NIFTY 500", security_id=""),
