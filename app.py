@@ -142,6 +142,7 @@ from ui.history_page import (  # noqa: F401
     _render_history_page,
     _render_history_run_details,
 )
+from ui.validation_page import _render_validation_page
 
 # The CLI prefetch downloads ten years of daily candles for every stock in the
 # union of all universes. The window length is shared with the headless daily job
@@ -990,7 +991,9 @@ def main() -> None:
     # audit view. It sits after the auth gate (so history inherits the same
     # protection) and before screener discovery on purpose: a broken screener
     # file must never prevent an operator from inspecting past runs.
-    view_options = ["Scanner", "Scan history"]
+    # "Validation / Signal Performance" is a read-only analytical view (like Scan
+    # history) available to every authenticated user, not an admin-only page.
+    view_options = ["Scanner", "Scan history", "Validation / Signal Performance"]
     if authenticated_user is not None and getattr(
         authenticated_user, "is_admin", False
     ):
@@ -1007,6 +1010,9 @@ def main() -> None:
     )
     if view == "Scan history":
         _render_history_page()
+        return
+    if view == "Validation / Signal Performance":
+        _render_validation_page()
         return
     if view == "Admin health":
         _record_admin_page_access(authenticated_user, "Admin health")

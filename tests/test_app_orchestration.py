@@ -24,7 +24,7 @@ from backend.screener_registry import ScreenerDefinition
 
 # Helpers that moved to ui/ (REF-001) read Streamlit and the chart renderer
 # from their own modules; fakes must be patched there, not onto app.
-from ui import chart_cache, common, health_page, history_page
+from ui import chart_cache, common, health_page, history_page, validation_page
 
 
 class _FixedDate(real_date):
@@ -413,6 +413,7 @@ def test_admin_health_view_is_available_and_returns_before_screener_discovery(
         assert options == (
             "Scanner",
             "Scan history",
+            "Validation / Signal Performance",
             "Admin health",
             "Admin settings",
             "Audit log",
@@ -467,6 +468,63 @@ def test_admin_health_view_is_available_and_returns_before_screener_discovery(
     assert calls == ["schema", "view", "health:admin@example.com"]
 
 
+def test_validation_view_is_available_to_all_authenticated_users(monkeypatch):
+    """Any authenticated user can open the read-only validation dashboard."""
+
+    calls: list[str] = []
+
+    def choose_validation(_label, options, **_kwargs):
+        assert "Validation / Signal Performance" in options
+        calls.append("view")
+        return "Validation / Signal Performance"
+
+    monkeypatch.setattr(
+        app,
+        "get_settings",
+        lambda: get_settings(env={"AUTH_REQUIRED": "true"}),
+    )
+    monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
+    monkeypatch.setattr(app, "_configure_logging", lambda: None)
+    monkeypatch.setattr(app, "ensure_database_schema", lambda: calls.append("schema"))
+    monkeypatch.setattr(
+        app,
+        "require_authorized_user",
+        lambda _st: app.AuthenticatedUser(
+            email="person@example.com",
+            name="Person",
+            is_admin=False,
+        ),
+    )
+    monkeypatch.setattr(
+        app,
+        "_render_validation_page",
+        lambda: calls.append("validation"),
+    )
+    monkeypatch.setattr(
+        app,
+        "discover_screeners",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("validation view must return before screener discovery")
+        ),
+    )
+    monkeypatch.setattr(
+        app,
+        "st",
+        SimpleNamespace(
+            set_page_config=lambda **_kwargs: None,
+            markdown=lambda *_args, **_kwargs: None,
+            title=lambda *_args, **_kwargs: None,
+            caption=lambda *_args, **_kwargs: None,
+            radio=choose_validation,
+            session_state={},
+        ),
+    )
+
+    app.main()
+
+    assert calls == ["schema", "view", "validation"]
+
+
 def test_non_admin_cannot_select_admin_health(monkeypatch):
     """The main selector must not advertise the admin-only operational page."""
 
@@ -474,7 +532,11 @@ def test_non_admin_cannot_select_admin_health(monkeypatch):
         """Signal that the normal scanner path continued after view selection."""
 
     def choose_scanner(_label, options, **_kwargs):
-        assert options == ("Scanner", "Scan history")
+        assert options == (
+            "Scanner",
+            "Scan history",
+            "Validation / Signal Performance",
+        )
         return "Scanner"
 
     monkeypatch.setattr(
@@ -714,6 +776,7 @@ def test_app_reexports_helpers_from_extracted_ui_modules():
     assert app._get_or_build_chart_payload is chart_cache._get_or_build_chart_payload
     assert app._render_history_page is history_page._render_history_page
     assert app._render_admin_health_page is health_page._render_admin_health_page
+    assert app._render_validation_page is validation_page._render_validation_page
 
 
 def test_refresh_universes_clears_every_derived_cache_after_success(monkeypatch):
