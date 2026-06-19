@@ -52,6 +52,7 @@ from backend.storage.repository import (
     get_latest_scan_runs,
     get_recent_audit_logs,
     get_scan_results,
+    get_signals_needing_forward_returns,
     list_distinct_audit_events,
     list_distinct_screener_keys,
     list_distinct_triggered_by_values,
@@ -59,6 +60,7 @@ from backend.storage.repository import (
     save_ai_evaluations,
     save_scan_results,
     set_config_override,
+    upsert_forward_return,
 )
 
 __all__ = [
@@ -84,6 +86,7 @@ __all__ = [
     "get_latest_scan_runs",
     "get_recent_audit_logs",
     "get_scan_results",
+    "get_signals_needing_forward_returns",
     "init_db",
     "list_distinct_audit_events",
     "list_distinct_screener_keys",
@@ -93,4 +96,5 @@ __all__ = [
     "save_scan_results",
     "session_scope",
     "set_config_override",
+    "upsert_forward_return",
 ]

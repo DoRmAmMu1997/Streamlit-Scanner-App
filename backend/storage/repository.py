@@ -19,19 +19,25 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, is_dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import exists, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import exists, func, or_, select
+from sqlalchemy.orm import Session, joinedload
 
 from backend.storage.models import (
     AIEvaluation,
     AppConfig,
     AuditLog,
+    ForwardReturnStatus,
     ScanResult,
     ScanRun,
     ScanStatus,
+    SignalForwardReturn,
 )
+
+if TYPE_CHECKING:
+    from backend.validation.benchmarks import BenchmarkLeg
+    from backend.validation.forward_return import ForwardReturnPoint
 
 _AI_EVALUATION_OUTCOMES = frozenset({"approved", "rejected", "error"})
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -340,6 +346,111 @@ def get_ai_evaluations(session: Session, run_id: int) -> list[AIEvaluation]:
         .order_by(AIEvaluation.symbol.asc(), AIEvaluation.id.asc())
     )
     return list(session.scalars(stmt))
+
+
+# ---------------------------------------------------------------------------
+# VALID-002 - forward-return validation helpers
+# ---------------------------------------------------------------------------
+
+
+def get_signals_needing_forward_returns(
+    session: Session,
+    *,
+    horizons: Sequence[int],
+    limit: int | None = None,
+) -> list[ScanResult]:
+    """Return signals with a missing or still-pending row for any horizon.
+
+    Terminal rows (``computed`` / ``insufficient_data``) are skipped so the
+    validation service can be re-run without rewriting completed measurements.
+    The parent run is eager-loaded because its universe key drives instrument
+    and benchmark resolution.
+    """
+    normalized_horizons = tuple(int(horizon) for horizon in horizons)
+    if not normalized_horizons:
+        return []
+
+    needs_any_horizon = []
+    for horizon in normalized_horizons:
+        terminal_row_exists = exists().where(
+            SignalForwardReturn.result_id == ScanResult.id,
+            SignalForwardReturn.horizon_days == horizon,
+            SignalForwardReturn.status != ForwardReturnStatus.PENDING,
+        )
+        needs_any_horizon.append(~terminal_row_exists)
+
+    stmt = (
+        select(ScanResult)
+        .options(joinedload(ScanResult.run))
+        .where(
+            ScanResult.signal_date.is_not(None),
+            or_(*needs_any_horizon),
+        )
+        .order_by(ScanResult.signal_date.asc(), ScanResult.id.asc())
+    )
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    return list(session.scalars(stmt))
+
+
+def upsert_forward_return(
+    session: Session,
+    *,
+    result_id: int,
+    point: ForwardReturnPoint,
+    benchmark: BenchmarkLeg | None = None,
+) -> SignalForwardReturn:
+    """Insert or update one ``signal_forward_returns`` horizon row.
+
+    The schema's unique ``(result_id, horizon_days)`` constraint is the durable
+    idempotency contract; this helper mirrors that in ORM code so callers never
+    append duplicate measurements on reruns.
+    """
+    stmt = select(SignalForwardReturn).where(
+        SignalForwardReturn.result_id == result_id,
+        SignalForwardReturn.horizon_days == point.horizon_days,
+    )
+    row = session.scalar(stmt)
+    if row is None:
+        row = SignalForwardReturn(
+            result_id=result_id,
+            horizon_days=point.horizon_days,
+        )
+        session.add(row)
+
+    row.status = point.status
+    row.entry_date = point.entry_date
+    row.exit_date = point.exit_date
+    row.entry_price = point.entry_price
+    row.exit_price = point.exit_price
+    row.forward_return_pct = point.forward_return_pct
+    row.max_adverse_excursion_pct = point.max_adverse_excursion_pct
+    row.max_favorable_excursion_pct = point.max_favorable_excursion_pct
+    row.computed_at = (
+        dt.datetime.now(dt.UTC)
+        if point.status is not ForwardReturnStatus.PENDING
+        else None
+    )
+
+    if benchmark is None:
+        row.benchmark_key = None
+        row.benchmark_entry_price = None
+        row.benchmark_exit_price = None
+        row.benchmark_return_pct = None
+        row.excess_return_pct = None
+    else:
+        row.benchmark_key = benchmark.benchmark_key
+        row.benchmark_entry_price = benchmark.entry_price
+        row.benchmark_exit_price = benchmark.exit_price
+        row.benchmark_return_pct = benchmark.return_pct
+        row.excess_return_pct = (
+            point.forward_return_pct - benchmark.return_pct
+            if point.forward_return_pct is not None and benchmark.return_pct is not None
+            else None
+        )
+
+    session.flush()
+    return row
 
 
 # ---------------------------------------------------------------------------
