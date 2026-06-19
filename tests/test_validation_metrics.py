@@ -7,7 +7,7 @@ from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
-from backend.storage.models import ForwardReturnStatus, SignalForwardReturn
+from backend.storage.models import ForwardReturnStatus, ScanStatus, SignalForwardReturn
 from backend.storage.repository import create_scan_run, save_scan_results
 from backend.validation.metrics import summarize_validation_metrics
 
@@ -17,13 +17,18 @@ def _seed_run(
     *,
     screener_key: str = "envelope_knoxville_buy",
     universe_key: str = "nifty_500",
+    status: ScanStatus = ScanStatus.SUCCESS,
 ):
-    return create_scan_run(
+    # Metrics only aggregate SUCCESS/PARTIAL runs, so seeded runs must be marked
+    # finished rather than left in the default RUNNING state.
+    run = create_scan_run(
         session,
         screener_key=screener_key,
         universe_key=universe_key,
         data_snapshot_date=dt.date(2026, 1, 31),
     )
+    run.status = status
+    return run
 
 
 def _seed_result(
@@ -108,8 +113,8 @@ def test_summarize_one_group_keeps_pending_insufficient_visible_without_losses(d
 
     summary = summarize_validation_metrics(db_session)
 
-    assert summary.total_signals == 4
-    assert summary.total_computed == 2
+    assert summary.total_measurements == 4
+    assert summary.computed_measurements == 2
     assert len(summary.rows) == 1
     row = summary.rows[0]
     assert row.screener_key == "envelope_knoxville_buy"
@@ -282,6 +287,107 @@ def test_summarize_no_computed_rows_returns_none_metrics_safely(db_session):
     assert row.average_mfe_pct is None
     assert row.best_signal is None
     assert row.worst_signal is None
+
+
+def test_summarize_excludes_non_success_and_running_runs(db_session):
+    success_run = _seed_run(db_session, status=ScanStatus.SUCCESS)
+    failed_run = _seed_run(db_session, status=ScanStatus.FAILED)
+    running_run = _seed_run(db_session, status=ScanStatus.RUNNING)
+    kept = _seed_result(
+        db_session, run=success_run, symbol="RELIANCE", signal_date=dt.date(2026, 1, 5)
+    )
+    from_failed = _seed_result(
+        db_session, run=failed_run, symbol="TCS", signal_date=dt.date(2026, 1, 5)
+    )
+    from_running = _seed_result(
+        db_session, run=running_run, symbol="INFY", signal_date=dt.date(2026, 1, 5)
+    )
+    _add_forward_return(db_session, result=kept, forward_return_pct=Decimal("5.0000"))
+    _add_forward_return(db_session, result=from_failed, forward_return_pct=Decimal("9.0000"))
+    _add_forward_return(db_session, result=from_running, forward_return_pct=Decimal("9.0000"))
+    db_session.commit()
+
+    summary = summarize_validation_metrics(db_session)
+
+    # Only the SUCCESS run's signal survives; the FAILED/RUNNING signals (which
+    # share the same screener/universe/horizon group) never reach the metrics.
+    assert summary.total_measurements == 1
+    assert len(summary.rows) == 1
+    assert summary.rows[0].best_signal is not None
+    assert summary.rows[0].best_signal.symbol == "RELIANCE"
+
+
+def test_summarize_dedupes_repeated_signal_keeping_latest_run(db_session):
+    earlier_run = _seed_run(db_session, screener_key="envelope", universe_key="nifty_500")
+    later_run = _seed_run(db_session, screener_key="envelope", universe_key="nifty_500")
+    earlier_run.started_at = dt.datetime(2026, 1, 10, tzinfo=dt.UTC)
+    later_run.started_at = dt.datetime(2026, 1, 11, tzinfo=dt.UTC)
+    earlier = _seed_result(
+        db_session, run=earlier_run, symbol="RELIANCE", signal_date=dt.date(2026, 1, 5)
+    )
+    later = _seed_result(
+        db_session, run=later_run, symbol="RELIANCE", signal_date=dt.date(2026, 1, 5)
+    )
+    _add_forward_return(db_session, result=earlier, forward_return_pct=Decimal("3.0000"))
+    _add_forward_return(db_session, result=later, forward_return_pct=Decimal("9.0000"))
+    db_session.commit()
+
+    summary = summarize_validation_metrics(db_session)
+
+    # The same signal measured by two runs counts once, using the later run.
+    assert summary.total_measurements == 1
+    row = summary.rows[0]
+    assert row.total_signals == 1
+    assert row.computed_count == 1
+    assert row.average_forward_return_pct == Decimal("9.0000")
+    assert row.best_signal is not None
+    assert row.best_signal.forward_return_pct == Decimal("9.0000")
+
+
+def test_summarize_counts_each_horizon_as_a_measurement(db_session):
+    run = _seed_run(db_session, screener_key="envelope", universe_key="nifty_500")
+    signal = _seed_result(
+        db_session, run=run, symbol="RELIANCE", signal_date=dt.date(2026, 1, 5)
+    )
+    for horizon, value in [
+        (20, Decimal("4.0000")),
+        (60, Decimal("8.0000")),
+        (120, Decimal("12.0000")),
+    ]:
+        _add_forward_return(
+            db_session, result=signal, horizon_days=horizon, forward_return_pct=value
+        )
+    db_session.commit()
+
+    summary = summarize_validation_metrics(db_session)
+
+    # One signal across three horizons -> three measurement rows in three groups,
+    # while each per-horizon row still counts a single signal.
+    assert summary.total_measurements == 3
+    assert summary.computed_measurements == 3
+    assert [row.horizon_days for row in summary.rows] == [20, 60, 120]
+    assert {row.total_signals for row in summary.rows} == {1}
+
+
+def test_summarize_includes_null_signal_date_until_a_date_filter_applies(db_session):
+    run = _seed_run(db_session, screener_key="envelope", universe_key="nifty_500")
+    [undated] = save_scan_results(
+        db_session, run, [{"symbol": "RELIANCE", "signal_date": None, "rating": "BUY"}]
+    )
+    _add_forward_return(db_session, result=undated, forward_return_pct=Decimal("6.0000"))
+    db_session.commit()
+
+    unfiltered = summarize_validation_metrics(db_session)
+    assert unfiltered.total_measurements == 1
+    row = unfiltered.rows[0]
+    assert row.total_signals == 1
+    assert row.first_signal_date is None
+    assert row.last_signal_date is None
+
+    # A signal-date filter is meaningless for an undated row, so it drops out.
+    filtered = summarize_validation_metrics(db_session, signal_date_from=dt.date(2026, 1, 1))
+    assert filtered.total_measurements == 0
+    assert filtered.rows == ()
 
 
 def test_validation_package_exports_metrics_api():

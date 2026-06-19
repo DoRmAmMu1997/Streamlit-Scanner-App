@@ -48,6 +48,7 @@ class ForwardReturnMetricRecord:
     """Read-only joined row for VALID-003A aggregate validation metrics."""
 
     run_id: int
+    run_started_at: dt.datetime
     result_id: int
     screener_key: str
     universe_key: str
@@ -492,10 +493,17 @@ def get_forward_return_metric_records(
     returns primitive DTOs that can be grouped safely after the session closes.
     Date filters are inclusive and deliberately use ``scan_results.signal_date``
     because the metrics answer "how did signals from this signal window perform?"
+
+    Only ``SUCCESS``/``PARTIAL`` runs feed the metrics: a ``RUNNING`` run is still
+    in flight and a ``FAILED`` run aborted before producing a trustworthy result
+    set, so neither should colour a screener's performance numbers. ``run_started_at``
+    is selected so callers can pick the most recent run when the same signal was
+    re-measured across reruns (see ``summarize_validation_metrics`` de-duplication).
     """
     stmt = (
         select(
             ScanRun.id.label("run_id"),
+            ScanRun.started_at.label("run_started_at"),
             ScanResult.id.label("result_id"),
             ScanRun.screener_key,
             ScanRun.universe_key,
@@ -510,6 +518,7 @@ def get_forward_return_metric_records(
         )
         .join(ScanResult, ScanResult.run_id == ScanRun.id)
         .join(SignalForwardReturn, SignalForwardReturn.result_id == ScanResult.id)
+        .where(ScanRun.status.in_((ScanStatus.SUCCESS, ScanStatus.PARTIAL)))
     )
     if screener_key is not None:
         stmt = stmt.where(ScanRun.screener_key == screener_key)
@@ -533,6 +542,7 @@ def get_forward_return_metric_records(
     return [
         ForwardReturnMetricRecord(
             run_id=row.run_id,
+            run_started_at=row.run_started_at,
             result_id=row.result_id,
             screener_key=row.screener_key,
             universe_key=row.universe_key,

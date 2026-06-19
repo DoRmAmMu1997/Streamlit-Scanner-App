@@ -49,8 +49,11 @@ class ValidationMetricRow:
     screener_key: str
     universe_key: str
     horizon_days: int
-    signal_date_from: dt.date | None
-    signal_date_to: dt.date | None
+    # Observed signal-date window for this group (the earliest/latest signal that
+    # actually landed here) -- distinct from the *requested* bounds on
+    # ``ValidationMetricFilters``.
+    first_signal_date: dt.date | None
+    last_signal_date: dt.date | None
     total_signals: int
     computed_count: int
     pending_count: int
@@ -68,14 +71,20 @@ class ValidationMetricRow:
 
 @dataclass(frozen=True)
 class ValidationSummary:
-    """Collection of grouped validation metric rows plus overall status counts."""
+    """Grouped validation metric rows plus overall measurement counts.
+
+    The ``*_measurements`` totals count one row per ``signal x horizon`` after
+    de-duplication, **not** distinct signals: a single signal measured at 20/60/120
+    days contributes three measurements. Per-signal counts live on each
+    ``ValidationMetricRow`` (which is already scoped to one horizon).
+    """
 
     filters: ValidationMetricFilters
     rows: tuple[ValidationMetricRow, ...]
-    total_signals: int
-    total_computed: int
-    total_pending: int
-    total_insufficient_data: int
+    total_measurements: int
+    computed_measurements: int
+    pending_measurements: int
+    insufficient_data_measurements: int
 
 
 def summarize_validation_metrics(
@@ -101,13 +110,15 @@ def summarize_validation_metrics(
         signal_date_from=signal_date_from,
         signal_date_to=signal_date_to,
     )
-    records = get_forward_return_metric_records(
-        session,
-        screener_key=screener_key,
-        universe_key=universe_key,
-        horizon_days=horizon_days,
-        signal_date_from=signal_date_from,
-        signal_date_to=signal_date_to,
+    records = _dedupe_latest_run(
+        get_forward_return_metric_records(
+            session,
+            screener_key=screener_key,
+            universe_key=universe_key,
+            horizon_days=horizon_days,
+            signal_date_from=signal_date_from,
+            signal_date_to=signal_date_to,
+        )
     )
     groups: dict[tuple[str, str, int], list[ForwardReturnMetricRecord]] = defaultdict(list)
     for record in records:
@@ -120,19 +131,50 @@ def summarize_validation_metrics(
     return ValidationSummary(
         filters=filters,
         rows=rows,
-        total_signals=len(records),
-        total_computed=sum(
+        total_measurements=len(records),
+        computed_measurements=sum(
             1 for record in records if record.status is ForwardReturnStatus.COMPUTED
         ),
-        total_pending=sum(
+        pending_measurements=sum(
             1 for record in records if record.status is ForwardReturnStatus.PENDING
         ),
-        total_insufficient_data=sum(
+        insufficient_data_measurements=sum(
             1
             for record in records
             if record.status is ForwardReturnStatus.INSUFFICIENT_DATA
         ),
     )
+
+
+def _dedupe_latest_run(
+    records: list[ForwardReturnMetricRecord],
+) -> list[ForwardReturnMetricRecord]:
+    """Keep one record per signal+horizon, preferring the most recent run.
+
+    The same shortlisted signal can be measured by more than one run -- a daily
+    job retried after a failure, or an overlapping backfill -- which would
+    otherwise count one real signal several times and skew hit rate and averages.
+    The key is ``(screener, universe, symbol, signal_date, horizon)``; the winner
+    is the record from the run with the greatest ``(started_at, run_id)``. Signals
+    with no ``signal_date`` de-duplicate within their own key.
+    """
+    DedupeKey = tuple[str, str, str, dt.date | None, int]
+    latest: dict[DedupeKey, ForwardReturnMetricRecord] = {}
+    for record in records:
+        key: DedupeKey = (
+            record.screener_key,
+            record.universe_key,
+            record.symbol,
+            record.signal_date,
+            record.horizon_days,
+        )
+        current = latest.get(key)
+        if current is None or (record.run_started_at, record.run_id) > (
+            current.run_started_at,
+            current.run_id,
+        ):
+            latest[key] = record
+    return list(latest.values())
 
 
 def _build_metric_row(records: list[ForwardReturnMetricRecord]) -> ValidationMetricRow:
@@ -144,16 +186,17 @@ def _build_metric_row(records: list[ForwardReturnMetricRecord]) -> ValidationMet
     excess_returns = _values(record.excess_return_pct for record in computed_records)
     mae_values = _values(record.max_adverse_excursion_pct for record in computed_records)
     mfe_values = _values(record.max_favorable_excursion_pct for record in computed_records)
-    dated_records = [record.signal_date for record in records if record.signal_date is not None]
-    best = _best_signal(computed_records)
-    worst = _worst_signal(computed_records)
+    signal_dates = [record.signal_date for record in records if record.signal_date is not None]
+    # Build the deterministically ordered candidate list once; best and worst both
+    # read from it instead of re-sorting the same rows twice.
+    eligible = _eligible_best_worst_records(computed_records)
 
     return ValidationMetricRow(
         screener_key=first.screener_key,
         universe_key=first.universe_key,
         horizon_days=first.horizon_days,
-        signal_date_from=min(dated_records) if dated_records else None,
-        signal_date_to=max(dated_records) if dated_records else None,
+        first_signal_date=min(signal_dates) if signal_dates else None,
+        last_signal_date=max(signal_dates) if signal_dates else None,
         total_signals=len(records),
         computed_count=len(computed_records),
         pending_count=sum(1 for record in records if record.status is ForwardReturnStatus.PENDING),
@@ -167,12 +210,15 @@ def _build_metric_row(records: list[ForwardReturnMetricRecord]) -> ValidationMet
         median_excess_return_pct=_median(excess_returns),
         average_mae_pct=_average(mae_values),
         average_mfe_pct=_average(mfe_values),
-        best_signal=best,
-        worst_signal=worst,
+        best_signal=_best_signal(eligible),
+        worst_signal=_worst_signal(eligible),
     )
 
 
 def _values(values: Iterable[Decimal | None]) -> list[Decimal]:
+    # Drop NULL measurements (benchmark/excess/MAE/MFE are all optional). Every
+    # Numeric column maps to Decimal, so the ``isinstance`` check both removes
+    # ``None`` and refuses to average a stray non-Decimal rather than crashing.
     return [value for value in values if isinstance(value, Decimal)]
 
 
@@ -199,15 +245,13 @@ def _hit_rate(values: list[Decimal]) -> Decimal | None:
     return ((Decimal(winners) / Decimal(len(values))) * Decimal("100")).quantize(PCT_QUANT)
 
 
-def _best_signal(records: list[ForwardReturnMetricRecord]) -> BestWorstSignal | None:
-    eligible = _eligible_best_worst_records(records)
+def _best_signal(eligible: list[ForwardReturnMetricRecord]) -> BestWorstSignal | None:
     if not eligible:
         return None
     return _as_best_worst_signal(max(eligible, key=_forward_return_value))
 
 
-def _worst_signal(records: list[ForwardReturnMetricRecord]) -> BestWorstSignal | None:
-    eligible = _eligible_best_worst_records(records)
+def _worst_signal(eligible: list[ForwardReturnMetricRecord]) -> BestWorstSignal | None:
     if not eligible:
         return None
     return _as_best_worst_signal(min(eligible, key=_forward_return_value))

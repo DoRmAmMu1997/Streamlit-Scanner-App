@@ -44,8 +44,8 @@ flowchart TD
 | `benchmark_for_universe(universe_key)` | Returns a `BenchmarkSpec` only when its Dhan index `security_id` is configured. Blank production IDs intentionally return `None`. |
 | `compute_pending_forward_returns(session, loader, *, as_of=None, horizons=(20, 60, 120), limit=None)` | Loads eligible stored signals, resolves instruments, computes each horizon, and upserts rows idempotently. |
 | `get_signals_needing_forward_returns(...)` / `upsert_forward_return(...)` | Repository-only query/write helpers for missing/pending rows and `(result_id, horizon_days)` upserts. |
-| `summarize_validation_metrics(session, *, screener_key=None, universe_key=None, horizon_days=None, signal_date_from=None, signal_date_to=None)` | Read-only aggregate metrics over stored forward-return rows. Filters by `scan_results.signal_date` inclusively and returns typed `ValidationSummary` / `ValidationMetricRow` objects. |
-| `get_forward_return_metric_records(...)` | Repository-only joined read of `scan_runs`, `scan_results`, and `signal_forward_returns` for metrics aggregation. |
+| `summarize_validation_metrics(session, *, screener_key=None, universe_key=None, horizon_days=None, signal_date_from=None, signal_date_to=None)` | Read-only aggregate metrics over stored forward-return rows. Filters by `scan_results.signal_date` inclusively, de-duplicates reruns (latest run wins), and returns typed `ValidationSummary` / `ValidationMetricRow` objects. |
+| `get_forward_return_metric_records(...)` | Repository-only joined read of `scan_runs`, `scan_results`, and `signal_forward_returns` (`SUCCESS`/`PARTIAL` runs only) for metrics aggregation. |
 
 ## 4. Missing-data and benchmark policy
 
@@ -56,6 +56,10 @@ flowchart TD
 - Benchmark IDs are not guessed. Until verified Dhan `IDX_I` IDs are configured, stock returns compute and benchmark/excess fields remain null.
 - Aggregate hit rate is `forward_return_pct > 0` over computed rows with stored returns only. Pending and insufficient rows stay visible as counts but never count as losses.
 - Average/median forward, excess, MAE, and MFE metrics use fixed-point `Decimal` values; missing benchmark/excess values are ignored, and empty metric sets return null instead of zero.
+- Aggregates read **only `SUCCESS`/`PARTIAL` runs**: a `RUNNING` run is still in flight and a `FAILED` run aborted before producing a trustworthy result set, so neither colours a screener's performance numbers.
+- The same signal can be measured by more than one run (a retried daily job, an overlapping backfill). Metrics **de-duplicate by `(screener, universe, symbol, signal_date, horizon)` keeping the most recent run** (`started_at`, then `run_id`), so a rerun never double-counts a signal. Undated signals de-duplicate within their own key.
+- `ValidationSummary` reports `*_measurements` counts — one per `signal × horizon` row after de-duplication, **not** distinct signals. Per-signal counts live on each `ValidationMetricRow` (already horizon-scoped). `ValidationMetricRow.first_signal_date`/`last_signal_date` are the *observed* window; the *requested* bounds stay on `ValidationMetricFilters`.
+- The read model loads matching rows and reduces them in Python to keep `Decimal` and median math exact. At much larger history volumes this is the natural pivot point to SQL aggregates or a pre-rollup table.
 
 ## 5. Testing
 
