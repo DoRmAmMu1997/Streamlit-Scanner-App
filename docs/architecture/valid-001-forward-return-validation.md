@@ -170,15 +170,27 @@ them honestly rather than papering over missing data:
    benchmark/`excess_return_pct` columns are left NULL. A missing benchmark must never null out
    a real, measurable signal return.
 
+**Refinement — telling "not yet" from "never" when the exit bar is absent.** Rules 2 and 3
+overlap in a case the first draft left implicit: an absent exit bar can mean *either* the holding
+window has not elapsed yet (a recent signal → should stay `pending`) *or* the symbol's data truly
+ends there (delisted/halted → `insufficient_data`). The calculator disambiguates by the
+**freshness of the candle frame**: if its latest bar is within a small grace window of the
+data-as-of date (`MISSING_FUTURE_DATA_GRACE_DAYS`, default 7 calendar days — enough to span a
+weekend plus a holiday), the data is merely lagging and the row stays `pending`; if the latest bar
+is older than that, the symbol is treated as having no further data and the row becomes
+`insufficient_data`. This keeps a freshly-fired signal retryable instead of being written off the
+first time it is scanned. (Separately, at the *service* layer a universe that cannot be loaded at
+all — a missing/corrupt CSV — is also treated as `pending`/retryable, not terminal: an
+environment fault is never a verdict about the signal. See §7.)
+
 Status lifecycle:
 
 ```
-                 window elapsed,
-                 entry+exit bars exist
-   pending ───────────────────────────────▶ computed
+   pending ──[ window elapsed, entry + exit bars exist ]─────────────▶ computed
       │
-      │ entry/exit bar absent (delisted/halted/gap)
-      └───────────────────────────────────▶ insufficient_data
+      ├──[ exit bar absent, but candle frame still fresh (≤ grace) ]──▶ stays pending (retry)
+      │
+      └──[ entry/exit bar absent and frame stale (> grace) / gap ]────▶ insufficient_data
 ```
 
 `pending → computed` is the normal path as data arrives; `pending → insufficient_data` is a
@@ -290,13 +302,19 @@ loader the screeners already use — no new fetch path:
 - **Instrument resolution.** A `scan_results` row stores only `symbol`; fetching its bars needs
   the Dhan `security_id`. Resolve it from the parent run's `universe_key` via
   `load_universe(run.universe_key)` ([`backend/universe_loader.py`](../../backend/universe_loader.py))
-  and match the row for `symbol`.
+  and match the row for `symbol`. Two failure modes are deliberately distinguished, because they
+  warrant opposite verdicts: if the **universe itself cannot load** (missing/corrupt CSV, unknown
+  key) the signal stays `pending`/retryable — an environment fault is not a fact about the signal;
+  if the universe loads but has **no row for the symbol** (delisted/renamed/never mapped) that is
+  terminal `insufficient_data`. (Conflating the two would let a transient missing CSV permanently
+  brand every signal in that universe as un-measurable.)
 - **Candle fetch.** `DailyDataLoader.get_daily_history(instrument, start_date, end_date)`
   ([`backend/daily_data_loader.py`](../../backend/daily_data_loader.py)) returns the daily frame
   sliced to a range and a `from_cache` flag. Request `start_date = signal_date` and a generous
-  `end_date` (≥ the max horizon in calendar terms, e.g. `signal_date + ~250 days` to cover 120
-  trading days plus holidays), then index by bar position per §3.2. The 10-year cache
-  (`DEFAULT_HISTORY_YEARS_BACK`) means historical signals' forward windows are already on disk.
+  `end_date = signal_date + (max_horizon × 3) calendar days` (a trading day is ~1.4 calendar days,
+  so ×3 is ample slack for long holiday clusters), clamped to at least `as_of` so the freshness
+  check (§4 refinement) sees the latest bar. Then index by bar position per §3.2. The 10-year
+  cache (`DEFAULT_HISTORY_YEARS_BACK`) means historical signals' forward windows are already on disk.
 - **Benchmark fetch.** Identical call with the `BenchmarkSpec` instrument; loaded **once per
   universe** per run, not per signal.
 

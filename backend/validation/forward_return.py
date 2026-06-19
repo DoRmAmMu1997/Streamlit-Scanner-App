@@ -4,18 +4,22 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
 import pandas as pd
 
-from backend.indicators import prepare_ohlc
 from backend.storage.models import ForwardReturnStatus
+from backend.validation._pricing import as_money, pct, prepared_frame
 
 FORWARD_RETURN_HORIZONS: tuple[int, ...] = (20, 60, 120)
-MISSING_FUTURE_DATA_GRACE_DAYS = 7
 
-_MONEY_QUANT = Decimal("0.0001")
-_PCT_QUANT = Decimal("0.0001")
+# When the exit bar is absent we must decide between "the window simply has not
+# elapsed yet" (retry later) and "this symbol's data stops here — delisted/halted"
+# (give up). The candle frame's freshness is the signal: if its latest bar is within
+# this many calendar days of ``as_of`` the data is merely lagging (markets close for
+# weekends + the odd holiday), so the row stays PENDING; older than that, the symbol
+# is treated as having no more data and the row becomes INSUFFICIENT_DATA.
+MISSING_FUTURE_DATA_GRACE_DAYS = 7
 
 
 @dataclass(frozen=True)
@@ -48,7 +52,7 @@ def compute_forward_return(
     stays pending instead of being guessed.
     """
     as_of_date = as_of or dt.date.today()
-    frame = _prepared_frame(candles)
+    frame = prepared_frame(candles)
     if frame.empty:
         return _empty_point(horizon_days, ForwardReturnStatus.INSUFFICIENT_DATA)
 
@@ -71,14 +75,14 @@ def compute_forward_return(
     if exit_date > as_of_date:
         return _empty_point(horizon_days, ForwardReturnStatus.PENDING)
 
-    entry_price = _as_money(entry_row["open"])
-    exit_price = _as_money(exit_row["close"])
+    entry_price = as_money(entry_row["open"])
+    exit_price = as_money(exit_row["close"])
     if entry_price is None or exit_price is None or entry_price <= 0:
         return _empty_point(horizon_days, ForwardReturnStatus.INSUFFICIENT_DATA)
 
     window = frame.iloc[entry_index : exit_index + 1]
-    low_price = _as_money(window["low"].min())
-    high_price = _as_money(window["high"].max())
+    low_price = as_money(window["low"].min())
+    high_price = as_money(window["high"].max())
     if low_price is None or high_price is None:
         return _empty_point(horizon_days, ForwardReturnStatus.INSUFFICIENT_DATA)
 
@@ -89,27 +93,10 @@ def compute_forward_return(
         exit_date=exit_date,
         entry_price=entry_price,
         exit_price=exit_price,
-        forward_return_pct=_pct(exit_price - entry_price, entry_price),
-        max_adverse_excursion_pct=_pct(low_price - entry_price, entry_price),
-        max_favorable_excursion_pct=_pct(high_price - entry_price, entry_price),
+        forward_return_pct=pct(exit_price - entry_price, entry_price),
+        max_adverse_excursion_pct=pct(low_price - entry_price, entry_price),
+        max_favorable_excursion_pct=pct(high_price - entry_price, entry_price),
     )
-
-
-def _prepared_frame(candles: pd.DataFrame) -> pd.DataFrame:
-    try:
-        frame = prepare_ohlc(candles)
-    except (TypeError, ValueError):
-        return pd.DataFrame()
-    if frame.empty or "timestamp" not in frame.columns:
-        return pd.DataFrame()
-
-    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
-    valid = timestamps.notna()
-    if not valid.any():
-        return pd.DataFrame()
-    prepared = frame.loc[valid].copy()
-    prepared["_date"] = timestamps.loc[valid].dt.date
-    return prepared.reset_index(drop=True)
 
 
 def _position_for_date(frame: pd.DataFrame, wanted: dt.date) -> int | None:
@@ -135,14 +122,3 @@ def _empty_point(
     status: ForwardReturnStatus,
 ) -> ForwardReturnPoint:
     return ForwardReturnPoint(horizon_days=int(horizon_days), status=status)
-
-
-def _as_money(value: object) -> Decimal | None:
-    try:
-        return Decimal(str(value)).quantize(_MONEY_QUANT)
-    except (InvalidOperation, ValueError):
-        return None
-
-
-def _pct(numerator: Decimal, denominator: Decimal) -> Decimal:
-    return ((numerator / denominator) * Decimal("100")).quantize(_PCT_QUANT)

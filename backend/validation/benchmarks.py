@@ -4,14 +4,11 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
 import pandas as pd
 
-from backend.indicators import prepare_ohlc
-
-_MONEY_QUANT = Decimal("0.0001")
-_PCT_QUANT = Decimal("0.0001")
+from backend.validation._pricing import as_money, pct, prepared_frame
 
 
 @dataclass(frozen=True)
@@ -80,7 +77,7 @@ def compute_benchmark_leg(
     benchmark_key: str,
 ) -> BenchmarkLeg:
     """Compute the benchmark return by entry/exit date, not by bar offset."""
-    frame = _prepared_frame(benchmark_candles)
+    frame = prepared_frame(benchmark_candles)
     if frame.empty:
         return BenchmarkLeg(benchmark_key, None, None, None)
 
@@ -89,8 +86,8 @@ def compute_benchmark_leg(
     if entry_row is None or exit_row is None:
         return BenchmarkLeg(benchmark_key, None, None, None)
 
-    entry_price = _as_money(entry_row["open"])
-    exit_price = _as_money(exit_row["close"])
+    entry_price = as_money(entry_row["open"])
+    exit_price = as_money(exit_row["close"])
     if entry_price is None or exit_price is None or entry_price <= 0:
         return BenchmarkLeg(benchmark_key, None, None, None)
 
@@ -98,25 +95,8 @@ def compute_benchmark_leg(
         benchmark_key=benchmark_key,
         entry_price=entry_price,
         exit_price=exit_price,
-        return_pct=_pct(exit_price - entry_price, entry_price),
+        return_pct=pct(exit_price - entry_price, entry_price),
     )
-
-
-def _prepared_frame(candles: pd.DataFrame) -> pd.DataFrame:
-    try:
-        frame = prepare_ohlc(candles)
-    except (TypeError, ValueError):
-        return pd.DataFrame()
-    if frame.empty or "timestamp" not in frame.columns:
-        return pd.DataFrame()
-
-    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
-    valid = timestamps.notna()
-    if not valid.any():
-        return pd.DataFrame()
-    prepared = frame.loc[valid].copy()
-    prepared["_date"] = timestamps.loc[valid].dt.date
-    return prepared.reset_index(drop=True)
 
 
 def _row_for_date(frame: pd.DataFrame, wanted: dt.date) -> pd.Series | None:
@@ -124,14 +104,3 @@ def _row_for_date(frame: pd.DataFrame, wanted: dt.date) -> pd.Series | None:
     if matches.empty:
         return None
     return matches.iloc[0]
-
-
-def _as_money(value: object) -> Decimal | None:
-    try:
-        return Decimal(str(value)).quantize(_MONEY_QUANT)
-    except (InvalidOperation, ValueError):
-        return None
-
-
-def _pct(numerator: Decimal, denominator: Decimal) -> Decimal:
-    return ((numerator / denominator) * Decimal("100")).quantize(_PCT_QUANT)

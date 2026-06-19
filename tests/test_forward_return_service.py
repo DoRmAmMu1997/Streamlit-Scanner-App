@@ -202,3 +202,104 @@ def test_service_marks_missing_symbol_mapping_insufficient_without_loading_data(
     row = db_session.scalars(select(SignalForwardReturn)).one()
     assert row.status is ForwardReturnStatus.INSUFFICIENT_DATA
     assert row.forward_return_pct is None
+
+
+def test_service_recomputes_pending_signal_to_computed_on_later_run(db_session):
+    """A window that has not elapsed yet stays PENDING, then upserts to COMPUTED.
+
+    This is the retryability contract end-to-end: the first pass cannot see the
+    exit bar's date as having passed (no lookahead), so it records PENDING; a later
+    pass — once ``as_of`` reaches the exit date — re-selects that same pending row
+    (terminal rows would be skipped) and updates it in place, never duplicating.
+    """
+    _seed_signal(db_session)
+    loader = _FakeDailyLoader(
+        {
+            "RELIANCE": _candles(
+                [
+                    ("2026-01-05", "90", "95", "88", "92"),    # signal bar
+                    ("2026-01-06", "100", "106", "98", "104"),  # entry (open=100)
+                    ("2026-01-07", "105", "120", "95", "110"),
+                    ("2026-01-08", "111", "118", "99", "115"),  # exit (close=115)
+                ]
+            )
+        }
+    )
+
+    # First pass: as_of is BEFORE the exit bar's date, so the window has not closed.
+    first = compute_pending_forward_returns(
+        db_session,
+        loader,
+        as_of=dt.date(2026, 1, 7),
+        horizons=(3,),
+        universe_loader=lambda _key: _universe([("RELIANCE", "500325")]),
+    )
+    db_session.commit()
+
+    assert first.pending == 1
+    assert first.computed == 0
+    pending_row = db_session.scalars(select(SignalForwardReturn)).one()
+    assert pending_row.status is ForwardReturnStatus.PENDING
+    assert pending_row.forward_return_pct is None
+    assert pending_row.computed_at is None
+
+    # Second pass: as_of now past the exit date — the same row flips to COMPUTED.
+    second = compute_pending_forward_returns(
+        db_session,
+        loader,
+        as_of=dt.date(2026, 1, 10),
+        horizons=(3,),
+        universe_loader=lambda _key: _universe([("RELIANCE", "500325")]),
+    )
+    db_session.commit()
+
+    assert second.total_signals == 1  # the pending row was retryable, so re-selected
+    assert second.computed == 1
+    assert db_session.scalar(select(func.count()).select_from(SignalForwardReturn)) == 1
+    computed_row = db_session.scalars(select(SignalForwardReturn)).one()
+    assert computed_row.id == pending_row.id  # updated in place, not a new row
+    assert computed_row.status is ForwardReturnStatus.COMPUTED
+    assert computed_row.forward_return_pct == Decimal("15.0000")
+    assert computed_row.computed_at is not None
+
+
+def test_service_keeps_signal_pending_and_retryable_when_universe_cannot_load(db_session):
+    """A missing/corrupt universe is an environment fault → PENDING, not terminal.
+
+    Contrast with the symbol-missing case above (INSUFFICIENT_DATA, terminal): there
+    the universe loaded and simply had no row for the symbol. Here the universe load
+    itself fails, which must not permanently brand every signal of that universe as
+    un-measurable — it stays PENDING so a later run can still compute it. No candle
+    fetch is attempted because there is no instrument to fetch.
+    """
+    _seed_signal(db_session)
+    loader = _FakeDailyLoader({})
+
+    def _broken_universe(_key: str) -> pd.DataFrame:
+        raise FileNotFoundError("universe CSV not generated yet")
+
+    summary = compute_pending_forward_returns(
+        db_session,
+        loader,
+        as_of=dt.date(2026, 2, 1),
+        horizons=(20, 60),
+        universe_loader=_broken_universe,
+    )
+    db_session.commit()
+
+    assert summary.pending == 2  # one row per horizon
+    assert summary.insufficient == 0
+    assert loader.calls == []  # nothing to fetch without an instrument
+    statuses = db_session.scalars(select(SignalForwardReturn.status)).all()
+    assert set(statuses) == {ForwardReturnStatus.PENDING}
+
+    # Retryable: the pending rows are still selected on a later pass.
+    retry = compute_pending_forward_returns(
+        db_session,
+        loader,
+        as_of=dt.date(2026, 2, 1),
+        horizons=(20, 60),
+        universe_loader=_broken_universe,
+    )
+    db_session.commit()
+    assert retry.total_signals == 1

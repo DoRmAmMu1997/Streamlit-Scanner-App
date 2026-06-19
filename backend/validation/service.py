@@ -87,32 +87,35 @@ def compute_pending_forward_returns(
         if signal.signal_date is None:
             continue
 
-        instrument = _resolve_instrument(signal, universe_loader, universe_cache)
+        universe = _universe_for_signal(signal, universe_loader, universe_cache)
+        if universe is None:
+            # The universe itself could not be loaded (missing/corrupt CSV, unknown
+            # key). That is an environment problem, not a fact about this signal, so
+            # keep it retryable — the same posture as the transient loader failure below.
+            _store_all_horizons(
+                session, summary, signal.id, normalized_horizons, ForwardReturnStatus.PENDING
+            )
+            continue
+
+        instrument = _match_instrument(universe, signal.symbol)
         if instrument is None:
-            for horizon in normalized_horizons:
-                _store_point(
-                    session,
-                    summary,
-                    signal.id,
-                    ForwardReturnPoint(
-                        horizon_days=horizon,
-                        status=ForwardReturnStatus.INSUFFICIENT_DATA,
-                    ),
-                    benchmark=None,
-                )
+            # The universe loaded but has no row for this symbol (delisted, renamed, or
+            # never mapped). That is terminal for this signal.
+            _store_all_horizons(
+                session,
+                summary,
+                signal.id,
+                normalized_horizons,
+                ForwardReturnStatus.INSUFFICIENT_DATA,
+            )
             continue
 
         end_date = _history_end_date(signal.signal_date, as_of_date, normalized_horizons)
         candles = _load_history(loader, instrument, signal.signal_date, end_date)
         if candles is None:
-            for horizon in normalized_horizons:
-                _store_point(
-                    session,
-                    summary,
-                    signal.id,
-                    ForwardReturnPoint(horizon_days=horizon, status=ForwardReturnStatus.PENDING),
-                    benchmark=None,
-                )
+            _store_all_horizons(
+                session, summary, signal.id, normalized_horizons, ForwardReturnStatus.PENDING
+            )
             continue
 
         for horizon in normalized_horizons:
@@ -137,11 +140,17 @@ def compute_pending_forward_returns(
     return summary
 
 
-def _resolve_instrument(
+def _universe_for_signal(
     signal: ScanResult,
     universe_loader: UniverseLoader,
     universe_cache: dict[str, pd.DataFrame | None],
-) -> dict[str, object] | None:
+) -> pd.DataFrame | None:
+    """Return the mapped-only universe for this signal's run, or None if it can't load.
+
+    None means the universe CSV is missing/corrupt or the key is unknown — an
+    environment problem the caller treats as *retryable* (PENDING), not a verdict
+    about the signal. Cached per ``universe_key`` so a run's signals share one load.
+    """
     universe_key = signal.run.universe_key
     if universe_key not in universe_cache:
         try:
@@ -152,9 +161,17 @@ def _resolve_instrument(
     universe = universe_cache[universe_key]
     if universe is None or universe.empty:
         return None
+    return universe
 
-    symbol = signal.symbol.upper().strip()
-    matches = universe.loc[universe["symbol"].astype(str).str.upper().str.strip().eq(symbol)]
+
+def _match_instrument(universe: pd.DataFrame, symbol: str) -> dict[str, object] | None:
+    """Return the loader-ready instrument row for ``symbol``, or None if absent.
+
+    None here is *terminal* for the signal (INSUFFICIENT_DATA): the universe loaded
+    fine, it simply has no row for this symbol (delisted, renamed, or never mapped).
+    """
+    wanted = symbol.upper().strip()
+    matches = universe.loc[universe["symbol"].astype(str).str.upper().str.strip().eq(wanted)]
     if matches.empty:
         return None
     return dict(matches.iloc[0])
@@ -215,6 +232,30 @@ def _benchmark_for_point(
     )
 
 
+def _store_all_horizons(
+    session: Session,
+    summary: ForwardReturnRunSummary,
+    result_id: int,
+    horizons: Sequence[int],
+    status: ForwardReturnStatus,
+) -> None:
+    """Record the same non-computed status for every horizon of one signal.
+
+    Used when there are no candles to measure at all — universe missing (PENDING),
+    symbol missing (INSUFFICIENT_DATA), or a loader failure (PENDING). Each horizon
+    still gets a row (with empty prices) so the signal is not silently skipped and a
+    later retry can upsert it to COMPUTED once data exists.
+    """
+    for horizon in horizons:
+        _store_point(
+            session,
+            summary,
+            result_id,
+            ForwardReturnPoint(horizon_days=int(horizon), status=status),
+            benchmark=None,
+        )
+
+
 def _store_point(
     session: Session,
     summary: ForwardReturnRunSummary,
@@ -241,6 +282,15 @@ def _history_end_date(
     as_of: dt.date,
     horizons: Sequence[int],
 ) -> dt.date:
+    """End date to request candles through: far enough to contain the exit bar.
+
+    Horizons are counted in *trading* days but the loader takes *calendar* dates.
+    A trading day is ~1.4 calendar days (5 sessions / 7 days); the ``* 3`` factor is
+    deliberately generous slack so even a long holiday cluster (Diwali, year-end)
+    cannot leave the Nth trading bar outside the fetched window. ``max(as_of, ...)``
+    also guarantees we always reach ``as_of`` so the freshness check in
+    ``compute_forward_return`` (pending vs insufficient) sees the latest bar.
+    """
     max_horizon = max(horizons, default=0)
     horizon_buffer = signal_date + dt.timedelta(days=max_horizon * 3)
     return max(as_of, horizon_buffer)
