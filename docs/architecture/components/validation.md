@@ -5,7 +5,7 @@
 | **Component** | Historical signal validation (VALID-002 / VALID-003A) |
 | **Source** | [`backend/validation/`](../../../backend/validation), [`backend/storage/repository.py`](../../../backend/storage/repository.py) |
 | **Layer** | Backend service + pure calculation + aggregate read model |
-| **Status** | Implemented for per-signal forward-return rows and backend aggregate metrics; Streamlit UI remains VALID-003 |
+| **Status** | Implemented for per-signal forward-return rows, backend aggregate metrics, and the read-only Validation / Signal Performance dashboard (VALID-003B); sector concentration remains later VALID-003 work |
 | **Related** | [VALID-001 design](../valid-001-forward-return-validation.md), [VALID-002 handoff](../valid-002-handoff.md), [storage-persistence](storage-persistence.md) |
 
 ## 1. Purpose & responsibilities
@@ -17,7 +17,7 @@ VALID-002 fills `signal_forward_returns` for stored `scan_results` rows. It meas
 - trading days are counted from the symbol's candle frame, not calendar days;
 - benchmark return is aligned to the same entry and exit dates when a verified benchmark instrument exists.
 
-VALID-003A adds a backend read model over those stored rows. It groups by screener, universe, and horizon, then reports counts, hit rate, average/median returns, benchmark-relative metrics when present, average MAE/MFE, and best/worst signals. It does not schedule itself or render UI; the Streamlit page and sector concentration remain later VALID-003 work.
+VALID-003A adds a backend read model over those stored rows. It groups by screener, universe, and horizon, then reports counts, hit rate, average/median returns, benchmark-relative metrics when present, average MAE/MFE, and best/worst signals. VALID-003B renders that read model in a **read-only** Streamlit page ([`ui/validation_page.py`](../../../ui/validation_page.py), `Validation / Signal Performance` in the top selector): filters → `summarize_validation_metrics()` → a screener-level summary table, with empty states for no rows / no computed rows / no benchmark data. The page never triggers a compute pass; sector concentration and charts remain later VALID-003 work.
 
 ## 2. Position in the system
 
@@ -26,7 +26,7 @@ flowchart TD
     JOB["Future scheduler / operator"] --> SVC["validation.service.compute_pending_forward_returns"]
     SVC --> REPO["storage.repository"]
     REPO --> DB[("signal_forward_returns")]
-    VIEW["Future validation UI / report"] --> METRICS["validation.metrics.summarize_validation_metrics"]
+    VIEW["ui.validation_page (Validation / Signal Performance)"] --> METRICS["validation.metrics.summarize_validation_metrics"]
     METRICS --> REPO
     SVC --> UNI["universe_loader"]
     SVC --> DATA["DailyDataLoader"]
@@ -67,3 +67,4 @@ flowchart TD
 - [`tests/test_forward_return_service.py`](../../../tests/test_forward_return_service.py) covers service orchestration, benchmark degradation, missing mapping, and idempotency.
 - [`tests/test_validation_metrics.py`](../../../tests/test_validation_metrics.py) covers VALID-003A grouping, filters, pending/insufficient handling, Decimal aggregate metrics, missing excess values, and best/worst selection.
 - [`tests/test_scan_storage_repository.py`](../../../tests/test_scan_storage_repository.py) covers the repository selection/upsert helpers and the VALID-003A joined metric-record helper.
+- [`tests/test_app_validation_page.py`](../../../tests/test_app_validation_page.py) covers the VALID-003B page helpers (percentage/signal formatting, filter plumbing into `summarize_validation_metrics`, empty + mixed-status summary frames); view wiring is covered in [`tests/test_app_orchestration.py`](../../../tests/test_app_orchestration.py).

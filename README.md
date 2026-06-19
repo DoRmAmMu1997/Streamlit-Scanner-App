@@ -134,7 +134,9 @@ by default or Postgres) that is ready to record every run for later replay and a
   it, error state) with screener/universe/status/date/trigger/symbol filters and
   click-through to each run's persisted results. Historical validation stores
   per-signal forward returns and exposes backend aggregate metrics by screener,
-  universe, and horizon; the Streamlit validation page is still future work.
+  universe, and horizon, surfaced in a read-only **Validation / Signal
+  Performance** dashboard (filters + summary table); charts and sector
+  concentration remain future work.
 - **Tested** — a `pytest` suite covers the indicators, data loader, universe
   builder, screener registry, the screeners themselves, the auth gate, the
   persistence layer, forward-return validation metrics, candle data-quality
@@ -765,6 +767,7 @@ Streamlit Scanner App/
 │   ├── common.py               # Shared helpers (emoji badges, CSV-safe, redaction)
 │   ├── chart_cache.py          # Per-session rendered-chart cache
 │   ├── history_page.py         # Scan history view (SCAN-004)
+│   ├── validation_page.py      # Validation / Signal Performance dashboard (VALID-003B)
 │   ├── health_page.py          # Admin health view (OBS-002)
 │   ├── audit_page.py           # Admin audit log viewer (OBS-003)
 │   └── config_page.py          # Admin runtime settings form (OBS-003)
