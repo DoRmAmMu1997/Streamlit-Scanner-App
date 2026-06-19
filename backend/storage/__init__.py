@@ -17,6 +17,8 @@ Public surface:
 - `ScanRun` — one row per scan execution (the audit header).
 - `ScanResult` — one row per shortlisted stock (the audit line item).
 - `ScanStatus` — allowed run states (running / success / partial / failed).
+- `SignalForwardReturn` — one forward-return measurement per signal/horizon (VALID-001).
+- `ForwardReturnStatus` — allowed measurement states (pending / computed / insufficient_data).
 - `SessionLocal` / `session_scope` — short-lived SQLAlchemy sessions.
 - Repository helpers — the only public query/write helpers for scan history.
 """
@@ -34,9 +36,11 @@ from backend.storage.models import (
     AppConfig,
     AuditLog,
     Base,
+    ForwardReturnStatus,
     ScanResult,
     ScanRun,
     ScanStatus,
+    SignalForwardReturn,
 )
 from backend.storage.repository import (
     count_scan_results_for_runs,
@@ -48,6 +52,7 @@ from backend.storage.repository import (
     get_latest_scan_runs,
     get_recent_audit_logs,
     get_scan_results,
+    get_signals_needing_forward_returns,
     list_distinct_audit_events,
     list_distinct_screener_keys,
     list_distinct_triggered_by_values,
@@ -55,6 +60,7 @@ from backend.storage.repository import (
     save_ai_evaluations,
     save_scan_results,
     set_config_override,
+    upsert_forward_return,
 )
 
 __all__ = [
@@ -62,10 +68,12 @@ __all__ = [
     "AppConfig",
     "AuditLog",
     "Base",
+    "ForwardReturnStatus",
     "ScanResult",
     "ScanRun",
     "ScanStatus",
     "SessionLocal",
+    "SignalForwardReturn",
     "count_scan_results_for_runs",
     "create_audit_log_entry",
     "create_scan_run",
@@ -78,6 +86,7 @@ __all__ = [
     "get_latest_scan_runs",
     "get_recent_audit_logs",
     "get_scan_results",
+    "get_signals_needing_forward_returns",
     "init_db",
     "list_distinct_audit_events",
     "list_distinct_screener_keys",
@@ -87,4 +96,5 @@ __all__ = [
     "save_scan_results",
     "session_scope",
     "set_config_override",
+    "upsert_forward_return",
 ]

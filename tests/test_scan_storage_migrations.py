@@ -38,7 +38,7 @@ def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Pa
     inspector = inspect(engine)
 
     # Table and index checks keep the hand-written migration aligned with
-    # backend/storage/models.py and the SCAN-001 design doc.
+    # backend/storage/models.py and the SCAN-001 / VALID-001 design docs.
     assert set(inspector.get_table_names()) == {
         "ai_evaluations",
         "alembic_version",
@@ -46,6 +46,7 @@ def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Pa
         "audit_logs",
         "scan_runs",
         "scan_results",
+        "signal_forward_returns",
     }
     assert {index["name"] for index in inspector.get_indexes("audit_logs")} >= {
         "ix_audit_logs_created_at",
@@ -63,6 +64,7 @@ def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Pa
     assert {index["name"] for index in inspector.get_indexes("scan_results")} >= {
         "ix_scan_results_run_id",
         "ix_scan_results_symbol",
+        "ix_scan_results_symbol_signal_date",  # VALID-001 forward-return lookup
     }
     assert {index["name"] for index in inspector.get_indexes("ai_evaluations")} >= {
         "ix_ai_evaluations_outcome",
@@ -77,6 +79,15 @@ def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Pa
     ai_foreign_keys = inspector.get_foreign_keys("ai_evaluations")
     assert ai_foreign_keys[0]["referred_table"] == "scan_runs"
     assert ai_foreign_keys[0]["options"] == {"ondelete": "CASCADE"}
+
+    # VALID-001: forward-return rows hang off scan_results with the same cascade,
+    # and the calculator's "pending rows" lookup is indexed.
+    assert {
+        index["name"] for index in inspector.get_indexes("signal_forward_returns")
+    } >= {"ix_signal_forward_returns_status"}
+    forward_keys = inspector.get_foreign_keys("signal_forward_returns")
+    assert forward_keys[0]["referred_table"] == "scan_results"
+    assert forward_keys[0]["options"] == {"ondelete": "CASCADE"}
     engine.dispose()
 
     command.downgrade(config, "base")
@@ -130,6 +141,7 @@ def test_ensure_database_schema_creates_tables_and_short_circuits(monkeypatch, t
         "audit_logs",
         "scan_runs",
         "scan_results",
+        "signal_forward_returns",
     }
     engine.dispose()
 
