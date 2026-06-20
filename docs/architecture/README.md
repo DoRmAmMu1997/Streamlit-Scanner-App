@@ -26,7 +26,8 @@ testing · extension points.
 
 ### Entry points & UI
 - [app-orchestration.md](components/app-orchestration.md) — `app.py` prefetch CLI + Streamlit `main()` + scan flow.
-- [ui-pages.md](components/ui-pages.md) — scan-history page + shared `ui/common.py` helpers.
+- [ui-pages.md](components/ui-pages.md) — scan-history, scan-comparison + validation pages + shared `ui/common.py` helpers.
+- [scan-comparison.md](components/scan-comparison.md) — JOB-003 latest-vs-previous shortlist read model (`backend/scanning/comparison.py`) + finalized-run repository helpers.
 - [daily-scan-job.md](components/daily-scan-job.md) — headless daily-scan CLI + YAML schedule.
 
 ### Screening engine

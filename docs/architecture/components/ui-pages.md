@@ -6,7 +6,7 @@
 | **Source** | [`ui/history_page.py`](../../../ui/history_page.py), [`ui/comparison_page.py`](../../../ui/comparison_page.py), [`ui/validation_page.py`](../../../ui/validation_page.py), [`ui/common.py`](../../../ui/common.py) |
 | **Layer** | UI (`ui/`) |
 | **Status** | Stable (SCAN-004 history · JOB-003 comparison · REF-001 split · VALID-003B/004 validation dashboard) |
-| **Related** | [HLD](../high-level-design.md) · [app-orchestration.md](app-orchestration.md) · [storage-persistence.md](storage-persistence.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [charts-visualization.md](charts-visualization.md) · [health-monitoring.md](health-monitoring.md) · [security.md](security.md) · [audit-log.md](audit-log.md) |
+| **Related** | [HLD](../high-level-design.md) · [app-orchestration.md](app-orchestration.md) · [scan-comparison.md](scan-comparison.md) · [storage-persistence.md](storage-persistence.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [charts-visualization.md](charts-visualization.md) · [health-monitoring.md](health-monitoring.md) · [security.md](security.md) · [audit-log.md](audit-log.md) |
 
 > The `ui/` package also contains [`chart_cache.py`](charts-visualization.md) (charts), [`health_page.py`](health-monitoring.md) (admin health), and the OBS-003 admin pages [`audit_page.py` + `config_page.py`](audit-log.md) (Audit log viewer + runtime settings form) — documented in their own LLDs. The scanner page itself lives in [`app.py`](app-orchestration.md). This LLD covers the **scan-history page**, the **scan-comparison page**, the **validation dashboard**, and the **shared display helpers** in `ui/common.py`.
 

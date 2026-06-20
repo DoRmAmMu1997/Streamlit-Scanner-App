@@ -110,6 +110,7 @@ flowchart TB
 | Screener catalog | [screener-catalog](components/screener-catalog.md) | The 10 strategies |
 | Scan service & provenance | [scan-service-and-provenance](components/scan-service-and-provenance.md) | `run_scan` lifecycle + strict result/provenance contract + AI evaluation receipts |
 | Storage & persistence | [storage-persistence](components/storage-persistence.md) | ORM (`scan_runs`/`scan_results`/`ai_evaluations`/`audit_logs`/`app_config`), engine/session, repository, finalized comparison helpers, Alembic |
+| Scan comparison | [scan-comparison](components/scan-comparison.md) | JOB-003 latest-vs-previous shortlist read model over `scan_runs`/`scan_results` + finalized-run helpers |
 | Forward-return validation | [validation](components/validation.md) | VALID-002 calculator/service, VALID-003A/004 aggregate/dashboard metrics for `signal_forward_returns` rows, the read-only Validation / Signal Performance dashboard, and the headless compute job |
 | Daily scan job | [daily-scan-job](components/daily-scan-job.md) | Headless CLI + YAML schedule |
 | Check Fundamentals (AI) | [fundamentals-ai](components/fundamentals-ai.md) | Claude agent + screener.in scraper + PDF + cache |
