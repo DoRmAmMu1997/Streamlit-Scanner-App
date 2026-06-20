@@ -6,6 +6,7 @@ from backend.validation.benchmarks import (
     BenchmarkSpec,
     benchmark_for_universe,
     compute_benchmark_leg,
+    resolve_index_security_ids,
 )
 from backend.validation.forward_return import (
     FORWARD_RETURN_HORIZONS,
@@ -52,6 +53,7 @@ __all__ = [
     "compute_forward_return",
     "compute_pending_forward_returns",
     "load_universe_sector_lookup",
+    "resolve_index_security_ids",
     "summarize_validation_dashboard",
     "summarize_validation_metrics",
 ]

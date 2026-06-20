@@ -52,7 +52,8 @@ flowchart TD
 |---|---|
 | `compute_forward_return(candles, signal_date, horizon_days, *, as_of=None)` | Pure calculation over one OHLC frame. Returns `ForwardReturnPoint` with `computed`, `pending`, or `insufficient_data`. |
 | `compute_benchmark_leg(candles, *, entry_date, exit_date, benchmark_key)` | Pure benchmark return over the exact stock entry/exit dates; missing dates return null prices/return. |
-| `benchmark_for_universe(universe_key)` | Returns a `BenchmarkSpec` only when its Dhan index `security_id` is configured. Blank production IDs intentionally return `None`. |
+| `benchmark_for_universe(universe_key)` | Returns a `BenchmarkSpec` only when its Dhan `IDX_I` `security_id` is configured in `config/benchmarks.yaml`. A blank/absent id returns `None` (graceful-null). |
+| `resolve_index_security_ids(instrument_master, wanted=...)` | Reads verified `IDX_I` index ids (NSE / `SEGMENT=I` / `INSTRUMENT=INDEX`) from the Dhan instrument master, matching each name on `SYMBOL_NAME` or `DISPLAY_NAME`. Used to verify/update the committed config; unknown or ambiguous names are omitted. |
 | `compute_pending_forward_returns(session, loader, *, as_of=None, horizons=(20, 60, 120), limit=None)` | Loads eligible stored signals, resolves instruments, computes each horizon, and upserts rows idempotently. |
 | `python -m backend.jobs.compute_forward_returns --limit 500` | Headless VALID-004 operator/scheduler entrypoint. Bootstraps schema, calls the service above, prints a secret-safe summary, and returns scheduler-friendly exit codes. |
 | `get_signals_needing_forward_returns(...)` / `upsert_forward_return(...)` | Repository-only query/write helpers for missing/pending rows and `(result_id, horizon_days)` upserts. |
@@ -67,7 +68,7 @@ flowchart TD
 - `PENDING`: the exit date is after `as_of`, or the candle frame is recently incomplete within the 7-calendar-day data-lag grace window.
 - `INSUFFICIENT_DATA`: the signal date is absent, prices are invalid, symbol mapping is missing, or the required future bar is still absent after the grace window.
 - Loader failures are retryable and stored as `PENDING`, not terminal `INSUFFICIENT_DATA`.
-- Benchmark IDs are not guessed. Until verified Dhan `IDX_I` IDs are configured, stock returns compute and benchmark/excess fields remain null.
+- Benchmark IDs are not guessed: the `IDX_I` index ids in `config/benchmarks.yaml` (VALID-002B) are resolved from the Dhan instrument master. A universe with a blank/absent id still computes stock returns while benchmark/excess stay null (graceful-null).
 - Aggregate hit rate is `forward_return_pct > 0` over computed rows with stored returns only. Pending and insufficient rows stay visible as counts but never count as losses.
 - Average/median forward, excess, MAE, and MFE metrics use fixed-point `Decimal` values; missing benchmark/excess values are ignored, and empty metric sets return null instead of zero.
 - Aggregates read only `SUCCESS`/`PARTIAL` runs: a `RUNNING` run is still in flight and a `FAILED` run aborted before producing a trustworthy result set.
@@ -76,10 +77,26 @@ flowchart TD
 - Sector concentration is best-effort over local metadata only. Current committed universe CSVs mostly lack sector fields, so rows fall back to `Unknown` rather than inventing labels.
 - The read model loads matching rows and reduces them in Python to keep `Decimal` and median math exact. At much larger history volumes this is the natural pivot point to SQL aggregates or a pre-rollup table.
 
+### Verifying / updating benchmark IDs (VALID-002B)
+
+The benchmark mapping lives in `config/benchmarks.yaml` (`universe_key -> {key, symbol, security_id}`). The `security_id`s are Dhan `IDX_I` instrument ids verified from the Dhan instrument master (snapshot dated 2026-06-20: NIFTY 50 = `13`, NIFTY 100 = `17`, NIFTY 500 = `19`). To re-verify them (or add an index) after a master refresh:
+
+```python
+from backend.universe_builder import load_instrument_master
+from backend.validation import resolve_index_security_ids
+
+master = load_instrument_master(save_snapshot=False)
+print(resolve_index_security_ids(master, wanted=("NIFTY 50", "NIFTY 100", "NIFTY 500")))
+# -> {'NIFTY 50': '13', 'NIFTY 100': '17', 'NIFTY 500': '19'}
+```
+
+The resolver returns an id only when exactly one NSE index row matches the name on `SYMBOL_NAME` or `DISPLAY_NAME` (NIFTY 50's trading symbol is `NIFTY`; its display name is `Nifty 50`). Copy the printed ids into `config/benchmarks.yaml` and commit. A name the master does not list is left unresolved, and that universe keeps the graceful-null benchmark behaviour.
+
 ## 5. Testing
 
 - [`tests/test_forward_return_calculator.py`](../../../tests/test_forward_return_calculator.py) covers pure math, trading-day gaps, as-of gating, stale missing data, and benchmark date alignment.
 - [`tests/test_forward_return_service.py`](../../../tests/test_forward_return_service.py) covers service orchestration, benchmark degradation, missing mapping, and idempotency.
+- [`tests/test_validation_benchmarks.py`](../../../tests/test_validation_benchmarks.py) covers VALID-002B: resolving verified `IDX_I` ids from a synthetic master (ignoring non-NSE/non-INDEX rows and ambiguous names), the committed config's ids, and graceful-null for unknown/blank entries.
 - [`tests/test_compute_forward_returns_job.py`](../../../tests/test_compute_forward_returns_job.py) covers the VALID-004 CLI argument parsing, schema-before-compute order, injected service call, operator summary, and fatal setup handling.
 - [`tests/test_validation_metrics.py`](../../../tests/test_validation_metrics.py) covers VALID-003A/004 grouping, filters, pending/insufficient handling, Decimal aggregate metrics, missing excess values, dashboard buckets/time series/sector concentration, and best/worst selection.
 - [`tests/test_validation_sectors.py`](../../../tests/test_validation_sectors.py) covers local sector metadata extraction and the empty-metadata fallback.
