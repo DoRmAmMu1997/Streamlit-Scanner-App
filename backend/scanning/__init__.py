@@ -3,6 +3,8 @@
 Public surface:
 - `run_scan` — run one screener and persist the run + results.
 - `ScanRunResult` — the structured outcome returned to the caller.
+- `build_scan_comparison` — derive latest-vs-previous comparison sections from
+  persisted finalized runs.
 - `ScreenerResult` and `SignalProvenance` — typed descriptions of a result and
   the evidence explaining why it was produced.
 - `normalize_screener_row` — the compatibility bridge that prepares flexible
@@ -13,6 +15,12 @@ the package's internal file layout. That keeps future refactors local to this
 package rather than forcing every screener, test, and service to change imports.
 """
 
+from backend.scanning.comparison import (
+    ComparisonRow,
+    ComparisonRun,
+    ScanComparison,
+    build_scan_comparison,
+)
 from backend.scanning.result_contract import (
     AIEvaluationOutcome,
     AIEvaluationRecord,
@@ -35,16 +43,20 @@ __all__ = [
     "AIEvaluationOutcome",
     "AIEvaluationRecord",
     "AIProvenance",
+    "ComparisonRow",
+    "ComparisonRun",
     "EvidenceReference",
     "JSONScalar",
     "JSONValue",
     "ResultContractError",
     "RuleCheck",
+    "ScanComparison",
     "ScanRunResult",
     "ScanStatus",
     "ScreenerResult",
     "SignalProvenance",
     "SignalSource",
+    "build_scan_comparison",
     "normalize_screener_row",
     "normalize_secret_safe_json",
     "run_scan",

@@ -132,7 +132,11 @@ by default or Postgres) that is ready to record every run for later replay and a
   repository API. A built-in **Scan history** view lists recent runs (status,
   started/finished timestamps, symbols scanned, shortlisted count, who triggered
   it, error state) with screener/universe/status/date/trigger/symbol filters and
-  click-through to each run's persisted results. Historical validation stores
+  click-through to each run's persisted results. A read-only **Scan comparison**
+  view compares the latest finalized shortlist against the immediately previous
+  finalized shortlist for each screener/universe pair, with new, repeated,
+  dropped, improved-score, degraded-score, and CSV export sections. Historical
+  validation stores
   per-signal forward returns and exposes backend aggregate metrics by screener,
   universe, and horizon, surfaced in a read-only **Validation / Signal
   Performance** dashboard (filters, summary table, return distribution, win
@@ -770,6 +774,7 @@ Streamlit Scanner App/
 │   ├── common.py               # Shared helpers (emoji badges, CSV-safe, redaction)
 │   ├── chart_cache.py          # Per-session rendered-chart cache
 │   ├── history_page.py         # Scan history view (SCAN-004)
+│   ├── comparison_page.py      # Latest-vs-previous scan comparison view (JOB-003)
 │   ├── validation_page.py      # Validation / Signal Performance dashboard (VALID-003B/004)
 │   ├── health_page.py          # Admin health view (OBS-002)
 │   ├── audit_page.py           # Admin audit log viewer (OBS-003)
@@ -960,6 +965,12 @@ re-running today's data, universe, or model.
   trigger, or symbol (exact, case-insensitive), then click a run to see its
   persisted results and download them as CSV. Failed runs show their full
   (secret-redacted) error message.
+- **Scan comparison page (JOB-003)** — switch to **Scan comparison** to compare
+  the latest finalized run with the immediately previous finalized run for a
+  selected screener/universe pair. Finalized means `SUCCESS` or `PARTIAL`; the
+  page derives New today, Repeated from yesterday, Dropped today, Improved score,
+  and Degraded score sections from existing `scan_runs` / `scan_results` data
+  and exports the combined view as a formula-safe audited CSV.
 
 > **Upgrading an existing checkout?** The app applies migrations automatically
 > on startup, so the database gains the `symbols_scanned` column, the

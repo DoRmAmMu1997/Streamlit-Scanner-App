@@ -287,6 +287,54 @@ def get_latest_scan_runs(
     return list(session.scalars(stmt))
 
 
+_FINALIZED_SCAN_STATUSES = (ScanStatus.SUCCESS, ScanStatus.PARTIAL)
+
+
+def get_latest_finalized_scan_runs(
+    session: Session,
+    *,
+    screener_key: str,
+    universe_key: str,
+    limit: int = 2,
+) -> list[ScanRun]:
+    """Return newest completed comparison candidates for one screener/universe.
+
+    JOB-003 compares the latest run against the immediately previous run. A
+    RUNNING row is still being written and a FAILED row does not represent a
+    trustworthy shortlist, so only SUCCESS and PARTIAL runs are eligible. The
+    ordering mirrors ``get_latest_scan_runs``: newest timestamp first, then id as
+    a deterministic tie-breaker for fast back-to-back runs.
+    """
+    stmt = (
+        select(ScanRun)
+        .where(
+            ScanRun.screener_key == screener_key,
+            ScanRun.universe_key == universe_key,
+            ScanRun.status.in_(_FINALIZED_SCAN_STATUSES),
+        )
+        .order_by(ScanRun.started_at.desc(), ScanRun.id.desc())
+        .limit(limit)
+    )
+    return list(session.scalars(stmt))
+
+
+def list_finalized_scan_groups(session: Session) -> list[tuple[str, str]]:
+    """Return screener/universe pairs that have at least one finalized run.
+
+    The comparison page offers only pairs that can produce a latest run. Reading
+    these options from history, rather than the live registry, keeps deleted or
+    renamed screeners inspectable and prevents a broken screener module from
+    taking down the read-only view.
+    """
+    stmt = (
+        select(ScanRun.screener_key, ScanRun.universe_key)
+        .where(ScanRun.status.in_(_FINALIZED_SCAN_STATUSES))
+        .distinct()
+        .order_by(ScanRun.screener_key.asc(), ScanRun.universe_key.asc())
+    )
+    return [(str(screener), str(universe)) for screener, universe in session.execute(stmt)]
+
+
 def count_scan_results_for_runs(
     session: Session, run_ids: Sequence[int]
 ) -> dict[int, int]:
