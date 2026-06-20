@@ -22,7 +22,7 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -128,6 +128,23 @@ def init_db() -> None:
 # sessions can arrive on worker threads, so the flag is guarded by a lock.
 _schema_ensured = False
 _schema_lock = threading.Lock()
+# Guard so a drifted database logs its loud guidance once per process instead of
+# on every Streamlit rerun. See ``ensure_database_schema`` for why drift happens.
+_schema_drift_logged = False
+
+
+def _missing_expected_tables(target_engine: Engine) -> set[str]:
+    """Return ORM-declared tables that are absent from the live database.
+
+    A database can report its Alembic version as ``head`` yet be missing tables
+    when its migration history was stitched together across branches/worktrees
+    (a real hazard of this repo's multi-agent workflow). When that happens
+    ``alembic upgrade head`` is a no-op and the gap stays invisible until a later
+    INSERT fails with a cryptic "no such table". Comparing the ORM's declared
+    tables against the live database surfaces the drift up front instead.
+    """
+    existing = set(inspect(target_engine).get_table_names())
+    return set(Base.metadata.tables) - existing
 
 
 def ensure_database_schema() -> bool:
@@ -149,8 +166,11 @@ def ensure_database_schema() -> bool:
     Returns ``True`` when the schema is ready. Failures are logged (the root
     redaction filter masks any credentials in the URL) and return ``False``;
     scan persistence stays best-effort, matching "continuing without history".
+    A database stamped at ``head`` but missing tables (schema drift) is also
+    reported as not-ready so the gap is loud instead of a later cryptic INSERT
+    error.
     """
-    global _schema_ensured
+    global _schema_ensured, _schema_drift_logged
     with _schema_lock:
         if _schema_ensured:
             return True
@@ -165,12 +185,40 @@ def ensure_database_schema() -> bool:
             config = Config()
             config.set_main_option("script_location", str(PROJECT_ROOT / "migrations"))
             command.upgrade(config, "head")
+            # ``upgrade head`` is a no-op when ``alembic_version`` already says
+            # head, so it cannot repair a database whose recorded version
+            # disagrees with the tables actually present. Verify the ORM's tables
+            # really exist against the database Alembic just migrated
+            # (``get_database_url()`` at call time, which the module engine also
+            # targets at runtime) via a short-lived engine. Kept inside this
+            # ``try`` so a verify hiccup degrades to best-effort like a migration
+            # failure rather than crashing startup.
+            verify_engine = _make_engine()
+            try:
+                missing = _missing_expected_tables(verify_engine)
+            finally:
+                verify_engine.dispose()
         except Exception:  # noqa: BLE001 - startup must not crash on a DB issue.
             logger.warning(
-                "Could not apply scan-history migrations; scans will continue "
-                "without persisted history.",
+                "Could not apply or verify scan-history migrations; scans will "
+                "continue without persisted history.",
                 exc_info=True,
             )
+            return False
+        if missing:
+            if not _schema_drift_logged:
+                logger.error(
+                    "Database schema drift: Alembic reports HEAD but these "
+                    "tables are missing: %s. The database is inconsistent "
+                    "(its version was likely stamped across branches/worktrees). "
+                    "Rebuild it -- locally: stop the app, delete data/scanner.db "
+                    "(and the -wal/-shm files), and restart so migrations "
+                    "recreate it (local scan history is lost); managed database: "
+                    "re-migrate from a known-good baseline. Persistence stays "
+                    "best-effort until then.",
+                    ", ".join(sorted(missing)),
+                )
+                _schema_drift_logged = True
             return False
         _schema_ensured = True
         return True

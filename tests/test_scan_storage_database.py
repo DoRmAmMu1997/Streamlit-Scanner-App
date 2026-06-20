@@ -122,3 +122,35 @@ def test_make_engine_applies_sqlite_concurrency_pragmas(tmp_path: Path):
             assert connection.exec_driver_sql("PRAGMA journal_mode").scalar().lower() == "wal"
     finally:
         engine.dispose()
+
+
+def test_missing_expected_tables_empty_when_schema_complete(tmp_path: Path):
+    """A fully built database reports no missing tables (the healthy path)."""
+    from backend.storage.database import _make_engine, _missing_expected_tables
+
+    engine = _make_engine(f"sqlite:///{(tmp_path / 'complete.db').as_posix()}")
+    try:
+        Base.metadata.create_all(engine)
+        assert _missing_expected_tables(engine) == set()
+    finally:
+        engine.dispose()
+
+
+def test_missing_expected_tables_flags_drift(tmp_path: Path):
+    """A database missing an ORM table is detected as drift.
+
+    This mirrors the real "stamped at HEAD but ``audit_logs`` never created"
+    failure: every ORM table exists except one, so the helper must name exactly
+    that gap so ``ensure_database_schema`` can warn instead of letting a later
+    INSERT fail with "no such table".
+    """
+    from backend.storage.database import _make_engine, _missing_expected_tables
+
+    engine = _make_engine(f"sqlite:///{(tmp_path / 'drift.db').as_posix()}")
+    try:
+        Base.metadata.create_all(engine)
+        with engine.begin() as connection:
+            connection.execute(text("DROP TABLE audit_logs"))
+        assert _missing_expected_tables(engine) == {"audit_logs"}
+    finally:
+        engine.dispose()
