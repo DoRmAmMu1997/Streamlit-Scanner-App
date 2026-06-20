@@ -120,6 +120,7 @@ from ui.common import (  # noqa: F401
     _escape_cell,
     _redact_secrets,
 )
+from ui.comparison_page import _render_comparison_page
 from ui.config_page import _render_config_page
 from ui.health_page import (  # noqa: F401
     _cached_admin_health_snapshot,
@@ -993,7 +994,12 @@ def main() -> None:
     # file must never prevent an operator from inspecting past runs.
     # "Validation / Signal Performance" is a read-only analytical view (like Scan
     # history) available to every authenticated user, not an admin-only page.
-    view_options = ["Scanner", "Scan history", "Validation / Signal Performance"]
+    view_options = [
+        "Scanner",
+        "Scan history",
+        "Scan comparison",
+        "Validation / Signal Performance",
+    ]
     if authenticated_user is not None and getattr(
         authenticated_user, "is_admin", False
     ):
@@ -1010,6 +1016,9 @@ def main() -> None:
     )
     if view == "Scan history":
         _render_history_page()
+        return
+    if view == "Scan comparison":
+        _render_comparison_page()
         return
     if view == "Validation / Signal Performance":
         _render_validation_page()

@@ -413,6 +413,7 @@ def test_admin_health_view_is_available_and_returns_before_screener_discovery(
         assert options == (
             "Scanner",
             "Scan history",
+            "Scan comparison",
             "Validation / Signal Performance",
             "Admin health",
             "Admin settings",
@@ -525,6 +526,63 @@ def test_validation_view_is_available_to_all_authenticated_users(monkeypatch):
     assert calls == ["schema", "view", "validation"]
 
 
+def test_comparison_view_is_available_to_all_authenticated_users(monkeypatch):
+    """Any authenticated user can open the read-only latest-vs-previous view."""
+
+    calls: list[str] = []
+
+    def choose_comparison(_label, options, **_kwargs):
+        assert "Scan comparison" in options
+        calls.append("view")
+        return "Scan comparison"
+
+    monkeypatch.setattr(
+        app,
+        "get_settings",
+        lambda: get_settings(env={"AUTH_REQUIRED": "true"}),
+    )
+    monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
+    monkeypatch.setattr(app, "_configure_logging", lambda: None)
+    monkeypatch.setattr(app, "ensure_database_schema", lambda: calls.append("schema"))
+    monkeypatch.setattr(
+        app,
+        "require_authorized_user",
+        lambda _st: app.AuthenticatedUser(
+            email="person@example.com",
+            name="Person",
+            is_admin=False,
+        ),
+    )
+    monkeypatch.setattr(
+        app,
+        "_render_comparison_page",
+        lambda: calls.append("comparison"),
+    )
+    monkeypatch.setattr(
+        app,
+        "discover_screeners",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("comparison view must return before screener discovery")
+        ),
+    )
+    monkeypatch.setattr(
+        app,
+        "st",
+        SimpleNamespace(
+            set_page_config=lambda **_kwargs: None,
+            markdown=lambda *_args, **_kwargs: None,
+            title=lambda *_args, **_kwargs: None,
+            caption=lambda *_args, **_kwargs: None,
+            radio=choose_comparison,
+            session_state={},
+        ),
+    )
+
+    app.main()
+
+    assert calls == ["schema", "view", "comparison"]
+
+
 def test_non_admin_cannot_select_admin_health(monkeypatch):
     """The main selector must not advertise the admin-only operational page."""
 
@@ -535,6 +593,7 @@ def test_non_admin_cannot_select_admin_health(monkeypatch):
         assert options == (
             "Scanner",
             "Scan history",
+            "Scan comparison",
             "Validation / Signal Performance",
         )
         return "Scanner"

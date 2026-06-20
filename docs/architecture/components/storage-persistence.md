@@ -5,7 +5,7 @@
 | **Component** | Scan-run persistence (engine, session, repository, migrations) |
 | **Source** | [`backend/storage/models.py`](../../../backend/storage/models.py), [`backend/storage/database.py`](../../../backend/storage/database.py), [`backend/storage/repository.py`](../../../backend/storage/repository.py), [`migrations/`](../../../migrations) |
 | **Layer** | Persistence (`backend/`) |
-| **Status** | Stable (SCAN-001 schema · SCAN-002 DB layer · SCAN-004 `symbols_scanned` · PROV-003 `ai_evaluations` · OBS-003 `audit_logs`/`app_config` · VALID-001/002 `signal_forward_returns` · VALID-003A/004 aggregate and dashboard read models) |
+| **Status** | Stable (SCAN-001 schema · SCAN-002 DB layer · SCAN-004 `symbols_scanned` · JOB-003 finalized comparison helpers · PROV-003 `ai_evaluations` · OBS-003 `audit_logs`/`app_config` · VALID-001/002 `signal_forward_returns` · VALID-003A/004 aggregate and dashboard read models) |
 | **Related** | **[scan-run-persistence.md](../scan-run-persistence.md)** (full SCAN-001 design) · [scan-002-handoff.md](../scan-002-handoff.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [validation.md](validation.md) · [ui-pages.md](ui-pages.md) · [HLD](../high-level-design.md) |
 
 > **This LLD summarizes the *current* persistence layer and how it is used.** The
@@ -29,6 +29,7 @@ universe, or model.
 ```mermaid
 flowchart TD
     UI["Streamlit history page"] -->|reads| REPO["repository.py (queries only)"]
+    CMP["Streamlit comparison page"] -->|reads finalized groups/runs| REPO
     SVC["scanning.service.run_scan"] -->|create→save→finish| REPO
     VAL["validation.service"] -->|upserts forward returns| REPO
     MET["validation.metrics"] -->|reads joined metric records| REPO
@@ -66,6 +67,8 @@ Full design: [obs-003-audit-log.md](../obs-003-audit-log.md).
 | `save_ai_evaluations(session, run, records)` | Validate + persist AI receipts (`AIEvaluationRecord`/mappings) → `ai_evaluations`. `_build_ai_evaluation` enforces full SHA-256 hashes, tz-aware UTC, confidence range, sanitized evidence URLs, and **cross-checks `validated_verdict_json` against the trusted receipt** so model output can't contradict the audit record. |
 | `finish_scan_run(session, run, *, status, error_message=None)` | Stamp `finished_at` + final status. |
 | `get_latest_scan_runs(session, limit=50, *, screener_key, universe_key, status, started_from, started_to, triggered_by, symbol)` | Filtered newest-first; `symbol` uses an EXISTS subquery (case-insensitive, exact); `(started_at desc, id desc)` deterministic order. |
+| `get_latest_finalized_scan_runs(session, *, screener_key, universe_key, limit=2)` | JOB-003 comparison candidates for one pair; only `SUCCESS` / `PARTIAL`, ordered `(started_at desc, id desc)`. |
+| `list_finalized_scan_groups(session)` | Sorted distinct `(screener_key, universe_key)` pairs that have at least one finalized run; drives comparison-page filter options. |
 | `get_scan_results(session, run_id)` | Ordered `(symbol, id)`. |
 | `get_ai_evaluations(session, run_id)` | AI receipts for a run, ordered `(symbol, id)`. |
 | `count_scan_results_for_runs(session, run_ids)` | One grouped COUNT; every id present (0 default). |
@@ -89,6 +92,7 @@ Type-coercion helpers (`_as_date`, `_as_decimal`, `_as_optional_str`, `_is_missi
 | **SQLite pragmas per connection** | `foreign_keys=ON` (enforce cascade), `busy_timeout=5000` (wait, don't error on lock), `journal_mode=WAL` (history page reads while a scan writes). |
 | **`session_scope()` per unit of work** | Streamlit reruns top-to-bottom; never hold a session across reruns. Commit on clean exit, rollback on exception. |
 | **Repository owns no sessions** | Lets the scan service wrap create→run→save→finish in one transaction. |
+| **Finalized comparison helpers reuse scan history** | JOB-003 derives latest-vs-previous sections from existing `scan_runs` / `scan_results`; no migration or materialized comparison table is needed. |
 | **JSON columns are the evolution seam** | `raw_result_json` + `provenance_json` let one schema serve deterministic and AI screeners with no per-screener table; PROV-* evolves the envelope without a migration. See [scan-service-and-provenance.md](scan-service-and-provenance.md). |
 | **AI receipts validated against the verdict** | `save_ai_evaluations` rejects a receipt whose `validated_verdict_json` contradicts the trusted fields (symbol / model / verdict / confidence / `approved`); only hashes + sanitized URLs are stored, never raw scraped/model text. | 
 
@@ -109,6 +113,7 @@ Type-coercion helpers (`_as_date`, `_as_decimal`, `_as_optional_str`, `_is_missi
 - [`tests/test_scan_persistence_models.py`](../../../tests/test_scan_persistence_models.py) — schema round-trip, enum value, Decimal precision, cascade.
 - [`tests/test_scan_storage_database.py`](../../../tests/test_scan_storage_database.py) — engine/pragmas/session_scope.
 - [`tests/test_scan_storage_repository.py`](../../../tests/test_scan_storage_repository.py) — CRUD + filters.
+- [`tests/test_scan_comparison.py`](../../../tests/test_scan_comparison.py) — JOB-003 read-model classification, score fallback/source matching, one-run state, and stable export columns.
 - [`tests/test_scan_storage_migrations.py`](../../../tests/test_scan_storage_migrations.py) — `alembic upgrade head` + drift guard (covers `audit_logs`/`app_config`).
 - [`tests/test_audit_repository.py`](../../../tests/test_audit_repository.py) — OBS-003 audit + config-override CRUD, filters, redaction.
 - [`tests/test_forward_return_service.py`](../../../tests/test_forward_return_service.py) — VALID-002 service orchestration + idempotent persistence.
@@ -116,4 +121,4 @@ Type-coercion helpers (`_as_date`, `_as_decimal`, `_as_optional_str`, `_is_missi
 
 ## 9. Extension points
 
-`final_score` is reserved for RANK-*; VALID-003A/004 aggregates `signal_forward_returns` into hit rate, median/average return, benchmark-relative metrics, MAE/MFE, best/worst signals, return distribution, monthly signal counts, and sector concentration without changing the per-signal schema. Sector labels are best-effort local metadata and fall back to `Unknown` when current universe CSVs lack sector columns. The PROV-003 `ai_evaluations` ledger is in place and richer AI evidence rides in its `provenance_json` without a flag-day. A schema change is a real change: add an Alembic migration **and** update `models.py` **and** [scan-run-persistence.md](../scan-run-persistence.md).
+`final_score` is reserved for RANK-* and JOB-003 compares it before falling back to numeric `raw_result_json["confidence"]` when both runs use the same score source. VALID-003A/004 aggregates `signal_forward_returns` into hit rate, median/average return, benchmark-relative metrics, MAE/MFE, best/worst signals, return distribution, monthly signal counts, and sector concentration without changing the per-signal schema. Sector labels are best-effort local metadata and fall back to `Unknown` when current universe CSVs lack sector columns. The PROV-003 `ai_evaluations` ledger is in place and richer AI evidence rides in its `provenance_json` without a flag-day. A schema change is a real change: add an Alembic migration **and** update `models.py` **and** [scan-run-persistence.md](../scan-run-persistence.md).

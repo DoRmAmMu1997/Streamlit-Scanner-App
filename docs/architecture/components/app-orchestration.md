@@ -19,7 +19,7 @@ chart, and offer Check Fundamentals. Strategy lives in `screeners/`, plumbing in
 - `python app.py` → not inside Streamlit → **prefetch** universes + ~10y candles in plain Python (terminal shows progress), then re-exec `streamlit run app.py`.
 - `streamlit run app.py` → skip prefetch, trust the on-disk cache.
 
-`ui/common.py` holds shared display helpers (CSV-injection escaping, secret redaction wrapper, emoji rating badges, decimal column config) used by both the scanner page and the history page (pages must not import each other).
+`ui/common.py` holds shared display helpers (CSV-injection escaping, secret redaction wrapper, emoji rating badges, decimal column config) used by the scanner, history, comparison, and validation pages (pages must not import each other).
 
 ## 2. Position in the system
 
@@ -37,6 +37,8 @@ flowchart TD
     MAIN --> VIEW{"View radio"}
     VIEW -->|Scanner| SCAN["discover_screeners → sidebar → run_scan → table+chart+fundamentals"]
     VIEW -->|Scan history| HIST["_render_history_page"]
+    VIEW -->|Scan comparison| COMP["_render_comparison_page"]
+    VIEW -->|Validation / Signal Performance| VALPAGE["_render_validation_page"]
     VIEW -->|Admin health| HLT["_render_admin_health_page (admins only)"]
     VIEW -->|Admin settings| CFG["_render_config_page (admins only, OBS-003)"]
     VIEW -->|Audit log| AUD["_render_audit_log_page (admins only, OBS-003)"]
@@ -52,7 +54,7 @@ flowchart TD
 | `running_inside_streamlit()` | `get_script_run_ctx` check that picks the launch path. |
 | `prefetch_data_assets()` | Refresh universes → union → cleanup legacy cache → `ensure_daily_history` per stock; emits `data_refresh_*` events; never blocks the UI. |
 | `launch_streamlit_from_plain_python()` | `configure_logging()` → prefetch → re-exec via `streamlit.web.cli`. |
-| `main()` | The per-rerun flow: validate → auth gate (records `login_success`) → migrate → `apply_config_overrides` → view router → scan state machine. Records OBS-003 audit events (`manual_scan_started`, `export_downloaded`, `admin_page_accessed`) via `backend.audit`. |
+| `main()` | The per-rerun flow: validate → auth gate (records `login_success`) → migrate → `apply_config_overrides` → view router → scan state machine. Records OBS-003 audit events (`manual_scan_started`, `export_downloaded`, `admin_page_accessed`) via `backend.audit`; read-only history/comparison/validation exports reuse the same `export_downloaded` event. |
 | `_execute_screener(selected, *, triggered_by)` | Build loader + params (+ overrides, progress callback), call `run_scan`, return a `scan_cache` payload (or `None`). |
 | `_render_scan_output` / `_render_results_with_chart` | Stats expander, selectable table, table↔dropdown sync, embedded chart. |
 | `_render_fundamentals_panel` / `_render_verdict_block` | Per-row Check Fundamentals (criteria vs universal mode), verdict rendering. |
@@ -84,7 +86,7 @@ flowchart TD
 ## 6. Testing
 
 - [`tests/test_app_orchestration.py`](../../../tests/test_app_orchestration.py) — view routing, scan state machine, trigger label, fundamentals panel, param overrides (page renderers monkeypatched via `app._render_*`).
-- [`tests/test_app_history_page.py`](../../../tests/test_app_history_page.py), [`tests/test_app_health_page.py`](../../../tests/test_app_health_page.py) — view delegation.
+- [`tests/test_app_history_page.py`](../../../tests/test_app_history_page.py), [`tests/test_app_comparison_page.py`](../../../tests/test_app_comparison_page.py), [`tests/test_app_health_page.py`](../../../tests/test_app_health_page.py) — view delegation and page-level render helpers.
 
 ## 7. Extension points
 

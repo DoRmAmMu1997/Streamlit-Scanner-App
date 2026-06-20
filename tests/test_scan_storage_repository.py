@@ -291,6 +291,65 @@ def test_count_scan_results_for_runs_includes_zero_for_empty_runs(db_session):
     assert count_scan_results_for_runs(db_session, []) == {}
 
 
+def test_get_latest_finalized_scan_runs_uses_success_and_partial_only(db_session):
+    """JOB-003 comparisons should ignore running/failed runs and compare newest finals."""
+    from backend.storage.repository import (
+        create_scan_run,
+        get_latest_finalized_scan_runs,
+    )
+
+    success = create_scan_run(db_session, screener_key="envelope", universe_key="nifty_500")
+    partial = create_scan_run(db_session, screener_key="envelope", universe_key="nifty_500")
+    failed = create_scan_run(db_session, screener_key="envelope", universe_key="nifty_500")
+    running = create_scan_run(db_session, screener_key="envelope", universe_key="nifty_500")
+    other_universe = create_scan_run(
+        db_session, screener_key="envelope", universe_key="nifty_100"
+    )
+    success.status = ScanStatus.SUCCESS
+    partial.status = ScanStatus.PARTIAL
+    failed.status = ScanStatus.FAILED
+    running.status = ScanStatus.RUNNING
+    other_universe.status = ScanStatus.SUCCESS
+    same_started_at = dt.datetime(2026, 6, 20, 9, 0, tzinfo=dt.UTC)
+    success.started_at = same_started_at
+    partial.started_at = same_started_at
+    failed.started_at = same_started_at + dt.timedelta(minutes=1)
+    running.started_at = same_started_at + dt.timedelta(minutes=2)
+    other_universe.started_at = same_started_at + dt.timedelta(minutes=3)
+    db_session.commit()
+
+    runs = get_latest_finalized_scan_runs(
+        db_session,
+        screener_key="envelope",
+        universe_key="nifty_500",
+        limit=2,
+    )
+
+    assert [run.id for run in runs] == [partial.id, success.id]
+
+
+def test_list_finalized_scan_groups_is_sorted_and_deduplicated(db_session):
+    """The comparison page should offer only screener/universe pairs with final runs."""
+    from backend.storage.repository import create_scan_run, list_finalized_scan_groups
+
+    success = create_scan_run(db_session, screener_key="zeta", universe_key="nifty_500")
+    partial = create_scan_run(db_session, screener_key="alpha", universe_key="fno")
+    duplicate = create_scan_run(db_session, screener_key="alpha", universe_key="fno")
+    failed = create_scan_run(db_session, screener_key="alpha", universe_key="nifty_100")
+    running = create_scan_run(db_session, screener_key="beta", universe_key="nifty_500")
+    success.status = ScanStatus.SUCCESS
+    partial.status = ScanStatus.PARTIAL
+    duplicate.status = ScanStatus.SUCCESS
+    failed.status = ScanStatus.FAILED
+    running.status = ScanStatus.RUNNING
+    db_session.commit()
+
+    assert list_finalized_scan_groups(db_session) == [
+        ("alpha", "fno"),
+        ("zeta", "nifty_500"),
+    ]
+
+
 def test_create_scan_run_persists_symbols_scanned_and_defaults_to_none(db_session):
     """symbols_scanned stores the universe size; older callers default to NULL."""
     from backend.storage.repository import create_scan_run

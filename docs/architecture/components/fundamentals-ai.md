@@ -42,7 +42,7 @@ sequenceDiagram
         SDK->>T1: fetch_company_data(symbol)  --> screener.in (cached)
         SDK->>T2: read_recent_concall_transcript(symbol)  [optional]
         T2->>T2: pdf_reader (pdfplumber→pypdf, capped)
-        Note over T1,T2: TEST-003 — record raw evidence (audit) then prompt-injection scan; a hit returns a generic blocked response, never the hostile text
+        Note over T1,T2: TEST-003 — record raw evidence (audit) then prompt-injection scan. A hit returns a generic blocked response, never the hostile text
         SDK-->>Agent: final AgentVerdict JSON
         Agent->>Agent: parse+validate, normalize (stamp mode/total_criteria)
         Agent->>Agent: fail closed on poisoned evidence (PromptInjectionEvidence) — no verdict/cache
