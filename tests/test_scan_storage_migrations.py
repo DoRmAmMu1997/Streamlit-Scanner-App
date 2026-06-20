@@ -201,6 +201,41 @@ def test_ensure_database_schema_returns_false_when_database_is_unusable(
     assert database._schema_ensured is False
 
 
+def test_ensure_database_schema_detects_schema_drift(monkeypatch, tmp_path: Path, caplog):
+    """A database stamped at HEAD but missing a table is reported as drift.
+
+    This reproduces the real failure where ``alembic_version`` says HEAD yet
+    ``audit_logs`` was never created (migration history stitched across
+    branches). ``upgrade head`` is then a no-op, so ``ensure_database_schema``
+    must verify the tables really exist, return ``False``, and log actionable
+    guidance instead of leaving a later INSERT to fail with "no such table".
+    """
+    db_path = tmp_path / "drift.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
+    monkeypatch.setattr(database, "_schema_ensured", False, raising=False)
+    monkeypatch.setattr(database, "_schema_drift_logged", False, raising=False)
+
+    # Build the correct schema first, then simulate drift by dropping one table
+    # while the alembic_version row keeps claiming HEAD.
+    assert database.ensure_database_schema() is True
+    monkeypatch.setattr(database, "_schema_ensured", False, raising=False)
+    engine = create_engine(f"sqlite:///{db_path.as_posix()}", future=True)
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql("DROP TABLE audit_logs")
+    finally:
+        engine.dispose()
+
+    with caplog.at_level(logging.ERROR, logger="backend.storage.database"):
+        result = database.ensure_database_schema()
+
+    assert result is False
+    # Stays unset so a later call retries once the database is rebuilt.
+    assert database._schema_ensured is False
+    assert "schema drift" in caplog.text.lower()
+    assert "audit_logs" in caplog.text
+
+
 def _reflect_schema(engine) -> dict[str, dict[str, object]]:
     """Return a comparable {table: columns/indexes/foreign_keys} structure.
 
