@@ -90,7 +90,15 @@ class ValidationSummary:
 
 @dataclass(frozen=True)
 class ValidationReturnBucket:
-    """Computed-return histogram bucket for one screener/universe/horizon group."""
+    """One bar of a return histogram for a screener/universe/horizon group.
+
+    Beginner note:
+    A histogram answers "how were the returns spread out?" — not just the average.
+    Each bucket is a return range (``bucket_label``, e.g. ``"0% to 10%"``) and the
+    number of *computed* signals whose forward return fell in that range
+    (``computed_count``). Many small buckets at the negative end vs a few big
+    winners tells a very different story than the same average return would.
+    """
 
     screener_key: str
     universe_key: str
@@ -101,7 +109,17 @@ class ValidationReturnBucket:
 
 @dataclass(frozen=True)
 class ValidationBenchmarkRow:
-    """Benchmark-relative dashboard row for one screener/universe/horizon group."""
+    """Per-holding-period row carrying both win rate and benchmark-relative return.
+
+    Beginner note:
+    One row per ``(screener, universe, horizon)``. It answers two related
+    questions for that holding period: "how often did the signal go up?"
+    (``hit_rate_pct``) and "did it beat its index?" (``average_/median_excess_return_pct``
+    — the stock return minus the benchmark return). The dashboard reuses this one
+    row type for both the "win rate by holding period" and "benchmark-relative"
+    sections, showing a different column subset in each. Excess columns are
+    ``None`` until verified benchmark instruments are configured.
+    """
 
     screener_key: str
     universe_key: str
@@ -114,7 +132,15 @@ class ValidationBenchmarkRow:
 
 @dataclass(frozen=True)
 class ValidationTimeSeriesPoint:
-    """One monthly signal-count point for the dashboard timeline."""
+    """One month of signal counts for a screener/universe/horizon group.
+
+    Beginner note:
+    This drives the "signal count over time" timeline: it groups signals by the
+    calendar month they fired in (``period_start`` is the first day of the month)
+    and counts how many are computed / still pending / insufficient. It shows
+    whether a screener fires steadily or in bursts, and how much of its recent
+    output is still waiting for its holding window to elapse.
+    """
 
     screener_key: str
     universe_key: str
@@ -128,7 +154,16 @@ class ValidationTimeSeriesPoint:
 
 @dataclass(frozen=True)
 class ValidationSectorConcentrationRow:
-    """Sector-level signal concentration for one screener/universe/horizon group."""
+    """One sector's slice of a screener/universe/horizon group.
+
+    Beginner note:
+    Concentration answers "are these signals spread across the market, or piled
+    into one sector?" — a screener that only ever fires on, say, energy stocks is
+    really an energy bet. ``share_of_group_pct`` is this sector's share of all the
+    group's signals; ``hit_rate_pct`` / ``average_forward_return_pct`` then show
+    how that sector actually performed. Sector labels come from local universe
+    metadata and fall back to ``"Unknown"`` when the CSVs lack a sector column.
+    """
 
     screener_key: str
     universe_key: str
@@ -204,6 +239,15 @@ def summarize_validation_dashboard(
     the compute job already stored; the only optional enrichment is a local
     ``sector_lookup`` mapping. Missing sector metadata becomes ``"Unknown"`` so
     the UI can be honest without inventing classifications.
+
+    Beginner note:
+    This is the dashboard's single entry point. It reads the joined rows **once**
+    (``_metric_records_for_filters`` — which also de-duplicates reruns), then
+    derives every section from that one in-memory list. Doing it this way means
+    the summary table, histogram, timeline, and sector breakdown can never
+    disagree about how many signals exist, and the database is touched only once
+    per page render. ``sector_lookup`` is the only thing the page passes in; the
+    function itself never reaches out to files or the network.
     """
     filters = ValidationMetricFilters(
         screener_key=screener_key,
@@ -226,6 +270,13 @@ def summarize_validation_dashboard(
 def _metric_records_for_filters(
     session: Session, filters: ValidationMetricFilters
 ) -> list[ForwardReturnMetricRecord]:
+    """Fetch the filtered, de-duplicated rows both read models share.
+
+    Shared by ``summarize_validation_metrics`` and ``summarize_validation_dashboard``
+    so they always start from the *same* rows: the repository join (which already
+    keeps only ``SUCCESS``/``PARTIAL`` runs) plus ``_dedupe_latest_run`` (which
+    collapses a signal measured by several reruns down to its most recent run).
+    """
     return _dedupe_latest_run(
         get_forward_return_metric_records(
             session,
@@ -242,6 +293,13 @@ def _build_summary(
     filters: ValidationMetricFilters,
     records: list[ForwardReturnMetricRecord],
 ) -> ValidationSummary:
+    """Group already-fetched rows into the VALID-003A summary table contract.
+
+    Splitting this out of ``summarize_validation_metrics`` lets the dashboard
+    reuse the exact same grouping/aggregation without a second database read.
+    Rows are grouped by ``(screener, universe, horizon)`` and sorted so the output
+    order is stable for tests and a predictable UI.
+    """
     groups: dict[tuple[str, str, int], list[ForwardReturnMetricRecord]] = defaultdict(list)
     for record in records:
         groups[(record.screener_key, record.universe_key, record.horizon_days)].append(record)
@@ -271,6 +329,12 @@ def _build_summary(
 def _benchmark_rows(
     rows: tuple[ValidationMetricRow, ...],
 ) -> tuple[ValidationBenchmarkRow, ...]:
+    """Project the summary rows down to the per-horizon win-rate/excess columns.
+
+    Reuses the numbers already computed for the main summary table, so the
+    "win rate by holding period" and "benchmark-relative" dashboard sections can
+    never drift from the headline hit rate / excess returns shown above them.
+    """
     return tuple(
         ValidationBenchmarkRow(
             screener_key=row.screener_key,
@@ -288,6 +352,15 @@ def _benchmark_rows(
 def _return_distribution(
     records: list[ForwardReturnMetricRecord],
 ) -> tuple[ValidationReturnBucket, ...]:
+    """Count computed returns into fixed buckets, per screener/universe/horizon.
+
+    Beginner note:
+    Only ``COMPUTED`` rows with a real stored return are counted — pending /
+    insufficient rows have no return to place in a bucket. We tally counts into a
+    ``{(group, bucket_label): count}`` dict, then emit one ``ValidationReturnBucket``
+    per non-empty bucket, sorted by group and then by the bucket's natural order
+    (``_BUCKET_ORDER``) so the histogram reads left-to-right from losses to wins.
+    """
     buckets: dict[tuple[str, str, int, str], int] = defaultdict(int)
     for record in records:
         if (
@@ -327,6 +400,15 @@ def _return_distribution(
 def _signal_count_over_time(
     records: list[ForwardReturnMetricRecord],
 ) -> tuple[ValidationTimeSeriesPoint, ...]:
+    """Bucket signals into calendar months per screener/universe/horizon.
+
+    Beginner note:
+    Each signal is filed under the first day of the month it fired in
+    (``date(year, month, 1)``), then we count how many in that month are
+    computed / pending / insufficient. Undated signals (a few AI rows have no
+    ``signal_date``) can't be placed on a timeline, so they are skipped here —
+    they still appear in the summary table's totals.
+    """
     grouped: dict[
         tuple[str, str, int, dt.date], list[ForwardReturnMetricRecord]
     ] = defaultdict(list)
@@ -376,6 +458,17 @@ def _sector_concentration(
     *,
     sector_lookup: Mapping[Any, str] | None,
 ) -> tuple[ValidationSectorConcentrationRow, ...]:
+    """Split each group's signals by sector and measure how lopsided it is.
+
+    Beginner note:
+    Two passes over the same records: ``group_totals`` counts every signal per
+    ``(screener, universe, horizon)`` (the denominator for "share of group"), and
+    ``sector_groups`` buckets the same records by sector. Each emitted row then
+    reports that sector's share plus its own hit rate / average return, so you can
+    see both *how concentrated* a screener is and *whether the crowded sector
+    actually performed*. Share uses **all** signals (including pending/insufficient)
+    because concentration is about where signals fire, not only where they computed.
+    """
     group_totals: dict[tuple[str, str, int], int] = defaultdict(int)
     sector_groups: dict[
         tuple[str, str, int, str], list[ForwardReturnMetricRecord]
@@ -429,6 +522,9 @@ def _sector_concentration(
     return tuple(rows)
 
 
+# The five histogram buckets, in left-to-right (worst-to-best) display order.
+# ``_BUCKET_ORDER`` maps each label back to that index so emitted rows can be
+# sorted into this order regardless of how the dict happened to be populated.
 _BUCKET_LABELS = (
     "<= -10%",
     "-10% to 0%",
@@ -440,6 +536,12 @@ _BUCKET_ORDER = {label: index for index, label in enumerate(_BUCKET_LABELS)}
 
 
 def _return_bucket_label(value: Decimal) -> str:
+    """Map a forward return to its histogram bucket label.
+
+    Boundaries are half-open so every return lands in exactly one bucket: ``-10``
+    falls in ``"<= -10%"``, and an exact ``0`` falls in ``"0% to 10%"`` (the
+    ``< 0`` test above it excludes zero).
+    """
     if value <= Decimal("-10"):
         return "<= -10%"
     if value < Decimal("0"):
@@ -452,6 +554,11 @@ def _return_bucket_label(value: Decimal) -> str:
 
 
 def _pct(part: int, whole: int) -> Decimal:
+    """Return ``part / whole * 100`` as a 4-dp Decimal, guarding divide-by-zero.
+
+    A zero/empty denominator yields ``0.00%`` rather than raising, so an empty
+    group never crashes the share-of-group calculation.
+    """
     if whole <= 0:
         return Decimal("0").quantize(PCT_QUANT)
     return ((Decimal(part) / Decimal(whole)) * Decimal("100")).quantize(PCT_QUANT)
@@ -461,6 +568,12 @@ def _sector_for_record(
     record: ForwardReturnMetricRecord,
     sector_lookup: Mapping[Any, str] | None,
 ) -> str:
+    """Resolve a record's sector label, falling back to ``"Unknown"``.
+
+    No lookup (the common case today, since committed universe CSVs lack sector
+    columns) or an unmapped/blank symbol both resolve to ``"Unknown"`` — the
+    dashboard never invents a classification it does not have.
+    """
     if not sector_lookup:
         return "Unknown"
     symbol = record.symbol.upper().strip()

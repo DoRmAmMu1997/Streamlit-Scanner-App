@@ -32,15 +32,22 @@ def load_universe_sector_lookup(
     performance metrics that can still render with the ``Unknown`` fallback.
     """
     lookup: dict[tuple[str, str], str] = {}
+    # De-dupe + sort the requested keys so the result is deterministic regardless
+    # of caller order, and one bad/missing universe never aborts the others.
     for universe_key in sorted({str(key) for key in universe_keys if str(key).strip()}):
         try:
             universe = universe_loader(universe_key)
         except (KeyError, FileNotFoundError, ValueError):
+            # A missing or unreadable universe file is fine: those symbols simply
+            # have no sector and fall back to "Unknown" in the dashboard.
             continue
         sector_column = _first_sector_column(universe)
         if sector_column is None or "symbol" not in universe.columns:
             continue
         for _, row in universe.iterrows():
+            # Keys are (universe_key, UPPER_SYMBOL) so the dashboard lookup matches
+            # regardless of how a stored signal cased its symbol. Blank symbol or
+            # blank sector rows are skipped rather than stored as empty strings.
             symbol = str(row.get("symbol", "")).strip().upper()
             sector = str(row.get(sector_column, "")).strip()
             if symbol and sector:

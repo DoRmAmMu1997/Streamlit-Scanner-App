@@ -40,6 +40,11 @@ from backend.validation import (
 
 logger = logging.getLogger(__name__)
 
+# Collaborators are typed as small Callable aliases so ``run_compute_forward_returns``
+# can be called with fakes in tests (no Dhan client, no real database) while the
+# production defaults wire in the real schema bootstrap, session scope, Dhan
+# client, and compute service. This is plain dependency injection: the function
+# never reaches for a global, so every external dependency can be swapped.
 EnsureSchema = Callable[[], object]
 SessionFactory = Callable[[], Any]
 DataClientFactory = Callable[[], Any]
@@ -49,7 +54,15 @@ ComputeService = Callable[..., ForwardReturnRunSummary]
 
 @dataclass(frozen=True)
 class ForwardReturnJobOutcome:
-    """Command result that can be asserted in tests and mapped to an exit code."""
+    """The result of one job run — asserted in tests and mapped to an exit code.
+
+    Beginner note:
+    ``summary`` is the per-status tally from the compute service (computed /
+    pending / insufficient / benchmark). ``fatal`` is True only when *setup* or the
+    batch boundary failed (bad credentials, schema, session) — not when individual
+    signals stayed pending, which is a normal validation state. ``message`` is an
+    already secret-redacted, human-readable line for the operator.
+    """
 
     summary: ForwardReturnRunSummary
     fatal: bool = False
@@ -57,7 +70,11 @@ class ForwardReturnJobOutcome:
 
     @property
     def exit_code(self) -> int:
-        """Schedulers treat a non-zero process exit code as failed work."""
+        """Map the outcome to a process exit code (0 = ok, 1 = fatal).
+
+        Schedulers (cron, Task Scheduler, Render) treat a non-zero exit code as
+        "this job failed, alert me", so only fatal setup/batch failures return 1.
+        """
         return 1 if self.fatal else 0
 
 
@@ -77,6 +94,17 @@ def run_compute_forward_returns(
 
     Dependency injection keeps the command testable without Dhan credentials,
     network calls, Streamlit, or the developer's real local database.
+
+    Beginner note — the flow is deliberately linear:
+      1. emit a structured ``..._started`` event (limit / as_of / horizons);
+      2. bootstrap the database schema (same best-effort step the web app uses);
+      3. build the Dhan client + ``DailyDataLoader`` and open one session;
+      4. hand them to ``compute_pending_forward_returns`` (the idempotent service
+         that actually fetches candles and upserts rows);
+      5. print + log a summary and return exit code 0.
+    Any exception from steps 2–4 is caught at this command boundary, redacted with
+    ``redact_exception`` (so a broker token in an error can never reach stdout or
+    the logs), reported, and turned into a fatal, exit-code-1 outcome.
     """
     out = output or sys.stdout
     normalized_horizons = tuple(int(horizon) for horizon in horizons)
@@ -139,6 +167,12 @@ def run_compute_forward_returns(
 
 
 def _print_outcome(out: TextIO, outcome: ForwardReturnJobOutcome) -> None:
+    """Print one operator-facing summary line to ``out`` (stdout by default).
+
+    ``out`` is injected so tests can capture the line from an ``io.StringIO``
+    instead of the real stdout. The fatal branch prints the already-redacted
+    message; the success branch prints the per-status counts the scheduler logs.
+    """
     if outcome.fatal:
         print(f"[forward-returns] FAILED {outcome.message}", file=out, flush=True)
         return
@@ -161,7 +195,13 @@ def main(
     *,
     job_runner: Callable[..., ForwardReturnJobOutcome] = run_compute_forward_returns,
 ) -> int:
-    """Parse CLI flags and return a process exit code."""
+    """Parse CLI flags, run the job, and return a process exit code.
+
+    This is the ``python -m backend.jobs.compute_forward_returns`` entry point.
+    ``--horizon`` is repeatable (``--horizon 20 --horizon 60``); when omitted, all
+    of ``FORWARD_RETURN_HORIZONS`` are computed. ``job_runner`` is injected so the
+    argument-parsing layer can be tested without running a real batch.
+    """
     parser = argparse.ArgumentParser(
         description="Compute pending VALID-002 forward-return rows for stored signals."
     )
@@ -196,6 +236,11 @@ def main(
 
 
 def _positive_int(value: str) -> int:
+    """argparse ``type=`` validator: accept only a positive integer.
+
+    Returning a clean ``ArgumentTypeError`` makes argparse print a friendly
+    "argument --limit: must be a positive integer" instead of a raw traceback.
+    """
     parsed = int(value)
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be a positive integer")
@@ -203,6 +248,7 @@ def _positive_int(value: str) -> int:
 
 
 def _parse_iso_date(value: str) -> dt.date:
+    """argparse ``type=`` validator: parse a ``YYYY-MM-DD`` string into a date."""
     try:
         return dt.date.fromisoformat(value)
     except ValueError as exc:

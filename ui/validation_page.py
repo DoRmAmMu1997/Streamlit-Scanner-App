@@ -161,8 +161,22 @@ def _validation_summary_frame(summary: ValidationSummary) -> pd.DataFrame:
     )
 
 
+# ---------------------------------------------------------------------------
+# Dashboard section frames.
+#
+# Each helper below turns one tuple from the backend ``ValidationDashboardSummary``
+# into a plain display ``pd.DataFrame``. They are deliberately tiny and pure (no
+# Streamlit, no database) so the column contract of every dashboard section can
+# be unit-tested without a browser. The meaning of each metric lives on the
+# backend dataclasses in ``backend/validation/metrics.py``; here we only choose
+# the columns, human labels, and ``_format_pct`` display formatting. Passing an
+# explicit ``columns=`` list keeps the header row stable even when the section is
+# empty (so the table never renders a different shape with no data).
+# ---------------------------------------------------------------------------
+
+
 def _validation_distribution_frame(dashboard: ValidationDashboardSummary) -> pd.DataFrame:
-    """Return the computed-return histogram rows for display."""
+    """Return the computed-return histogram rows (one row per return bucket)."""
     return pd.DataFrame(
         [
             {
@@ -285,7 +299,12 @@ def _validation_sector_frame(dashboard: ValidationDashboardSummary) -> pd.DataFr
 
 
 def _validation_best_worst_frame(summary: ValidationSummary) -> pd.DataFrame:
-    """Return best/worst signal details as a scan-friendly table."""
+    """Return best/worst signal details as two rows per group (a long table).
+
+    The summary table already shows best/worst as side-by-side columns; this
+    "long" shape (one ``Rank: Best`` row and one ``Rank: Worst`` row per group)
+    is easier to scan and sort when comparing many screeners at once.
+    """
     rows: list[dict[str, Any]] = []
     for row in summary.rows:
         rows.append(
@@ -313,7 +332,14 @@ def _validation_best_worst_frame(summary: ValidationSummary) -> pd.DataFrame:
 
 
 def _validation_summary_csv(summary_frame: pd.DataFrame) -> bytes:
-    """Return CSV bytes using the shared spreadsheet-formula safety wrapper."""
+    """Return UTF-8 CSV bytes for the summary table, escaped against CSV injection.
+
+    Beginner note:
+    A spreadsheet treats a cell starting with ``=``/``+``/``-``/``@`` as a formula,
+    so an exported value could execute when opened in Excel/Sheets. ``_csv_safe``
+    (shared with the scan-history export) prefixes such cells with a single quote
+    to neutralise that before we hand the file to the browser download.
+    """
     return _csv_safe(summary_frame).to_csv(index=False).encode("utf-8")
 
 
@@ -480,7 +506,15 @@ def _render_validation_page() -> None:
 
 
 def _render_dashboard_sections(dashboard: ValidationDashboardSummary) -> None:
-    """Render the VALID-004 dashboard sections as compact, sortable tables."""
+    """Render the VALID-004 dashboard sections as compact, sortable tables.
+
+    Beginner note:
+    The whole dashboard stays "table-first" on purpose (no charts in v1): each
+    section is just a titled ``st.dataframe``. A section with no rows shows a short
+    caption instead of an empty grid, so the page reads cleanly before the compute
+    job has produced much data. The widget ``key`` is derived from the title so
+    Streamlit keeps each table's sort/scroll state independent across reruns.
+    """
     sections = [
         ("Return distribution", _validation_distribution_frame(dashboard)),
         ("Win rate by holding period", _validation_horizon_frame(dashboard)),
