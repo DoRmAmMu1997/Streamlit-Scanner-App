@@ -105,6 +105,14 @@ def _render_comparison_page() -> None:
             "Run `python -m alembic upgrade head` and reload this page."
         )
         return
+    except ValueError:
+        # The pair came from list_finalized_scan_groups, so it had history when the
+        # page loaded; its runs vanishing before this read is a rare TOCTOU edge.
+        st.info(
+            "No finalized runs are available for this screener/universe pair "
+            "anymore. Reload the page to refresh the list."
+        )
+        return
 
     _render_run_summary(comparison)
     if comparison.previous_run is None:

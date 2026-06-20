@@ -272,3 +272,26 @@ def test_render_comparison_page_explains_when_only_one_run_exists(monkeypatch):
 
     assert any("Need at least two finalized runs" in message for message in fake_st.infos)
     assert fake_st.tables == []
+
+
+def test_render_comparison_page_handles_value_error_from_build(monkeypatch):
+    fake_st = _FakeComparisonSt()
+
+    def build(_session, **_kwargs):
+        raise ValueError("No finalized scan runs found for envelope/nifty_500.")
+
+    monkeypatch.setattr(comparison_page, "st", fake_st)
+    monkeypatch.setattr(comparison_page, "session_scope", _fake_session_scope)
+    monkeypatch.setattr(
+        comparison_page,
+        "list_finalized_scan_groups",
+        lambda _session: [("envelope", "nifty_500")],
+    )
+    monkeypatch.setattr(comparison_page, "build_scan_comparison", build)
+
+    comparison_page._render_comparison_page()
+
+    assert any(
+        "No finalized runs are available" in message for message in fake_st.infos
+    )
+    assert fake_st.tables == []
