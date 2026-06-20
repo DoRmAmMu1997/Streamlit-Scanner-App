@@ -142,13 +142,16 @@ by default or Postgres) that is ready to record every run for later replay and a
   Performance** dashboard (filters, summary table, return distribution, win
   rate by horizon, benchmark-relative rows, monthly signal counts, sector
   concentration with an `Unknown` fallback, best/worst signals, and CSV export).
-  Operators can fill pending rows with
+  Benchmark-relative (excess) returns compare each signal against its universe's
+  index (NIFTY 50 / 100 / 500) using verified Dhan `IDX_I` instrument IDs
+  configured in `config/benchmarks.yaml` (VALID-002B); an unconfigured benchmark
+  stays null rather than guessing. Operators can fill pending rows with
   `python -m backend.jobs.compute_forward_returns --limit 500`.
 - **Tested** — a `pytest` suite covers the indicators, data loader, universe
   builder, screener registry, the screeners themselves, the auth gate, the
-  persistence layer, forward-return validation metrics, candle data-quality
-  validation, the AI prompt-injection quarantine corpus, structured AI-output
-  validation, and the Docker artifacts —
+  persistence layer, forward-return validation metrics, benchmark-index
+  resolution, candle data-quality validation, the AI prompt-injection quarantine
+  corpus, structured AI-output validation, and the Docker artifacts —
   plus **golden-snapshot** tests that catch screener output drift and an Alembic
   migration drift-guard.
 
@@ -707,6 +710,10 @@ Streamlit Scanner App/
 ├── constraints.txt              # Verified direct dependency pins
 ├── alembic.ini                  # Alembic config for scan-history migrations
 ├── migrations/                  # Alembic migration scripts (scan-history + audit log schema)
+├── config/                      # Committed runtime config (no secrets)
+│   ├── daily_scans.yaml         # Render/default daily-scan schedule (JOB-002)
+│   ├── daily_scans.example.yaml # Verbose daily-scan schedule template
+│   └── benchmarks.yaml          # Verified Dhan IDX_I benchmark index IDs (VALID-002B)
 ├── docs/                        # Project documentation
 │   ├── operations.md            # Operations / runbook guide
 │   ├── adding-a-screener.md     # Screener authoring walkthrough
@@ -720,7 +727,7 @@ Streamlit Scanner App/
 │   ├── daily_data_loader.py     # Candle fetching + Parquet cache
 │   ├── universe_builder.py      # Builds the stock-universe CSVs
 │   ├── universe_loader.py       # Reads the universe CSVs
-│   ├── validation/              # Forward-return calculators, services, dashboard metrics, and sector metadata helper
+│   ├── validation/              # Forward-return calculators, services, dashboard metrics, sector + benchmark-index helpers
 │   ├── screener_registry.py     # Discovers + validates screeners
 │   ├── scanner_base.py          # BaseScanner ABC every screener subclasses
 │   ├── jobs/                    # Headless commands: daily scans + forward-return validation batches
