@@ -1,4 +1,13 @@
-"""Tests for the JOB-003 Streamlit scan comparison page helpers."""
+"""Tests for the JOB-003 Streamlit scan comparison page helpers.
+
+Beginner note:
+Streamlit needs a browser to run for real, which is too heavy for unit tests.
+Instead we ``monkeypatch`` the page module's ``st`` with a tiny fake
+(``_FakeComparisonSt``) that records what the page *tried* to render - subheaders,
+tables, downloads, info/error messages - so each test can assert on that record.
+We also stub the database calls (``session_scope``, ``list_finalized_scan_groups``,
+``build_scan_comparison``) so the tests never touch a real database.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +24,12 @@ from backend.scanning.comparison import ComparisonRun, ScanComparison
 
 
 class _FakeColumn:
+    """Stand-in for a Streamlit column (``st.columns(...)`` element).
+
+    Supports the context-manager protocol (``with col:``) and ``.metric(...)`` so
+    the page's column usage runs without a real Streamlit runtime.
+    """
+
     def __enter__(self):
         return self
 
@@ -72,11 +87,22 @@ class _FakeComparisonSt:
 
 @contextmanager
 def _fake_session_scope():
+    """Replace ``session_scope`` with a no-op context yielding a dummy session.
+
+    The repository calls are stubbed in each test, so the yielded object is never
+    actually used to talk to a database - it just satisfies the ``with`` block.
+    """
     yield object()
 
 
 @dataclass(frozen=True)
 class _Row:
+    """Minimal stand-in for ``ComparisonRow`` with test-friendly defaults.
+
+    The page only reads attributes off the rows it renders, so a small dataclass
+    is enough; defaults keep each test's row construction terse.
+    """
+
     symbol: str
     latest_rating: str = "BUY"
     previous_rating: str | None = None
@@ -93,6 +119,11 @@ class _Row:
 
 
 def _comparison() -> ScanComparison:
+    """Build a fully populated two-run ``ScanComparison`` fixture for render tests.
+
+    Covers all five sections (one row each, except the empty degraded bucket) so a
+    single render exercises every table and the CSV export path.
+    """
     latest = ComparisonRun(
         run_id=2,
         started="2026-06-20 09:00 UTC",

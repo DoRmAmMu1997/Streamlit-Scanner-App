@@ -1,4 +1,11 @@
-"""Tests for the JOB-003 latest-vs-previous scan comparison read model."""
+"""Tests for the JOB-003 latest-vs-previous scan comparison read model.
+
+Beginner note:
+These tests use a real (temporary) database via the ``db_session`` fixture and a
+``_seed_run`` helper to write two finalized runs, then assert that
+``build_scan_comparison`` sorts the symbols into the right buckets and computes
+score deltas correctly. No Streamlit/UI is involved - this is the pure read model.
+"""
 
 from __future__ import annotations
 
@@ -75,26 +82,28 @@ def test_build_scan_comparison_uses_score_fallback_and_source_match(db_session):
     """Scores use final_score first, then confidence, and compare only matching sources."""
     from backend.scanning.comparison import build_scan_comparison
 
+    # Previous run. Each symbol probes one score-resolution rule:
     _seed_run(
         db_session,
         started_at=dt.datetime(2026, 6, 19, 9, 0, tzinfo=dt.UTC),
         rows=[
-            {"symbol": "FINAL", "final_score": Decimal("40.00")},
-            {"symbol": "CONF", "confidence": 4},
-            {"symbol": "MISMATCH", "confidence": 6},
-            {"symbol": "BADCONF", "confidence": "NaN"},
-            {"symbol": "DOWN", "final_score": Decimal("90.00")},
+            {"symbol": "FINAL", "final_score": Decimal("40.00")},  # final_score both runs -> improved
+            {"symbol": "CONF", "confidence": 4},  # confidence fallback both runs -> improved
+            {"symbol": "MISMATCH", "confidence": 6},  # source differs next run -> excluded
+            {"symbol": "BADCONF", "confidence": "NaN"},  # unparseable -> no score -> excluded
+            {"symbol": "DOWN", "final_score": Decimal("90.00")},  # final_score both, lower next -> degraded
         ],
     )
+    # Latest run. Same symbols, paired so the source-match rule can be checked:
     _seed_run(
         db_session,
         started_at=dt.datetime(2026, 6, 20, 9, 0, tzinfo=dt.UTC),
         rows=[
-            {"symbol": "FINAL", "final_score": Decimal("45.50")},
-            {"symbol": "CONF", "confidence": "7"},
-            {"symbol": "MISMATCH", "final_score": Decimal("8.00")},
-            {"symbol": "BADCONF", "confidence": 9},
-            {"symbol": "DOWN", "final_score": Decimal("84.25")},
+            {"symbol": "FINAL", "final_score": Decimal("45.50")},  # 40.00 -> 45.50 (+5.50)
+            {"symbol": "CONF", "confidence": "7"},  # numeric string parses; 4 -> 7 (+3)
+            {"symbol": "MISMATCH", "final_score": Decimal("8.00")},  # confidence vs final_score -> no delta
+            {"symbol": "BADCONF", "confidence": 9},  # prior run had no usable score -> no delta
+            {"symbol": "DOWN", "final_score": Decimal("84.25")},  # 90.00 -> 84.25 (-5.75)
         ],
     )
 
