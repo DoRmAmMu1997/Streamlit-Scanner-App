@@ -45,7 +45,7 @@ sequenceDiagram
         Loader-->>Scanner: frame passes through
     end
     Loader->>Service: last_data_quality_reports
-    Service->>Service: build bounded receipt; SUCCESS→PARTIAL (fatal) / →FAILED (no usable)
+    Service->>Service: build bounded receipt, SUCCESS→PARTIAL (fatal) / →FAILED (no usable)
     Service->>DB: finish_scan_run(data_quality_json) [redacted]
     Health->>DB: newest run carrying a receipt
     Health-->>Health: passive summary (counts + capped, redacted findings)
