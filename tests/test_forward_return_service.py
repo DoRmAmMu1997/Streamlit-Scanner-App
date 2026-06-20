@@ -173,6 +173,10 @@ def test_service_computes_stock_return_when_benchmark_is_unresolved(db_session):
         as_of=dt.date(2026, 1, 10),
         horizons=(3,),
         universe_loader=lambda _key: _universe([("RELIANCE", "500325")]),
+        # Force the unresolved path explicitly: since VALID-002B ships verified
+        # ids, the default resolver now resolves "fno", so this test injects an
+        # always-None resolver to keep covering the graceful-null behaviour.
+        benchmark_resolver=lambda _key: None,
     )
     db_session.commit()
 

@@ -1,0 +1,50 @@
+# Verified Dhan IDX_I benchmark index instruments (VALID-002B).
+#
+# Each entry maps a scan `universe_key` to the index it is benchmarked against.
+# `security_id` is the Dhan IDX_I instrument id, RESOLVED FROM the Dhan instrument
+# master (not guessed). See
+# docs/architecture/components/validation.md -> "Verifying / updating benchmark IDs"
+# for how to re-derive these with `resolve_index_security_ids(...)`.
+#
+# A blank or missing `security_id` keeps the graceful-null behaviour: stock returns
+# still compute, but benchmark/excess returns stay null for that universe.
+#
+# Verified from the Dhan instrument master snapshot dated 2026-06-20
+# (rows EXCH_ID=NSE, SEGMENT=I, INSTRUMENT=INDEX):
+#   NIFTY 50 -> 13 (display name "Nifty 50")
+#   NIFTY 100 -> 17
+#   NIFTY 500 -> 19
+
+benchmarks:
+  nifty_100:
+    key: nifty_100
+    symbol: "NIFTY 100"
+    security_id: "17"
+  nifty_500:
+    key: nifty_500
+    symbol: "NIFTY 500"
+    security_id: "19"
+  fno:
+    key: nifty_50
+    symbol: "NIFTY 50"
+    security_id: "13"
+  hemant_super_45:
+    key: nifty_50
+    symbol: "NIFTY 50"
+    security_id: "13"
+  hemant_good_45:
+    key: nifty_50
+    symbol: "NIFTY 50"
+    security_id: "13"
+  hemant_good_200:
+    key: nifty_50
+    symbol: "NIFTY 50"
+    security_id: "13"
+  hemant_super_good_union:
+    key: nifty_50
+    symbol: "NIFTY 50"
+    security_id: "13"
+  hemant_super_good_200_union:
+    key: nifty_50
+    symbol: "NIFTY 50"
+    security_id: "13"
