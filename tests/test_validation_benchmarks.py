@@ -140,6 +140,35 @@ def test_load_benchmarks_malformed_file_is_graceful(tmp_path):
     assert load_benchmarks(bad) == {}
 
 
+def test_load_benchmarks_treats_explicit_null_scalars_as_blank(tmp_path):
+    """YAML null placeholders must keep graceful-null benchmark behaviour."""
+    config = tmp_path / "benchmarks.yaml"
+    config.write_text(
+        """
+        benchmarks:
+          null_id:
+            key: nifty_50
+            symbol: "NIFTY 50"
+            security_id:
+          null_symbol:
+            key: nifty_50
+            symbol:
+            security_id: "13"
+          null_key:
+            key:
+            symbol: "NIFTY 50"
+            security_id: "13"
+        """,
+        encoding="utf-8",
+    )
+
+    specs = load_benchmarks(config)
+
+    assert specs["null_id"].security_id == ""
+    assert "null_symbol" not in specs
+    assert specs["null_key"].key == "null_key"
+
+
 def test_load_benchmarks_keeps_blank_id_entries(tmp_path):
     """An entry with a blank id parses (its symbol is kept) but stays unusable."""
     config = tmp_path / "benchmarks.yaml"

@@ -109,16 +109,22 @@ def load_benchmarks(path: Path | None = None) -> dict[str, BenchmarkSpec]:
     for universe_key, entry in raw.items():
         if not isinstance(entry, Mapping):
             continue
-        symbol = str(entry.get("symbol", "")).strip()
+        universe = _config_text(universe_key)
+        symbol = _config_text(entry.get("symbol"))
         if not symbol:
             # Without an index symbol the entry cannot name a benchmark at all.
             continue
-        specs[str(universe_key)] = BenchmarkSpec(
-            key=str(entry.get("key", "")).strip() or str(universe_key),
+        specs[universe] = BenchmarkSpec(
+            key=_config_text(entry.get("key")) or universe,
             symbol=symbol,
-            security_id=str(entry.get("security_id", "")).strip(),
+            security_id=_config_text(entry.get("security_id")),
         )
     return specs
+
+
+def _config_text(value: object) -> str:
+    """Normalize optional YAML scalar values without turning null into "None"."""
+    return "" if value is None else str(value).strip()
 
 
 # Loaded once at import from config/benchmarks.yaml. Kept module-level (like the
