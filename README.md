@@ -135,8 +135,11 @@ by default or Postgres) that is ready to record every run for later replay and a
   click-through to each run's persisted results. Historical validation stores
   per-signal forward returns and exposes backend aggregate metrics by screener,
   universe, and horizon, surfaced in a read-only **Validation / Signal
-  Performance** dashboard (filters + summary table); charts and sector
-  concentration remain future work.
+  Performance** dashboard (filters, summary table, return distribution, win
+  rate by horizon, benchmark-relative rows, monthly signal counts, sector
+  concentration with an `Unknown` fallback, best/worst signals, and CSV export).
+  Operators can fill pending rows with
+  `python -m backend.jobs.compute_forward_returns --limit 500`.
 - **Tested** — a `pytest` suite covers the indicators, data loader, universe
   builder, screener registry, the screeners themselves, the auth gate, the
   persistence layer, forward-return validation metrics, candle data-quality
@@ -713,10 +716,10 @@ Streamlit Scanner App/
 │   ├── daily_data_loader.py     # Candle fetching + Parquet cache
 │   ├── universe_builder.py      # Builds the stock-universe CSVs
 │   ├── universe_loader.py       # Reads the universe CSVs
-│   ├── validation/              # Forward-return calculators, service, and aggregate metrics
+│   ├── validation/              # Forward-return calculators, services, dashboard metrics, and sector metadata helper
 │   ├── screener_registry.py     # Discovers + validates screeners
 │   ├── scanner_base.py          # BaseScanner ABC every screener subclasses
-│   ├── jobs/                    # Headless commands such as daily scans
+│   ├── jobs/                    # Headless commands: daily scans + forward-return validation batches
 │   ├── indicators.py            # Indicators (TA-Lib/pandas_ta + fallbacks)
 │   ├── url_safety.py            # Shared guardrails for server-side fetches
 │   ├── charts.py                # Lightweight Charts chart-spec builders
@@ -767,7 +770,7 @@ Streamlit Scanner App/
 │   ├── common.py               # Shared helpers (emoji badges, CSV-safe, redaction)
 │   ├── chart_cache.py          # Per-session rendered-chart cache
 │   ├── history_page.py         # Scan history view (SCAN-004)
-│   ├── validation_page.py      # Validation / Signal Performance dashboard (VALID-003B)
+│   ├── validation_page.py      # Validation / Signal Performance dashboard (VALID-003B/004)
 │   ├── health_page.py          # Admin health view (OBS-002)
 │   ├── audit_page.py           # Admin audit log viewer (OBS-003)
 │   └── config_page.py          # Admin runtime settings form (OBS-003)

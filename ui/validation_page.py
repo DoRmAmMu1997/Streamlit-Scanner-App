@@ -21,6 +21,8 @@ import pandas as pd
 import streamlit as st
 from sqlalchemy.exc import OperationalError
 
+from backend.audit import record_audit_event
+from backend.observability import EVENT_EXPORT_DOWNLOADED
 from backend.storage import (
     list_distinct_screener_keys,
     list_distinct_universe_keys,
@@ -28,9 +30,15 @@ from backend.storage import (
 )
 from backend.validation import (
     FORWARD_RETURN_HORIZONS,
-    summarize_validation_metrics,
+    load_universe_sector_lookup,
+    summarize_validation_dashboard,
 )
-from backend.validation.metrics import BestWorstSignal, ValidationSummary
+from backend.validation.metrics import (
+    BestWorstSignal,
+    ValidationDashboardSummary,
+    ValidationSummary,
+)
+from ui.common import _csv_safe
 
 # Column order for the summary table. Kept as a module constant so a test can
 # assert the contract without re-listing every header inline.
@@ -153,6 +161,199 @@ def _validation_summary_frame(summary: ValidationSummary) -> pd.DataFrame:
     )
 
 
+# ---------------------------------------------------------------------------
+# Dashboard section frames.
+#
+# Each helper below turns one tuple from the backend ``ValidationDashboardSummary``
+# into a plain display ``pd.DataFrame``. They are deliberately tiny and pure (no
+# Streamlit, no database) so the column contract of every dashboard section can
+# be unit-tested without a browser. The meaning of each metric lives on the
+# backend dataclasses in ``backend/validation/metrics.py``; here we only choose
+# the columns, human labels, and ``_format_pct`` display formatting. Passing an
+# explicit ``columns=`` list keeps the header row stable even when the section is
+# empty (so the table never renders a different shape with no data).
+# ---------------------------------------------------------------------------
+
+
+def _validation_distribution_frame(dashboard: ValidationDashboardSummary) -> pd.DataFrame:
+    """Return the computed-return histogram rows (one row per return bucket)."""
+    return pd.DataFrame(
+        [
+            {
+                "Screener": row.screener_key,
+                "Universe": row.universe_key,
+                "Horizon": f"{row.horizon_days}D",
+                "Return bucket": row.bucket_label,
+                "Computed signals": row.computed_count,
+            }
+            for row in dashboard.return_distribution
+        ],
+        columns=["Screener", "Universe", "Horizon", "Return bucket", "Computed signals"],
+    )
+
+
+def _validation_horizon_frame(dashboard: ValidationDashboardSummary) -> pd.DataFrame:
+    """Return win-rate rows grouped by screener/universe/horizon.
+
+    The win-rate and benchmark-relative sections are two projections of the same
+    per-horizon ``benchmark_relative_rows`` tuple: this one shows the hit rate.
+    """
+    return pd.DataFrame(
+        [
+            {
+                "Screener": row.screener_key,
+                "Universe": row.universe_key,
+                "Horizon": f"{row.horizon_days}D",
+                "Computed": row.computed_count,
+                "Hit rate %": _format_pct(row.hit_rate_pct),
+            }
+            for row in dashboard.benchmark_relative_rows
+        ],
+        columns=["Screener", "Universe", "Horizon", "Computed", "Hit rate %"],
+    )
+
+
+def _validation_benchmark_frame(dashboard: ValidationDashboardSummary) -> pd.DataFrame:
+    """Return benchmark-relative rows without fabricating missing excess values."""
+    return pd.DataFrame(
+        [
+            {
+                "Screener": row.screener_key,
+                "Universe": row.universe_key,
+                "Horizon": f"{row.horizon_days}D",
+                "Computed": row.computed_count,
+                "Avg excess %": _format_pct(row.average_excess_return_pct),
+                "Median excess %": _format_pct(row.median_excess_return_pct),
+            }
+            for row in dashboard.benchmark_relative_rows
+        ],
+        columns=[
+            "Screener",
+            "Universe",
+            "Horizon",
+            "Computed",
+            "Avg excess %",
+            "Median excess %",
+        ],
+    )
+
+
+def _validation_time_series_frame(dashboard: ValidationDashboardSummary) -> pd.DataFrame:
+    """Return monthly signal-count rows for the dashboard timeline section."""
+    return pd.DataFrame(
+        [
+            {
+                "Month": point.period_start.isoformat(),
+                "Screener": point.screener_key,
+                "Universe": point.universe_key,
+                "Horizon": f"{point.horizon_days}D",
+                "Total": point.total_signals,
+                "Computed": point.computed_count,
+                "Pending": point.pending_count,
+                "Insufficient": point.insufficient_data_count,
+            }
+            for point in dashboard.signal_count_over_time
+        ],
+        columns=[
+            "Month",
+            "Screener",
+            "Universe",
+            "Horizon",
+            "Total",
+            "Computed",
+            "Pending",
+            "Insufficient",
+        ],
+    )
+
+
+def _validation_sector_frame(dashboard: ValidationDashboardSummary) -> pd.DataFrame:
+    """Return sector concentration rows, with Unknown when metadata is absent."""
+    return pd.DataFrame(
+        [
+            {
+                "Screener": row.screener_key,
+                "Universe": row.universe_key,
+                "Horizon": f"{row.horizon_days}D",
+                "Sector": row.sector,
+                "Total signals": row.total_signals,
+                "Computed": row.computed_count,
+                "Share %": _format_pct(row.share_of_group_pct),
+                "Hit rate %": _format_pct(row.hit_rate_pct),
+                "Avg return %": _format_pct(row.average_forward_return_pct),
+            }
+            for row in dashboard.sector_concentration
+        ],
+        columns=[
+            "Screener",
+            "Universe",
+            "Horizon",
+            "Sector",
+            "Total signals",
+            "Computed",
+            "Share %",
+            "Hit rate %",
+            "Avg return %",
+        ],
+    )
+
+
+def _validation_best_worst_frame(summary: ValidationSummary) -> pd.DataFrame:
+    """Return best/worst signal details as two rows per group (a long table).
+
+    The summary table already shows best/worst as side-by-side columns; this
+    "long" shape (one ``Rank: Best`` row and one ``Rank: Worst`` row per group)
+    is easier to scan and sort when comparing many screeners at once.
+    """
+    rows: list[dict[str, Any]] = []
+    for row in summary.rows:
+        rows.append(
+            {
+                "Screener": row.screener_key,
+                "Universe": row.universe_key,
+                "Horizon": f"{row.horizon_days}D",
+                "Rank": "Best",
+                "Signal": _format_signal(row.best_signal),
+            }
+        )
+        rows.append(
+            {
+                "Screener": row.screener_key,
+                "Universe": row.universe_key,
+                "Horizon": f"{row.horizon_days}D",
+                "Rank": "Worst",
+                "Signal": _format_signal(row.worst_signal),
+            }
+        )
+    return pd.DataFrame(
+        rows,
+        columns=["Screener", "Universe", "Horizon", "Rank", "Signal"],
+    )
+
+
+def _validation_summary_csv(summary_frame: pd.DataFrame) -> bytes:
+    """Return UTF-8 CSV bytes for the summary table, escaped against CSV injection.
+
+    Beginner note:
+    A spreadsheet treats a cell starting with ``=``/``+``/``-``/``@`` as a formula,
+    so an exported value could execute when opened in Excel/Sheets. ``_csv_safe``
+    (shared with the scan-history export) prefixes such cells with a single quote
+    to neutralise that before we hand the file to the browser download.
+    """
+    return _csv_safe(summary_frame).to_csv(index=False).encode("utf-8")
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_sector_lookup(universe_keys: tuple[str, ...]) -> dict[tuple[str, str], str]:
+    """Cache the local sector lookup so universe CSVs aren't re-read every rerun.
+
+    Streamlit reruns the page for every widget interaction; without this cache
+    each rerun would re-read and iterate every relevant universe CSV. A 10-minute
+    TTL matches the other universe-derived caches in ``app.py``.
+    """
+    return load_universe_sector_lookup(universe_keys)
+
+
 def _render_validation_page() -> None:
     """Render the read-only validation / signal-performance dashboard.
 
@@ -215,14 +416,25 @@ def _render_validation_page() -> None:
     filters = _validation_filter_kwargs(
         screener_choice, universe_choice, horizon_choice, date_range
     )
+    sector_universes = (
+        [filters["universe_key"]]
+        if "universe_key" in filters
+        else list(universe_keys)
+    )
+    sector_lookup = _cached_sector_lookup(tuple(sector_universes))
     try:
         with session_scope() as session:
             # This is the dashboard's only validation-data read. Keeping the
             # call here (instead of hand-written UI queries) preserves the
-            # VALID-003A contract: repository code owns SQL, the page owns
-            # widgets and display states. The returned frozen dataclasses have
-            # no lazy ORM attributes, so they are safe after the session closes.
-            summary = summarize_validation_metrics(session, **filters)
+            # VALID-003A/004 contract: repository/service code owns SQL and
+            # grouping, while the page owns widgets and display states. The
+            # returned frozen dataclasses have no lazy ORM attributes, so they
+            # are safe after the session closes.
+            dashboard = summarize_validation_dashboard(
+                session,
+                **filters,
+                sector_lookup=sector_lookup,
+            )
     except OperationalError:
         # A partially migrated database can still list old scan history but fail
         # once the VALID tables are joined. Show the same operator hint as the
@@ -233,6 +445,7 @@ def _render_validation_page() -> None:
         )
         return
 
+    summary = dashboard.metric_summary
     if not summary.rows:
         if filters:
             st.info("No validation rows match the current filters.")
@@ -244,12 +457,36 @@ def _render_validation_page() -> None:
             )
         return
 
+    summary_frame = _validation_summary_frame(summary)
     st.dataframe(
-        _validation_summary_frame(summary),
+        summary_frame,
         width="stretch",
         hide_index=True,
         key="validation_summary_table",
     )
+    validation_file_name = "validation_signal_performance.csv"
+    # The download button is also the OBS-003 export audit trigger. The page is
+    # otherwise read-only; this records only that a user downloaded the displayed
+    # summary, not a mutation of validation data.
+    if st.download_button(
+        label="Download validation summary CSV",
+        data=_validation_summary_csv(summary_frame),
+        file_name=validation_file_name,
+        mime="text/csv",
+        key="validation_summary_csv",
+    ):
+        session_state = getattr(st, "session_state", {})
+        record_audit_event(
+            event=EVENT_EXPORT_DOWNLOADED,
+            user_email=session_state.get("_audit_user_email"),
+            metadata={
+                "file_name": validation_file_name,
+                "row_count": len(summary_frame),
+                "kind": "validation_summary",
+            },
+        )
+
+    _render_dashboard_sections(dashboard)
 
     # Empty-state notes that still make sense once the table itself is shown.
     # These are mutually exclusive: with zero computed rows every excess is also
@@ -265,4 +502,35 @@ def _render_validation_page() -> None:
         st.caption(
             "Benchmark/excess returns are unavailable because benchmark "
             "instruments are not configured yet."
+        )
+
+
+def _render_dashboard_sections(dashboard: ValidationDashboardSummary) -> None:
+    """Render the VALID-004 dashboard sections as compact, sortable tables.
+
+    Beginner note:
+    The whole dashboard stays "table-first" on purpose (no charts in v1): each
+    section is just a titled ``st.dataframe``. A section with no rows shows a short
+    caption instead of an empty grid, so the page reads cleanly before the compute
+    job has produced much data. The widget ``key`` is derived from the title so
+    Streamlit keeps each table's sort/scroll state independent across reruns.
+    """
+    sections = [
+        ("Return distribution", _validation_distribution_frame(dashboard)),
+        ("Win rate by holding period", _validation_horizon_frame(dashboard)),
+        ("Benchmark-relative performance", _validation_benchmark_frame(dashboard)),
+        ("Signal count over time", _validation_time_series_frame(dashboard)),
+        ("Sector concentration", _validation_sector_frame(dashboard)),
+        ("Best/worst signals", _validation_best_worst_frame(dashboard.metric_summary)),
+    ]
+    for title, frame in sections:
+        st.subheader(title)
+        if frame.empty:
+            st.caption("No computed rows are available for this section yet.")
+            continue
+        st.dataframe(
+            frame,
+            width="stretch",
+            hide_index=True,
+            key=f"validation_{title.lower().replace('/', '_').replace(' ', '_')}",
         )

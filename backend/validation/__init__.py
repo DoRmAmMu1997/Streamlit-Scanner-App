@@ -14,11 +14,18 @@ from backend.validation.forward_return import (
 )
 from backend.validation.metrics import (
     BestWorstSignal,
+    ValidationBenchmarkRow,
+    ValidationDashboardSummary,
     ValidationMetricFilters,
     ValidationMetricRow,
+    ValidationReturnBucket,
+    ValidationSectorConcentrationRow,
     ValidationSummary,
+    ValidationTimeSeriesPoint,
+    summarize_validation_dashboard,
     summarize_validation_metrics,
 )
+from backend.validation.sectors import load_universe_sector_lookup
 from backend.validation.service import (
     ForwardReturnRunSummary,
     compute_pending_forward_returns,
@@ -32,12 +39,19 @@ __all__ = [
     "BestWorstSignal",
     "ForwardReturnPoint",
     "ForwardReturnRunSummary",
+    "ValidationBenchmarkRow",
+    "ValidationDashboardSummary",
     "ValidationMetricFilters",
     "ValidationMetricRow",
+    "ValidationReturnBucket",
+    "ValidationSectorConcentrationRow",
     "ValidationSummary",
+    "ValidationTimeSeriesPoint",
     "benchmark_for_universe",
     "compute_benchmark_leg",
     "compute_forward_return",
     "compute_pending_forward_returns",
+    "load_universe_sector_lookup",
+    "summarize_validation_dashboard",
     "summarize_validation_metrics",
 ]
