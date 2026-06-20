@@ -8,7 +8,7 @@
 | **Status** | Implemented for per-signal forward-return rows, backend aggregate metrics, the read-only Validation / Signal Performance dashboard, and the headless forward-return compute job |
 | **Related** | [VALID-001 design](../valid-001-forward-return-validation.md), [VALID-002 handoff](../valid-002-handoff.md), [storage-persistence](storage-persistence.md), [ui-pages](ui-pages.md) |
 
-## 1. Purpose & Responsibilities
+## 1. Purpose & responsibilities
 
 VALID-002 fills `signal_forward_returns` for stored `scan_results` rows. It measures what happened after a signal without re-running the screener:
 
@@ -29,7 +29,7 @@ python -m backend.jobs.compute_forward_returns --limit 500
 
 The job bootstraps schema, builds the Dhan-backed loader, calls `compute_pending_forward_returns()`, commits through `session_scope()`, and exits non-zero only for fatal setup/batch failures. It is schedulable but not wired into Render as a second cron in this task.
 
-## 2. Position In The System
+## 2. Position in the system
 
 ```mermaid
 flowchart TD
@@ -46,7 +46,7 @@ flowchart TD
     SVC --> BENCH["benchmarks.compute_benchmark_leg"]
 ```
 
-## 3. Public Interface
+## 3. Public interface
 
 | Function | Contract |
 |---|---|
@@ -61,7 +61,7 @@ flowchart TD
 | `load_universe_sector_lookup(universe_keys)` | Best-effort local metadata helper. Reads universe CSVs for `sector` / `industry` / `macro_sector` / `sector_name`; missing metadata becomes `Unknown` in dashboard concentration rows. |
 | `get_forward_return_metric_records(...)` | Repository-only joined read of `scan_runs`, `scan_results`, and `signal_forward_returns` (`SUCCESS`/`PARTIAL` runs only) for metrics aggregation. |
 
-## 4. Missing-Data, Benchmark, And Sector Policy
+## 4. Missing-data, benchmark, and sector policy
 
 - `COMPUTED`: entry/exit bars exist and `exit_date <= as_of`.
 - `PENDING`: the exit date is after `as_of`, or the candle frame is recently incomplete within the 7-calendar-day data-lag grace window.
@@ -71,7 +71,8 @@ flowchart TD
 - Aggregate hit rate is `forward_return_pct > 0` over computed rows with stored returns only. Pending and insufficient rows stay visible as counts but never count as losses.
 - Average/median forward, excess, MAE, and MFE metrics use fixed-point `Decimal` values; missing benchmark/excess values are ignored, and empty metric sets return null instead of zero.
 - Aggregates read only `SUCCESS`/`PARTIAL` runs: a `RUNNING` run is still in flight and a `FAILED` run aborted before producing a trustworthy result set.
-- The same signal can be measured by more than one run. Metrics de-duplicate by `(screener, universe, symbol, signal_date, horizon)` keeping the most recent run (`started_at`, then `run_id`), so a rerun never double-counts a signal.
+- The same signal can be measured by more than one run. Metrics de-duplicate by `(screener, universe, symbol, signal_date, horizon)` keeping the most recent run (`started_at`, then `run_id`), so a rerun never double-counts a signal. Undated signals de-duplicate within their own key.
+- `ValidationSummary` reports `*_measurements` counts — one per `signal × horizon` row after de-duplication, **not** distinct signals. Per-signal counts live on each `ValidationMetricRow` (already horizon-scoped). `ValidationMetricRow.first_signal_date`/`last_signal_date` are the *observed* window; the *requested* bounds stay on `ValidationMetricFilters`.
 - Sector concentration is best-effort over local metadata only. Current committed universe CSVs mostly lack sector fields, so rows fall back to `Unknown` rather than inventing labels.
 - The read model loads matching rows and reduces them in Python to keep `Decimal` and median math exact. At much larger history volumes this is the natural pivot point to SQL aggregates or a pre-rollup table.
 

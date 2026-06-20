@@ -179,7 +179,11 @@ def _validation_distribution_frame(dashboard: ValidationDashboardSummary) -> pd.
 
 
 def _validation_horizon_frame(dashboard: ValidationDashboardSummary) -> pd.DataFrame:
-    """Return win-rate rows grouped by screener/universe/horizon."""
+    """Return win-rate rows grouped by screener/universe/horizon.
+
+    The win-rate and benchmark-relative sections are two projections of the same
+    per-horizon ``benchmark_relative_rows`` tuple: this one shows the hit rate.
+    """
     return pd.DataFrame(
         [
             {
@@ -189,7 +193,7 @@ def _validation_horizon_frame(dashboard: ValidationDashboardSummary) -> pd.DataF
                 "Computed": row.computed_count,
                 "Hit rate %": _format_pct(row.hit_rate_pct),
             }
-            for row in dashboard.horizon_win_rates
+            for row in dashboard.benchmark_relative_rows
         ],
         columns=["Screener", "Universe", "Horizon", "Computed", "Hit rate %"],
     )
@@ -313,6 +317,17 @@ def _validation_summary_csv(summary_frame: pd.DataFrame) -> bytes:
     return _csv_safe(summary_frame).to_csv(index=False).encode("utf-8")
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def _cached_sector_lookup(universe_keys: tuple[str, ...]) -> dict[tuple[str, str], str]:
+    """Cache the local sector lookup so universe CSVs aren't re-read every rerun.
+
+    Streamlit reruns the page for every widget interaction; without this cache
+    each rerun would re-read and iterate every relevant universe CSV. A 10-minute
+    TTL matches the other universe-derived caches in ``app.py``.
+    """
+    return load_universe_sector_lookup(universe_keys)
+
+
 def _render_validation_page() -> None:
     """Render the read-only validation / signal-performance dashboard.
 
@@ -380,7 +395,7 @@ def _render_validation_page() -> None:
         if "universe_key" in filters
         else list(universe_keys)
     )
-    sector_lookup = load_universe_sector_lookup(sector_universes)
+    sector_lookup = _cached_sector_lookup(tuple(sector_universes))
     try:
         with session_scope() as session:
             # This is the dashboard's only validation-data read. Keeping the

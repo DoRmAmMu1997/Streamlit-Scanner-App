@@ -55,6 +55,10 @@ EVENT_DAILY_JOB_STARTED = "daily_job_started"
 EVENT_DAILY_JOB_CONFIG_LOADED = "daily_job_config_loaded"
 EVENT_DAILY_JOB_CONFIG_INVALID = "daily_job_config_invalid"
 EVENT_DAILY_JOB_COMPLETED = "daily_job_completed"
+# VALID-004 headless forward-return compute job lifecycle events.
+EVENT_FORWARD_RETURNS_JOB_STARTED = "forward_returns_job_started"
+EVENT_FORWARD_RETURNS_JOB_COMPLETED = "forward_returns_job_completed"
+EVENT_FORWARD_RETURNS_JOB_FAILED = "forward_returns_job_failed"
 EVENT_EXTERNAL_API_FAILED = "external_api_failed"
 # DATA-001 candle-quality events. ``_warning`` = a usable frame with suspicious
 # data; ``_failed`` = a frame quarantined before scanning. Both log finding
@@ -104,6 +108,9 @@ __all__ = [
     "EVENT_DATA_REFRESH_STARTED",
     "EVENT_EXPORT_DOWNLOADED",
     "EVENT_EXTERNAL_API_FAILED",
+    "EVENT_FORWARD_RETURNS_JOB_COMPLETED",
+    "EVENT_FORWARD_RETURNS_JOB_FAILED",
+    "EVENT_FORWARD_RETURNS_JOB_STARTED",
     "EVENT_LOGIN_DENIED",
     "EVENT_LOGIN_SUCCESS",
     "EVENT_MANUAL_SCAN_STARTED",

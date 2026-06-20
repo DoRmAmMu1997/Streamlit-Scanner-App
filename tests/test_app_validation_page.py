@@ -175,17 +175,6 @@ def _dashboard(rows: list[ValidationMetricRow]) -> ValidationDashboardSummary:
                 computed_count=1,
             ),
         ),
-        horizon_win_rates=(
-            ValidationBenchmarkRow(
-                screener_key="envelope",
-                universe_key="nifty_500",
-                horizon_days=20,
-                computed_count=1,
-                hit_rate_pct=Decimal("100.0000"),
-                average_excess_return_pct=Decimal("2.0000"),
-                median_excess_return_pct=Decimal("2.0000"),
-            ),
-        ),
         benchmark_relative_rows=(
             ValidationBenchmarkRow(
                 screener_key="envelope",

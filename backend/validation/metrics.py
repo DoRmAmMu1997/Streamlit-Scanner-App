@@ -152,7 +152,10 @@ class ValidationDashboardSummary:
 
     metric_summary: ValidationSummary
     return_distribution: tuple[ValidationReturnBucket, ...]
-    horizon_win_rates: tuple[ValidationBenchmarkRow, ...]
+    # One per-horizon row per group, carrying both the win rate (hit_rate_pct) and
+    # the benchmark-relative excess columns. The dashboard renders two sections
+    # from this single tuple (win rate vs benchmark-relative) rather than storing
+    # the same rows twice.
     benchmark_relative_rows: tuple[ValidationBenchmarkRow, ...]
     signal_count_over_time: tuple[ValidationTimeSeriesPoint, ...]
     sector_concentration: tuple[ValidationSectorConcentrationRow, ...]
@@ -211,12 +214,10 @@ def summarize_validation_dashboard(
     )
     records = _metric_records_for_filters(session, filters)
     metric_summary = _build_summary(filters, records)
-    benchmark_rows = _benchmark_rows(metric_summary.rows)
     return ValidationDashboardSummary(
         metric_summary=metric_summary,
         return_distribution=_return_distribution(records),
-        horizon_win_rates=benchmark_rows,
-        benchmark_relative_rows=benchmark_rows,
+        benchmark_relative_rows=_benchmark_rows(metric_summary.rows),
         signal_count_over_time=_signal_count_over_time(records),
         sector_concentration=_sector_concentration(records, sector_lookup=sector_lookup),
     )
@@ -398,10 +399,16 @@ def _sector_concentration(
         horizon_days,
         sector,
     ), group_records in sorted(sector_groups.items(), key=lambda item: item[0]):
-        computed_returns = _values(
-            record.forward_return_pct
+        computed_records = [
+            record
             for record in group_records
             if record.status is ForwardReturnStatus.COMPUTED
+        ]
+        # ``computed_count`` matches the main summary table: every COMPUTED row,
+        # not only those with a stored return. ``computed_returns`` (non-null only)
+        # drives hit rate and average, exactly like ``_build_metric_row``.
+        computed_returns = _values(
+            record.forward_return_pct for record in computed_records
         )
         rows.append(
             ValidationSectorConcentrationRow(
@@ -410,7 +417,7 @@ def _sector_concentration(
                 horizon_days=horizon_days,
                 sector=sector,
                 total_signals=len(group_records),
-                computed_count=len(computed_returns),
+                computed_count=len(computed_records),
                 share_of_group_pct=_pct(
                     len(group_records),
                     group_totals[(screener_key, universe_key, horizon_days)],
@@ -457,11 +464,9 @@ def _sector_for_record(
     if not sector_lookup:
         return "Unknown"
     symbol = record.symbol.upper().strip()
-    sector = (
-        sector_lookup.get((record.universe_key, symbol))
-        or sector_lookup.get(symbol)
-        or sector_lookup.get(record.symbol)
-    )
+    # ``load_universe_sector_lookup`` keys on (universe_key, UPPER_SYMBOL); that is
+    # the only shape the dashboard passes, so a single lookup is enough.
+    sector = sector_lookup.get((record.universe_key, symbol))
     if sector is None or not str(sector).strip():
         return "Unknown"
     return str(sector).strip()

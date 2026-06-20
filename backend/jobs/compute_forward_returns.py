@@ -23,7 +23,13 @@ from typing import Any, TextIO
 
 from backend.daily_data_loader import DailyDataLoader
 from backend.dhan_client import DhanDataClient
-from backend.observability import configure_logging, log_event
+from backend.observability import (
+    EVENT_FORWARD_RETURNS_JOB_COMPLETED,
+    EVENT_FORWARD_RETURNS_JOB_FAILED,
+    EVENT_FORWARD_RETURNS_JOB_STARTED,
+    configure_logging,
+    log_event,
+)
 from backend.security import redact_exception
 from backend.storage.database import ensure_database_schema, session_scope
 from backend.validation import (
@@ -33,10 +39,6 @@ from backend.validation import (
 )
 
 logger = logging.getLogger(__name__)
-
-EVENT_FORWARD_RETURNS_JOB_STARTED = "forward_returns_job_started"
-EVENT_FORWARD_RETURNS_JOB_COMPLETED = "forward_returns_job_completed"
-EVENT_FORWARD_RETURNS_JOB_FAILED = "forward_returns_job_failed"
 
 EnsureSchema = Callable[[], object]
 SessionFactory = Callable[[], Any]
