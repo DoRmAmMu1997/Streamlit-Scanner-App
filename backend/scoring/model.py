@@ -23,7 +23,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
 from backend.scoring.components import (
@@ -34,6 +33,7 @@ from backend.scoring.components import (
     technical_raw,
 )
 from backend.scoring.config import ScoringConfig
+from backend.scoring.ordering import sort_by_final_score
 
 _COMPONENT_ORDER = ("technical", "liquidity", "risk", "freshness")
 _SECURITY_ID_COLUMNS = (
@@ -93,10 +93,13 @@ def score_candidates(
     # Resolve cached candles once per row, then reuse them for both liquidity
     # and risk. This keeps scoring deterministic and avoids reading the same
     # parquet cache twice for a single symbol.
+    # Materialize the row dicts once and reuse them for every component below; a
+    # large shortlist would otherwise be converted to records three times.
+    records = ranked.to_dict("records")
     symbol_to_security_id = _security_id_lookup(context.universe_df)
     cached_candles = [
         _read_cached_candles(row, symbol_to_security_id, context.data_loader)
-        for row in ranked.to_dict("records")
+        for row in records
     ]
 
     # Technical and liquidity are relative to the current shortlist, so they use
@@ -104,7 +107,7 @@ def score_candidates(
     # with the other rows returned by this same scan.
     technical_scores = cross_sectional(
         pd.Series(
-            [technical_raw(row) for row in ranked.to_dict("records")],
+            [technical_raw(row) for row in records],
             index=ranked.index,
             dtype="float64",
         )
@@ -143,7 +146,7 @@ def score_candidates(
                 snapshot_date=context.data_snapshot_date,
                 halflife_days=context.config.freshness_halflife_days,
             )
-            for row in ranked.to_dict("records")
+            for row in records
         ],
         index=ranked.index,
         dtype="float64",
@@ -171,7 +174,9 @@ def score_candidates(
 
     ranked["final_score"] = final_scores
     _attach_score_breakdowns(ranked, breakdowns)
-    return _sort_ranked_frame(ranked)
+    # Shared with the UI display/export paths so a freshly scored frame and the
+    # same run re-read from history order rows identically (deterministic rank).
+    return sort_by_final_score(ranked)
 
 
 def _score_one_row(
@@ -249,6 +254,10 @@ def _attach_score_breakdowns(
     receipt when they need the component table.
     """
     for index, breakdown in enumerate(breakdowns):
+        # Attach to EVERY provenance column the row carries, not just the first.
+        # ``normalize_screener_row`` prefers ``provenance_json`` over the legacy
+        # ``provenance`` when both exist, so stopping at the first match could
+        # leave the receipt on the column normalization discards.
         for column in ("provenance", "provenance_json"):
             if column not in ranked.columns:
                 continue
@@ -260,38 +269,6 @@ def _attach_score_breakdowns(
                 provenance = copy.deepcopy(dict(raw))
                 provenance["score_breakdown"] = breakdown
                 ranked.at[index, column] = provenance
-                break
-
-
-def _sort_ranked_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    """Sort score descending, put null scores last, and preserve ties.
-
-    ``mergesort`` is stable, and ``_rank_original_order`` is an explicit final
-    tie-breaker. Together they make repeated scoring runs deterministic even
-    when two stocks receive the exact same final score.
-    """
-    sortable = frame.copy(deep=True)
-    # Temporary columns keep the public result columns untouched. They are
-    # dropped before returning, so screeners do not need to know this helper ran.
-    sortable["_rank_original_order"] = range(len(sortable))
-    sortable["_rank_final_score"] = pd.to_numeric(
-        sortable["final_score"],
-        errors="coerce",
-    )
-    sortable["_rank_final_score"] = sortable["_rank_final_score"].where(
-        np.isfinite(sortable["_rank_final_score"]),
-        np.nan,
-    )
-    return (
-        sortable.sort_values(
-            by=["_rank_final_score", "_rank_original_order"],
-            ascending=[False, True],
-            na_position="last",
-            kind="mergesort",
-        )
-        .drop(columns=["_rank_original_order", "_rank_final_score"])
-        .reset_index(drop=True)
-    )
 
 
 def _read_cached_candles(

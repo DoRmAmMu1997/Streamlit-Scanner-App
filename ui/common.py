@@ -16,6 +16,7 @@ import streamlit as st
 
 from backend.auth.session import auth_secret_values
 from backend.scanner_base import PROVENANCE_COLUMN
+from backend.scoring import sort_by_final_score
 from backend.security import redact_text
 
 
@@ -35,42 +36,14 @@ def _drop_provenance(results: pd.DataFrame) -> pd.DataFrame:
 
 
 def _sort_results_by_final_score(results: pd.DataFrame) -> pd.DataFrame:
-    """Return display/export rows sorted by ``final_score`` when available.
+    """Order display/export rows by ``final_score`` (shared RANK-002 rule).
 
-    The scan service already ranks new results, but persisted history may
-    include older or hand-built frames. This helper gives every UI path the same
-    deterministic ordering: highest score first, null/non-finite scores last,
-    and original row order preserved for ties.
+    The scan service already ranks new results, but persisted history may include
+    older or hand-built frames. Delegating to ``backend.scoring.sort_by_final_score``
+    guarantees the scanner page, the history page, and the live scorer all order
+    rows identically (highest score first, null/non-finite last, ties stable).
     """
-    if "final_score" not in results.columns:
-        return results.copy()
-
-    ranked = results.copy()
-    # Keep the original order as an explicit tie-breaker. Without this, two
-    # equal scores could flip around between reruns, which is disorienting when
-    # a user is comparing a table with a downloaded CSV.
-    ranked["_rank_original_order"] = range(len(ranked))
-    # Display data can come from freshly scored rows, old persisted rows, or
-    # small hand-built test frames. Coerce quietly so one bad cell becomes "no
-    # score" instead of breaking the whole page.
-    ranked["_rank_final_score"] = pd.to_numeric(
-        ranked["final_score"],
-        errors="coerce",
-    )
-    ranked["_rank_final_score"] = ranked["_rank_final_score"].where(
-        np.isfinite(ranked["_rank_final_score"]),
-        np.nan,
-    )
-    return (
-        ranked.sort_values(
-            by=["_rank_final_score", "_rank_original_order"],
-            ascending=[False, True],
-            na_position="last",
-            kind="mergesort",
-        )
-        .drop(columns=["_rank_original_order", "_rank_final_score"])
-        .reset_index(drop=True)
-    )
+    return sort_by_final_score(results)
 
 
 _SCORE_COMPONENT_COLUMNS = [

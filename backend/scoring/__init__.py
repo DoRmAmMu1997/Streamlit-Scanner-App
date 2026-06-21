@@ -10,10 +10,12 @@ future scoring refactors can stay internal. The package has two layers:
 
 from backend.scoring.config import ScoringConfig, load_scoring_config
 from backend.scoring.model import ScoringContext, score_candidates
+from backend.scoring.ordering import sort_by_final_score
 
 __all__ = [
     "ScoringConfig",
     "ScoringContext",
     "load_scoring_config",
     "score_candidates",
+    "sort_by_final_score",
 ]

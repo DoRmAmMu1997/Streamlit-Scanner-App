@@ -234,6 +234,24 @@ def test_history_result_row_includes_final_score_and_provenance_receipt():
     }
 
 
+def test_history_result_row_uses_em_dash_for_missing_signal_date():
+    """A null signal_date renders the em-dash placeholder, not corrupted bytes."""
+    result = SimpleNamespace(
+        symbol="TCS",
+        signal_date=None,
+        close_price=None,
+        rating="BUY",
+        final_score=None,
+        reason="",
+        provenance_json=None,
+    )
+
+    row = app._history_result_row(result)
+
+    # Explicit codepoint so the assertion can't itself be mojibake: U+2014 em dash.
+    assert row["signal_date"] == "—"
+
+
 def test_history_error_is_redacted_before_preview_truncation():
     """A long bare secret must not leak a prefix when the preview is shortened."""
     secret = "S" * (app._HISTORY_ERROR_PREVIEW_CHARS + 30)

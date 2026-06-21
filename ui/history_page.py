@@ -228,7 +228,7 @@ def _history_result_row(result: Any) -> dict[str, Any]:
     """
     return {
         "symbol": result.symbol,
-        "signal_date": result.signal_date.isoformat() if result.signal_date else "â€”",
+        "signal_date": result.signal_date.isoformat() if result.signal_date else "—",
         "close": (
             float(result.close_price)
             if result.close_price is not None
