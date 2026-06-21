@@ -132,6 +132,8 @@ class SignalProvenance:
     - ``params_snapshot`` records the non-secret settings used for the run;
     - ``data_snapshot_date`` identifies how current the input data was;
     - ``source`` distinguishes deterministic, AI, and combined workflows.
+    - ``score_breakdown`` is the optional RANK-002 receipt that explains how a
+      row's final ranking score was assembled.
 
     Most fields have empty defaults so existing screeners can adopt the
     contract gradually instead of all being rewritten in one release.
@@ -146,6 +148,14 @@ class SignalProvenance:
     source: SignalSource | None = None
     notes: str | None = None
     ai: AIProvenance | None = None
+    # RANK-002 stores the additive score receipt here. It is optional so older
+    # screeners/provenance rows remain valid and unknown future keys are still
+    # preserved by normalize_screener_row(). The receipt is deliberately nested
+    # under provenance instead of becoming a wide set of database columns: the
+    # public table only needs final_score, while auditors can still inspect the
+    # model version, component scores, effective weights, coverage, and missing
+    # components from this JSON object.
+    score_breakdown: Mapping[str, JSONValue] | None = None
 
 
 @dataclass(frozen=True)
@@ -163,9 +173,10 @@ class ScreenerResult:
     signal_date: dt.date | dt.datetime | str | None = None
     close_price: Decimal | int | float | str | None = None
     reason: str | None = None
-    # The composite rank score from a future RANK-* ticket. The database column
-    # and repository mapping already exist; this keeps the typed contract aligned
-    # with the documented PROV-001 shape. It stays ``None`` until ranking lands.
+    # RANK-002 populates this composite rank score when at least one scoring
+    # component is computable. It remains optional for historical rows and
+    # graceful-null scoring failures. "Optional" here is important: an absent
+    # score means "the row could not be scored", not "the stock scored zero".
     final_score: Decimal | int | float | str | None = None
     provenance: SignalProvenance | None = None
 

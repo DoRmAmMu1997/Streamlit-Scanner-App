@@ -95,7 +95,7 @@ scan_runs (1) ─────< (many) scan_results
 | `signal_date` | Date | yes | —³ | Candle date the signal fired on. |
 | `close_price` | Numeric(18,4) | yes | — | Price at the signal (exact, not float). |
 | `rating` | String(20) | yes | — | Verdict label (`BUY`, `STRONG BUY`, …). |
-| `final_score` | Numeric(6,2) | yes | — | Composite rank score (RANK-*); NULL for now. |
+| `final_score` | Numeric(6,2) | yes | — | Composite rank score (RANK-002); NULL when unscorable or from older history. |
 | `reason` | Text | yes | — | Plain-English reason for the shortlist. |
 | `raw_result_json` | JSON | yes | — | Full raw screener output row (all extra columns). |
 | `provenance_json` | JSON | yes | — | Receipts / evidence (PROV-001 contract). |

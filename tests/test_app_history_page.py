@@ -16,6 +16,8 @@ through ``streamlit run``; importing it just defines functions.
 from __future__ import annotations
 
 import datetime as dt
+from decimal import Decimal
+from types import SimpleNamespace
 
 import app
 from backend.storage.models import ScanRun, ScanStatus
@@ -199,6 +201,55 @@ def test_history_runs_frame_formats_legacy_and_failed_rows():
     # Long messages are previewed in the table; the details view shows them fully.
     assert len(failed_row["Error"]) <= app._HISTORY_ERROR_PREVIEW_CHARS + 1
     assert failed_row["Error"].endswith("…")
+
+
+def test_history_result_row_includes_final_score_and_provenance_receipt():
+    """History details need score data for sorting and component display."""
+    result = SimpleNamespace(
+        symbol="RELIANCE",
+        signal_date=dt.date(2026, 6, 1),
+        close_price=Decimal("1234.50"),
+        rating="BUY",
+        final_score=Decimal("87.06"),
+        reason="oversold bounce",
+        provenance_json={
+            "score_breakdown": {
+                "components": {"freshness": 87.06},
+                "coverage": ["freshness"],
+                "missing": ["technical"],
+            }
+        },
+    )
+
+    row = app._history_result_row(result)
+
+    assert row == {
+        "symbol": "RELIANCE",
+        "signal_date": "2026-06-01",
+        "close": 1234.5,
+        "rating": "BUY",
+        "final_score": 87.06,
+        "reason": "oversold bounce",
+        "provenance_json": result.provenance_json,
+    }
+
+
+def test_history_result_row_uses_em_dash_for_missing_signal_date():
+    """A null signal_date renders the em-dash placeholder, not corrupted bytes."""
+    result = SimpleNamespace(
+        symbol="TCS",
+        signal_date=None,
+        close_price=None,
+        rating="BUY",
+        final_score=None,
+        reason="",
+        provenance_json=None,
+    )
+
+    row = app._history_result_row(result)
+
+    # Explicit codepoint so the assertion can't itself be mojibake: U+2014 em dash.
+    assert row["signal_date"] == "—"
 
 
 def test_history_error_is_redacted_before_preview_truncation():

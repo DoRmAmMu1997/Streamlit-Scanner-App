@@ -32,7 +32,15 @@ from backend.storage import (
     list_distinct_universe_keys,
     session_scope,
 )
-from ui.common import _csv_safe, _decimal_column_config, _emoji_rating, _redact_secrets
+from ui.common import (
+    _csv_safe,
+    _decimal_column_config,
+    _drop_provenance,
+    _emoji_rating,
+    _redact_secrets,
+    _score_components_frame,
+    _sort_results_by_final_score,
+)
 
 # Emoji badges make run states scannable in a dense table, mirroring the
 # BUY/SELL badges the results table already uses.
@@ -207,6 +215,36 @@ def _history_runs_frame(
     )
 
 
+def _history_result_row(result: Any) -> dict[str, Any]:
+    """Copy one persisted ScanResult into a plain UI/export row.
+
+    Beginner note:
+    The SQLAlchemy object becomes detached once the database session closes.
+    Copying every scalar we need here avoids later lazy-loading surprises, and
+    keeping ``provenance_json`` in this intermediate row lets the score
+    component expander read the receipt before display/CSV paths drop it. That
+    is why this helper includes ``provenance_json`` even though the visible
+    results table and CSV intentionally hide it.
+    """
+    return {
+        "symbol": result.symbol,
+        "signal_date": result.signal_date.isoformat() if result.signal_date else "—",
+        "close": (
+            float(result.close_price)
+            if result.close_price is not None
+            else None
+        ),
+        "rating": result.rating or "",
+        "final_score": (
+            float(result.final_score)
+            if result.final_score is not None
+            else None
+        ),
+        "reason": result.reason or "",
+        "provenance_json": result.provenance_json or {},
+    }
+
+
 def _render_history_page() -> None:
     """Render the scan-history view: filters, runs table, and run details.
 
@@ -375,25 +413,7 @@ def _render_history_run_details(row: dict[str, Any], *, symbol_filter: str = "")
 
     with session_scope() as session:
         results = get_scan_results(session, row["run_id"])
-        # Same detached-object rule as the runs table: copy scalars to plain
-        # dicts inside the session. close_price is a Decimal; convert to float
-        # so _decimal_column_config's float-dtype formatting applies.
-        result_rows = [
-            {
-                "symbol": result.symbol,
-                "signal_date": (
-                    result.signal_date.isoformat() if result.signal_date else "—"
-                ),
-                "close": (
-                    float(result.close_price)
-                    if result.close_price is not None
-                    else None
-                ),
-                "rating": result.rating or "",
-                "reason": result.reason or "",
-            }
-            for result in results
-        ]
+        result_rows = [_history_result_row(result) for result in results]
 
     if symbol_filter:
         # Mirror the repository's exact, case-insensitive match so the run list
@@ -411,20 +431,39 @@ def _render_history_run_details(row: dict[str, Any], *, symbol_filter: str = "")
             st.info("This run produced no shortlisted results.")
         return
 
-    results_df = pd.DataFrame(result_rows)
+    # RANK-002 should be visible in history the same way it is visible right
+    # after a scan: best score first, with old/null-score rows still shown last.
+    results_df = _sort_results_by_final_score(pd.DataFrame(result_rows))
+    # Drop provenance only after building the ranked frame. The nested
+    # score_breakdown is still needed for the expander below, but raw JSON would
+    # be noisy and unhelpful in the main table.
+    display_df = _drop_provenance(results_df)
     st.dataframe(
-        _emoji_rating(results_df),
+        _emoji_rating(display_df),
         width="stretch",
         hide_index=True,
-        column_config=_decimal_column_config(results_df),
+        column_config=_decimal_column_config(display_df),
         key=f"history_results_{row['run_id']}",
     )
+    # The main table keeps one compact ``final_score`` column. The expander is
+    # the teaching/audit view that explains where that number came from without
+    # crowding the shortlist.
+    components_frame = _score_components_frame(results_df)
+    if not components_frame.empty:
+        with st.expander("Score components", expanded=False):
+            st.dataframe(
+                components_frame,
+                width="stretch",
+                hide_index=True,
+                column_config=_decimal_column_config(components_frame),
+                key=f"history_score_components_{row['run_id']}",
+            )
     history_file_name = f"scan_run_{row['run_id']}_results.csv"
     # download_button returns True on the click rerun, doubling as the OBS-003
     # export trigger. The signed-in email is stashed in session_state by main().
     if st.download_button(
         "Download run results CSV",
-        data=_csv_safe(results_df).to_csv(index=False).encode("utf-8"),
+        data=_csv_safe(display_df).to_csv(index=False).encode("utf-8"),
         file_name=history_file_name,
         mime="text/csv",
         key=f"history_csv_{row['run_id']}",

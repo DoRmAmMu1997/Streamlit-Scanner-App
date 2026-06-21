@@ -831,6 +831,8 @@ def test_app_reexports_helpers_from_extracted_ui_modules():
     happen to behave similarly today.
     """
     assert app._csv_safe is common._csv_safe
+    assert app._score_components_frame is common._score_components_frame
+    assert app._sort_results_by_final_score is common._sort_results_by_final_score
     assert app._redact_secrets is common._redact_secrets
     assert app._get_or_build_chart_payload is chart_cache._get_or_build_chart_payload
     assert app._render_history_page is history_page._render_history_page
