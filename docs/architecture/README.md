@@ -65,6 +65,8 @@ testing · extension points.
 - **[obs-003-audit-log.md](obs-003-audit-log.md)** — OBS-003 audit log + runtime-config schema, recorder design, and the seven tracked events.
 - **[valid-001-forward-return-validation.md](valid-001-forward-return-validation.md)** — VALID-001 methodology, no-lookahead rules, and schema rationale.
 - **[valid-002-handoff.md](valid-002-handoff.md)** — VALID-002 build brief plus resolved implementation decisions.
+- **[rank-001-final-scoring-model.md](rank-001-final-scoring-model.md)** — RANK-001 scoring methodology: the four v1 components, normalization, weighting, score ranges, missing-data behaviour, and the no-hidden-reasons invariant (no schema/migration).
+- **[rank-002-handoff.md](rank-002-handoff.md)** — RANK-002 build brief for the `backend/scoring/` scorer (pure components + config + the `run_scan` call + tests).
 - **[audit-2026-06.md](audit-2026-06.md)** — June 2026 codebase audit & hardening register (QUAL-001/002/003, REF-001, PERF-001, DOC-001): what was found, fixed, and deferred.
 
 ## Conventions
