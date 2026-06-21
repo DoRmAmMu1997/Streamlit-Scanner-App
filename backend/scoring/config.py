@@ -33,7 +33,15 @@ _CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "scoring_model.y
 
 @dataclass(frozen=True)
 class ScoringConfig:
-    """Runtime knobs for the deterministic RANK-002 scorer."""
+    """Runtime knobs for the deterministic RANK-002 scorer.
+
+    Field guide for new contributors:
+    ``weights`` decides how much each present component contributes after
+    per-row renormalization, ``liquidity_window`` and ``risk_window`` choose the
+    trailing cached-candle sample sizes, ``risk_vol_cap`` is the volatility level
+    that maps to a zero risk score, and ``freshness_halflife_days`` controls how
+    quickly older signal dates decay.
+    """
 
     model_version: str = DEFAULT_MODEL_VERSION
     weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_WEIGHTS))
@@ -55,10 +63,14 @@ def load_scoring_config(path: Path | str | None = None) -> ScoringConfig:
     try:
         payload = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError):
+        # A bad config file should make the model less customizable, not make
+        # the scanner unusable. The defaults are intentionally production-safe.
         return ScoringConfig()
     if not isinstance(payload, Mapping):
         return ScoringConfig()
 
+    # Keep the YAML names grouped under ``scoring:`` so this file can grow later
+    # without top-level key collisions with unrelated app configuration.
     raw = payload.get("scoring", {})
     if not isinstance(raw, Mapping):
         return ScoringConfig()
@@ -82,15 +94,22 @@ def _normalize_weights(value: Any) -> dict[str, float]:
     weights: dict[str, float] = {}
     for key, default in DEFAULT_WEIGHTS.items():
         candidate = _float_or_default(raw.get(key), default)
+        # Unknown component names are ignored, and invalid values for known
+        # components fall back individually. That lets an operator mistype one
+        # weight without losing the rest of their valid configuration.
         weights[key] = candidate if math.isfinite(candidate) and candidate > 0 else default
 
     total = sum(weights.values())
     if not math.isfinite(total) or total <= 0:
         return dict(DEFAULT_WEIGHTS)
+    # Store normalized values in the config object so the scoring layer does not
+    # need to remember whether a YAML author used percentages, fractions, or
+    # any other positive scale.
     return {key: round(weight / total, 10) for key, weight in weights.items()}
 
 
 def _text_or_default(value: Any, default: str) -> str:
+    """Return stripped text, treating blank/null YAML values as default."""
     if value is None:
         return default
     text = str(value).strip()
@@ -98,6 +117,7 @@ def _text_or_default(value: Any, default: str) -> str:
 
 
 def _float_or_default(value: Any, default: float) -> float:
+    """Return a positive finite float, or the safe default."""
     if value is None:
         return default
     try:
@@ -108,5 +128,6 @@ def _float_or_default(value: Any, default: float) -> float:
 
 
 def _int_or_default(value: Any, default: int) -> int:
+    """Return a positive integer window length, or the safe default."""
     result = _float_or_default(value, float(default))
     return int(result) if result >= 1 else default

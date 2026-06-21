@@ -539,11 +539,19 @@ def _score_results_safely(
     shortlisted rows." If scoring has a bug or reads a corrupt cache file, this
     wrapper logs a precise warning, adds a null ``final_score`` column, and lets
     persistence/UI continue with the original results.
+
+    This wrapper is also the boundary that protects the "cache-only" scoring
+    rule. The scorer receives the same ``universe_df`` and ``data_loader`` that
+    the screener used, plus the stored data snapshot date from params; it does
+    not get credentials or permission to start a fresh market-data fetch.
     """
     if results is None or results.empty:
         return results
 
     try:
+        # Load config inside the wrapper so malformed YAML is handled by the
+        # scoring config loader and so tests can monkeypatch the public scorer
+        # without needing to construct an entire app boot sequence.
         return score_candidates(
             results,
             context=ScoringContext(
@@ -569,11 +577,19 @@ def _score_results_safely(
             error_type=exc_info[0].__name__,
             results_count=len(results),
         )
+        # Preserve the original rows and row order. A null score is explicit
+        # enough for display/export without pretending a failed scoring pass
+        # produced a meaningful rank.
         return _with_null_final_score(results)
 
 
 def _with_null_final_score(results: pd.DataFrame) -> pd.DataFrame:
-    """Return a copy with explicit null scores after scoring failure."""
+    """Return a copy with explicit null scores after scoring failure.
+
+    The copy protects the caller's original DataFrame. That matters in
+    Streamlit because the same result object can be cached in session state and
+    reused across reruns.
+    """
     fallback = results.copy(deep=True)
     fallback["final_score"] = None
     return fallback

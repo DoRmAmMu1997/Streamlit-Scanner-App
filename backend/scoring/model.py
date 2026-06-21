@@ -52,6 +52,11 @@ class ScoringContext:
     ``universe_df`` and ``data_loader`` are supplied by the scan that just ran.
     Reusing them is important: scoring should not reload universes or make new
     network calls after the screener has finished.
+
+    Think of this object as the "read-only surroundings" for scoring. The
+    result rows contain symbol-level signals, while the context supplies the
+    already-loaded universe map, cache reader, data snapshot date, and model
+    knobs needed to turn those signals into comparable scores.
     """
 
     universe_key: str
@@ -76,18 +81,27 @@ def score_candidates(
     if results is None:
         return pd.DataFrame(columns=["final_score"])
 
+    # Reset to a simple 0..N index because the component Series below are
+    # position-based. Keeping an old screener index could make row 17's
+    # component accidentally line up with a different DataFrame row.
     ranked = results.copy(deep=True).reset_index(drop=True)
     if ranked.empty:
         if "final_score" not in ranked.columns:
             ranked["final_score"] = pd.Series(dtype="float64")
         return ranked
 
+    # Resolve cached candles once per row, then reuse them for both liquidity
+    # and risk. This keeps scoring deterministic and avoids reading the same
+    # parquet cache twice for a single symbol.
     symbol_to_security_id = _security_id_lookup(context.universe_df)
     cached_candles = [
         _read_cached_candles(row, symbol_to_security_id, context.data_loader)
         for row in ranked.to_dict("records")
     ]
 
+    # Technical and liquidity are relative to the current shortlist, so they use
+    # cross-sectional normalization. A strong symbol gets a high score compared
+    # with the other rows returned by this same scan.
     technical_scores = cross_sectional(
         pd.Series(
             [technical_raw(row) for row in ranked.to_dict("records")],
@@ -107,6 +121,9 @@ def score_candidates(
             dtype="float64",
         )
     )
+    # Risk and freshness use fixed absolute curves. A volatile symbol is risky
+    # regardless of what else appeared in the shortlist, and a seven-day-old
+    # signal is equally stale in every run.
     risk_scores = pd.Series(
         [
             risk_score_absolute(
@@ -142,6 +159,8 @@ def score_candidates(
     final_scores: list[float] = []
     breakdowns: list[dict[str, Any]] = []
     for index in ranked.index:
+        # Build a receipt row-by-row so the persisted provenance can explain not
+        # only the final number, but also which components were available.
         final_score, breakdown = _score_one_row(
             index,
             component_frames,
@@ -161,7 +180,13 @@ def _score_one_row(
     *,
     config: ScoringConfig,
 ) -> tuple[float, dict[str, Any]]:
-    """Combine one row's available component scores into a final score."""
+    """Combine one row's available component scores into a final score.
+
+    Missing data is handled gently. If liquidity is unavailable for one row but
+    technical/risk/freshness are present, only the present weights are
+    renormalized. The row is kept with a null score only when *no* component has
+    a usable value.
+    """
     components: dict[str, float] = {}
     raw_components: dict[str, float] = {}
     missing: list[str] = []
@@ -173,6 +198,8 @@ def _score_one_row(
         if score is None:
             missing.append(name)
             continue
+        # ``raw_components`` keeps full precision for arithmetic. ``components``
+        # is the rounded, JSON-friendly version shown to users and auditors.
         raw_components[name] = score
         components[name] = round(score, 2)
         if weight is not None:
@@ -187,8 +214,9 @@ def _score_one_row(
             name: round(weight / total_weight, 10)
             for name, weight in weights.items()
         }
-        # The additive formula is intentionally simple and auditable:
-        # final_score = sum(component_score * renormalized_weight).
+        # The additive formula is intentionally simple and auditable. A reader
+        # can recompute it from the receipt:
+        # final_score = sum(component_score * renormalized_present_weight).
         final_score = round(
             sum(
                 raw_components[name] * weight
@@ -213,13 +241,22 @@ def _attach_score_breakdowns(
     ranked: pd.DataFrame,
     breakdowns: list[dict[str, Any]],
 ) -> None:
-    """Copy row provenance and add ``score_breakdown`` without mutating input."""
+    """Copy row provenance and add ``score_breakdown`` without mutating input.
+
+    The scorer writes the receipt into whichever provenance column the row
+    already uses. It does not create a brand-new public column because display
+    and CSV paths should stay compact; UI helpers can still read the nested
+    receipt when they need the component table.
+    """
     for index, breakdown in enumerate(breakdowns):
         for column in ("provenance", "provenance_json"):
             if column not in ranked.columns:
                 continue
             raw = ranked.at[index, column]
             if isinstance(raw, Mapping):
+                # Deep-copy the existing provenance first. Some screeners reuse
+                # nested dicts across tests, and mutating them here would leak a
+                # score receipt back into the caller's original DataFrame.
                 provenance = copy.deepcopy(dict(raw))
                 provenance["score_breakdown"] = breakdown
                 ranked.at[index, column] = provenance
@@ -227,8 +264,15 @@ def _attach_score_breakdowns(
 
 
 def _sort_ranked_frame(frame: pd.DataFrame) -> pd.DataFrame:
-    """Sort score descending, put null scores last, and preserve ties."""
+    """Sort score descending, put null scores last, and preserve ties.
+
+    ``mergesort`` is stable, and ``_rank_original_order`` is an explicit final
+    tie-breaker. Together they make repeated scoring runs deterministic even
+    when two stocks receive the exact same final score.
+    """
     sortable = frame.copy(deep=True)
+    # Temporary columns keep the public result columns untouched. They are
+    # dropped before returning, so screeners do not need to know this helper ran.
     sortable["_rank_original_order"] = range(len(sortable))
     sortable["_rank_final_score"] = pd.to_numeric(
         sortable["final_score"],
@@ -255,11 +299,20 @@ def _read_cached_candles(
     symbol_to_security_id: Mapping[str, str],
     data_loader: Any,
 ) -> pd.DataFrame:
-    """Read cached candles for one row, never falling back to a live fetch."""
+    """Read cached candles for one row, never falling back to a live fetch.
+
+    RANK-002 is allowed to use data the scan already prepared, but it must not
+    surprise the user with extra Dhan calls. That is why this helper only looks
+    for ``read_cached_history`` and deliberately ignores live loader methods.
+    """
     symbol = _clean_text(row.get("symbol"))
     if not symbol:
         return pd.DataFrame()
 
+    # Result rows may already carry security_id. If not, use the universe that
+    # was loaded for the current scan. We do not reload the universe here because
+    # a changed CSV on disk would make scoring differ from the actual screener
+    # inputs.
     security_id = _clean_text(row.get("security_id"))
     if security_id is None:
         security_id = symbol_to_security_id.get(symbol.upper())
@@ -272,13 +325,19 @@ def _read_cached_candles(
     try:
         candles = reader(symbol, security_id)
     except Exception:
-        # A corrupt cache file or a test fake should drop only liquidity/risk.
+        # A corrupt cache file or a test fake should drop only liquidity/risk for
+        # this row. The final score can still be computed from other components.
         return pd.DataFrame()
     return candles if isinstance(candles, pd.DataFrame) else pd.DataFrame()
 
 
 def _security_id_lookup(universe_df: pd.DataFrame | None) -> dict[str, str]:
-    """Build a symbol -> security_id map from the already-loaded universe."""
+    """Build a symbol -> security_id map from the already-loaded universe.
+
+    Different universe builders and Dhan exports have used slightly different
+    security-id column names over time. The ordered column list keeps this
+    helper backward-compatible without requiring every caller to rename columns.
+    """
     if universe_df is None or universe_df.empty or "symbol" not in universe_df.columns:
         return {}
     security_column = next(
@@ -311,6 +370,12 @@ def _freshness_for_row(
 
 
 def _as_date(value: Any) -> dt.date | None:
+    """Parse a stored or pandas-friendly value into a plain ``date``.
+
+    Freshness should be based on the scan's data snapshot, not the current wall
+    clock. This helper accepts the common date-like shapes that can appear in
+    params/result rows and returns ``None`` when the value is not trustworthy.
+    """
     if isinstance(value, dt.datetime):
         return value.date()
     if isinstance(value, dt.date):
@@ -331,6 +396,7 @@ def _log_liquidity(value: float | None) -> float | None:
 
 
 def _finite_component(value: Any) -> float | None:
+    """Return a finite component value or ``None`` for missing/unsafe input."""
     try:
         result = float(value)
     except (TypeError, ValueError):
@@ -339,6 +405,7 @@ def _finite_component(value: Any) -> float | None:
 
 
 def _finite_weight(value: Any) -> float | None:
+    """Return a positive finite weight or ``None`` when it should be ignored."""
     weight = _finite_component(value)
     if weight is None or weight <= 0:
         return None
@@ -346,6 +413,7 @@ def _finite_weight(value: Any) -> float | None:
 
 
 def _clean_text(value: Any) -> str | None:
+    """Trim a symbol/security-id-like value and treat blanks as missing."""
     if value is None:
         return None
     text = str(value).strip()

@@ -222,7 +222,9 @@ def _history_result_row(result: Any) -> dict[str, Any]:
     The SQLAlchemy object becomes detached once the database session closes.
     Copying every scalar we need here avoids later lazy-loading surprises, and
     keeping ``provenance_json`` in this intermediate row lets the score
-    component expander read the receipt before display/CSV paths drop it.
+    component expander read the receipt before display/CSV paths drop it. That
+    is why this helper includes ``provenance_json`` even though the visible
+    results table and CSV intentionally hide it.
     """
     return {
         "symbol": result.symbol,
@@ -429,7 +431,12 @@ def _render_history_run_details(row: dict[str, Any], *, symbol_filter: str = "")
             st.info("This run produced no shortlisted results.")
         return
 
+    # RANK-002 should be visible in history the same way it is visible right
+    # after a scan: best score first, with old/null-score rows still shown last.
     results_df = _sort_results_by_final_score(pd.DataFrame(result_rows))
+    # Drop provenance only after building the ranked frame. The nested
+    # score_breakdown is still needed for the expander below, but raw JSON would
+    # be noisy and unhelpful in the main table.
     display_df = _drop_provenance(results_df)
     st.dataframe(
         _emoji_rating(display_df),
@@ -438,6 +445,9 @@ def _render_history_run_details(row: dict[str, Any], *, symbol_filter: str = "")
         column_config=_decimal_column_config(display_df),
         key=f"history_results_{row['run_id']}",
     )
+    # The main table keeps one compact ``final_score`` column. The expander is
+    # the teaching/audit view that explains where that number came from without
+    # crowding the shortlist.
     components_frame = _score_components_frame(results_df)
     if not components_frame.empty:
         with st.expander("Score components", expanded=False):

@@ -1285,7 +1285,13 @@ def _execute_screener(
 
 
 def _render_scan_output(selected: ScreenerDefinition, cache: dict[str, Any]) -> None:
-    """Render the cached scan: stats + single styled+selectable table + chart."""
+    """Render the cached scan: stats + ranked selectable table + chart.
+
+    The cache payload survives ordinary Streamlit reruns, so this function must
+    be deterministic: sort by ``final_score`` the same way every time, preserve
+    the selected-row contract for charts, and keep exports aligned with what the
+    user sees on screen.
+    """
     results: pd.DataFrame = _sort_results_by_final_score(cache["results"])
     stats = cache["stats"]
     failures: list[dict[str, Any]] = cache["failures"]
@@ -1362,6 +1368,9 @@ def _render_results_with_chart(
     can be rendered (no symbol column, no `build_chart`, etc.).
     """
     table_key = f"results_table_{selected.key}"
+    # RANK-002 sorting happens here too, even though run_scan already returns a
+    # ranked frame. Keeping the UI helper as a second guard makes old cached test
+    # payloads and future history imports display consistently.
     ranked_results = _sort_results_by_final_score(results)
 
     # The reserved PROV-002 provenance column is machine-readable evidence for
@@ -1386,6 +1395,9 @@ def _render_results_with_chart(
     if _has_rating_column(ranked_results):
         st.caption("🟢 BUY / 🔴 SELL · click a row to chart that symbol.")
 
+    # Keep component details one click away instead of adding four more columns
+    # to the main shortlist. The raw `reason` column stays in the table, so the
+    # score explains usefulness without hiding the screener's original rationale.
     components_frame = _score_components_frame(ranked_results)
     if not components_frame.empty:
         with st.expander("Score components", expanded=False):

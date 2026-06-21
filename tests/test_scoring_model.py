@@ -1,4 +1,11 @@
-"""RANK-002 model tests for annotating complete scan result frames."""
+"""RANK-002 model tests for annotating complete scan result frames.
+
+These tests exercise the scorer the way the scan service uses it: start with a
+normal screener DataFrame, add ``final_score`` and a nested ``score_breakdown``,
+and keep raw columns such as ``reason`` intact. The tiny fake loader below is
+intentional - it exposes only cached candle reads so a test will fail loudly if
+the scorer ever tries to fetch fresh market data.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +19,7 @@ from backend.scoring.components import risk_score_absolute
 
 
 def _provenance() -> dict:
+    """Return the smallest valid provenance envelope needed by result rows."""
     return {
         "triggered_rules": ["test_rule"],
         "indicator_values": {"close": 100.0},
@@ -20,6 +28,7 @@ def _provenance() -> dict:
 
 
 def _candles(close_values: list[float], volume_values: list[int] | None = None) -> pd.DataFrame:
+    """Build a small OHLCV frame with realistic columns for component tests."""
     volumes = volume_values or [1000 for _ in close_values]
     return pd.DataFrame(
         {
@@ -34,7 +43,12 @@ def _candles(close_values: list[float], volume_values: list[int] | None = None) 
 
 
 class _CachedLoader:
-    """Fake loader that exposes only the cache-read method scoring is allowed to use."""
+    """Fake loader that exposes only the cache-read method scoring may use.
+
+    The production ``DailyDataLoader`` has both cache reads and live Dhan fetches.
+    RANK-002 should never call the live side, so this fake raises if that method
+    is touched and records every allowed cache read for assertions.
+    """
 
     def __init__(self, frames: dict[str, pd.DataFrame]):
         self.frames = frames
@@ -44,11 +58,14 @@ class _CachedLoader:
         self.cache_reads.append((symbol, security_id))
         return self.frames.get(symbol, pd.DataFrame()).copy()
 
-    def get_daily_history(self, *_args, **_kwargs):  # pragma: no cover - should never be called
+    def get_daily_history(
+        self, *_args, **_kwargs
+    ):  # pragma: no cover - should never be called
         raise AssertionError("RANK-002 scoring must not make live Dhan history calls")
 
 
 def _context(loader: _CachedLoader, *, config: ScoringConfig | None = None) -> ScoringContext:
+    """Build the minimal real ``ScoringContext`` used by score_candidates."""
     return ScoringContext(
         universe_key="test_universe",
         universe_df=pd.DataFrame(

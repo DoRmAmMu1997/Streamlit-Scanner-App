@@ -50,6 +50,9 @@ EVENT_SCAN_STARTED = "scan_started"
 EVENT_SCAN_COMPLETED = "scan_completed"
 EVENT_SCAN_PARTIAL = "scan_partial"
 EVENT_SCAN_FAILED = "scan_failed"
+# RANK-002 scoring is intentionally non-fatal. This warning event means "the
+# shortlist still exists, but ranking metadata could not be produced", which is
+# more precise than overloading the terminal scan_failed lifecycle event.
 EVENT_SCAN_SCORING_FAILED = "scan_scoring_failed"
 EVENT_SYMBOL_SCAN_FAILED = "symbol_scan_failed"
 EVENT_DAILY_JOB_STARTED = "daily_job_started"
