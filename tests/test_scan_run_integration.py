@@ -197,37 +197,45 @@ def test_full_scan_run_persists_results_and_history_can_be_queried(
         assert [row.symbol for row in rows] == ["RELIANCE", "TCS"]
         assert rows[0].signal_date == date(2026, 6, 1)
         assert rows[0].close_price == Decimal("1234.5678")
-        assert rows[0].final_score == Decimal("91.50")
+        assert rows[0].final_score == Decimal("87.06")
         assert rows[0].reason == "fake breakout with rising volume"
         assert rows[0].raw_result_json["close"] == "1234.5678"
-        assert rows[0].provenance_json == {
-            "rules": ["fake_breakout", "volume_confirmation"],
-            "observed_at": "2026-06-01",
-            "screener_key": "fake_integration_screener",
-            "screener_version": None,
-            "triggered_rules": ["fake_breakout", "volume_confirmation"],
-            "indicator_values": {"signal_value": 1.0},
-            "params_snapshot": {
-                "start_date": "2026-01-01",
-                "end_date": "2026-06-02",
-                "min_score": "80.5",
-            },
-            "data_snapshot_date": "2026-06-02",
-            "source": "deterministic",
-            "notes": None,
-            "ai": None,
+        assert rows[0].raw_result_json["final_score"] == 87.06
+        provenance = rows[0].provenance_json
+        assert provenance["rules"] == ["fake_breakout", "volume_confirmation"]
+        assert provenance["observed_at"] == "2026-06-01"
+        assert provenance["screener_key"] == "fake_integration_screener"
+        assert provenance["screener_version"] is None
+        assert provenance["triggered_rules"] == [
+            "fake_breakout",
+            "volume_confirmation",
+        ]
+        assert provenance["indicator_values"] == {"signal_value": 1.0}
+        assert provenance["params_snapshot"] == {
+            "start_date": "2026-01-01",
+            "end_date": "2026-06-02",
+            "min_score": "80.5",
         }
+        assert provenance["data_snapshot_date"] == "2026-06-02"
+        assert provenance["source"] == "deterministic"
+        assert provenance["notes"] is None
+        assert provenance["ai"] is None
+        assert provenance["score_breakdown"]["components"] == {"freshness": 87.06}
+        assert provenance["score_breakdown"]["missing"] == [
+            "technical",
+            "liquidity",
+            "risk",
+        ]
 
-        # ``raw_result_json`` is the complete normalized screener row, so the
-        # author's original receipt remains visible exactly where legacy
-        # readers expect it. The added canonical envelope is stored alongside
-        # it and extracted into the dedicated provenance column.
-        assert rows[0].raw_result_json["provenance"] == {
-            "rules": ["fake_breakout", "volume_confirmation"],
-            "indicator_values": {"signal_value": 1.0},
-            "source": "deterministic",
-            "observed_at": "2026-06-01",
-        }
+        # ``raw_result_json`` is the complete normalized screener row, so legacy
+        # provenance fields remain visible and RANK-002's receipt is appended
+        # beside them.
+        raw_provenance = rows[0].raw_result_json["provenance"]
+        assert raw_provenance["rules"] == ["fake_breakout", "volume_confirmation"]
+        assert raw_provenance["indicator_values"] == {"signal_value": 1.0}
+        assert raw_provenance["source"] == "deterministic"
+        assert raw_provenance["observed_at"] == "2026-06-01"
+        assert raw_provenance["score_breakdown"] == provenance["score_breakdown"]
         assert rows[0].raw_result_json["provenance_json"] == rows[0].provenance_json
         assert rows[1].rating == "WATCH"
         # Row 2 supplied signal_date as the string "2026-06-01"; confirm it parsed.

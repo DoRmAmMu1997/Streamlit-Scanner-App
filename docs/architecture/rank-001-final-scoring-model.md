@@ -55,7 +55,7 @@ not hide raw reasons.
   so most deterministic screener rows have no fundamentals at scan time. v1 therefore scores the
   **four always-computable components** and reserves the other two (§3.1).
 - The **UI sort/column** that renders the ranked shortlist (sort by `final_score`, keep the
-  `reason` column) → RANK-002's wiring or a small follow-up UI ticket.
+  `reason` column) → implemented by RANK-002's wiring.
 - **Portfolio-aware** ranking (sector caps, position sizing, correlation) → later EPIC 11 tickets.
 
 The design stops at "methodology only" — exactly as VALID-001 did for VALID-002 — so the formula
@@ -226,8 +226,8 @@ reasons" — are pinned down here as hard rules, in the spirit of VALID-001 §4'
 
 This is the decisive difference from VALID-001 (which added a table and therefore had to ship a
 schema stub + migration): RANK-001 changes **no schema**, so the `test_migration_matches_orm_metadata`
-drift guard forces no code at all. RANK-002 may optionally promote `score_breakdown` to a typed
-optional field on `SignalProvenance`; storing it as a preserved provenance key works either way.
+drift guard forces no code at all. RANK-002 promotes `score_breakdown` to a typed optional field on
+`SignalProvenance` while still storing it as a provenance JSON key for backward-compatible readers.
 
 **Example `score_breakdown`** (one row, fully covered):
 

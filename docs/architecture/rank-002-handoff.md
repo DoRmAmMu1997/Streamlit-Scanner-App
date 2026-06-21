@@ -4,9 +4,10 @@
 |---|---|
 | **Ticket** | RANK-002 — Implement the four-component scorer |
 | **Type / Priority** | Story · P2 |
+| **Status** | Implemented by `codex/rank-002-ranking-layer` (scorer, persistence receipt, scanner/history UI sort + component tables) |
 | **Owner / Reviewer** | **Codex** / Claude |
 | **Depends on** | RANK-001 (methodology — **landed**: [`rank-001-final-scoring-model.md`](rank-001-final-scoring-model.md)) · SCAN-001…004 (the `final_score` column + persistence) |
-| **Unblocks** | RANK-003 (fundamental/valuation components) · the ranked-shortlist UI sort |
+| **Unblocks** | RANK-003 (fundamental/valuation components) and later portfolio-aware ranking tickets |
 
 > Goal (from EPIC 11): *Convert raw scanner results into a ranked shortlist.*
 > Acceptance (RANK-002): `final_score` populated per row from the documented formula · component
@@ -49,10 +50,11 @@ Infrastructure to build on (don't reinvent):
 - **`run_scan`** — [`backend/scanning/service.py`](../../backend/scanning/service.py). Your one call
   site (§2.4); note how it already copies caller params and never raises for failures.
 
-**Boundary to keep:** RANK-002 delivers the *pure scorer + config + the one `run_scan` call + tests
-+ a component LLD*. It does **not** build `fundamental_score`/`valuation_score` (→ **RANK-003**) or
-the ranked-shortlist UI sort (a small follow-up). "Convert raw results into a ranked shortlist" is
-satisfied by `final_score` being populated and the rows being sortable, proven by tests.
+**Implemented boundary:** RANK-002 delivers the *pure scorer + config + the one `run_scan` call +
+scanner/history UI sort + component tables + tests + a component LLD*. It does **not** build
+`fundamental_score`/`valuation_score` (→ **RANK-003**). "Convert raw results into a ranked
+shortlist" is satisfied by `final_score` being populated, persisted, and used as the default
+display/export ordering.
 
 ---
 
@@ -67,10 +69,11 @@ satisfied by `final_score` being populated and the rows being sortable, proven b
 | `config/scoring_model.yaml` | **New** — weights + params (design §6); defaults apply when absent. |
 | `backend/scanning/service.py` | **Edit** — call `score_candidates` once, right after `run_callable` returns (§2.4), wrapped non-fatally. |
 | `backend/scanning/result_contract.py` | **Edit (optional)** — add a typed `score_breakdown: Mapping \| None = None` to `SignalProvenance` (mypy-friendlier than a bare preserved key). |
+| `app.py`, `ui/common.py`, `ui/history_page.py` | **Edit** — sort scanner/history tables by `final_score`, show the compact Score components expander, and keep CSV exports free of raw receipt dicts. |
 | `tests/test_scoring_components.py` | **New** — pure-function edge cases (synthetic frames/sets, no DB). |
 | `tests/test_scoring_model.py` | **New** — aggregation, renormalization, missing-data, determinism, "reason untouched." |
 | `tests/test_scan_service.py` | **Edit** — assert `run_scan` populates `final_score`/`score_breakdown` and stays non-fatal when scoring fails. |
-| `docs/architecture/components/scoring.md` | **New** — component LLD (purpose · position · interface · decisions · failure modes · config · testing · extension points). |
+| `docs/architecture/components/scoring.md` | **New** — component LLD (purpose · position · interface · decisions · failure modes · config · UI behavior · testing · extension points). |
 | `docs/architecture/README.md` · `high-level-design.md` | **Edit** — link the new LLD from the component map (RANK-001 already added the ticket-doc index rows). |
 
 ---

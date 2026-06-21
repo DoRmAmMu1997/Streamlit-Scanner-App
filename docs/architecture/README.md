@@ -35,6 +35,7 @@ testing · extension points.
 - [screener-catalog.md](components/screener-catalog.md) — the 10 screeners.
 - [indicators.md](components/indicators.md) — indicator library (TA-Lib/pandas_ta + fallbacks).
 - [scan-service-and-provenance.md](components/scan-service-and-provenance.md) — `run_scan` lifecycle + result/provenance contract.
+- [scoring.md](components/scoring.md) — RANK-002 deterministic `final_score` scorer + score-component UI/export behavior.
 - [charts-visualization.md](components/charts-visualization.md) — Lightweight-Charts specs + chart cache.
 
 ### Data & persistence
@@ -66,7 +67,7 @@ testing · extension points.
 - **[valid-001-forward-return-validation.md](valid-001-forward-return-validation.md)** — VALID-001 methodology, no-lookahead rules, and schema rationale.
 - **[valid-002-handoff.md](valid-002-handoff.md)** — VALID-002 build brief plus resolved implementation decisions.
 - **[rank-001-final-scoring-model.md](rank-001-final-scoring-model.md)** — RANK-001 scoring methodology: the four v1 components, normalization, weighting, score ranges, missing-data behaviour, and the no-hidden-reasons invariant (no schema/migration).
-- **[rank-002-handoff.md](rank-002-handoff.md)** — RANK-002 build brief for the `backend/scoring/` scorer (pure components + config + the `run_scan` call + tests).
+- **[rank-002-handoff.md](rank-002-handoff.md)** — RANK-002 implemented build brief for the `backend/scoring/` scorer (pure components + config + the `run_scan` call + UI sort/components + tests).
 - **[audit-2026-06.md](audit-2026-06.md)** — June 2026 codebase audit & hardening register (QUAL-001/002/003, REF-001, PERF-001, DOC-001): what was found, fixed, and deferred.
 
 ## Conventions

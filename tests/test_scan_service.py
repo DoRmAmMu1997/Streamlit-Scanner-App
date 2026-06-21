@@ -22,6 +22,7 @@ from backend.observability import (
     EVENT_SCAN_COMPLETED,
     EVENT_SCAN_FAILED,
     EVENT_SCAN_PARTIAL,
+    EVENT_SCAN_SCORING_FAILED,
     EVENT_SCAN_STARTED,
     EVENT_SYMBOL_SCAN_FAILED,
 )
@@ -39,11 +40,22 @@ from backend.storage.repository import (
 
 
 class _FakeLoader:
-    """Minimal data loader exposing only the ``last_failures`` the service reads."""
+    """Minimal data loader exposing the service-facing loader attributes."""
 
-    def __init__(self, last_failures=None, last_data_quality_reports=None):
+    def __init__(
+        self,
+        last_failures=None,
+        last_data_quality_reports=None,
+        cached_frames=None,
+    ):
         self.last_failures = list(last_failures or [])
         self.last_data_quality_reports = list(last_data_quality_reports or [])
+        self.cached_frames = dict(cached_frames or {})
+        self.cache_reads: list[tuple[str, str]] = []
+
+    def read_cached_history(self, symbol: str, security_id: str) -> pd.DataFrame:
+        self.cache_reads.append((symbol, security_id))
+        return self.cached_frames.get(symbol, pd.DataFrame()).copy()
 
 
 def _base_params() -> dict:
@@ -92,11 +104,11 @@ def _quality_report(symbol: str, severity: str, code: str) -> CandleQualityRepor
 
 
 def test_run_scan_success_persists_run_and_results(db_engine, session_factory):
-    """A successful scan persists normalized copies but returns legacy UI data.
+    """A successful scan persists scored copies and returns ranked UI data.
 
     This checks both sides of the service boundary. The caller receives the
-    original DataFrame shape, while a fresh database session sees the canonical
-    provenance generated immediately before persistence.
+    ranked DataFrame with raw reason text intact, while a fresh database session
+    sees the canonical provenance generated immediately before persistence.
     """
     params = _base_params()
     # A callback in the caller's params must be stripped before it is persisted.
@@ -118,8 +130,7 @@ def test_run_scan_success_persists_run_and_results(db_engine, session_factory):
     assert result.status is ScanStatus.SUCCESS
     assert result.run_id is not None
     assert list(result.results["symbol"]) == ["RELIANCE", "TCS"]
-    # PROV-001A normalizes only copies sent to persistence. Streamlit must keep
-    # receiving the exact legacy DataFrame produced by the screener.
+    assert "final_score" in result.results.columns
     assert "provenance_json" not in result.results.columns
     assert list(result.results.columns) == [
         "symbol",
@@ -128,6 +139,7 @@ def test_run_scan_success_persists_run_and_results(db_engine, session_factory):
         "close",
         "reason",
         "provenance",
+        "final_score",
     ]
 
     # Re-query the database to prove the run + results were written.
@@ -144,24 +156,69 @@ def test_run_scan_success_persists_run_and_results(db_engine, session_factory):
         rows = get_scan_results(session, result.run_id)
         assert [r.symbol for r in rows] == ["RELIANCE", "TCS"]
 
-        assert rows[0].provenance_json == {
-            "screener_key": "envelope",
-            "screener_version": None,
-            "triggered_rules": ["oversold_bounce"],
-            "indicator_values": {"signal_value": 31.5},
-            "params_snapshot": {
-                "start_date": "2016-06-02",
-                "end_date": "2026-06-02",
-                "period": 20,
-            },
-            "data_snapshot_date": "2026-06-02",
-            "source": "deterministic",
-            "notes": None,
-            "ai": None,
+        assert rows[0].final_score == Decimal("87.06")
+        provenance = rows[0].provenance_json
+        assert provenance["screener_key"] == "envelope"
+        assert provenance["screener_version"] is None
+        assert provenance["triggered_rules"] == ["oversold_bounce"]
+        assert provenance["indicator_values"] == {"signal_value": 31.5}
+        assert provenance["params_snapshot"] == {
+            "start_date": "2016-06-02",
+            "end_date": "2026-06-02",
+            "period": 20,
         }
+        assert provenance["data_snapshot_date"] == "2026-06-02"
+        assert provenance["source"] == "deterministic"
+        assert provenance["notes"] is None
+        assert provenance["ai"] is None
+        breakdown = provenance["score_breakdown"]
+        assert breakdown["model_version"] == "rank-1.0"
+        assert breakdown["components"] == {"freshness": 87.06}
+        assert breakdown["coverage"] == ["freshness"]
+        assert breakdown["missing"] == ["technical", "liquidity", "risk"]
         # The repository's raw audit copy receives the normalized persistence
         # row, while the in-memory DataFrame above remains untouched.
-        assert rows[0].raw_result_json["provenance_json"] == rows[0].provenance_json
+        assert rows[0].raw_result_json["provenance_json"] == provenance
+
+
+def test_run_scan_scoring_failure_is_non_fatal_and_logged(
+    db_engine,
+    session_factory,
+    caplog,
+    monkeypatch,
+):
+    """Scoring errors should not erase otherwise valid scanner results."""
+    from backend.scanning import service
+
+    def screener_run(_universe_df, _data_loader, _params):
+        return _two_buy_rows()
+
+    def broken_score_candidates(*_args, **_kwargs):
+        raise RuntimeError("token=RANKSECRET")
+
+    monkeypatch.setattr(service, "score_candidates", broken_score_candidates)
+
+    with caplog.at_level(logging.INFO):
+        result = run_scan(
+            screener_key="envelope",
+            universe_key="hemant_super_45",
+            run_callable=screener_run,
+            universe_df=pd.DataFrame({"symbol": ["RELIANCE", "TCS"]}),
+            data_loader=_FakeLoader(),
+            params=_base_params(),
+            session_factory=session_factory,
+        )
+
+    assert result.status is ScanStatus.SUCCESS
+    assert result.results["final_score"].isna().all()
+    events = _event_fields(caplog, EVENT_SCAN_SCORING_FAILED)
+    assert len(events) == 1
+    assert events[0]["phase"] == "scoring"
+    assert events[0]["error_type"] == "RuntimeError"
+    assert "RANKSECRET" not in str(events)
+    with Session(db_engine) as session:
+        rows = get_scan_results(session, result.run_id)
+        assert [row.final_score for row in rows] == [None, None]
 
 
 def test_run_scan_creates_running_row_before_invoking_screener(

@@ -7,8 +7,10 @@ each other (or app.py) without creating cycles.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -27,9 +29,119 @@ def _drop_provenance(results: pd.DataFrame) -> pd.DataFrame:
     keeps this safe for legacy or hand-built frames that never had the column.
     """
     return results.drop(
-        columns=[PROVENANCE_COLUMN, "provenance_json"],
+        columns=[PROVENANCE_COLUMN, "provenance_json", "score_breakdown"],
         errors="ignore",
     )
+
+
+def _sort_results_by_final_score(results: pd.DataFrame) -> pd.DataFrame:
+    """Return display/export rows sorted by ``final_score`` when available.
+
+    The scan service already ranks new results, but persisted history may
+    include older or hand-built frames. This helper gives every UI path the same
+    deterministic ordering: highest score first, null/non-finite scores last,
+    and original row order preserved for ties.
+    """
+    if "final_score" not in results.columns:
+        return results.copy()
+
+    ranked = results.copy()
+    ranked["_rank_original_order"] = range(len(ranked))
+    ranked["_rank_final_score"] = pd.to_numeric(
+        ranked["final_score"],
+        errors="coerce",
+    )
+    ranked["_rank_final_score"] = ranked["_rank_final_score"].where(
+        np.isfinite(ranked["_rank_final_score"]),
+        np.nan,
+    )
+    return (
+        ranked.sort_values(
+            by=["_rank_final_score", "_rank_original_order"],
+            ascending=[False, True],
+            na_position="last",
+            kind="mergesort",
+        )
+        .drop(columns=["_rank_original_order", "_rank_final_score"])
+        .reset_index(drop=True)
+    )
+
+
+_SCORE_COMPONENT_COLUMNS = [
+    "Symbol",
+    "Final score",
+    "Technical",
+    "Liquidity",
+    "Risk",
+    "Freshness",
+    "Coverage",
+    "Missing",
+]
+
+
+def _score_components_frame(results: pd.DataFrame) -> pd.DataFrame:
+    """Build the compact RANK-002 component table for Streamlit expanders.
+
+    ``score_breakdown`` is an audit receipt, so the main results table hides the
+    raw dictionary. This helper extracts just the human-sized fields: component
+    scores, coverage, and missing components.
+    """
+    rows: list[dict[str, Any]] = []
+    for row in results.to_dict("records"):
+        breakdown = _extract_score_breakdown(row)
+        if breakdown is None:
+            continue
+        components = breakdown.get("components")
+        component_map = components if isinstance(components, Mapping) else {}
+        rows.append(
+            {
+                "Symbol": row.get("symbol", ""),
+                "Final score": _optional_float(
+                    row.get("final_score", breakdown.get("final_score"))
+                ),
+                "Technical": _optional_float(component_map.get("technical")),
+                "Liquidity": _optional_float(component_map.get("liquidity")),
+                "Risk": _optional_float(component_map.get("risk")),
+                "Freshness": _optional_float(component_map.get("freshness")),
+                "Coverage": _join_component_names(breakdown.get("coverage")),
+                "Missing": _join_component_names(breakdown.get("missing")),
+            }
+        )
+    return pd.DataFrame(rows, columns=_SCORE_COMPONENT_COLUMNS)
+
+
+def _extract_score_breakdown(row: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """Find ``score_breakdown`` on a result row or inside provenance."""
+    direct = row.get("score_breakdown")
+    if isinstance(direct, Mapping):
+        return direct
+
+    for column in (PROVENANCE_COLUMN, "provenance_json"):
+        provenance = row.get(column)
+        if not isinstance(provenance, Mapping):
+            continue
+        nested = provenance.get("score_breakdown")
+        if isinstance(nested, Mapping):
+            return nested
+    return None
+
+
+def _optional_float(value: Any) -> float | None:
+    """Coerce a display number while keeping missing/non-finite values blank."""
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if np.isfinite(result) else None
+
+
+def _join_component_names(value: Any) -> str:
+    """Render a list-like component set as compact comma-separated text."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list | tuple):
+        return ", ".join(str(item) for item in value)
+    return ""
 
 
 # Excel/Sheets treat a cell whose first character is one of these as a formula.

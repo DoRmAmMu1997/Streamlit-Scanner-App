@@ -44,12 +44,14 @@ from backend.observability import (
     EVENT_SCAN_COMPLETED,
     EVENT_SCAN_FAILED,
     EVENT_SCAN_PARTIAL,
+    EVENT_SCAN_SCORING_FAILED,
     EVENT_SCAN_STARTED,
     EVENT_SYMBOL_SCAN_FAILED,
     ExceptionInfo,
     log_event,
 )
 from backend.scanning.result_contract import ResultContractError, normalize_screener_row
+from backend.scoring import ScoringContext, load_scoring_config, score_candidates
 from backend.security import redact_text
 from backend.storage.database import session_scope
 from backend.storage.models import ScanRun, ScanStatus
@@ -207,6 +209,16 @@ def run_scan(
             f"The screener raised {type(exc).__name__} before producing results."
         )
     else:
+        results = _score_results_safely(
+            results,
+            run_id=run_id,
+            scan_name=scan_name,
+            screener_key=screener_key,
+            universe_key=universe_key,
+            universe_df=universe_df,
+            data_loader=data_loader,
+            data_snapshot_date=_as_date(params.get("end_date")),
+        )
         # A scan is PARTIAL when it produced a usable frame but some symbols could
         # not be loaded (data loader) or computed (screener per-symbol callback).
         loader_failures = list(getattr(data_loader, "last_failures", None) or [])
@@ -507,6 +519,64 @@ def _current_exc_info() -> ExceptionInfo:
     triple; inside an active ``except`` it never is, so the cast is truthful.
     """
     return cast("ExceptionInfo", sys.exc_info())
+
+
+def _score_results_safely(
+    results: pd.DataFrame,
+    *,
+    run_id: int | None,
+    scan_name: str | None,
+    screener_key: str,
+    universe_key: str,
+    universe_df: pd.DataFrame,
+    data_loader: Any,
+    data_snapshot_date: dt.date | None,
+) -> pd.DataFrame:
+    """Apply RANK-002 scoring without making scoring a scan failure.
+
+    Beginner note:
+    Ranking is useful metadata, but the core scanner promise is still "show the
+    shortlisted rows." If scoring has a bug or reads a corrupt cache file, this
+    wrapper logs a precise warning, adds a null ``final_score`` column, and lets
+    persistence/UI continue with the original results.
+    """
+    if results is None or results.empty:
+        return results
+
+    try:
+        return score_candidates(
+            results,
+            context=ScoringContext(
+                universe_key=universe_key,
+                universe_df=universe_df,
+                data_loader=data_loader,
+                data_snapshot_date=data_snapshot_date,
+                config=load_scoring_config(),
+            ),
+        )
+    except Exception:
+        exc_info = _current_exc_info()
+        log_event(
+            logger,
+            EVENT_SCAN_SCORING_FAILED,
+            level=logging.WARNING,
+            exc_info=exc_info,
+            run_id=run_id,
+            scan_name=scan_name,
+            screener_key=screener_key,
+            universe_key=universe_key,
+            phase="scoring",
+            error_type=exc_info[0].__name__,
+            results_count=len(results),
+        )
+        return _with_null_final_score(results)
+
+
+def _with_null_final_score(results: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy with explicit null scores after scoring failure."""
+    fallback = results.copy(deep=True)
+    fallback["final_score"] = None
+    return fallback
 
 
 def _create_run_header(

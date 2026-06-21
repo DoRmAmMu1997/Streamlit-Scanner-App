@@ -119,6 +119,8 @@ from ui.common import (  # noqa: F401
     _emoji_rating,
     _escape_cell,
     _redact_secrets,
+    _score_components_frame,
+    _sort_results_by_final_score,
 )
 from ui.comparison_page import _render_comparison_page
 from ui.config_page import _render_config_page
@@ -138,6 +140,7 @@ from ui.history_page import (  # noqa: F401
     _format_utc_timestamp,
     _history_filter_kwargs,
     _history_filter_signature,
+    _history_result_row,
     _history_run_row,
     _history_runs_frame,
     _render_history_page,
@@ -1283,7 +1286,7 @@ def _execute_screener(
 
 def _render_scan_output(selected: ScreenerDefinition, cache: dict[str, Any]) -> None:
     """Render the cached scan: stats + single styled+selectable table + chart."""
-    results: pd.DataFrame = cache["results"]
+    results: pd.DataFrame = _sort_results_by_final_score(cache["results"])
     stats = cache["stats"]
     failures: list[dict[str, Any]] = cache["failures"]
     compute_failures: list[dict[str, Any]] = cache.get("compute_failures", [])
@@ -1316,7 +1319,9 @@ def _render_scan_output(selected: ScreenerDefinition, cache: dict[str, Any]) -> 
         # so it doubles as the OBS-003 export trigger (edge-triggered, no dedup).
         if st.download_button(
             "Download results CSV",
-            data=_csv_safe(_drop_provenance(results)).to_csv(index=False).encode("utf-8"),
+            data=_csv_safe(_drop_provenance(results))
+            .to_csv(index=False)
+            .encode("utf-8"),
             file_name=results_file_name,
             mime="text/csv",
         ):
@@ -1357,11 +1362,12 @@ def _render_results_with_chart(
     can be rendered (no symbol column, no `build_chart`, etc.).
     """
     table_key = f"results_table_{selected.key}"
+    ranked_results = _sort_results_by_final_score(results)
 
     # The reserved PROV-002 provenance column is machine-readable evidence for
     # persistence, not a table column; drop it for display. Row order/indices are
     # unchanged, so the row-selection below still maps back to `results`.
-    display = _drop_provenance(results)
+    display = _drop_provenance(ranked_results)
 
     # ONE plain DataFrame does both jobs: emoji BUY/SELL badges for the eye,
     # and `selection_mode` row-selection to drive the chart. We deliberately
@@ -1377,13 +1383,24 @@ def _render_results_with_chart(
         on_select="rerun",
         key=table_key,
     )
-    if _has_rating_column(results):
+    if _has_rating_column(ranked_results):
         st.caption("🟢 BUY / 🔴 SELL · click a row to chart that symbol.")
 
-    if "symbol" not in results.columns or selected.build_chart is None:
+    components_frame = _score_components_frame(ranked_results)
+    if not components_frame.empty:
+        with st.expander("Score components", expanded=False):
+            st.dataframe(
+                components_frame,
+                width="stretch",
+                hide_index=True,
+                column_config=_decimal_column_config(components_frame),
+                key=f"score_components_{selected.key}",
+            )
+
+    if "symbol" not in ranked_results.columns or selected.build_chart is None:
         return None
 
-    symbols = [str(symbol).upper() for symbol in results["symbol"].tolist()]
+    symbols = [str(symbol).upper() for symbol in ranked_results["symbol"].tolist()]
     if not symbols:
         return None
 

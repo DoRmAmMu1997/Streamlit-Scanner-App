@@ -1,0 +1,16 @@
+# RANK-002 scoring model defaults.
+#
+# All component scores and the final score live on a 0-100 scale. The scorer
+# renormalizes over whichever components are present for a row, so missing
+# cached candles or missing technical fields drop only that component.
+scoring:
+  model_version: "rank-1.0"
+  weights:
+    technical: 0.45
+    risk: 0.25
+    liquidity: 0.20
+    freshness: 0.10
+  liquidity_window: 20
+  risk_window: 60
+  risk_vol_cap: 0.06
+  freshness_halflife_days: 5
