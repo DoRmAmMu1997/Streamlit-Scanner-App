@@ -582,6 +582,56 @@ def test_config_entry_overrides_universe_and_params_reach_the_service(capsys):
     assert params["end_date"] == date(2026, 6, 5)
 
 
+def test_outcome_carries_structured_partial_failure_counts() -> None:
+    """ALERT-001 needs partial-symbol counts, not just fatal screener counts."""
+    from backend.jobs.run_daily_scan import run_daily_scan
+
+    def fake_scan_runner(**_kwargs):
+        return ScanRunResult(
+            status=ScanStatus.PARTIAL,
+            results=pd.DataFrame([_row_for("X")]),
+            run_id=10,
+            compute_failures=[
+                {"symbol": "BAD", "message": "indicator failed"},
+                {
+                    "symbol": "AI_BAD",
+                    "message": "invalid JSON",
+                    "phase": "ai_validation",
+                },
+            ],
+            rejected_result_rows=1,
+            ai_validation_failures=1,
+            data_quality_json={"fatal_symbols": 1, "fatal_findings": 2},
+            error_message="partial symbol failures",
+        )
+
+    summary = run_daily_scan(
+        screener_keys=["envelope_knoxville_buy"],
+        registry_loader=lambda: {
+            "envelope_knoxville_buy": _definition(
+                "envelope_knoxville_buy",
+                "fno",
+                lambda *_args: pd.DataFrame([_row_for("X")]),
+            )
+        },
+        universe_loader=lambda key: _fake_universe(key.upper()),
+        data_loader_factory=lambda: _FakeLoader(
+            last_failures=[{"symbol": "LOAD_BAD", "message": "timeout"}]
+        ),
+        scan_runner=fake_scan_runner,
+        today=date(2026, 6, 5),
+    )
+
+    outcome = summary.outcomes[0]
+    assert outcome.fatal is False
+    assert outcome.loader_failures == 1
+    assert outcome.compute_failures == 2
+    assert outcome.rejected_result_rows == 1
+    assert outcome.ai_validation_failures == 1
+    assert outcome.data_quality_fatal_symbols == 1
+    assert outcome.data_quality_fatal_findings == 2
+
+
 def test_config_unknown_screener_is_fatal_but_keeps_running_valid_entries(
     file_session_factory,
 ):

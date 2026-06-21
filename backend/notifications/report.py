@@ -13,7 +13,8 @@ import logging
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from decimal import Decimal, InvalidOperation
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.orm import Session
 
@@ -36,8 +37,19 @@ class RankedRow:
 
     symbol: str
     rating: str | None
-    final_score: float | None
+    score: float | None
     screener_key: str
+    score_source: str = "final_score"
+
+    @property
+    def final_score(self) -> float | None:
+        """Backward-compatible alias for older renderer/tests.
+
+        ALERT-001 originally exposed only ``final_score``. Once we added the
+        confidence fallback, the neutral field name ``score`` became clearer,
+        but this property keeps older in-process callers from breaking.
+        """
+        return self.score
 
 
 @dataclass(frozen=True)
@@ -60,6 +72,7 @@ class DailyScanReport:
     total_symbols_scanned: int | None
     total_shortlisted: int
     failed_count: int
+    failed_symbols_or_findings: int
     top_results: tuple[RankedRow, ...]
     app_url: str
 
@@ -69,6 +82,60 @@ def _status_label(outcome: DailyScanOutcome) -> str:
     if outcome.fatal:
         return "failed"
     return outcome.status.value if outcome.status is not None else "unknown"
+
+
+def _count_attr(outcome: DailyScanOutcome, name: str) -> int:
+    """Read optional integer fields from real or test outcome objects safely."""
+    try:
+        value = int(getattr(outcome, name, 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(value, 0)
+
+
+def _failed_symbols_or_findings(outcome: DailyScanOutcome) -> int:
+    """Return the non-fatal dropped-symbol/finding count for one outcome.
+
+    ``ai_validation_failures`` is intentionally not added here because those
+    failures are already included in ``compute_failures`` by the scan service.
+    Counting it again would make AI partial runs look worse than they are.
+    """
+    return (
+        _count_attr(outcome, "loader_failures")
+        + _count_attr(outcome, "compute_failures")
+        + _count_attr(outcome, "rejected_result_rows")
+        + _count_attr(outcome, "data_quality_fatal_symbols")
+        + _count_attr(outcome, "data_quality_fatal_findings")
+    )
+
+
+def _finite_decimal(value: Any) -> Decimal | None:
+    """Parse a finite numeric score from typed columns or raw JSON.
+
+    Raw scanner JSON can contain strings, ints, floats, ``None``, or accidental
+    values such as ``"nan"``. The notification should simply treat bad values as
+    unscored, not fail the whole alert.
+    """
+    if value is None:
+        return None
+    try:
+        score = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    return score if score.is_finite() else None
+
+
+def _score_and_source(row: Any) -> tuple[float | None, str]:
+    """Return the report score and the label the renderer should show."""
+    final_score = _finite_decimal(getattr(row, "final_score", None))
+    if final_score is not None:
+        return float(final_score), "final_score"
+    raw_result = getattr(row, "raw_result_json", None)
+    if isinstance(raw_result, dict):
+        confidence = _finite_decimal(raw_result.get("confidence"))
+        if confidence is not None:
+            return float(confidence), "confidence"
+    return None, "unscored"
 
 
 def build_daily_scan_report(
@@ -91,6 +158,9 @@ def build_daily_scan_report(
     )
     total_shortlisted = sum(int(outcome.row_count) for outcome in outcomes)
     failed_count = sum(1 for outcome in outcomes if outcome.fatal)
+    failed_symbols_or_findings = sum(
+        _failed_symbols_or_findings(outcome) for outcome in outcomes
+    )
     run_ids = [outcome.run_id for outcome in outcomes if outcome.run_id is not None]
     screener_by_run = {
         outcome.run_id: outcome.screener_key
@@ -111,19 +181,19 @@ def build_daily_scan_report(
                 top_rows = get_top_ranked_results(
                     session, run_ids, limit=TOP_RESULTS_LIMIT
                 )
-                top_results = tuple(
-                    RankedRow(
-                        symbol=row.symbol,
-                        rating=row.rating,
-                        final_score=(
-                            float(row.final_score)
-                            if row.final_score is not None
-                            else None
-                        ),
-                        screener_key=screener_by_run.get(row.run_id, ""),
+                ranked_rows: list[RankedRow] = []
+                for row in top_rows:
+                    score, score_source = _score_and_source(row)
+                    ranked_rows.append(
+                        RankedRow(
+                            symbol=row.symbol,
+                            rating=row.rating,
+                            score=score,
+                            screener_key=screener_by_run.get(row.run_id, ""),
+                            score_source=score_source,
+                        )
                     )
-                    for row in top_rows
-                )
+                top_results = tuple(ranked_rows)
         except Exception:  # noqa: BLE001 - a read failure must not block the alert
             logger.warning("daily-scan report DB read failed", exc_info=True)
             total_symbols_scanned = None
@@ -135,6 +205,7 @@ def build_daily_scan_report(
         total_symbols_scanned=total_symbols_scanned,
         total_shortlisted=total_shortlisted,
         failed_count=failed_count,
+        failed_symbols_or_findings=failed_symbols_or_findings,
         top_results=top_results,
         app_url=settings.app_url,
     )

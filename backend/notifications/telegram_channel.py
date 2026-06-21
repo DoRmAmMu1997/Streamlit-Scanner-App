@@ -46,7 +46,15 @@ def send_telegram(
         "disable_web_page_preview": True,
     }
     try:
-        response = http.post(url, json=payload, timeout=TELEGRAM_TIMEOUT_SECONDS)
+        response = http.post(
+            url,
+            json=payload,
+            timeout=TELEGRAM_TIMEOUT_SECONDS,
+            # Requests follows redirects by default. The Telegram host is fixed,
+            # so refusing redirects keeps a proxy/API edge from bouncing a bot
+            # token-bearing URL to any other origin.
+            allow_redirects=False,
+        )
         response.raise_for_status()
         body = response.json()
     except requests.RequestException as exc:

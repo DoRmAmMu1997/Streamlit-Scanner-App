@@ -40,13 +40,16 @@ def send_email(
     smtp_factory: SmtpFactory = _default_smtp_factory,
 ) -> None:
     """Send the summary email. Raises ``EmailSendError`` on any SMTP/network fault."""
-    message = EmailMessage()
-    message["Subject"] = subject
-    message["From"] = settings.email_from
-    message["To"] = settings.email_to
-    message.set_content(body)
-
     try:
+        message = EmailMessage()
+        # Header assignment validates CR/LF injection before any SMTP connection
+        # is opened. Keep it inside this try block so malformed operator env
+        # values become the same non-fatal channel error as network failures.
+        message["Subject"] = subject
+        message["From"] = settings.email_from
+        message["To"] = settings.email_to
+        message.set_content(body)
+
         with smtp_factory(
             settings.smtp_host, settings.smtp_port, timeout=EMAIL_TIMEOUT_SECONDS
         ) as server:
@@ -56,7 +59,7 @@ def send_email(
             server.starttls(context=ssl.create_default_context())
             server.login(settings.smtp_user, settings.smtp_password)
             server.send_message(message)
-    except (smtplib.SMTPException, OSError) as exc:
+    except (smtplib.SMTPException, OSError, ValueError) as exc:
         # SMTP/network errors can echo credentials or the server banner.
         detail = redact_text(str(exc), extra_secrets=[settings.smtp_password])
         raise EmailSendError(f"SMTP send failed: {detail}") from exc

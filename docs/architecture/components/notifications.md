@@ -55,7 +55,7 @@ fatal summary — so "a failed scan sends a failure alert" holds across the boar
 | Decision | Rationale | Alternative rejected |
 |---|---|---|
 | **Opt-in, best-effort, non-fatal** | Alerts are a convenience, not a production requirement; a notifier fault must never break a scheduled scan or its exit code. | Adding the creds to `validate_production_settings` — would force every deploy to configure alerts and could fail-closed on a notifier issue. |
-| **Read top-N from persisted history** (`get_top_ranked_results`, nulls-last) | One source of truth (JOB-003 read-model pattern); ranks by `final_score` and **degrades to symbol order until RANK-* lands**, then auto-ranks — no coupling to RANK-002. | Threading result DataFrames out of the job — more plumbing, no persistence guarantee. |
+| **Read top-N from persisted history** (`get_top_ranked_results`, score fallback) | One source of truth (JOB-003 read-model pattern); ranks by `final_score`, then numeric raw `confidence`, then stable unscored rows. The renderer labels the source so confidence is never confused with a final model score. | Threading result DataFrames out of the job - more plumbing, no persistence guarantee. |
 | **Two secrets registered in `secret_values()`** (token, password) | One definition of "secret" so the shared SEC-002 filter masks them everywhere; the body is built only from non-secret fields and re-run through `redact_text`. | Per-module redaction — drifts from the central registry. |
 | **Channels behind one interface, each config-gated** | Faithful to "email/Telegram"; the user enables either/both by setting creds. | One channel only — less flexible for the same code shape. |
 | **Notify at every job terminal path via a synthetic summary** | "Failed scan sends failure alert" must hold even when the scan can't start (DB down, bad config, crash). | Hooking only the success path — silent on the failures that matter most. |
@@ -66,8 +66,9 @@ fatal summary — so "a failed scan sends a failure alert" holds across the boar
 - **No channel configured** → `notification_skipped` logged, no-op.
 - **One channel send fails** → `notification_failed` logged (redacted), the other channel still attempted, job exit code unchanged.
 - **DB read fails while building the report** → caught; the alert still sends with the counts already in the summary (symbols/top-N omitted).
-- **Telegram/SMTP/network error** → wrapped in `TelegramSendError`/`EmailSendError` with the token/password scrubbed via `redact_text(extra_secrets=…)`.
-- **Tampered/unsafe Telegram host** → refused by `is_safe_http_url(allowed_hosts={"api.telegram.org"})` before any request.
+- **Telegram/SMTP/network error** -> wrapped in `TelegramSendError`/`EmailSendError` with the token/password scrubbed via `redact_text(extra_secrets=...)`.
+- **Telegram redirect or tampered/unsafe host** -> unsafe hosts are refused by `is_safe_http_url(allowed_hosts={"api.telegram.org"})` before any request, and redirects are disabled so the bot-token URL is not followed to another origin.
+- **Malformed email header env** -> CR/LF header values are wrapped as `EmailSendError` before any SMTP connection is opened.
 
 ## 6. Configuration & dependencies
 
@@ -80,14 +81,14 @@ Render cron block in [`render.yaml`](../../../render.yaml)): `APP_URL`, `TELEGRA
 ## 7. Testing
 
 [`tests/test_notifications_config.py`](../../../tests/test_notifications_config.py) (config gating + secret registration),
-`test_notifications_render.py` (fields, score formatting, redaction), `test_notifications_channels.py`
-(fake HTTP/SMTP: payload, STARTTLS order, token/password never leaked, SSRF guard),
-`test_notifications_report.py` (seeded DB: totals, nulls-last top-10, cap),
-`test_notifications_service.py` (skip / one-channel-fails-non-fatal / failure alert), and
-`test_notifications_job_wiring.py` (the job notifies on completion and a notifier crash never changes the exit code).
+`test_notifications_render.py` (fields, score-source labels, redaction), `test_notifications_channels.py`
+(fake HTTP/SMTP: payload, STARTTLS order, redirect refusal, header validation, token/password never leaked, SSRF guard),
+`test_notifications_report.py` (seeded DB: totals, partial-failure counts, score fallback, top-10 cap),
+`test_notifications_service.py` (skip / one-channel-fails-non-fatal / failure alert / sender-secret redaction), and
+`test_notifications_job_wiring.py` (completion plus schema/config/crash failure alerts).
 
 ## 8. Extension points
 
 - **New channel** (Slack, webhook): add a `*_channel.py` sender + a `*_configured` flag and one branch in `service.py`; rendering/report are reused.
 - **Per-screener or HTML emails**: extend `render.py` only — the report is rendering-agnostic.
-- **Richer ranking**: once RANK-002 populates `final_score`, the top-N auto-ranks with no change here.
+- **Richer ranking**: once RANK-002 populates `final_score`, the top-N naturally prefers that score while keeping confidence fallback for older runs.

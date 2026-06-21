@@ -12,9 +12,17 @@ from backend.notifications.report import DailyScanReport, RankedRow
 from backend.security import redact_text
 
 
-def _score(value: float | None) -> str:
-    """Format a score to 2dp, or ``n/a`` when unscored (RANK-* not yet applied)."""
-    return f"{value:.2f}" if value is not None else "n/a"
+def _score_label(row: RankedRow) -> str:
+    """Format the score without hiding whether it is final or a fallback.
+
+    Before RANK-002 lands, many rows have no ``final_score``. Showing
+    ``confidence`` explicitly keeps operators from mistaking the fallback value
+    for the final ranking model's score.
+    """
+    if row.score is None:
+        return "unscored"
+    label = "confidence" if row.score_source == "confidence" else "score"
+    return f"{label} {row.score:.2f}"
 
 
 def _ranked_lines(rows: tuple[RankedRow, ...]) -> list[str]:
@@ -24,9 +32,7 @@ def _ranked_lines(rows: tuple[RankedRow, ...]) -> list[str]:
     for index, row in enumerate(rows, start=1):
         rating = f" {row.rating}" if row.rating else ""
         screener = f" [{row.screener_key}]" if row.screener_key else ""
-        lines.append(
-            f"  {index}. {row.symbol}{rating} - score {_score(row.final_score)}{screener}"
-        )
+        lines.append(f"  {index}. {row.symbol}{rating} - {_score_label(row)}{screener}")
     return lines
 
 
@@ -42,7 +48,9 @@ def _body_lines(report: DailyScanReport) -> list[str]:
         "",
         f"Symbols scanned: {scanned}",
         f"Shortlisted: {report.total_shortlisted}",
-        f"Screeners: {len(report.screeners)} ({report.failed_count} failed)",
+        f"Screeners: {len(report.screeners)}",
+        f"Failed screeners: {report.failed_count}",
+        f"Failed symbols/findings: {report.failed_symbols_or_findings}",
         "",
         "Per screener:",
     ]

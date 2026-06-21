@@ -21,9 +21,11 @@ def _report(*, ok: bool = True, message: str = "") -> DailyScanReport:
         total_symbols_scanned=120,
         total_shortlisted=3,
         failed_count=0 if ok else 1,
+        failed_symbols_or_findings=4,
         top_results=(
-            RankedRow("RELIANCE", "BUY", 87.5, "bollinger_band_reversal"),
-            RankedRow("TCS", "BUY", None, "bollinger_band_reversal"),
+            RankedRow("RELIANCE", "BUY", 87.5, "bollinger_band_reversal", "final_score"),
+            RankedRow("TCS", "BUY", 73.25, "bollinger_band_reversal", "confidence"),
+            RankedRow("WIPRO", "BUY", None, "bollinger_band_reversal", "unscored"),
         ),
         app_url="https://scanner.example.com",
     )
@@ -34,8 +36,11 @@ def test_telegram_includes_all_summary_fields() -> None:
     assert "Daily scan complete" in text
     assert "Symbols scanned: 120" in text
     assert "Shortlisted: 3" in text
+    assert "Failed screeners: 0" in text
+    assert "Failed symbols/findings: 4" in text
     assert "1. RELIANCE BUY - score 87.50" in text  # scored row, 2dp
-    assert "2. TCS BUY - score n/a" in text  # unscored row degrades to n/a
+    assert "2. TCS BUY - confidence 73.25" in text
+    assert "3. WIPRO BUY - unscored" in text
     assert "Open the app: https://scanner.example.com" in text
 
 

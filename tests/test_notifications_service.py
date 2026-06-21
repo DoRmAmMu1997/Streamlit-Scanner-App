@@ -72,6 +72,36 @@ def test_one_channel_failure_does_not_block_the_other_or_raise() -> None:
     assert len(emails) == 1
 
 
+def test_unexpected_sender_errors_redact_channel_secrets() -> None:
+    settings = NotificationSettings(
+        telegram_bot_token="telegram-secret-token",
+        telegram_chat_id="c",
+        smtp_host="smtp.example.com",
+        smtp_user="me@example.com",
+        smtp_password="smtp-secret-password",
+        email_to="you@example.com",
+    )
+
+    def telegram(_text: str, *, settings: NotificationSettings) -> None:
+        raise RuntimeError(f"boom {settings.telegram_bot_token}")
+
+    def email(_subject: str, _body: str, *, settings: NotificationSettings) -> None:
+        raise RuntimeError(f"boom {settings.smtp_password}")
+
+    result = notify_daily_scan(
+        _Summary(),
+        settings=settings,
+        telegram_sender=telegram,
+        email_sender=email,
+    )
+
+    errors = {channel.channel: channel.error or "" for channel in result.channels}
+    assert "telegram-secret-token" not in errors["telegram"]
+    assert "smtp-secret-password" not in errors["email"]
+    assert "***REDACTED***" in errors["telegram"]
+    assert "***REDACTED***" in errors["email"]
+
+
 def test_failed_run_renders_a_failure_alert() -> None:
     sent_text: list[str] = []
 

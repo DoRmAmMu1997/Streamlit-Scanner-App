@@ -437,17 +437,66 @@ def get_scan_runs(session: Session, run_ids: Sequence[int]) -> list[ScanRun]:
     return list(session.scalars(stmt))
 
 
+def _finite_decimal(value: Any) -> Decimal | None:
+    """Parse only finite numeric values for score ordering.
+
+    Stored raw JSON is intentionally flexible, so ``confidence`` may be a
+    number, a numeric string, ``None``, or junk. The repository should make bad
+    values sort as unscored instead of letting ``Decimal('NaN')`` or a string
+    parsing error make the notification job fail.
+    """
+    if value is None:
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    return parsed if parsed.is_finite() else None
+
+
+def _rank_score_and_source(result: ScanResult) -> tuple[Decimal | None, str | None]:
+    """Return the score used for ALERT-001 ranking and its source.
+
+    ``final_score`` is the future canonical ranking model output, so it always
+    outranks the generic confidence fallback. The fallback only makes today's
+    alerts more useful while RANK-002 is not yet merged.
+    """
+    final_score = _finite_decimal(result.final_score)
+    if final_score is not None:
+        return final_score, "final_score"
+    raw_result = result.raw_result_json
+    if isinstance(raw_result, Mapping):
+        confidence = _finite_decimal(raw_result.get("confidence"))
+        if confidence is not None:
+            return confidence, "confidence"
+    return None, None
+
+
+def _top_result_sort_key(result: ScanResult) -> tuple[int, Decimal, str, int]:
+    """Sort final-scored, confidence-scored, then unscored rows deterministically."""
+    score, source = _rank_score_and_source(result)
+    source_order = {"final_score": 0, "confidence": 1}.get(source, 2)
+    # For scored rows, negating the Decimal gives descending numeric order while
+    # still using Python's normal ascending tuple sort. Unscored rows share the
+    # same zero score key and then fall back to symbol/id for stable output.
+    score_order = -score if score is not None else Decimal("0")
+    result_id = int(result.id or 0)
+    return (source_order, score_order, str(result.symbol), result_id)
+
+
 def get_top_ranked_results(
     session: Session, run_ids: Sequence[int], *, limit: int = 10
 ) -> list[ScanResult]:
-    """Return the top shortlisted rows across runs, best ``final_score`` first.
+    """Return the top shortlisted rows across runs for ALERT-001 notifications.
 
-    ALERT-001 ranks the daily shortlist for its summary. ``final_score`` is
-    nullable until RANK-* populates it, so unscored rows sort **last**: the
-    ``final_score IS NULL`` key orders ``False`` (has a score) before ``True``.
-    This keeps the ordering portable across SQLite/Postgres without relying on a
-    specific ``NULLS LAST`` dialect, and the summary degrades to symbol order
-    today, then auto-ranks once scores land.
+    Ranking rule:
+    1. rows with ``final_score`` (canonical RANK-* score), highest first;
+    2. rows without ``final_score`` but with numeric raw ``confidence``;
+    3. completely unscored rows, stable by symbol/id.
+
+    The fallback is done in Python because ``raw_result_json`` is portable JSON:
+    SQLite and Postgres expose different JSON casting syntax, while Python gives
+    one deterministic rule for both local and deployed databases.
     """
     ids = [int(run_id) for run_id in run_ids]
     if not ids or limit <= 0:
@@ -455,15 +504,11 @@ def get_top_ranked_results(
     stmt = (
         select(ScanResult)
         .where(ScanResult.run_id.in_(ids))
-        .order_by(
-            ScanResult.final_score.is_(None),  # has-score rows (False) first
-            ScanResult.final_score.desc(),
-            ScanResult.symbol.asc(),
-            ScanResult.id.asc(),
-        )
-        .limit(limit)
+        .order_by(ScanResult.symbol.asc(), ScanResult.id.asc())
     )
-    return list(session.scalars(stmt))
+    rows = list(session.scalars(stmt))
+    rows.sort(key=_top_result_sort_key)
+    return rows[:limit]
 
 
 def get_ai_evaluations(session: Session, run_id: int) -> list[AIEvaluation]:

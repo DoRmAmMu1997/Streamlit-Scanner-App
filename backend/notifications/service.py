@@ -8,7 +8,7 @@ so a notification problem can never change the scan job's exit code.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -100,27 +100,40 @@ def notify_daily_scan(
         text = render_telegram(report)
         results.append(
             _attempt(
-                "telegram", report, lambda: telegram_sender(text, settings=settings)
+                "telegram",
+                report,
+                lambda: telegram_sender(text, settings=settings),
+                extra_secrets=[settings.telegram_bot_token],
             )
         )
     if settings.email_configured:
         subject, body = render_email(report)
         results.append(
             _attempt(
-                "email", report, lambda: email_sender(subject, body, settings=settings)
+                "email",
+                report,
+                lambda: email_sender(subject, body, settings=settings),
+                extra_secrets=[settings.smtp_password],
             )
         )
     return NotificationResult(channels=tuple(results))
 
 
 def _attempt(
-    channel: str, report: DailyScanReport, send: Callable[[], None]
+    channel: str,
+    report: DailyScanReport,
+    send: Callable[[], None],
+    *,
+    extra_secrets: Iterable[str] = (),
 ) -> ChannelResult:
     """Run one channel send, converting any failure into a logged ``ChannelResult``."""
     try:
         send()
     except Exception as exc:  # noqa: BLE001 - one channel must not break others/the job
-        detail = redact_exception(exc)
+        # Channel implementations already scrub their own known secret values,
+        # but tests inject arbitrary senders too. Passing the channel secret here
+        # gives the service boundary one final redaction chance before logging.
+        detail = redact_exception(exc, extra_secrets=extra_secrets)
         log_event(
             logger,
             EVENT_NOTIFICATION_FAILED,

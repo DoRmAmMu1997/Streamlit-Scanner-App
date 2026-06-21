@@ -39,8 +39,22 @@ class _FakeSession:
         self.response = response
         self.calls: list[dict[str, object]] = []
 
-    def post(self, url: str, *, json: dict[str, object], timeout: float) -> _FakeResponse:
-        self.calls.append({"url": url, "json": json, "timeout": timeout})
+    def post(
+        self,
+        url: str,
+        *,
+        json: dict[str, object],
+        timeout: float,
+        allow_redirects: bool,
+    ) -> _FakeResponse:
+        self.calls.append(
+            {
+                "url": url,
+                "json": json,
+                "timeout": timeout,
+                "allow_redirects": allow_redirects,
+            }
+        )
         return self.response
 
 
@@ -51,6 +65,7 @@ def test_telegram_posts_to_fixed_host_without_token_in_body() -> None:
     assert call["url"].startswith("https://api.telegram.org/bot")
     assert call["json"]["chat_id"] == "999"
     assert call["json"]["text"] == "hello world"
+    assert call["allow_redirects"] is False
     # The bot token rides only in the URL path, never in the message body.
     assert TELEGRAM_SETTINGS.telegram_bot_token not in call["json"]["text"]
 
@@ -132,3 +147,23 @@ def test_email_smtp_error_is_wrapped_and_password_redacted() -> None:
     with pytest.raises(EmailSendError) as excinfo:
         send_email("s", "b", settings=EMAIL_SETTINGS, smtp_factory=factory)
     assert EMAIL_SETTINGS.smtp_password not in str(excinfo.value)
+
+
+def test_email_header_error_is_wrapped_before_smtp_connect() -> None:
+    bad_settings = NotificationSettings(
+        smtp_host="smtp.example.com",
+        smtp_user="me@example.com",
+        smtp_password="smtp-password-secret",
+        email_to="you@example.com\r\nBcc: attacker@example.com",
+    )
+    factory_called = False
+
+    def factory(host: str, port: int, *, timeout: float) -> _FakeSMTP:
+        nonlocal factory_called
+        factory_called = True
+        return _FakeSMTP(host, port, timeout=timeout)
+
+    with pytest.raises(EmailSendError):
+        send_email("subject", "body", settings=bad_settings, smtp_factory=factory)
+
+    assert factory_called is False

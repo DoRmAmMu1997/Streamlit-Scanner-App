@@ -430,6 +430,12 @@ without adding a long-lived scheduler service:
 docker compose run --rm scanner-ui python -m backend.jobs.run_daily_scan --config config/daily_scans.yaml
 ```
 
+To send ALERT-001 notifications from that Compose-run job, fill the optional
+notification variables in the root `.env` before running it: `APP_URL`,
+`TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`, and/or `SMTP_HOST`, `SMTP_USER`,
+`SMTP_PASSWORD`, `ALERT_EMAIL_TO`. Leaving them blank keeps alerts disabled and
+the scan still runs normally.
+
 Use the single-container commands below when you only want to build or smoke-test
 the image without starting Postgres.
 
@@ -567,6 +573,14 @@ unknown screener key, missing setup, a failed screener, or a scan whose results
 could not be written to `scan_runs` / `scan_results`. Operator summaries include
 status and run ids, but not raw secrets.
 
+ALERT-001 notifications are opt-in for this command. Set `APP_URL` for the
+message link, then configure Telegram (`TELEGRAM_BOT_TOKEN`,
+`TELEGRAM_CHAT_ID`) and/or email (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`,
+`SMTP_PASSWORD`, optional `SMTP_FROM`, `ALERT_EMAIL_TO`) in
+`Dependencies/.env`, the root `.env` for Docker Compose, or your hosting
+dashboard. A notification failure is logged and never changes the scan exit
+code.
+
 ---
 
 ## Deploying to Render
@@ -587,7 +601,10 @@ local Docker:
   writing results to the shared Postgres.
 
 Every secret is `sync: false` in the Blueprint (provided in the Render dashboard,
-never committed); Google OIDC secrets go in a Render Secret File at
+never committed). The cron also exposes opt-in ALERT-001 variables there
+(`APP_URL`, Telegram bot/chat values, SMTP settings, and `ALERT_EMAIL_TO`) so it
+can send the daily summary after the scheduled scan. Google OIDC secrets go in a
+Render Secret File at
 `streamlit-secrets.toml`, which Render exposes to Docker at
 `/etc/secrets/streamlit-secrets.toml`. The web `dockerCommand` passes that file
 through `--secrets.files` so `st.login` can read the `[auth]` tables. The cron's

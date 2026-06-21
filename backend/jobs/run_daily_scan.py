@@ -124,6 +124,15 @@ class DailyScanOutcome:
     row_count: int = 0
     fatal: bool = False
     message: str = ""
+    # ALERT-001 notification counts: these are non-fatal partial-run details.
+    # Keeping them structured prevents the alert renderer from scraping numbers
+    # back out of a human sentence such as "2 failed to compute".
+    loader_failures: int = 0
+    compute_failures: int = 0
+    rejected_result_rows: int = 0
+    ai_validation_failures: int = 0
+    data_quality_fatal_symbols: int = 0
+    data_quality_fatal_findings: int = 0
 
 
 @dataclass(frozen=True)
@@ -306,6 +315,22 @@ def _failure_summary(screener_key: str, message: str) -> DailyScanSummary:
     return DailyScanSummary(
         outcomes=[DailyScanOutcome(screener_key=screener_key, fatal=True, message=message)]
     )
+
+
+def _int_from_mapping(value: Mapping[str, Any] | None, key: str) -> int:
+    """Read a non-negative integer from optional service receipts.
+
+    Service receipts are JSON-like dictionaries. Tests and future versions may
+    omit a key, store ``None``, or pass a numeric string; the daily job should
+    treat those as "no count" instead of crashing while trying to send an alert.
+    """
+    if not value:
+        return 0
+    try:
+        parsed = int(value.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(parsed, 0)
 
 
 def main(
@@ -542,6 +567,9 @@ def _run_one_screener(
 
     row_count = 0 if result.results is None else len(result.results)
     fatal = result.status is ScanStatus.FAILED or result.run_id is None
+    data_quality_json = result.data_quality_json or {}
+    loader_failure_count = len(getattr(data_loader, "last_failures", None) or [])
+    compute_failure_count = len(result.compute_failures)
     if result.run_id is None:
         # SCAN-003 is intentionally best-effort for the interactive UI: the user
         # can still see fresh in-memory rows if the database is down. A scheduled
@@ -572,6 +600,16 @@ def _run_one_screener(
         row_count=row_count,
         fatal=fatal,
         message=message,
+        loader_failures=loader_failure_count,
+        compute_failures=compute_failure_count,
+        rejected_result_rows=max(int(result.rejected_result_rows), 0),
+        ai_validation_failures=max(int(result.ai_validation_failures), 0),
+        data_quality_fatal_symbols=_int_from_mapping(
+            data_quality_json, "fatal_symbols"
+        ),
+        data_quality_fatal_findings=_int_from_mapping(
+            data_quality_json, "fatal_findings"
+        ),
     )
 
 
