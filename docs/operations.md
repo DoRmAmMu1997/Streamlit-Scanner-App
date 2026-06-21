@@ -82,6 +82,40 @@ output; the default "auto" already picks JSON when `APP_ENV=production`.
 
 ---
 
+## Daily scan notifications (ALERT-001)
+
+After the daily scan finishes, the job can send a summary (status, symbols
+scanned, shortlisted count, top-10 ranked results, failures, and an app link) to
+**Telegram and/or email**. Both channels are **opt-in**: each fires only when all
+of its variables are set, and a send failure is logged but never changes the
+job's exit code. A failed/aborted run (bad config, DB down, crash) sends a
+failure alert too.
+
+Set the variables for the channel(s) you want (locally in `Dependencies/.env`,
+on Render as `sync: false` dashboard values):
+
+```bash
+APP_URL=https://your-scanner.example.com      # used for the "Open the app" link
+
+# Telegram (bot token from @BotFather; numeric chat id from getUpdates)
+TELEGRAM_BOT_TOKEN=123456:AA...
+TELEGRAM_CHAT_ID=987654321
+
+# Email over SMTP (STARTTLS, e.g. port 587). SMTP_FROM defaults to SMTP_USER.
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=you@example.com
+SMTP_PASSWORD=app-password
+ALERT_EMAIL_TO=you@example.com
+```
+
+`TELEGRAM_BOT_TOKEN` and `SMTP_PASSWORD` are masked by the shared redactor, and
+the message body is built only from non-secret summary fields, so secrets never
+appear in a notification. Leave a channel's variables unset to disable it; with
+none set, the scan runs normally and notification is skipped.
+
+---
+
 ## Speeding up the candle prefetch (PERF-001)
 
 `python app.py` backfills ~10 years of candles for every mapped stock before

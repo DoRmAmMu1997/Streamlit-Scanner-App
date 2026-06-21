@@ -424,6 +424,48 @@ def get_scan_results(session: Session, run_id: int) -> list[ScanResult]:
     return list(session.scalars(stmt))
 
 
+def get_scan_runs(session: Session, run_ids: Sequence[int]) -> list[ScanRun]:
+    """Return the ``ScanRun`` rows for the given ids (ALERT-001 summary reads).
+
+    The daily-scan notification totals the universe size (``symbols_scanned``)
+    across a job's runs. Unknown ids are simply absent from the result.
+    """
+    ids = [int(run_id) for run_id in run_ids]
+    if not ids:
+        return []
+    stmt = select(ScanRun).where(ScanRun.id.in_(ids))
+    return list(session.scalars(stmt))
+
+
+def get_top_ranked_results(
+    session: Session, run_ids: Sequence[int], *, limit: int = 10
+) -> list[ScanResult]:
+    """Return the top shortlisted rows across runs, best ``final_score`` first.
+
+    ALERT-001 ranks the daily shortlist for its summary. ``final_score`` is
+    nullable until RANK-* populates it, so unscored rows sort **last**: the
+    ``final_score IS NULL`` key orders ``False`` (has a score) before ``True``.
+    This keeps the ordering portable across SQLite/Postgres without relying on a
+    specific ``NULLS LAST`` dialect, and the summary degrades to symbol order
+    today, then auto-ranks once scores land.
+    """
+    ids = [int(run_id) for run_id in run_ids]
+    if not ids or limit <= 0:
+        return []
+    stmt = (
+        select(ScanResult)
+        .where(ScanResult.run_id.in_(ids))
+        .order_by(
+            ScanResult.final_score.is_(None),  # has-score rows (False) first
+            ScanResult.final_score.desc(),
+            ScanResult.symbol.asc(),
+            ScanResult.id.asc(),
+        )
+        .limit(limit)
+    )
+    return list(session.scalars(stmt))
+
+
 def get_ai_evaluations(session: Session, run_id: int) -> list[AIEvaluation]:
     """Return AI evaluation receipts for one run in stable symbol/id order."""
     stmt = (

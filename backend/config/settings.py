@@ -438,6 +438,11 @@ def secret_values(settings: AppSettings | None = None) -> list[str]:
             settings.dhan_client_id,
             settings.dhan_access_token,
             _clean_env_value(os.getenv("SCANNER_AI_CACHE_SIGNING_KEY")),
+            # ALERT-001 notification secrets. Registered here so the shared
+            # redaction filter masks them everywhere, even though the typed
+            # notification config lives in backend.notifications.config.
+            _clean_env_value(os.getenv("TELEGRAM_BOT_TOKEN")),
+            _clean_env_value(os.getenv("SMTP_PASSWORD")),
         )
         if value
     ]

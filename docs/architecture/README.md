@@ -55,6 +55,7 @@ testing · extension points.
 - [configuration.md](components/configuration.md) — typed runtime settings + prod fail-closed.
 - [deployment-runtime.md](components/deployment-runtime.md) — Docker image, Docker Compose local production stack, the Render Blueprint (DEPLOY-003), build context, container env, port, health check.
 - [observability.md](components/observability.md) — structured, secret-safe logging.
+- [notifications.md](components/notifications.md) — ALERT-001 daily-scan Telegram/email summary (opt-in, best-effort).
 - [security.md](components/security.md) — secret redaction + SSRF guards + AI verdict-cache integrity (`ai_cache_integrity.py`, HMAC).
 - [health-monitoring.md](components/health-monitoring.md) — passive admin health snapshot/page.
 

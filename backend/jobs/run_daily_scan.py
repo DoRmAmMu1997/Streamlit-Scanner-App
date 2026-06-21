@@ -286,6 +286,28 @@ def run_daily_scan(
     return summary
 
 
+def _send_scan_notification(summary: DailyScanSummary) -> None:
+    """Best-effort ALERT-001 summary/alert; never affects the job's exit code.
+
+    The notifications package is imported lazily so its ``requests``/``smtplib``
+    use is only loaded when the job finishes, and so any problem there is swallowed
+    here rather than stopping the scheduled scan.
+    """
+    try:
+        from backend.notifications import notify_daily_scan
+
+        notify_daily_scan(summary)
+    except Exception:  # noqa: BLE001 - a notification must never fail the job
+        logger.warning("daily-scan notification failed", exc_info=True)
+
+
+def _failure_summary(screener_key: str, message: str) -> DailyScanSummary:
+    """One synthetic fatal outcome so pre-scan failures still send a failure alert."""
+    return DailyScanSummary(
+        outcomes=[DailyScanOutcome(screener_key=screener_key, fatal=True, message=message)]
+    )
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -360,6 +382,11 @@ def main(
             started_at=started_at,
             error_type="SchemaBootstrapError",
         )
+        _send_scan_notification(
+            _failure_summary(
+                "<schema>", "Database schema is unavailable; scan not started."
+            )
+        )
         return 1
 
     if args.config_path:
@@ -392,6 +419,9 @@ def main(
                 outcomes=[],
                 started_at=started_at,
             )
+            _send_scan_notification(
+                _failure_summary("<config>", f"Could not load config: {safe_message}")
+            )
             return 1
         log_event(
             logger,
@@ -420,12 +450,16 @@ def main(
             started_at=started_at,
             error_type=type(exc).__name__,
         )
+        _send_scan_notification(
+            _failure_summary("<job>", f"Daily scan crashed: {redact_exception(exc)}")
+        )
         raise
     _log_daily_job_completed(
         exit_code=summary.exit_code,
         outcomes=summary.outcomes,
         started_at=started_at,
     )
+    _send_scan_notification(summary)
     return summary.exit_code
 
 

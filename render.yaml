@@ -115,3 +115,24 @@ services:
         sync: false
       - key: SERPAPI_API_KEY
         sync: false
+      # ALERT-001 daily-scan notifications (opt-in). Fill a channel's values in
+      # the dashboard to enable it; leave blank to keep it off. A send failure
+      # never changes the cron's exit code. See docs/operations.md.
+      - key: APP_URL
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      - key: ALERT_EMAIL_TO
+        sync: false
