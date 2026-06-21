@@ -5,7 +5,7 @@
 | **Component** | Scan-history page + scan comparison + validation dashboard + shared UI helpers |
 | **Source** | [`ui/history_page.py`](../../../ui/history_page.py), [`ui/comparison_page.py`](../../../ui/comparison_page.py), [`ui/validation_page.py`](../../../ui/validation_page.py), [`ui/common.py`](../../../ui/common.py) |
 | **Layer** | UI (`ui/`) |
-| **Status** | Stable (SCAN-004 history · JOB-003 comparison · REF-001 split · VALID-003B/004 validation dashboard) |
+| **Status** | Stable (SCAN-004 history · JOB-003 comparison · REF-001 split · VALID-003B/004 validation dashboard · RANK-002 score display) |
 | **Related** | [HLD](../high-level-design.md) · [app-orchestration.md](app-orchestration.md) · [scan-comparison.md](scan-comparison.md) · [storage-persistence.md](storage-persistence.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [charts-visualization.md](charts-visualization.md) · [health-monitoring.md](health-monitoring.md) · [security.md](security.md) · [audit-log.md](audit-log.md) |
 
 > The `ui/` package also contains [`chart_cache.py`](charts-visualization.md) (charts), [`health_page.py`](health-monitoring.md) (admin health), and the OBS-003 admin pages [`audit_page.py` + `config_page.py`](audit-log.md) (Audit log viewer + runtime settings form) — documented in their own LLDs. The scanner page itself lives in [`app.py`](app-orchestration.md). This LLD covers the **scan-history page**, the **scan-comparison page**, the **validation dashboard**, and the **shared display helpers** in `ui/common.py`.
@@ -15,7 +15,7 @@
 - **`history_page.py`** — the SCAN-004 **read-only** audit view: filter recorded runs, list them, click one to inspect its persisted results + download CSV. Pure data-shaping helpers are separated from rendering so they unit-test without a browser.
 - **`comparison_page.py`** — the JOB-003 **read-only** comparison view: choose a finalized screener/universe pair, compare the latest finalized run with the immediately previous finalized run, render New today / Repeated from yesterday / Dropped today / Improved score / Degraded score sections, and export one audited formula-safe CSV.
 - **`validation_page.py`** — the VALID-003B/004 **read-only** Validation / Signal Performance dashboard: filter stored forward-return metrics by screener / universe / horizon / signal-date and render the screener-level summary table, return distribution, win rate by horizon, benchmark-relative rows, monthly signal counts, sector concentration, best/worst signals, and CSV export. It reads through `summarize_validation_dashboard()` only — no raw SQL — and never triggers a forward-return compute pass from the UI. Same pure-helper / render split as the history page.
-- **`ui/common.py`** — display helpers needed by the scanner and read-only pages (which must not import each other or `app.py`): CSV-injection escaping, secret-redaction wrapper, BUY/SELL emoji badges, decimal column config, and provenance-column hiding.
+- **`ui/common.py`** — display helpers needed by the scanner and read-only pages (which must not import each other or `app.py`): CSV-injection escaping, secret-redaction wrapper, BUY/SELL emoji badges, decimal column config, score sorting/component extraction, and provenance/receipt-column hiding.
 
 ## 2. Position in the system
 
@@ -48,7 +48,7 @@ flowchart TD
 `_render_validation_page()` (the view) · pure helpers `_validation_filter_kwargs(...)` (widgets → dashboard kwargs), `_validation_summary_frame(summary)` (summary → 18-column display frame), `_validation_distribution_frame(...)`, `_validation_horizon_frame(...)`, `_validation_benchmark_frame(...)`, `_validation_time_series_frame(...)`, `_validation_sector_frame(...)`, `_validation_best_worst_frame(...)`, `_validation_summary_csv(...)`, `_format_pct(value)` (4-dp `Decimal` → `"x.xx%"`, `None` → em-dash), `_format_signal(signal)` (best/worst → `"SYMBOL x.xx% (date)"`). Column contract `_SUMMARY_COLUMNS`. Empty states: no rows yet / no rows for filters / no computed rows yet / benchmark-excess unavailable.
 
 ### `ui/common.py`
-`_csv_safe(df)` / `_escape_cell` (formula-injection escaping) · `_redact_secrets(text)` (wraps `redact_text` + `auth_secret_values`) · `_emoji_rating(df)` (BUY/SELL badges) · `_decimal_column_config(df)` (2-dp display) · `_drop_provenance(df)` (drops the internal `provenance` **and** `provenance_json` columns from the table + CSV — machine-readable evidence, not display data).
+`_csv_safe(df)` / `_escape_cell` (formula-injection escaping) · `_redact_secrets(text)` (wraps `redact_text` + `auth_secret_values`) · `_emoji_rating(df)` (BUY/SELL badges) · `_decimal_column_config(df)` (2-dp display) · `_sort_results_by_final_score(df)` (score-desc, nulls-last, stable) · `_score_components_frame(df)` (compact RANK-002 receipt display) · `_drop_provenance(df)` (drops internal `provenance`, `provenance_json`, and raw `score_breakdown` columns from table + CSV; `final_score` remains exported).
 
 ## 4. Key design decisions & trade-offs
 
@@ -64,6 +64,7 @@ flowchart TD
 | **Redact full message *before* truncating** | Truncating a long bare secret first could leave a prefix the exact-value redactor no longer matches. | Truncate then redact — partial leak. |
 | **`symbols_scanned=None` shows "—"** | Pre-SCAN-004 runs didn't store it; an em-dash beats a misleading `0`. | Show 0 — wrong. |
 | **CSV formula-injection escaping** | A cell starting `=`/`+`/`-`/`@`/tab executes when opened in Excel/Sheets; prefix with `'` (idempotent). | Raw CSV — spreadsheet code execution. |
+| **Ranked result tables keep receipts compact** | Scanner and history result tables sort by `final_score`, keep raw `reason` visible, and expose component details in a Score components expander. CSV exports keep the numeric score but drop raw provenance/receipt dicts. | Show raw dict columns — noisy UI/CSV and harder spreadsheet use. |
 | **`OperationalError` → friendly migrate hint** | Fresh/outdated DB is the common cause; tell the operator to run `alembic upgrade head`. | Raw traceback — confusing. |
 
 ## 5. Failure modes
@@ -78,7 +79,7 @@ flowchart TD
 - [`tests/test_app_history_page.py`](../../../tests/test_app_history_page.py) — filter mapping, signature stability, row shaping, run details, redaction/truncation order.
 - [`tests/test_app_comparison_page.py`](../../../tests/test_app_comparison_page.py) — finalized-pair option mapping, empty states, table rendering, formula-safe CSV, export audit metadata, and friendly schema-error handling.
 - [`tests/test_app_validation_page.py`](../../../tests/test_app_validation_page.py) — VALID-003B/004 percentage/signal formatting, filter mapping, summary/dashboard frame shaping, render-level `summarize_validation_dashboard` plumbing, CSV-safe export/audit, friendly schema-error handling, and empty-state copy. View wiring (selector options + dispatch) is covered in [`tests/test_app_orchestration.py`](../../../tests/test_app_orchestration.py).
-- `ui/common` helpers are exercised via the scanner and history page tests (`test_app_orchestration.py`, golden CSV checks).
+- `ui/common` helpers are exercised via the scanner and history page tests (`test_app_orchestration.py`, `test_ui_common.py`, golden CSV checks).
 
 ## 7. Extension points
 

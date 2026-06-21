@@ -134,12 +134,31 @@ def test_typed_models_describe_the_common_result_and_provenance_contract():
     }
 
 
+def test_signal_provenance_accepts_optional_score_breakdown_receipt():
+    """RANK-002 receipts belong in provenance without breaking old producers."""
+    provenance = SignalProvenance(
+        screener_key="envelope",
+        triggered_rules=["close_below_band"],
+        indicator_values={"close": Decimal("80.0")},
+        source="deterministic",
+        score_breakdown={
+            "model_version": "rank-1.0",
+            "components": {"freshness": 87.06},
+        },
+    )
+
+    assert asdict(provenance)["score_breakdown"] == {
+        "model_version": "rank-1.0",
+        "components": {"freshness": 87.06},
+    }
+
+
 def test_screener_result_carries_the_reserved_final_score_field():
-    """PROV-001 lists final_score in the contract; RANK-* will populate it.
+    """PROV-001 lists final_score in the contract; RANK-002 populates it.
 
     The DB column and repository mapping already exist; this closes the typed
-    contract so the dataclass matches the documented shape. It stays optional and
-    defaults to None because no screener computes a composite score yet.
+    contract so the dataclass matches the documented shape. It stays optional
+    and defaults to None for legacy rows and graceful-null scoring failures.
     """
     assert ScreenerResult(symbol="TCS").final_score is None
     scored = ScreenerResult(symbol="TCS", final_score=Decimal("82.50"))

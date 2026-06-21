@@ -5,8 +5,8 @@
 | **Component** | Scan orchestration lifecycle + typed result/provenance normalization |
 | **Source** | [`backend/scanning/service.py`](../../../backend/scanning/service.py), [`backend/scanning/result_contract.py`](../../../backend/scanning/result_contract.py) |
 | **Layer** | Screening engine ↔ persistence seam (`backend/`) |
-| **Status** | Stable (SCAN-003 service · PROV-001B strict result contract · PROV-002 deterministic receipts · PROV-003 AI verdict receipts) |
-| **Related** | [HLD](../high-level-design.md) · [screener-framework.md](screener-framework.md) · [storage-persistence.md](storage-persistence.md) · [scan-run-persistence.md](../scan-run-persistence.md) · [data-quality.md](data-quality.md) · [observability.md](observability.md) · [security.md](security.md) |
+| **Status** | Stable (SCAN-003 service · PROV-001B strict result contract · PROV-002 deterministic receipts · PROV-003 AI verdict receipts · RANK-002 scoring annotation) |
+| **Related** | [HLD](../high-level-design.md) · [screener-framework.md](screener-framework.md) · [scoring.md](scoring.md) · [storage-persistence.md](storage-persistence.md) · [scan-run-persistence.md](../scan-run-persistence.md) · [data-quality.md](data-quality.md) · [observability.md](observability.md) · [security.md](security.md) |
 
 ## 1. Purpose & responsibilities
 
@@ -38,6 +38,7 @@ sequenceDiagram
     Svc-->>Svc: log scan_started(run_id)
     Svc->>Screener: run(universe, loader, params + compute/ai_evaluation callbacks)
     Screener-->>Svc: results DataFrame + AI evaluation records [approved/rejected/error]
+    Svc->>Svc: RANK-002 score_candidates (non-fatal)
     Svc->>Svc: status = SUCCESS / PARTIAL / FAILED (truthful)
     Svc->>Repo: normalize rows → save_scan_results + save_ai_evaluations + finish_scan_run  %% short txn
     Svc-->>Svc: log scan_completed/partial/failed
@@ -50,7 +51,7 @@ sequenceDiagram
 | Symbol | Contract |
 |---|---|
 | `run_scan(*, screener_key, universe_key, scan_name=None, run_callable, universe_df, data_loader, params, triggered_by="ui", session_factory=session_scope)` | Orchestrate one scan; returns `ScanRunResult`; never raises for screener/DB failure. |
-| `ScanRunResult` | frozen: `status`, `results` (the **unchanged** screener DataFrame), `run_id|None`, `compute_failures`, `rejected_result_rows`, `ai_validation_failures` (AI-004), `error_message`. |
+| `ScanRunResult` | frozen: `status`, `results` (a ranked copy with `final_score`; raw `reason` and screener columns preserved), `run_id|None`, `compute_failures`, `rejected_result_rows`, `ai_validation_failures` (AI-004), `error_message`. |
 | `RunCallable` / `SessionFactory` | Type aliases; `session_factory` injectable for tests. |
 
 **Lifecycle nuances**: header is a separate short transaction (visible immediately, no lock held during the scan); params snapshot drops callables; `data_snapshot_date` derived from `end_date`; a copy of `params` is made (never mutate the caller's dict — UI reuses it for charts); `compute_failure_callback` **and** `ai_evaluation_callback` are wired so the service decides SUCCESS vs PARTIAL and streams AI verdict receipts to `save_ai_evaluations`; terminal events emitted only after the durable write, with `phase` (`create_header`/`screener`/`persistence`). **Truthful terminal state**: a persistence failure (or all result rows rejected) downgrades the run to `FAILED`; some rows rejected → `PARTIAL`. **AI-004 (AC3)**: the AI screeners tag a verdict that still fails strict validation within the configured attempt budget with `phase="ai_validation"` in that callback; `run_scan` counts those into `ScanRunResult.ai_validation_failures`, an `ai_validation_failures=N` field on the terminal `scan_*` event, and an attempt-budget-neutral clause in `error_message` — so "the AI was unavailable" reads differently from "the AI returned unparseable output".

@@ -7,13 +7,16 @@ each other (or app.py) without creating cycles.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
 from backend.auth.session import auth_secret_values
 from backend.scanner_base import PROVENANCE_COLUMN
+from backend.scoring import sort_by_final_score
 from backend.security import redact_text
 
 
@@ -27,9 +30,120 @@ def _drop_provenance(results: pd.DataFrame) -> pd.DataFrame:
     keeps this safe for legacy or hand-built frames that never had the column.
     """
     return results.drop(
-        columns=[PROVENANCE_COLUMN, "provenance_json"],
+        columns=[PROVENANCE_COLUMN, "provenance_json", "score_breakdown"],
         errors="ignore",
     )
+
+
+def _sort_results_by_final_score(results: pd.DataFrame) -> pd.DataFrame:
+    """Order display/export rows by ``final_score`` (shared RANK-002 rule).
+
+    The scan service already ranks new results, but persisted history may include
+    older or hand-built frames. Delegating to ``backend.scoring.sort_by_final_score``
+    guarantees the scanner page, the history page, and the live scorer all order
+    rows identically (highest score first, null/non-finite last, ties stable).
+    """
+    return sort_by_final_score(results)
+
+
+_SCORE_COMPONENT_COLUMNS = [
+    "Symbol",
+    "Final score",
+    "Technical",
+    "Liquidity",
+    "Risk",
+    "Freshness",
+    "Coverage",
+    "Missing",
+]
+
+
+def _score_components_frame(results: pd.DataFrame) -> pd.DataFrame:
+    """Build the compact RANK-002 component table for Streamlit expanders.
+
+    ``score_breakdown`` is an audit receipt, so the main results table hides the
+    raw dictionary. This helper extracts just the human-sized fields: component
+    scores, coverage, and missing components.
+
+    The helper accepts both shapes used in the app:
+    - a direct ``score_breakdown`` column from a hand-built/test frame; and
+    - a nested ``provenance``/``provenance_json.score_breakdown`` receipt from
+      real scanner persistence.
+    """
+    rows: list[dict[str, Any]] = []
+    for row in results.to_dict("records"):
+        breakdown = _extract_score_breakdown(row)
+        if breakdown is None:
+            continue
+        components = breakdown.get("components")
+        component_map = components if isinstance(components, Mapping) else {}
+        # Convert every numeric field through _optional_float so Streamlit shows
+        # a blank cell for missing data instead of the literal strings "nan" or
+        # "None". Coverage/missing stay as readable comma-separated text.
+        rows.append(
+            {
+                "Symbol": row.get("symbol", ""),
+                "Final score": _optional_float(
+                    row.get("final_score", breakdown.get("final_score"))
+                ),
+                "Technical": _optional_float(component_map.get("technical")),
+                "Liquidity": _optional_float(component_map.get("liquidity")),
+                "Risk": _optional_float(component_map.get("risk")),
+                "Freshness": _optional_float(component_map.get("freshness")),
+                "Coverage": _join_component_names(breakdown.get("coverage")),
+                "Missing": _join_component_names(breakdown.get("missing")),
+            }
+        )
+    return pd.DataFrame(rows, columns=_SCORE_COMPONENT_COLUMNS)
+
+
+def _extract_score_breakdown(row: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """Find ``score_breakdown`` on a result row or inside provenance.
+
+    The UI reads receipts but never mutates them. Returning ``None`` for unknown
+    shapes keeps legacy scan results renderable even before RANK-002 existed.
+    """
+    direct = row.get("score_breakdown")
+    if isinstance(direct, Mapping):
+        return direct
+
+    # Fresh scanner rows usually keep the receipt inside canonical provenance.
+    # History rows use ``provenance_json`` after SQLAlchemy has read JSON back
+    # from the database.
+    for column in (PROVENANCE_COLUMN, "provenance_json"):
+        provenance = row.get(column)
+        if not isinstance(provenance, Mapping):
+            continue
+        nested = provenance.get("score_breakdown")
+        if isinstance(nested, Mapping):
+            return nested
+    return None
+
+
+def _optional_float(value: Any) -> float | None:
+    """Coerce a display number while keeping missing/non-finite values blank.
+
+    Streamlit's numeric column formatter works best with real floats or nulls,
+    not mixed strings like ``"nan"``.
+    """
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if np.isfinite(result) else None
+
+
+def _join_component_names(value: Any) -> str:
+    """Render a list-like component set as compact comma-separated text.
+
+    Receipts store coverage and missing components as JSON lists because that is
+    easier for code to inspect. Humans scanning the UI need a short phrase.
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list | tuple):
+        return ", ".join(str(item) for item in value)
+    return ""
 
 
 # Excel/Sheets treat a cell whose first character is one of these as a formula.

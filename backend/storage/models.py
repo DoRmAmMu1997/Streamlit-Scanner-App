@@ -314,10 +314,10 @@ class ScanResult(Base):
         String(20), nullable=True, comment="Screener verdict label, e.g. 'BUY'"
     )
 
-    # Optional ranking score (filled later by RANK-* once a scoring model exists).
-    # Nullable today; here now so the column is reserved and replay-stable.
+    # Optional ranking score populated by RANK-002. It remains nullable because
+    # a row can be unscorable or come from historical data recorded before RANK-002.
     final_score: Mapped[Decimal | None] = mapped_column(
-        Numeric(6, 2), nullable=True, comment="Composite rank score (RANK-*); NULL for now"
+        Numeric(6, 2), nullable=True, comment="Composite rank score (RANK-002)"
     )
 
     # Short human explanation ("oversold reversal with improving volume").
