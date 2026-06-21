@@ -82,6 +82,41 @@ output; the default "auto" already picks JSON when `APP_ENV=production`.
 
 ---
 
+## Daily scan notifications (ALERT-001)
+
+After the daily scan finishes, the job can send a summary (status, symbols
+scanned, shortlisted count, top-10 ranked results, failures, and an app link) to
+**Telegram and/or email**. Both channels are **opt-in**: each fires only when all
+of its variables are set, and a send failure is logged but never changes the
+job's exit code. A failed/aborted run (bad config, DB down, crash) sends a
+failure alert too.
+
+Set the variables for the channel(s) you want. Use `Dependencies/.env` for a
+local Python run, the root `.env` for Docker Compose, or the Render dashboard
+`sync: false` values on the `scanner-daily-scan` cron service:
+
+```bash
+APP_URL=https://your-scanner.example.com      # used for the "Open the app" link
+
+# Telegram (bot token from @BotFather; numeric chat id from getUpdates)
+TELEGRAM_BOT_TOKEN=123456:AA...
+TELEGRAM_CHAT_ID=987654321
+
+# Email over SMTP (STARTTLS, e.g. port 587). SMTP_FROM defaults to SMTP_USER.
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=you@example.com
+SMTP_PASSWORD=app-password
+ALERT_EMAIL_TO=you@example.com
+```
+
+`TELEGRAM_BOT_TOKEN` and `SMTP_PASSWORD` are masked by the shared redactor, and
+the message body is built only from non-secret summary fields, so secrets never
+appear in a notification. Leave a channel's variables unset to disable it; with
+none set, the scan runs normally and notification is skipped.
+
+---
+
 ## Speeding up the candle prefetch (PERF-001)
 
 `python app.py` backfills ~10 years of candles for every mapped stock before
@@ -269,6 +304,10 @@ Run the daily job against the same Postgres database and `/data` volume:
 docker compose run --rm scanner-ui python -m backend.jobs.run_daily_scan --config config/daily_scans.yaml
 ```
 
+ALERT-001 notifications work from this Compose job too. Fill the optional
+notification section in the root `.env`; `docker-compose.yml` passes those
+values into `scanner-ui`. Leave a channel blank to keep it disabled.
+
 Troubleshooting notes:
 
 - `docker compose config` prints the fully interpolated stack and catches a
@@ -398,7 +437,12 @@ Render runs the exact image you can build locally. The design rationale lives in
    cron job.
 2. Fill in the `sync: false` env vars Render prompts for (they are never
    committed): `DHAN_CLIENT_ID`, `DHAN_ACCESS_TOKEN`, `ALLOWED_EMAILS` and/or
-   `ADMIN_EMAILS`, and optionally `SERPAPI_API_KEY`. `DATABASE_URL` is wired
+   `ADMIN_EMAILS`, and optionally `SERPAPI_API_KEY`. For ALERT-001, set
+   `APP_URL` on the cron to the public scanner URL and fill either the Telegram
+   pair (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`) or the SMTP set
+   (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, optional
+   `SMTP_FROM`, `ALERT_EMAIL_TO`) if you want scheduled notifications. Leave
+   them blank to keep alerts disabled. `DATABASE_URL` is wired
    automatically from `scanner-db` — Render emits a bare `postgresql://` URL and
    the app rewrites it to the pinned psycopg v3 driver at startup, so no manual
    editing is needed. The database uses `ipAllowList: []`, so public internet
@@ -446,6 +490,9 @@ contains the cron schedule it runs. Use it as the production default, copy/edit 
 for custom deployments, or change the Blueprint command to another committed
 config path. AI-heavy jobs remain disabled by default; enable them deliberately
 only after setting the optional AI/search secrets and cost limits you want.
+If ALERT-001 variables are present on the cron service, it sends the summary
+after successful/partial scans and fatal pre-scan failures; delivery errors are
+logged but never change the cron exit code.
 
 ### Troubleshooting
 

@@ -296,6 +296,7 @@ _SECRET_KEY_SUFFIXES = (
     "apikey",
     "accesstoken",
     "authtoken",
+    "bottoken",  # telegram_bot_token (ALERT-001); smtp_password matches "password"
     "clientsecret",
     "password",
     "refreshtoken",

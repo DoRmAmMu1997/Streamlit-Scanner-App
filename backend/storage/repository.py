@@ -424,6 +424,98 @@ def get_scan_results(session: Session, run_id: int) -> list[ScanResult]:
     return list(session.scalars(stmt))
 
 
+def get_scan_runs(session: Session, run_ids: Sequence[int]) -> list[ScanRun]:
+    """Return the ``ScanRun`` rows for the given ids (ALERT-001 summary reads).
+
+    The daily-scan notification totals the universe size (``symbols_scanned``)
+    across a job's runs. Unknown ids are simply absent from the result.
+    """
+    ids = [int(run_id) for run_id in run_ids]
+    if not ids:
+        return []
+    stmt = select(ScanRun).where(ScanRun.id.in_(ids))
+    return list(session.scalars(stmt))
+
+
+def _finite_decimal(value: Any) -> Decimal | None:
+    """Parse only finite numeric values for score ordering.
+
+    Stored raw JSON is intentionally flexible, so ``confidence`` may be a
+    number, a numeric string, ``None``, or junk. The repository should make bad
+    values sort as unscored instead of letting ``Decimal('NaN')`` or a string
+    parsing error make the notification job fail.
+    """
+    if value is None:
+        return None
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    return parsed if parsed.is_finite() else None
+
+
+def _rank_score_and_source(result: ScanResult) -> tuple[Decimal | None, str | None]:
+    """Return the score used for ALERT-001 ranking and its source.
+
+    ``final_score`` is the future canonical ranking model output, so it always
+    outranks the generic confidence fallback. The fallback only makes today's
+    alerts more useful while RANK-002 is not yet merged.
+    """
+    final_score = _finite_decimal(result.final_score)
+    if final_score is not None:
+        return final_score, "final_score"
+    raw_result = result.raw_result_json
+    if isinstance(raw_result, Mapping):
+        confidence = _finite_decimal(raw_result.get("confidence"))
+        if confidence is not None:
+            return confidence, "confidence"
+    return None, None
+
+
+def _top_result_sort_key(result: ScanResult) -> tuple[int, Decimal, str, int]:
+    """Sort final-scored, confidence-scored, then unscored rows deterministically."""
+    score, source = _rank_score_and_source(result)
+    if source == "final_score":
+        source_order = 0
+    elif source == "confidence":
+        source_order = 1
+    else:
+        source_order = 2
+    # For scored rows, negating the Decimal gives descending numeric order while
+    # still using Python's normal ascending tuple sort. Unscored rows share the
+    # same zero score key and then fall back to symbol/id for stable output.
+    score_order = -score if score is not None else Decimal("0")
+    result_id = int(result.id or 0)
+    return (source_order, score_order, str(result.symbol), result_id)
+
+
+def get_top_ranked_results(
+    session: Session, run_ids: Sequence[int], *, limit: int = 10
+) -> list[ScanResult]:
+    """Return the top shortlisted rows across runs for ALERT-001 notifications.
+
+    Ranking rule:
+    1. rows with ``final_score`` (canonical RANK-* score), highest first;
+    2. rows without ``final_score`` but with numeric raw ``confidence``;
+    3. completely unscored rows, stable by symbol/id.
+
+    The fallback is done in Python because ``raw_result_json`` is portable JSON:
+    SQLite and Postgres expose different JSON casting syntax, while Python gives
+    one deterministic rule for both local and deployed databases.
+    """
+    ids = [int(run_id) for run_id in run_ids]
+    if not ids or limit <= 0:
+        return []
+    stmt = (
+        select(ScanResult)
+        .where(ScanResult.run_id.in_(ids))
+        .order_by(ScanResult.symbol.asc(), ScanResult.id.asc())
+    )
+    rows = list(session.scalars(stmt))
+    rows.sort(key=_top_result_sort_key)
+    return rows[:limit]
+
+
 def get_ai_evaluations(session: Session, run_id: int) -> list[AIEvaluation]:
     """Return AI evaluation receipts for one run in stable symbol/id order."""
     stmt = (

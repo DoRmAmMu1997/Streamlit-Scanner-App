@@ -43,7 +43,7 @@ flowchart TD
 |---|---|
 | `main(argv=None, *, job_runner=run_daily_scan, schema_bootstrapper=ensure_database_schema, output=None) -> int` | Parse args, migrate, dispatch, return exit code. Injectable for tests. |
 | `run_daily_scan(*, screener_keys=None, scan_entries=None, registry_loader, universe_loader, data_client_factory, data_loader_factory, scan_runner, session_factory, today, output) -> DailyScanSummary` | Heavy DI surface; production uses defaults, tests pass fakes (no Dhan/network/DB/Streamlit). |
-| `DailyScanOutcome` | frozen: `screener_key, universe_key?, status?, run_id?, row_count, fatal, message` (concise, secret-safe). |
+| `DailyScanOutcome` | frozen: `screener_key, universe_key?, status?, run_id?, row_count, fatal, message` plus structured partial-failure counts (`loader_failures`, `compute_failures`, `rejected_result_rows`, `ai_validation_failures`, data-quality fatal counts). Messages stay concise/secret-safe; ALERT-001 uses the counts instead of scraping prose. |
 | `DailyScanSummary.exit_code` | `1` if any outcome `fatal`, else `0`. |
 | `TRIGGERED_BY = "job:daily_scan"` | Audit identity persisted to `scan_runs`. |
 | `load_daily_scan_config(path) -> list[DailyScanEntry]` / `DailyScanEntry` / `DailyScanConfigError` | YAML shape-validation only (registry-free). |

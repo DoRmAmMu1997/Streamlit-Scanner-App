@@ -55,6 +55,12 @@ EVENT_DAILY_JOB_STARTED = "daily_job_started"
 EVENT_DAILY_JOB_CONFIG_LOADED = "daily_job_config_loaded"
 EVENT_DAILY_JOB_CONFIG_INVALID = "daily_job_config_invalid"
 EVENT_DAILY_JOB_COMPLETED = "daily_job_completed"
+# ALERT-001 daily-scan notification lifecycle events. ``_skipped`` = no channel
+# configured (opt-in); ``_sent``/``_failed`` are per-channel and never affect the
+# job's exit code.
+EVENT_NOTIFICATION_SENT = "notification_sent"
+EVENT_NOTIFICATION_FAILED = "notification_failed"
+EVENT_NOTIFICATION_SKIPPED = "notification_skipped"
 # VALID-004 headless forward-return compute job lifecycle events.
 EVENT_FORWARD_RETURNS_JOB_STARTED = "forward_returns_job_started"
 EVENT_FORWARD_RETURNS_JOB_COMPLETED = "forward_returns_job_completed"
@@ -114,6 +120,9 @@ __all__ = [
     "EVENT_LOGIN_DENIED",
     "EVENT_LOGIN_SUCCESS",
     "EVENT_MANUAL_SCAN_STARTED",
+    "EVENT_NOTIFICATION_FAILED",
+    "EVENT_NOTIFICATION_SENT",
+    "EVENT_NOTIFICATION_SKIPPED",
     "EVENT_SCAN_COMPLETED",
     "EVENT_SCAN_FAILED",
     "EVENT_SCAN_PARTIAL",

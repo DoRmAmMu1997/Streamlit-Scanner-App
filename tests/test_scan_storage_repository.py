@@ -258,6 +258,46 @@ def test_get_latest_scan_runs_combines_filters(db_session):
     )
 
 
+def test_get_top_ranked_results_uses_confidence_fallback_before_unscored(
+    db_session,
+):
+    """ALERT-001 can rank useful rows before RANK-002 writes final_score."""
+    from backend.storage.repository import (
+        create_scan_run,
+        get_top_ranked_results,
+        save_scan_results,
+    )
+
+    run = create_scan_run(db_session, screener_key="envelope", universe_key="nifty_500")
+    save_scan_results(
+        db_session,
+        run,
+        [
+            {
+                "symbol": "LOW_FINAL_SCORE",
+                "rating": "BUY",
+                "final_score": Decimal("10.00"),
+                "confidence": 1,
+            },
+            {"symbol": "HIGH_CONFIDENCE", "rating": "BUY", "confidence": 94.2},
+            {"symbol": "LOW_CONFIDENCE", "rating": "BUY", "confidence": 61.5},
+            {"symbol": "BAD_CONFIDENCE", "rating": "BUY", "confidence": "nan"},
+            {"symbol": "UNSCORED", "rating": "BUY"},
+        ],
+    )
+    db_session.commit()
+
+    rows = get_top_ranked_results(db_session, [run.id])
+
+    assert [row.symbol for row in rows] == [
+        "LOW_FINAL_SCORE",
+        "HIGH_CONFIDENCE",
+        "LOW_CONFIDENCE",
+        "BAD_CONFIDENCE",
+        "UNSCORED",
+    ]
+
+
 def test_get_latest_scan_runs_filters_by_universe_status_and_trigger(db_session):
     """The SCAN-004 dropdown filters map to exact persisted run metadata."""
     from backend.storage.repository import get_latest_scan_runs
