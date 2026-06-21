@@ -475,7 +475,12 @@ def _rank_score_and_source(result: ScanResult) -> tuple[Decimal | None, str | No
 def _top_result_sort_key(result: ScanResult) -> tuple[int, Decimal, str, int]:
     """Sort final-scored, confidence-scored, then unscored rows deterministically."""
     score, source = _rank_score_and_source(result)
-    source_order = {"final_score": 0, "confidence": 1}.get(source, 2)
+    if source == "final_score":
+        source_order = 0
+    elif source == "confidence":
+        source_order = 1
+    else:
+        source_order = 2
     # For scored rows, negating the Decimal gives descending numeric order while
     # still using Python's normal ascending tuple sort. Unscored rows share the
     # same zero score key and then fall back to symbol/id for stable output.
