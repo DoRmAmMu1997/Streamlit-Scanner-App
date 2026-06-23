@@ -704,6 +704,8 @@ filter / `redact_text`, so tokens, API keys, and database passwords are masked.
 ```
 Streamlit Scanner App/
 ├── app.py                       # Streamlit entry point + CLI prefetch
+├── AGENTS.md                    # Agent/contributor guide (Claude Code + Codex)
+├── CLAUDE.md                    # Loads AGENTS.md for Claude Code (@import)
 ├── requirements.txt
 ├── requirements-optional.txt    # Optional TA-Lib/pandas_ta accelerators
 ├── requirements-dev.txt         # Local verification tools
@@ -1180,7 +1182,15 @@ screeners (`tests/test_screener_golden_outputs.py`, with snapshots under
 `tests/golden/`). After an *intentional* screener change, refresh the snapshots
 with `UPDATE_GOLDEN=1 python -m pytest tests/test_screener_golden_outputs.py` and
 review the diff. The Alembic migration is also guarded by a drift test that fails
-if the ORM models and the migration fall out of sync.
+if the ORM models and the migration fall out of sync. A **repository-boundary**
+guard (`tests/test_repository_layer_boundary.py`, REFACTOR-002) likewise fails CI
+if any module outside `backend/storage` builds raw SQL, opens an engine, or creates
+a session, keeping all database access behind the repository layer.
+
+> **Contributing / AI agents:** the development conventions, layering rules, full
+> CI gate suite, multi-agent worktree workflow, and the skills this project expects
+> you to use are documented in [`AGENTS.md`](AGENTS.md) — Claude Code loads it via
+> [`CLAUDE.md`](CLAUDE.md). Read it before starting work.
 
 ---
 
