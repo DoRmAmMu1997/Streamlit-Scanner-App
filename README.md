@@ -104,10 +104,11 @@ by default or Postgres) that is ready to record every run for later replay and a
 - **Local Parquet cache** — candles are cached on disk; subsequent runs only
   fetch the days that are missing.
 - **Authentication & access control** — every page sits behind a Google SSO
-  (OIDC) sign-in gate (`backend/auth/`). An environment-driven **email allowlist**
-  (`ALLOWED_EMAILS`) restricts who may use the app, with **admin identification**
-  (`ADMIN_EMAILS`); in production the gate fails closed when SSO config or the
-  allowlist is missing.
+  (OIDC) sign-in gate (`backend/auth/`). An **email allowlist** (`ALLOWED_EMAILS`)
+  restricts who may use the app, and a database-driven **role model**
+  (viewer / analyst / admin) gates features by capability, assignable at runtime
+  from the admin **Roles** page (`ADMIN_EMAILS` is the bootstrap admin). In
+  production the gate fails closed when SSO config or the allowlist is missing.
 - **Scan-run persistence + history page** — every scan (from the UI or the
   headless daily job) is recorded into a SQLAlchemy `scan_runs` / `scan_results`
   schema (`backend/storage/`) with a local SQLite default (`data/scanner.db`) or
@@ -321,8 +322,12 @@ network work happens up front in the terminal.
    ADMIN_EMAILS=you@gmail.com
    ```
 
-   - `ADMIN_EMAILS` are always allowed and are flagged as admins (reserved for
-     future admin-only features).
+   - `ADMIN_EMAILS` are always allowed and are admins — the bootstrap admins who
+     can then assign viewer/analyst/admin roles to others from the in-app **Admin
+     roles** page (AUTH-003). An authorized user with no assigned role defaults to
+     **analyst** (can run scans and export); admins can add **viewer** (read-only)
+     accounts there. Role assignments live in the `user_roles` table, so no
+     redeploy is needed to change them.
    - If `ALLOWED_EMAILS` is **empty**, development permits any signed-in Google
      user when auth is enabled, but production (`APP_ENV=production`) requires
      either `ALLOWED_EMAILS` or `ADMIN_EMAILS`. A signed-in user who is not
@@ -624,10 +629,11 @@ Streamlit UI, the `python app.py` prefetch, and the headless daily-scan job —
 configures logging the same way via `configure_logging()`.
 
 Admins also receive an **Admin health** view (OBS-002) in the app's top view
-selector. The page is available only when the authenticated email is listed in
-`ADMIN_EMAILS`; it repeats that admin check inside the renderer so an
-auth-disabled development session or a future direct caller cannot bypass the
-guard.
+selector, alongside the other admin pages (settings, audit log, and AUTH-003
+**roles**). These views are shown only to holders of the matching capability
+(admin tier); each renderer repeats the check, and the action handler re-checks
+the capability via `require_capability`, so an auth-disabled development session
+or a stale/direct caller cannot bypass the guard.
 
 The health snapshot reports the latest exact `SUCCESS` and `FAILED` scan runs,
 the newest persisted **candle data-quality receipt** (DATA-001 — checked/usable
@@ -666,12 +672,14 @@ same secret redactor used elsewhere in the app.
 | `config_changed` | INFO | an admin changes a runtime setting via the settings form (OBS-003 audit; old/new redacted) |
 | `export_downloaded` | INFO | a results/history CSV is downloaded (OBS-003 audit) |
 | `admin_page_accessed` | INFO | an admin opens an admin page (OBS-003 audit; once per page per session) |
+| `role_denied` | WARNING | a user attempts a feature above their role (AUTH-003 audit; logs the email + attempted capability + actual role, never the role table; deduped per session) |
+| `role_changed` | INFO | an admin assigns or revokes a role (AUTH-003 audit; records target email, old/new role, and who made the change) |
 
-The seven OBS-003 audit events are `login_success`, `login_denied`,
+The OBS-003 / AUTH-003 audit events are `login_success`, `login_denied`,
 `manual_scan_started`, `data_refresh_started`, `config_changed`,
-`export_downloaded`, and `admin_page_accessed`. They are emitted to the log
-stream *and* written to a durable `audit_logs` table. See
-[Audit log](#audit-log-obs-003) below.
+`export_downloaded`, `admin_page_accessed`, `role_denied`, and `role_changed`.
+They are emitted to the log stream *and* written to a durable `audit_logs` table.
+See [Audit log](#audit-log-obs-003) below.
 
 **Plain text vs JSON.** `LOG_FORMAT` controls rendering:
 
@@ -719,9 +727,9 @@ Streamlit Scanner App/
 │   ├── adding-a-screener.md     # Screener authoring walkthrough
 │   └── architecture/            # HLD + per-component LLDs + 2026-06 audit register (start at README.md)
 ├── backend/                     # Data + infrastructure (no strategy logic)
-│   ├── admin/                   # Admin runtime-config override service (OBS-003)
+│   ├── admin/                   # Admin services: runtime-config (OBS-003) + role assignment (AUTH-003)
 │   ├── audit/                   # Best-effort, secret-safe audit recorder (OBS-003)
-│   ├── auth/                    # Streamlit OIDC login/session gate
+│   ├── auth/                    # Streamlit OIDC login/session gate + role model (AUTH-003)
 │   ├── config/                  # Runtime settings package + legacy exports
 │   ├── dhan_client.py           # DhanHQ API wrapper
 │   ├── daily_data_loader.py     # Candle fetching + Parquet cache
@@ -785,7 +793,8 @@ Streamlit Scanner App/
 │   ├── validation_page.py      # Validation / Signal Performance dashboard (VALID-003B/004)
 │   ├── health_page.py          # Admin health view (OBS-002)
 │   ├── audit_page.py           # Admin audit log viewer (OBS-003)
-│   └── config_page.py          # Admin runtime settings form (OBS-003)
+│   ├── config_page.py          # Admin runtime settings form (OBS-003)
+│   └── roles_page.py           # Admin role assignment page (AUTH-003)
 ├── Dependencies/
 │   ├── .env.example             # Credential template (copy to .env)
 │   └── dhan_token_setup.py      # One-time OAuth token helper
@@ -919,16 +928,29 @@ CSV download is reached.
   (`st.login` / `st.user` / `st.logout`), configured in `.streamlit/secrets.toml`
   (setup step 6). The email claim is verified and lower-cased.
 - **Allowlist + admins (AUTH-002)** — `ALLOWED_EMAILS` decides who may use the
-  app; `ADMIN_EMAILS` are always allowed and flagged `is_admin`. Admins can open
-  the OBS-002 operational health view; scanner and history access remain
-  unchanged. Both lists are comma-separated and case/space-insensitive.
-- **Dev-permits / prod-fails-closed** — with an empty `ALLOWED_EMAILS`,
-  development lets any signed-in Google user through when auth is enabled, but
-  `APP_ENV=production` requires at least one allowed or admin email and cannot
-  disable auth. Missing SSO config in production is a hard error, not a warning.
+  app; `ADMIN_EMAILS` are always allowed. Both lists are comma-separated and
+  case/space-insensitive.
+- **Role model (AUTH-003)** — every authorized user resolves to one hierarchical
+  role, `viewer < analyst < admin`:
+  - **viewer** — read-only: scan history, comparison, validation, and charts.
+  - **analyst** — viewer **+** run manual scans and export results.
+  - **admin** — analyst **+** the admin pages (health, runtime settings, audit
+    log, **role management**).
 
-General role-based feature gating remains out of scope; OBS-002 uses only the
-existing admin flag for its narrowly scoped operational page.
+  Roles are **database-driven**: the `user_roles` table is the runtime source of
+  truth and an admin can (re)assign roles from the in-app **Admin roles** page. A
+  `user_roles` row also authorizes sign-in (unioned with the env lists), so the
+  page doubles as a self-service access manager; `ADMIN_EMAILS` stays a
+  **bootstrap-admin floor** so the table can never lock everyone out. Features are
+  gated by *capability* (the UI hides controls **and** the handler re-checks);
+  blocked attempts are logged and audited as `role_denied`. The default role for
+  an authorized user with no row is **analyst**, so existing users keep their
+  scan/export access.
+- **Dev-permits / prod-fails-closed** — with an empty `ALLOWED_EMAILS`,
+  development lets any signed-in Google user through when auth is enabled (treated
+  as a full-access local owner), but `APP_ENV=production` requires at least one
+  allowed or admin email and cannot disable auth. Missing SSO config in production
+  is a hard error, not a warning.
 
 ---
 
@@ -1060,16 +1082,17 @@ changed, and by whom?"* Every audit row carries the **user email**, a UTC
   record `user_email` as `system`; first-run audit call sites bootstrap the
   schema before writing so fresh local databases can still keep the durable row.
 - **Events recorded** — `login_success`, `login_denied`, `manual_scan_started`,
-  `data_refresh_started`, `config_changed`, `export_downloaded`, and
-  `admin_page_accessed` (see the event table under
-  [Observability & logging](#observability--logging)).
-- **Admin pages** — admins gain two views in the top selector (alongside Admin
-  health): **Audit log** (browse/filter the trail) and **Admin settings** (change
-  the operational settings `LOG_LEVEL` / `LOG_FORMAT` at runtime). A settings
-  change is validated, persisted to `app_config`, applied immediately
-  (`get_settings()` reads the environment live), and recorded as `config_changed`.
-  Only those non-secret operational keys are editable — credentials and auth/infra
-  settings are deliberately out of scope.
+  `data_refresh_started`, `config_changed`, `export_downloaded`,
+  `admin_page_accessed`, and the AUTH-003 `role_denied` / `role_changed` (see the
+  event table under [Observability & logging](#observability--logging)).
+- **Admin pages** — admins gain three views in the top selector (alongside Admin
+  health): **Audit log** (browse/filter the trail), **Admin settings** (change the
+  operational settings `LOG_LEVEL` / `LOG_FORMAT` at runtime), and **Admin roles**
+  (AUTH-003 — assign/revoke viewer/analyst/admin roles in the `user_roles` table,
+  recorded as `role_changed`). A settings change is validated, persisted to
+  `app_config`, applied immediately (`get_settings()` reads the environment live),
+  and recorded as `config_changed`. Only those non-secret operational keys are
+  editable — credentials and auth/infra settings are deliberately out of scope.
 
 Full design: [`docs/architecture/obs-003-audit-log.md`](docs/architecture/obs-003-audit-log.md)
 and the LLD [`docs/architecture/components/audit-log.md`](docs/architecture/components/audit-log.md).
