@@ -87,9 +87,10 @@ review → `/code-review` + `/security-review`; everything → `/using-superpowe
    them as `app.<name>` and monkeypatch page renderers like `app._render_history_page`.
 4. **All database access goes through `backend/storage`** (the repository pattern). UI/
    services/jobs call repository helpers and never build `select(...)`, open an engine, or
-   create a session. A CI guard (`tests/test_repository_layer_boundary.py`, added by
-   REFACTOR-002) rejects raw SQL/engine/session construction anywhere outside
-   `backend/storage`. The repository **never opens its own session — the caller owns the
+   create a session. A CI guard
+   ([`tests/test_repository_layer_boundary.py`](tests/test_repository_layer_boundary.py))
+   rejects raw SQL/engine/session construction anywhere outside `backend/storage`. The
+   repository **never opens its own session — the caller owns the
    transaction**; see [storage-persistence](docs/architecture/components/storage-persistence.md).
 
 ---
@@ -238,7 +239,8 @@ allowlist gate. Full details and the **accepted residual risks**:
   [operations runbook](docs/operations.md)
 - **Decision/audit history:** [audit-2026-06 register](docs/architecture/audit-2026-06.md)
   (read before re-flagging "findings" — documents known false alarms). ADRs live under
-  `docs/architecture/` (e.g. `refactor-002-repository-boundary.md`, added by REFACTOR-002).
+  `docs/architecture/` — e.g. the
+  [repository-boundary ADR](docs/architecture/refactor-002-repository-boundary.md) (REFACTOR-002).
 
 ---
 
