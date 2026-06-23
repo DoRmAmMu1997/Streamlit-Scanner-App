@@ -40,10 +40,21 @@ from streamlit.runtime.scriptrunner import get_script_run_ctx
 
 from backend.admin import apply_config_overrides
 from backend.audit import record_audit_event, record_audit_event_once
+from backend.auth.roles import (
+    EXPORT_RESULTS,
+    MANAGE_ROLES,
+    MODIFY_CONFIG,
+    RUN_SCAN,
+    VIEW_AUDIT_LOG,
+    VIEW_HEALTH,
+    Role,
+    role_has_capability,
+)
 from backend.auth.session import (
     AuthenticatedUser,
     auth_secret_values,
     require_authorized_user,
+    require_capability,
 )
 from backend.config import (
     DAILY_CACHE_DIR,
@@ -146,6 +157,7 @@ from ui.history_page import (  # noqa: F401
     _render_history_page,
     _render_history_run_details,
 )
+from ui.roles_page import _render_roles_page
 from ui.validation_page import _render_validation_page
 
 # The CLI prefetch downloads ten years of daily candles for every stock in the
@@ -960,6 +972,18 @@ def main() -> None:
     if settings.auth_required:
         authenticated_user = require_authorized_user(st)
 
+    # AUTH-003: the effective role drives every capability check below. With auth
+    # disabled (local development only — production validation forbids it) there is
+    # no signed-in identity, so the single local operator is treated as a
+    # full-access owner for the scanner flow (admin pages still require a real
+    # signed-in admin so their audit trail has an actor).
+    current_role = (
+        authenticated_user.role if authenticated_user is not None else Role.ADMIN
+    )
+    current_email = (
+        authenticated_user.email if authenticated_user is not None else None
+    )
+
     # Scan history and OBS-003 audit tables need the schema before any durable
     # write. Run this only after the auth gate so an unauthenticated tab still
     # cannot create DB connections or DDL, but before login_success so the first
@@ -1003,12 +1027,14 @@ def main() -> None:
         "Scan comparison",
         "Validation / Signal Performance",
     ]
-    if authenticated_user is not None and getattr(
-        authenticated_user, "is_admin", False
+    if authenticated_user is not None and role_has_capability(
+        current_role, VIEW_HEALTH
     ):
-        # OBS-003 adds two admin pages alongside the OBS-002 health view: a
-        # runtime settings form and the audit log viewer.
-        view_options.extend(["Admin health", "Admin settings", "Audit log"])
+        # AUTH-003: the admin tier sees the operate-the-system pages — health,
+        # the runtime settings form, the audit log viewer, and role management.
+        view_options.extend(
+            ["Admin health", "Admin settings", "Audit log", "Admin roles"]
+        )
 
     view = st.radio(
         "View",
@@ -1026,17 +1052,28 @@ def main() -> None:
     if view == "Validation / Signal Performance":
         _render_validation_page()
         return
+    # AUTH-003 defense in depth: the view list already hides these from non-admins,
+    # but the handler re-checks the capability before rendering — a stale rerun or a
+    # crafted request cannot reach an admin page the UI never offered.
     if view == "Admin health":
+        require_capability(st, role=current_role, capability=VIEW_HEALTH, email=current_email)
         _record_admin_page_access(authenticated_user, "Admin health")
         _render_admin_health_page(authenticated_user)
         return
     if view == "Admin settings":
+        require_capability(st, role=current_role, capability=MODIFY_CONFIG, email=current_email)
         _record_admin_page_access(authenticated_user, "Admin settings")
         _render_config_page(authenticated_user)
         return
     if view == "Audit log":
+        require_capability(st, role=current_role, capability=VIEW_AUDIT_LOG, email=current_email)
         _record_admin_page_access(authenticated_user, "Audit log")
         _render_audit_log_page(authenticated_user)
+        return
+    if view == "Admin roles":
+        require_capability(st, role=current_role, capability=MANAGE_ROLES, email=current_email)
+        _record_admin_page_access(authenticated_user, "Admin roles")
+        _render_roles_page(authenticated_user)
         return
 
     try:
@@ -1052,7 +1089,9 @@ def main() -> None:
         st.error("No screeners were discovered in the screeners folder.")
         return
 
-    selected = _render_sidebar(screeners)
+    selected = _render_sidebar(
+        screeners, can_run=role_has_capability(current_role, RUN_SCAN)
+    )
 
     show_status_panel(selected)
     render_universe_table()
@@ -1067,6 +1106,10 @@ def main() -> None:
     #   simply re-render from `scan_cache` so the user does not lose state.
     # - Switching screeners invalidates the cache via the key mismatch check.
     if st.session_state.pop("pending_run", False):
+        # AUTH-003 defense in depth: the Run button is hidden from viewers, but the
+        # handler re-checks before executing so a stale pending_run flag cannot run
+        # a scan a viewer's UI never offered. Denial logs/audits and stops.
+        require_capability(st, role=current_role, capability=RUN_SCAN, email=current_email)
         # OBS-003: the user explicitly pressed Run. Record the manual action
         # (edge-triggered by the button, so no dedup is needed). This is distinct
         # from the service-level scan_started lifecycle event, which also fires
@@ -1090,17 +1133,26 @@ def main() -> None:
         st.info("Press **Run screener** in the sidebar to scan for matches.", icon="👈")
         return
 
-    _render_scan_output(selected, cache)
+    _render_scan_output(
+        selected, cache, can_export=role_has_capability(current_role, EXPORT_RESULTS)
+    )
 
 
 
-def _render_sidebar(screeners: dict[str, ScreenerDefinition]) -> ScreenerDefinition:
+def _render_sidebar(
+    screeners: dict[str, ScreenerDefinition], *, can_run: bool = True
+) -> ScreenerDefinition:
     """Render the sidebar and return the selected screener definition.
 
     The sidebar is intentionally minimal: data refresh belongs to the CLI
     prefetch step (`python app.py`), and every scan uses the 10-year candle
     window maintained there. The Run button writes flags into `st.session_state`
     so the main flow can detect them on the same rerun.
+
+    ``can_run`` is the AUTH-003 ``RUN_SCAN`` capability: viewers see the screener
+    selection (so they can read its description) but not the Run button. The main
+    flow re-checks the capability before executing, so hiding the button is UX, not
+    the security boundary.
     """
     with st.sidebar:
         st.header("Scanner")
@@ -1132,11 +1184,16 @@ def _render_sidebar(screeners: dict[str, ScreenerDefinition]) -> ScreenerDefinit
         _render_parameter_overrides(selected)
 
         st.divider()
-        if st.button("Run screener", type="primary", width="stretch"):
-            # Invalidate any previously cached scan so the next pass through
-            # main() executes the screener fresh.
-            st.session_state.pop("scan_cache", None)
-            st.session_state["pending_run"] = True
+        # AUTH-003: only analysts and admins may run scans. Viewers see a hint
+        # instead of the Run button; the main flow still re-checks the capability.
+        if can_run:
+            if st.button("Run screener", type="primary", width="stretch"):
+                # Invalidate any previously cached scan so the next pass through
+                # main() executes the screener fresh.
+                st.session_state.pop("scan_cache", None)
+                st.session_state["pending_run"] = True
+        else:
+            st.caption("Your role has read-only access; running scans is disabled.")
 
     return selected
 
@@ -1284,13 +1341,20 @@ def _execute_screener(
     }
 
 
-def _render_scan_output(selected: ScreenerDefinition, cache: dict[str, Any]) -> None:
+def _render_scan_output(
+    selected: ScreenerDefinition, cache: dict[str, Any], *, can_export: bool = True
+) -> None:
     """Render the cached scan: stats + ranked selectable table + chart.
 
     The cache payload survives ordinary Streamlit reruns, so this function must
     be deterministic: sort by ``final_score`` the same way every time, preserve
     the selected-row contract for charts, and keep exports aligned with what the
     user sees on screen.
+
+    ``can_export`` is the AUTH-003 ``EXPORT_RESULTS`` capability. A CSV download has
+    no separate server handler — ``st.download_button`` builds its payload at render
+    time — so a viewer (no export capability) must never reach the button or the
+    bytes build; the whole export block is skipped for them.
     """
     results: pd.DataFrame = _sort_results_by_final_score(cache["results"])
     stats = cache["stats"]
@@ -1317,29 +1381,33 @@ def _render_scan_output(selected: ScreenerDefinition, cache: dict[str, Any]) -> 
         # criteria mode for curated symbols and universal mode for everything
         # else, so every shortlisted stock can still get a fundamentals view.
         _render_fundamentals_panel(chart_symbol)
-        # CSV-safe wrapper neutralizes formula injection before download. The
-        # raw DataFrame still has full precision; only the on-screen Styler
-        # rounds to 2 decimals, so the CSV mirrors the source data.
-        results_file_name = f"{selected.key}_results.csv"
-        # st.download_button returns True on the rerun where the user clicks it,
-        # so it doubles as the OBS-003 export trigger (edge-triggered, no dedup).
-        if st.download_button(
-            "Download results CSV",
-            data=_csv_safe(_drop_provenance(results))
-            .to_csv(index=False)
-            .encode("utf-8"),
-            file_name=results_file_name,
-            mime="text/csv",
-        ):
-            record_audit_event(
-                event=EVENT_EXPORT_DOWNLOADED,
-                user_email=st.session_state.get("_audit_user_email"),
-                metadata={
-                    "file_name": results_file_name,
-                    "row_count": len(results),
-                    "kind": "scan_results",
-                },
-            )
+        # AUTH-003: only analysts and admins may export. Build the CSV bytes and
+        # render the download button only when the role allows it (the button has
+        # no post-click handler to re-check, so this conditional IS the boundary).
+        if can_export:
+            # CSV-safe wrapper neutralizes formula injection before download. The
+            # raw DataFrame still has full precision; only the on-screen Styler
+            # rounds to 2 decimals, so the CSV mirrors the source data.
+            results_file_name = f"{selected.key}_results.csv"
+            # st.download_button returns True on the rerun where the user clicks it,
+            # so it doubles as the OBS-003 export trigger (edge-triggered, no dedup).
+            if st.download_button(
+                "Download results CSV",
+                data=_csv_safe(_drop_provenance(results))
+                .to_csv(index=False)
+                .encode("utf-8"),
+                file_name=results_file_name,
+                mime="text/csv",
+            ):
+                record_audit_event(
+                    event=EVENT_EXPORT_DOWNLOADED,
+                    user_email=st.session_state.get("_audit_user_email"),
+                    metadata={
+                        "file_name": results_file_name,
+                        "row_count": len(results),
+                        "kind": "scan_results",
+                    },
+                )
 
     if failures:
         with st.expander("Fetch failures", expanded=True):

@@ -669,6 +669,72 @@ class AppConfig(Base):
         return f"AppConfig(key={self.key!r}, updated_by={self.updated_by!r})"
 
 
+class UserRole(Base):
+    """AUTH-003 — one durable role assignment per user (viewer / analyst / admin).
+
+    Where ``audit_logs`` records *what people did*, this table records *what a
+    person is allowed to do*. AUTH-001/002 still decide whether a Google identity
+    may sign in at all; AUTH-003 layers a role on top so capabilities split into
+    read-only (viewer), produce-work (analyst), and operate-the-system (admin).
+
+    The role store is database-driven on purpose: an admin can (re)assign roles at
+    runtime from the admin Roles page without a redeploy. ``ADMIN_EMAILS`` (env)
+    stays a bootstrap-admin floor so the very first admin always exists to populate
+    this table — see ``backend.auth.roles.resolve_role`` for the precedence.
+
+    Like ``app_config`` this is a tiny key/value-shaped table: ``email`` is the
+    identity, so it is the primary key (one role per user). The allowed role names
+    are pinned by a CHECK constraint on both engines (same rationale as
+    ``ai_evaluations.outcome``) so a bad write can never store an unknown role.
+    """
+
+    __tablename__ = "user_roles"
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('viewer', 'analyst', 'admin')",
+            name="ck_user_roles_role",
+        ),
+    )
+
+    # The normalized, lower-cased identity email — the exact form the auth gate
+    # compares against ALLOWED_EMAILS/ADMIN_EMAILS. 320 is the maximum email
+    # length, matching ``audit_logs.user_email``.
+    email: Mapped[str] = mapped_column(
+        String(320), primary_key=True, comment="Normalized lowercase user email"
+    )
+
+    # The role name. A short String + CHECK (not a native enum) so adding a future
+    # role is a normal migration, not an ALTER TYPE — same pattern as scan_status.
+    role: Mapped[str] = mapped_column(
+        String(16), nullable=False, comment="viewer | analyst | admin"
+    )
+
+    # The admin who last set this row (forensics for the role_changed audit event).
+    # NULL for rows created by a seed/migration rather than a person.
+    assigned_by: Mapped[str | None] = mapped_column(
+        String(320), nullable=True, comment="Admin email who set this role"
+    )
+
+    # tz-aware UTC like every other timestamp in this schema. ORM-side defaults
+    # (applied on flush) keep the value engine-independent, matching app_config.
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: dt.datetime.now(dt.UTC),
+        comment="UTC time the row was first written",
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: dt.datetime.now(dt.UTC),
+        onupdate=lambda: dt.datetime.now(dt.UTC),
+        comment="UTC time the role was last changed",
+    )
+
+    def __repr__(self) -> str:
+        return f"UserRole(email={self.email!r}, role={self.role!r})"
+
+
 # ============================================================================
 # NEXT: SCAN-002 (owner: Codex) — implement the database layer on top of this
 # schema. This file gives you the tables; SCAN-002 gives the app a way to talk

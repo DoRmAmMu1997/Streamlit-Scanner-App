@@ -25,9 +25,15 @@ from dataclasses import dataclass, replace
 from typing import Any, NoReturn
 
 from backend.audit import record_audit_event, record_audit_event_once
+from backend.auth.roles import DEFAULT_ROLE, Role, resolve_role, role_has_capability
 from backend.config import get_settings
-from backend.observability import EVENT_AUTH_DENIED, EVENT_LOGIN_DENIED, log_event
-from backend.storage import ensure_database_schema
+from backend.observability import (
+    EVENT_AUTH_DENIED,
+    EVENT_LOGIN_DENIED,
+    EVENT_ROLE_DENIED,
+    log_event,
+)
+from backend.storage import ensure_database_schema, get_user_role, session_scope
 
 logger = logging.getLogger(__name__)
 
@@ -48,16 +54,25 @@ _PROVIDER_AUTH_KEYS = ("client_id", "client_secret", "server_metadata_url")
 class AuthenticatedUser:
     """Identity details the rest of the app may safely use.
 
-    ``email`` is required because it is the stable value future AUTH tasks can
-    compare against an allowlist or role table. ``name`` is optional because
-    identity providers may omit display names, but the email must be present.
+    ``email`` is required because it is the stable value the allowlist and role
+    table compare against. ``name`` is optional because identity providers may
+    omit display names, but the email must be present.
+
+    ``role`` is the AUTH-003 effective role (viewer/analyst/admin). AUTH-001's
+    authentication gate builds the user without it (defaults to the lowest tier,
+    ``VIEWER``); ``require_authorized_user`` fills the real role via
+    ``backend.auth.roles.resolve_role``. ``is_admin`` is derived from it so every
+    existing ``is_admin`` reader keeps working without a separate, drift-prone field.
     """
 
     email: str
     name: str | None = None
-    # AUTH-002 fills this from ADMIN_EMAILS. AUTH-001's authentication gate builds
-    # the user without it (defaults False); role-gated features (AUTH-003) can read it.
-    is_admin: bool = False
+    role: Role = Role.VIEWER
+
+    @property
+    def is_admin(self) -> bool:
+        """True when this user holds the admin role (back-compat convenience)."""
+        return self.role is Role.ADMIN
 
 
 def auth_config_status(st_module: Any) -> dict[str, object]:
@@ -224,9 +239,18 @@ def require_authorized_user(st_module: Any) -> AuthenticatedUser:
     # frozensets of already-normalized email keys.
     allowed = _allowed_emails()
     admins = _admin_emails()
+    # AUTH-003: a user_roles row both authorizes sign-in (unioned with the env
+    # lists) and supplies the role. One best-effort lookup serves both; a DB error
+    # yields None, which fails closed for a table-only user (env allow-listed /
+    # admin users are unaffected) — see ``_lookup_table_role``.
+    table_role = _lookup_table_role(email)
 
     if not is_email_authorized(
-        email, allowed=allowed, admins=admins, production=_is_production_mode()
+        email,
+        allowed=allowed,
+        admins=admins,
+        production=_is_production_mode(),
+        in_role_table=table_role is not None,
     ):
         # Record the denied attempt for the operator's own audit trail. Only the
         # email is logged — never the allowlist itself — so the log cannot leak
@@ -269,10 +293,18 @@ def require_authorized_user(st_module: Any) -> AuthenticatedUser:
         )
         _stop(st_module)
 
-    # Authorized. Tag admins so future role-gated features (AUTH-003) can read it.
-    # Replacing the email too keeps the returned app state in the same canonical
-    # lowercase form used for the allowlist/admin comparison.
-    return replace(user, email=email, is_admin=email in admins)
+    # Authorized. Resolve the effective AUTH-003 role: ADMIN_EMAILS is a floor,
+    # otherwise the table role, otherwise the analyst default (see resolve_role).
+    # Replacing the email keeps the returned state in the canonical lowercase form
+    # used for every authorization comparison.
+    role = resolve_role(
+        email,
+        in_admin_env=email in admins,
+        table_role=table_role,
+        default_role=DEFAULT_ROLE,
+        auth_required=True,
+    )
+    return replace(user, email=email, role=role)
 
 
 def is_email_authorized(
@@ -281,22 +313,108 @@ def is_email_authorized(
     allowed: frozenset[str],
     admins: frozenset[str],
     production: bool,
+    in_role_table: bool = False,
 ) -> bool:
     """Pure allowlist decision — no Streamlit and no env reads, so it tests easily.
 
     Rules, in order:
       1. Admins are always authorized.
-      2. If an allowlist is configured, the email must be on it.
-      3. If no allowlist is configured, permit in development but deny in
+      2. A user with an AUTH-003 ``user_roles`` row (``in_role_table``) is
+         authorized — the database doubles as a self-service allowlist.
+      3. If an env allowlist is configured, the email must be on it.
+      4. If no allowlist is configured, permit in development but deny in
          production (fail closed). Admins already passed at rule 1.
+
+    ``in_role_table`` is passed in (not read here) so the function stays pure and
+    DB-free; the gate computes it from one best-effort lookup.
     """
     email = _normalize_email(email)
     if email in admins:
+        return True
+    if in_role_table:
         return True
     if allowed:
         return email in allowed
     # No allowlist configured: dev permits everyone signed in; prod locks down.
     return not production
+
+
+def require_capability(
+    st_module: Any,
+    *,
+    role: Role,
+    capability: str,
+    email: str | None = None,
+) -> None:
+    """Stop the current run when ``role`` lacks ``capability`` (AUTH-003 guard).
+
+    The defense-in-depth companion to the view-list/button hiding in ``app.py``:
+    hiding a control is UX, this re-check at the action handler is the boundary.
+    On a miss it logs (OBS-001) and durably audits (OBS-003) a ``role_denied``
+    event — the actor's email and the attempted capability only, never the role
+    table — then shows a generic message and ``st.stop()``s so code below never runs.
+
+    ``role``/``email`` are passed in (not read from a user object) so the auth-off
+    local-owner path (``role=ADMIN``, ``email=None``) and tests both work without
+    constructing an ``AuthenticatedUser``. Mirrors the AUTH-002 denial branch,
+    including the once-per-session dedup that keeps a viewer hammering a hidden
+    control to a single audit row.
+    """
+    if role_has_capability(role, capability):
+        return
+
+    log_event(
+        logger,
+        EVENT_ROLE_DENIED,
+        level=logging.WARNING,
+        email=email,
+        required_capability=capability,
+        role=role.name.lower(),
+    )
+    metadata = {"required_capability": capability, "actual_role": role.name.lower()}
+    session_state = getattr(st_module, "session_state", None)
+    if not hasattr(session_state, "get"):
+        record_audit_event(
+            event=EVENT_ROLE_DENIED,
+            user_email=email,
+            metadata=metadata,
+            level=logging.WARNING,
+        )
+    else:
+        ensure_database_schema()
+        record_audit_event_once(
+            session_state=session_state,
+            dedup_key=f"_audit_role_denied:{email}:{capability}",
+            event=EVENT_ROLE_DENIED,
+            user_email=email,
+            metadata=metadata,
+            level=logging.WARNING,
+        )
+    st_module.error("You do not have permission to perform this action.")
+    _stop(st_module)
+
+
+def _lookup_table_role(email: str) -> Role | None:
+    """Return the AUTH-003 ``user_roles`` role for ``email``, best-effort.
+
+    The role store lives in the database, but the auth gate runs before
+    ``app.main()`` bootstraps the schema, so this ensures the schema first (a
+    per-process no-op after the first call) and then reads the row. Any database
+    problem (or an unknown stored role) yields ``None`` — which both authorization
+    (treat as "no table grant") and ``resolve_role`` (fall back to the default
+    role) handle as fail-closed, so a transient DB error can never *grant* access.
+    """
+    try:
+        ensure_database_schema()
+        with session_scope() as session:
+            stored = get_user_role(session, email)
+    except Exception:  # noqa: BLE001 - role lookup is best-effort and fails closed.
+        logger.warning(
+            "Could not read the user_roles table; treating as no assignment.",
+            exc_info=True,
+        )
+        return None
+    return Role.parse(stored)
 
 
 def _allowed_emails() -> frozenset[str]:

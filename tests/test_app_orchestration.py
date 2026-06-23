@@ -17,6 +17,7 @@ import pandas as pd
 import pytest
 
 import app
+from backend.auth.roles import Role
 from backend.config.settings import get_settings
 from backend.observability import EVENT_DATA_REFRESH_COMPLETED
 from backend.scanning import ScanRunResult, ScanStatus
@@ -358,7 +359,7 @@ def test_main_bootstraps_schema_before_login_audit_and_view_selection(monkeypatc
 
     def authenticate(_st):
         calls.append("auth")
-        return SimpleNamespace(email="person@example.com")
+        return SimpleNamespace(email="person@example.com", role=Role.ANALYST)
 
     def stop_at_view(*_args, **_kwargs):
         calls.append("view")
@@ -418,6 +419,7 @@ def test_admin_health_view_is_available_and_returns_before_screener_discovery(
             "Admin health",
             "Admin settings",
             "Audit log",
+            "Admin roles",
         )
         calls.append("view")
         return "Admin health"
@@ -436,7 +438,7 @@ def test_admin_health_view_is_available_and_returns_before_screener_discovery(
         lambda _st: app.AuthenticatedUser(
             email="admin@example.com",
             name="Admin",
-            is_admin=True,
+            role=Role.ADMIN,
         ),
     )
     monkeypatch.setattr(
@@ -493,7 +495,7 @@ def test_validation_view_is_available_to_all_authenticated_users(monkeypatch):
         lambda _st: app.AuthenticatedUser(
             email="person@example.com",
             name="Person",
-            is_admin=False,
+            role=Role.ANALYST,
         ),
     )
     monkeypatch.setattr(
@@ -550,7 +552,7 @@ def test_comparison_view_is_available_to_all_authenticated_users(monkeypatch):
         lambda _st: app.AuthenticatedUser(
             email="person@example.com",
             name="Person",
-            is_admin=False,
+            role=Role.ANALYST,
         ),
     )
     monkeypatch.setattr(
@@ -612,7 +614,7 @@ def test_non_admin_cannot_select_admin_health(monkeypatch):
         lambda _st: app.AuthenticatedUser(
             email="person@example.com",
             name="Person",
-            is_admin=False,
+            role=Role.ANALYST,
         ),
     )
     monkeypatch.setattr(
@@ -687,14 +689,14 @@ def test_main_passes_authenticated_email_as_scan_trigger(monkeypatch):
         "require_authorized_user",
         # The mixed-case email proves app.main() normalizes through _scan_trigger
         # before the value reaches run_scan/persistence.
-        lambda _st: SimpleNamespace(email="Sunny@Example.COM"),
+        lambda _st: SimpleNamespace(email="Sunny@Example.COM", role=Role.ANALYST),
     )
     monkeypatch.setattr(app, "discover_screeners", lambda: {selected.key: selected})
-    monkeypatch.setattr(app, "_render_sidebar", lambda _screeners: selected)
+    monkeypatch.setattr(app, "_render_sidebar", lambda _screeners, **_kwargs: selected)
     monkeypatch.setattr(app, "show_status_panel", lambda _selected: None)
     monkeypatch.setattr(app, "render_universe_table", lambda: None)
     monkeypatch.setattr(app, "_execute_screener", fake_execute)
-    monkeypatch.setattr(app, "_render_scan_output", lambda _selected, _cache: None)
+    monkeypatch.setattr(app, "_render_scan_output", lambda _selected, _cache, **_kwargs: None)
     monkeypatch.setattr(
         app,
         "st",

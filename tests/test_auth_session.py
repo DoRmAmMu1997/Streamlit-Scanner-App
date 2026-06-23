@@ -13,13 +13,15 @@ from types import SimpleNamespace
 import pytest
 
 from backend.auth import session
+from backend.auth.roles import RUN_SCAN, VIEW_RESULTS, Role
 from backend.auth.session import (
     AuthenticatedUser,
     is_email_authorized,
     require_authenticated_user,
     require_authorized_user,
+    require_capability,
 )
-from backend.observability import EVENT_AUTH_DENIED
+from backend.observability import EVENT_AUTH_DENIED, EVENT_ROLE_DENIED
 
 
 class _StopCalled(RuntimeError):
@@ -126,6 +128,19 @@ def _authlib_installed(monkeypatch):
     dependency case overrides this fixture explicitly.
     """
     monkeypatch.setattr(session, "_is_authlib_available", lambda: True)
+
+
+@pytest.fixture(autouse=True)
+def _no_role_table(monkeypatch):
+    """Default every gate test to "no user_roles assignment", DB-free.
+
+    AUTH-003 made ``require_authorized_user`` consult the ``user_roles`` table for
+    both authorization and role. These tests exercise the AUTH-002 env-allowlist
+    behaviour, so stub the lookup to ``None`` (no row); the dedicated table-path
+    tests below override it explicitly. This keeps the env-allowlist tests from
+    touching the database.
+    """
+    monkeypatch.setattr(session, "_lookup_table_role", lambda _email: None)
 
 
 def test_unauthenticated_user_sees_google_login_and_cannot_continue():
@@ -279,7 +294,11 @@ def test_require_authorized_user_allows_listed_email(monkeypatch):
 
     user = require_authorized_user(fake_st)
 
-    assert user == AuthenticatedUser(email="sunny@example.com", name="Sunny", is_admin=False)
+    # No table row + not an admin → the analyst default (preserves AUTH-002 access).
+    assert user == AuthenticatedUser(
+        email="sunny@example.com", name="Sunny", role=Role.ANALYST
+    )
+    assert user.is_admin is False
     assert fake_st.errors == []
 
 
@@ -442,3 +461,80 @@ def test_require_authorized_user_requires_email_via_auth_gate(monkeypatch):
         require_authorized_user(fake_st)
 
     assert fake_st.errors == ["Your login did not provide an email address."]
+
+
+# ---------------------------------------------------------------------------
+# AUTH-003 — table-driven entry + role, and the capability guard
+# ---------------------------------------------------------------------------
+
+
+def test_user_roles_row_authorizes_entry_and_sets_role(monkeypatch):
+    """A user_roles row grants sign-in even with an empty env allowlist in prod."""
+    monkeypatch.setenv("ALLOWED_EMAILS", "")
+    monkeypatch.setenv("ADMIN_EMAILS", "")
+    monkeypatch.setenv("SCANNER_ENV", "production")
+    # Only the database grants this email access; it is on neither env list.
+    monkeypatch.setattr(session, "_lookup_table_role", lambda _email: Role.VIEWER)
+    fake_st = _signed_in("tabled@example.com", "Tabled")
+
+    user = require_authorized_user(fake_st)
+
+    assert user.email == "tabled@example.com"
+    assert user.role is Role.VIEWER
+    assert user.is_admin is False
+    assert fake_st.errors == []
+
+
+def test_admin_env_floor_overrides_a_lower_table_role(monkeypatch):
+    """An ADMIN_EMAILS member stays admin even if the table says viewer."""
+    monkeypatch.setenv("ALLOWED_EMAILS", "")
+    monkeypatch.setenv("ADMIN_EMAILS", "boss@example.com")
+    monkeypatch.setenv("SCANNER_ENV", "production")
+    monkeypatch.setattr(session, "_lookup_table_role", lambda _email: Role.VIEWER)
+    fake_st = _signed_in("boss@example.com", "Boss")
+
+    user = require_authorized_user(fake_st)
+
+    assert user.role is Role.ADMIN
+    assert user.is_admin is True
+
+
+def test_require_capability_allows_when_role_has_capability():
+    """A capable role passes straight through with no error and no stop."""
+    fake_st = _FakeStreamlit()
+    assert require_capability(fake_st, role=Role.VIEWER, capability=VIEW_RESULTS) is None
+    assert require_capability(fake_st, role=Role.ANALYST, capability=RUN_SCAN) is None
+    assert require_capability(fake_st, role=Role.ADMIN, capability=RUN_SCAN) is None
+    assert fake_st.errors == []
+
+
+def test_require_capability_denies_logs_and_audits(monkeypatch, caplog):
+    """A role below the minimum is logged, audited, shown a message, and stopped."""
+    fake_st = _FakeStreamlit()
+    audited: list[dict] = []
+    monkeypatch.setattr(
+        session, "record_audit_event", lambda **kwargs: audited.append(kwargs) or True
+    )
+
+    with caplog.at_level(logging.WARNING), pytest.raises(_StopCalled):
+        require_capability(
+            fake_st, role=Role.VIEWER, capability=RUN_SCAN, email="viewer@example.com"
+        )
+
+    # Generic message — never reveals the policy or the role table.
+    assert any("permission" in message.lower() for message in fake_st.errors)
+    # OBS-001 structured log event.
+    events = [
+        getattr(record, "structured_fields", {})
+        for record in caplog.records
+        if getattr(record, "event", None) == EVENT_ROLE_DENIED
+    ]
+    assert len(events) == 1
+    assert events[0]["required_capability"] == RUN_SCAN
+    assert events[0]["role"] == "viewer"
+    # OBS-003 durable audit (best-effort path: the fake has no session_state).
+    assert len(audited) == 1
+    assert audited[0]["event"] == EVENT_ROLE_DENIED
+    assert audited[0]["user_email"] == "viewer@example.com"
+    assert audited[0]["metadata"]["actual_role"] == "viewer"
+    assert audited[0]["metadata"]["required_capability"] == RUN_SCAN
