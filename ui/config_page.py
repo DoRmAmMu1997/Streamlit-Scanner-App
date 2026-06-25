@@ -40,14 +40,28 @@ def _render_config_page(authenticated_user: AuthenticatedUser | None) -> None:
         selections: dict[str, str] = {}
         for setting in EDITABLE_CONFIG_KEYS.values():
             current = setting.current()
-            index = setting.choices.index(current) if current in setting.choices else 0
-            selections[setting.key] = st.selectbox(
-                setting.label,
-                setting.choices,
-                index=index,
-                help=setting.help,
-                key=f"config_{setting.key}",
-            )
+            if setting.choices:
+                index = (
+                    setting.choices.index(current)
+                    if current in setting.choices
+                    else 0
+                )
+                selections[setting.key] = st.selectbox(
+                    setting.label,
+                    setting.choices,
+                    index=index,
+                    help=setting.help,
+                    key=f"config_{setting.key}",
+                )
+            else:
+                # Free-text settings (e.g. ALERT-002 alert destinations). The value
+                # is still validated by ``setting.parse`` on save.
+                selections[setting.key] = st.text_input(
+                    setting.label,
+                    value=current,
+                    help=setting.help,
+                    key=f"config_{setting.key}",
+                )
         submitted = st.form_submit_button("Save settings", type="primary")
 
     if not submitted:

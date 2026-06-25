@@ -98,6 +98,11 @@ local Python run, the root `.env` for Docker Compose, or the Render dashboard
 ```bash
 APP_URL=https://your-scanner.example.com      # used for the "Open the app" link
 
+# Preferences (ALERT-002). Defaults: on, full. An admin can also change these
+# (and the destination) at runtime from Admin settings — see the note below.
+ALERT_ENABLED=true                            # set false to silence alerts without removing creds
+ALERT_CONTENT=full                            # full = include top results; summary = counts only
+
 # Telegram (bot token from @BotFather; numeric chat id from getUpdates)
 TELEGRAM_BOT_TOKEN=123456:AA...
 TELEGRAM_CHAT_ID=987654321
@@ -114,6 +119,12 @@ ALERT_EMAIL_TO=you@example.com
 the message body is built only from non-secret summary fields, so secrets never
 appear in a notification. Leave a channel's variables unset to disable it; with
 none set, the scan runs normally and notification is skipped.
+
+**Runtime preferences (ALERT-002).** An admin can change `ALERT_ENABLED`,
+`ALERT_CONTENT`, and the non-secret destinations `TELEGRAM_CHAT_ID` /
+`ALERT_EMAIL_TO` from the **Admin settings** page without a redeploy; changes are
+validated, audited, applied immediately, and replayed on the next start (the daily
+job included). Channel credentials stay environment-only.
 
 ---
 

@@ -40,6 +40,30 @@ def test_main_notifies_with_the_summary(monkeypatch) -> None:
     assert captured[0].outcomes[0].screener_key == "bollinger_band_reversal"
 
 
+def test_main_applies_config_overrides_before_running(monkeypatch) -> None:
+    # ALERT-002: the headless job replays admin runtime-config overrides (alert
+    # prefs, log level, ...) so an admin change in the UI reaches the cron alert.
+    import backend.admin as admin
+
+    applied: list[bool] = []
+
+    def fake_apply(**_kwargs: object) -> dict[str, str]:
+        applied.append(True)
+        return {}
+
+    monkeypatch.setattr(admin, "apply_config_overrides", fake_apply)
+    monkeypatch.setattr(notifications, "notify_daily_scan", lambda _summary: None)
+
+    exit_code = main(
+        ["--screener", "bollinger_band_reversal"],
+        job_runner=lambda **_kwargs: _ok_summary(),
+        schema_bootstrapper=lambda: True,
+    )
+
+    assert exit_code == 0
+    assert applied == [True]
+
+
 def test_notification_failure_never_changes_exit_code(monkeypatch) -> None:
     def boom(_summary: DailyScanSummary) -> None:
         raise RuntimeError("notifier exploded")

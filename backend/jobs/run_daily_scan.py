@@ -414,6 +414,17 @@ def main(
         )
         return 1
 
+    # ALERT-002: now that the schema exists, replay admin runtime-config overrides
+    # (alert enable / content / destination, log level, ...) into the environment so
+    # this headless job honours changes an admin made in the UI. Best-effort and
+    # lazily imported, mirroring the notification import below.
+    try:
+        from backend.admin import apply_config_overrides
+
+        apply_config_overrides()
+    except Exception:  # noqa: BLE001 - config replay must never fail the scan job
+        logger.warning("daily-scan could not apply config overrides", exc_info=True)
+
     if args.config_path:
         try:
             scan_entries = load_daily_scan_config(args.config_path)

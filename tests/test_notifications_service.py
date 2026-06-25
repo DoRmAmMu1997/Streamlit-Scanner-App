@@ -114,3 +114,19 @@ def test_failed_run_renders_a_failure_alert() -> None:
         telegram_sender=telegram,
     )
     assert "Daily scan FAILED" in sent_text[0]
+
+
+def test_disabled_alert_sends_nothing_even_when_configured() -> None:
+    # ALERT-002: an admin can switch alerts off without removing credentials.
+    calls: list[str] = []
+
+    def telegram(_text: str, *, settings: NotificationSettings) -> None:
+        calls.append("telegram")
+
+    disabled = NotificationSettings(
+        telegram_bot_token="t", telegram_chat_id="c", alerts_enabled=False
+    )
+    result = notify_daily_scan(_Summary(), settings=disabled, telegram_sender=telegram)
+
+    assert result.skipped is True
+    assert calls == []

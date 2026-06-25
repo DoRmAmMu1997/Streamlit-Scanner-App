@@ -83,6 +83,10 @@ def notify_daily_scan(
     notification problem can never change the scan job's exit code (ALERT-001).
     """
     settings = settings or load_notification_settings()
+    if not settings.alerts_enabled:
+        # ALERT-002: an admin can switch alerts off without removing credentials.
+        log_event(logger, EVENT_NOTIFICATION_SKIPPED, reason="disabled")
+        return NotificationResult()
     if not settings.any_configured:
         log_event(logger, EVENT_NOTIFICATION_SKIPPED, reason="no_channel_configured")
         return NotificationResult()

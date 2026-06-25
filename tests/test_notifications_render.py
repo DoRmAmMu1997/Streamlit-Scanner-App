@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from backend.notifications.render import render_email, render_telegram
 from backend.notifications.report import DailyScanReport, RankedRow, ScreenerLine
 
@@ -63,3 +65,14 @@ def test_rendered_body_is_redacted() -> None:
     text = render_telegram(_report(message="failed: token=SUPERSECRETVALUE123"))
     assert "SUPERSECRETVALUE123" not in text
     assert "***REDACTED***" in text
+
+
+def test_summary_content_omits_the_results_block() -> None:
+    # ALERT-002: a summary-only alert keeps the counts but drops the per-stock list.
+    summary = replace(_report(), include_results=False)
+    text = render_telegram(summary)
+    assert "Shortlisted: 3" in text
+    assert "Top results:" not in text
+    assert "RELIANCE" not in text
+    # Full alerts (the default) still include the results.
+    assert "Top results:" in render_telegram(_report())

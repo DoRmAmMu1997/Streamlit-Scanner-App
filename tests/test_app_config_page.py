@@ -30,6 +30,8 @@ class _FakeStreamlit:
         self.successes: list[str] = []
         self.infos: list[str] = []
         self.errors: list[str] = []
+        self.selectboxes: list[str] = []
+        self.text_inputs: list[str] = []
 
     def subheader(self, *_args, **_kwargs):
         pass
@@ -40,8 +42,13 @@ class _FakeStreamlit:
     def form(self, *_args, **_kwargs):
         return _FakeForm()
 
-    def selectbox(self, _label, choices, index=0, **_kwargs):
+    def selectbox(self, label, choices, index=0, **_kwargs):
+        self.selectboxes.append(label)
         return choices[index]
+
+    def text_input(self, label, value="", **_kwargs):
+        self.text_inputs.append(label)
+        return value
 
     def form_submit_button(self, *_args, **_kwargs):
         return self._submit
@@ -147,3 +154,19 @@ def test_config_page_surfaces_validation_errors(monkeypatch):
 
     assert fake_st.errors
     assert fake_st.successes == []
+
+
+def test_config_page_renders_alert_preference_controls(monkeypatch):
+    # ALERT-002: enable/content are choice select boxes; the destinations are
+    # free-text inputs (validated on save). All four must appear on the form.
+    fake_st = _FakeStreamlit(submit=False)
+    monkeypatch.setattr(config_page, "st", fake_st)
+
+    config_page._render_config_page(
+        AuthenticatedUser("admin@example.com", "Admin", is_admin=True)
+    )
+
+    assert "Daily alerts enabled" in fake_st.selectboxes
+    assert "Alert content" in fake_st.selectboxes
+    assert "Telegram chat id" in fake_st.text_inputs
+    assert "Alert email recipient" in fake_st.text_inputs

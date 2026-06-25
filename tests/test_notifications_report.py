@@ -213,6 +213,30 @@ def test_top_results_capped_at_ten(session_factory) -> None:
     assert len(report.top_results) == 10
 
 
+def test_summary_content_keeps_counts_but_skips_top_results(session_factory) -> None:
+    # ALERT-002: the summary-only content level still reads symbol counts but skips
+    # the heavier top-N read, so the report carries no per-stock results.
+    a_id, b_id = _seed(session_factory)
+    summary = FakeSummary(
+        outcomes=[
+            FakeOutcome("bollinger_band_reversal", "fno", ScanStatus.SUCCESS, a_id, 2),
+            FakeOutcome("bollinger_band_reversal", "fno", ScanStatus.SUCCESS, b_id, 1),
+        ]
+    )
+    summary_settings = NotificationSettings(
+        app_url="https://scanner.example.com", alert_content="summary"
+    )
+
+    report = build_daily_scan_report(
+        summary, settings=summary_settings, session_factory=session_factory
+    )
+
+    assert report.include_results is False
+    assert report.total_symbols_scanned == 120
+    assert report.total_shortlisted == 3
+    assert report.top_results == ()
+
+
 def test_fatal_only_summary_needs_no_db(session_factory) -> None:
     # A pre-scan failure (no run_id) builds a failure report without any DB read.
     summary = FakeSummary(

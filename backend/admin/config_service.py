@@ -6,8 +6,8 @@ The app reads its settings from environment variables (see
 app is running. This module adds a *small, safe* runtime-config capability so the
 ``config_changed`` audit event has a real trigger:
 
-- An admin edits a whitelisted operational setting (currently ``LOG_LEVEL`` and
-  ``LOG_FORMAT``) in the UI.
+- An admin edits a whitelisted operational setting (``LOG_LEVEL``, ``LOG_FORMAT``,
+  and the ALERT-002 daily-alert preferences) in the UI.
 - ``update_config_value`` validates the new value with the *same* parsers the app
   uses at startup, stores it in the ``app_config`` table, writes it into
   ``os.environ`` so it takes effect immediately (``get_settings()`` reads the
@@ -18,7 +18,10 @@ app is running. This module adds a *small, safe* runtime-config capability so th
 Scope is deliberately narrow. Only non-secret operational keys are editable:
 credentials and auth/infra settings (``AUTH_REQUIRED``, ``ALLOWED_EMAILS``,
 ``DATABASE_URL``, ``DATA_DIR``, ``APP_ENV``, API tokens, ...) are intentionally
-out of scope, so this never becomes an auth-bypass lever or a secret store.
+out of scope, so this never becomes an auth-bypass lever or a secret store. The
+ALERT-002 keys follow the same rule: the editable alert *destinations*
+(``TELEGRAM_CHAT_ID``, ``ALERT_EMAIL_TO``) are non-secret recipients, while the
+channel credentials (``TELEGRAM_BOT_TOKEN``, ``SMTP_PASSWORD``) stay env-only.
 
 Design note: ``backend`` never imports Streamlit. This module exposes plain
 functions and data; the admin page in ``ui/`` renders them.
@@ -39,6 +42,14 @@ from backend.config.settings import (
     _parse_log_format,
     _parse_log_level,
 )
+from backend.notifications.config import (
+    ALERT_CONTENT_CHOICES,
+    load_notification_settings,
+    parse_alert_content,
+    parse_alert_enabled,
+    parse_email_recipient,
+    parse_telegram_chat_id,
+)
 from backend.observability import EVENT_CONFIG_CHANGED
 from backend.storage import get_config_overrides, session_scope, set_config_override
 
@@ -54,15 +65,16 @@ class EditableSetting:
     ``parse`` validates and normalizes a raw string exactly as startup does
     (raising ``SettingsError`` on bad input); ``current`` reads the effective
     value now so the form can pre-fill it and the audit entry can record the
-    real "before" value. ``choices`` drives a select box in the UI.
+    real "before" value. ``choices`` drives a select box in the UI; leave it empty
+    (the default) for a validated free-text input (e.g. an alert destination).
     """
 
     key: str
     label: str
     help: str
-    choices: tuple[str, ...]
     parse: Callable[[str], str]
     current: Callable[[], str]
+    choices: tuple[str, ...] = ()
 
 
 # The whitelist. Keep it small and non-secret on purpose (see module docstring).
@@ -82,6 +94,40 @@ EDITABLE_CONFIG_KEYS: dict[str, EditableSetting] = {
         choices=("auto", "json", "text"),
         parse=_parse_log_format,
         current=lambda: get_settings().log_format,
+    ),
+    # ALERT-002 daily-alert preferences. These read/write the opt-in notification
+    # settings (env-backed, applied via apply_config_overrides). Only the two
+    # NON-secret destinations are editable here; the bot token and SMTP password
+    # stay environment-only (see module docstring).
+    "ALERT_ENABLED": EditableSetting(
+        key="ALERT_ENABLED",
+        label="Daily alerts enabled",
+        help="Master on/off switch for the daily-scan alert. Off keeps credentials but sends nothing.",
+        choices=("true", "false"),
+        parse=parse_alert_enabled,
+        current=lambda: "true" if load_notification_settings().alerts_enabled else "false",
+    ),
+    "ALERT_CONTENT": EditableSetting(
+        key="ALERT_CONTENT",
+        label="Alert content",
+        help="summary = status + counts only; full = also include the top-ranked results.",
+        choices=ALERT_CONTENT_CHOICES,
+        parse=parse_alert_content,
+        current=lambda: load_notification_settings().alert_content,
+    ),
+    "TELEGRAM_CHAT_ID": EditableSetting(
+        key="TELEGRAM_CHAT_ID",
+        label="Telegram chat id",
+        help="Destination chat/group id or @channel. Empty disables Telegram. The bot token stays in the environment.",
+        parse=parse_telegram_chat_id,
+        current=lambda: load_notification_settings().telegram_chat_id,
+    ),
+    "ALERT_EMAIL_TO": EditableSetting(
+        key="ALERT_EMAIL_TO",
+        label="Alert email recipient",
+        help="Destination email address. Empty disables email. SMTP credentials stay in the environment.",
+        parse=parse_email_recipient,
+        current=lambda: load_notification_settings().email_to,
     ),
 }
 

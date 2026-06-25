@@ -20,7 +20,8 @@ and redacted action metadata.
   best-effort write one `audit_logs` row.
 - `should_record_once(...)` — once-per-session dedup for level-triggered events.
 - `backend/admin` — a whitelisted runtime-config override service (`LOG_LEVEL`,
-  `LOG_FORMAT`) that gives `config_changed` a real trigger.
+  `LOG_FORMAT`, and the ALERT-002 alert preferences) that gives `config_changed`
+  a real trigger.
 - Admin **Audit log** viewer and **Admin settings** form pages.
 
 **Non-responsibilities**
@@ -54,7 +55,7 @@ flowchart TD
 | `should_record_once(session_state, key) -> bool` | `True` the first time `key` is seen in a session; marks it. Framework-free (takes a dict / `st.session_state`). |
 | `apply_config_overrides(*, session_factory=session_scope) -> dict[str,str]` | Replay stored whitelisted overrides into `os.environ`; best-effort. |
 | `update_config_value(key, raw_value, *, updated_by, session_factory=session_scope) -> ConfigUpdateResult` | Validate (startup parsers) → persist `app_config` → set `os.environ` → record `config_changed`. Raises `SettingsError` on invalid/non-editable. |
-| `EDITABLE_CONFIG_KEYS` | Whitelist mapping `LOG_LEVEL`/`LOG_FORMAT` → `EditableSetting` (label, choices, parser, current). |
+| `EDITABLE_CONFIG_KEYS` | Whitelist mapping `LOG_LEVEL`/`LOG_FORMAT` and the ALERT-002 keys (`ALERT_ENABLED`, `ALERT_CONTENT`, `TELEGRAM_CHAT_ID`, `ALERT_EMAIL_TO`) → `EditableSetting` (label, parser, current, plus `choices` for a select box or empty for a validated text input). |
 
 ## 4. Recorded events & triggers
 
@@ -76,13 +77,15 @@ flowchart TD
 | **Two sinks (DB + `log_event`)** | Audit actions also appear in the live log stream with one redaction implementation. | DB only — invisible to log aggregators. |
 | **Redact at the recorder boundary** | Reuses `normalize_secret_safe_json` (same as `params_json`); satisfies the "values redacted" AC for every event. | Per-page redaction — drift, gaps. |
 | **Success-only audit dedup** | Streamlit reruns every interaction; `record_audit_event_once` keeps one row per session but marks the key only after persistence succeeds. | Mark before write — a transient DB failure permanently hides the retry. |
-| **Config whitelist = operational only** | Editing only `LOG_LEVEL`/`LOG_FORMAT` keeps the form from becoming an auth-bypass lever or secret store. | Editable secrets/auth — security risk. |
+| **Config whitelist = non-secret operational keys** | Editing only `LOG_LEVEL`/`LOG_FORMAT` and the non-secret alert prefs/destinations (ALERT-002) keeps the form from becoming an auth-bypass lever or secret store; channel credentials stay env-only. | Editable secrets/auth — security risk. |
 | **Overrides via `os.environ`** | `get_settings()` reads env live, so an override applies without rewriting the settings system; replayed at startup. | New settings layer — large, invasive. |
 
 ## 6. Configuration
 
-No new environment variables. The admin form **edits** existing settings
-([configuration.md](configuration.md)): `LOG_LEVEL`, `LOG_FORMAT`. Overrides persist
+The admin form **edits** existing settings ([configuration.md](configuration.md)):
+`LOG_LEVEL`, `LOG_FORMAT`, and the ALERT-002 alert preferences (`ALERT_ENABLED`,
+`ALERT_CONTENT`, `TELEGRAM_CHAT_ID`, `ALERT_EMAIL_TO`; see
+[notifications.md](notifications.md)). Overrides persist
 in `app_config` and are re-applied by `apply_config_overrides()` in `main()` after
 the schema bootstrap (then `configure_logging()` is refreshed so a changed level
 takes effect on the same run).
