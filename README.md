@@ -581,6 +581,14 @@ message link, then configure Telegram (`TELEGRAM_BOT_TOKEN`,
 dashboard. A notification failure is logged and never changes the scan exit
 code.
 
+**Alert preferences (ALERT-002).** `ALERT_ENABLED` (default `true`) turns the
+alert on/off without removing credentials, and `ALERT_CONTENT` (`summary` =
+status + counts; `full` = also the top-ranked results, the default) chooses the
+body. An admin can change these — and the non-secret destination
+(`TELEGRAM_CHAT_ID` / `ALERT_EMAIL_TO`) — at runtime from the **Admin settings**
+page (validated, audited, and applied without a redeploy); channel credentials
+stay environment-only. See [docs/operations.md](docs/operations.md).
+
 ---
 
 ## Deploying to Render
