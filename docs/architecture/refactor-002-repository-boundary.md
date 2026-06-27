@@ -2,6 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-06-23
+**Updated:** 2026-06-27 (Codex review follow-up)
 **Deciders:** Codex (ticket owner), Claude (reviewer / implementer)
 
 > Beginner note: an *Architecture Decision Record* (ADR) is a short, durable note
@@ -20,18 +21,20 @@ REFACTOR-002 asked us to *create* `backend/storage/repository.py` with
 - the repository methods are tested.
 
 When the work was picked up, exploration found that **the repository layer already
-exists and already satisfies all three goals.** It was built incrementally across
+exists and satisfies most of the ticket.** It was built incrementally across
 SCAN-001/002/003, OBS-003, VALID-001/002, and RANK-001/002:
 
 - `backend/storage/repository.py` (~1,035 lines) already exposes every method the
   ticket lists. The ticket's `record_audit_event` is the higher-level wrapper in
   [`backend/audit/recorder.py`](../../backend/audit/recorder.py), which records the
   structured log event and then calls the repository's `create_audit_log_entry`.
-- A static sweep of `app.py`, `backend/` (outside `storage/`), `screeners/`, and
-  `ui/` found **no** raw SQL, engines, or sessions. The only SQLAlchemy references
-  in those layers are `from sqlalchemy.orm import Session` (a type hint for a
-  caller-owned session) and `from sqlalchemy.exc import OperationalError` (so the
-  UI can show "database unavailable" instead of crashing).
+- UI pages build no SQL and create no engine or session factory. They may open a
+  short caller-owned transaction with `session_scope()` and pass that session to
+  repository helpers.
+- Codex review found three remaining ORM operations outside storage: two
+  `Session.get()` lookups in the scan service and one redundant `Session.flush()`
+  in validation. This follow-up adds `get_scan_run()` to the repository, routes
+  both lookups through it, and removes the redundant flush.
 - The methods are covered by `tests/test_scan_storage_repository.py` and
   `tests/test_audit_repository.py`.
 
@@ -68,40 +71,38 @@ in — they just must not *build SQL* with it.
 
 ## Decision
 
-Treat REFACTOR-002 as **already delivered** by the existing repository layer, and
-**lock the boundary in with an automated guard** instead of rewriting working code.
+Keep the mature repository rather than recreating it, close the three narrow ORM
+leaks found during review, and **lock the boundary in with an automated guard**.
 
 Add `tests/test_repository_layer_boundary.py`: a standard-library `ast` check (no
 new dependencies) that fails CI if any module under `app.py` / `backend` (excluding
 `backend/storage`) / `screeners` / `ui`:
 
-1. imports from the top-level `sqlalchemy` package (where `select`/`text`/
-   `create_engine`/… live);
-2. imports an engine/session/table factory from a SQLAlchemy submodule
-   (`sessionmaker`, `scoped_session`, `create_engine`, `MetaData`, `Table`); or
-3. calls the legacy `session.query(...)` / `session.execute(...)` API on a
-   session-like receiver (matched by name, so pandas `frame.query(...)` is not a
-   false positive).
+1. imports SQLAlchemy outside the explicit safe cases (`Session` as a type hint
+   and exception classes for graceful failures);
+2. imports `engine`, `SessionLocal`, or `init_db` from the storage package; or
+3. invokes ORM read/write/flush/transaction methods on a database-session receiver.
 
 `from sqlalchemy.orm import Session` and `from sqlalchemy.exc import …` stay allowed.
 
-Do **not** modify `repository.py` or any caller; add no tables, migrations, or
-dependencies.
+The only new repository API is `get_scan_run(session, run_id)`. Add no tables,
+migrations, dependencies, or UI behavior.
 
 ## Options Considered
 
 ### Option A: Add a regression guard test (chosen)
 | Dimension | Assessment |
 |-----------|------------|
-| Complexity | Low — one ~190-line test, stdlib `ast` only |
+| Complexity | Low — one focused test module, stdlib `ast` only |
 | Cost | One fast static test in the existing suite |
 | Scalability | Scales to every new module for free |
 | Team familiarity | High — mirrors `tests/test_supply_chain_policy.py` |
 
 **Pros:** Delivers REFACTOR-002's real intent (no raw DB access *and* it stays that
-way); zero risk to working code; green on the current tree; clear failure message.
-**Cons:** Static/heuristic — can't catch a session smuggled through a dynamically
-named variable. Acceptable: the import checks catch every way to *construct* SQL.
+way); small production change; clear failure message and negative controls.
+**Cons:** Static/heuristic — reflective imports or deliberately disguised receiver
+names are outside its scope. Code review and the normal security scan remain the
+backstop for intentionally evasive patterns.
 
 ### Option B: Recreate `repository.py` as the ticket literally says
 | Dimension | Assessment |
@@ -123,7 +124,7 @@ but the documentation half is kept (this ADR + the audit-register entry).
 ## Trade-off Analysis
 
 The honest tension is "the ticket says *create a file*" vs. "the file already
-exists and is correct." Following the letter of the ticket (Option B) would destroy
+exists and is mature." Following the letter of the ticket (Option B) would destroy
 value; following its *intent* — "avoid raw database access throughout the app" —
 means making the already-good state permanent and verifiable. A guard test is the
 cheapest mechanism that converts a one-time review finding into a standing
@@ -142,5 +143,7 @@ invariant, exactly as `test_supply_chain_policy.py` did for dependency pins.
 ## Action Items
 
 1. [x] Add `tests/test_repository_layer_boundary.py` (guard + self-test).
-2. [x] Record the closure in [`audit-2026-06.md`](audit-2026-06.md).
-3. [ ] If a future store is added, extend the exempt list with a reviewed rationale.
+2. [x] Route remaining scan lookups through `get_scan_run()` and remove the
+   redundant validation flush.
+3. [x] Record the closure in [`audit-2026-06.md`](audit-2026-06.md).
+4. [ ] If a future store is added, extend the exempt list with a reviewed rationale.

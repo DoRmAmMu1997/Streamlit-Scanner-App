@@ -29,6 +29,7 @@ from backend.observability import (
 from backend.scanner_base import BaseScanner
 from backend.scanning import ScanStatus, run_scan
 from backend.scanning.result_contract import AIEvaluationRecord, AIProvenance
+from backend.storage.models import ScanRun
 from backend.storage.repository import (
     get_ai_evaluations,
     get_latest_scan_runs,
@@ -950,7 +951,7 @@ def test_run_scan_emits_started_and_completed_events_after_persistence(
         if event_name == EVENT_SCAN_COMPLETED:
             with Session(db_engine) as session:
                 run = session.get(
-                    service.ScanRun,
+                    ScanRun,
                     fields["run_id"],
                 )
                 assert run is not None

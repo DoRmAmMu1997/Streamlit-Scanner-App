@@ -62,6 +62,17 @@ class ForwardReturnMetricRecord:
     max_favorable_excursion_pct: Decimal | None
 
 
+def get_scan_run(session: Session, run_id: int) -> ScanRun | None:
+    """Return one scan run by primary key, or ``None`` when it does not exist.
+
+    Beginner note:
+    ``Session.get`` is a database lookup even though it does not look like a SQL
+    statement. Keeping that call here means services can own a transaction and
+    still avoid knowing which ORM class or lookup primitive backs a scan run.
+    """
+    return session.get(ScanRun, run_id)
+
+
 def create_scan_run(
     session: Session,
     *,

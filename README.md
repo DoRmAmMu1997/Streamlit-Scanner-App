@@ -1184,8 +1184,9 @@ with `UPDATE_GOLDEN=1 python -m pytest tests/test_screener_golden_outputs.py` an
 review the diff. The Alembic migration is also guarded by a drift test that fails
 if the ORM models and the migration fall out of sync. A **repository-boundary**
 guard (`tests/test_repository_layer_boundary.py`, REFACTOR-002) likewise fails CI
-if any module outside `backend/storage` builds raw SQL, opens an engine, or creates
-a session, keeping all database access behind the repository layer.
+if any module outside `backend/storage` builds raw SQL, imports an engine/session
+factory, or invokes ORM methods directly. Callers may own a short transaction via
+`session_scope()`, but all reads and writes stay behind repository helpers.
 
 > **Contributing / AI agents:** the development conventions, layering rules, full
 > CI gate suite, multi-agent worktree workflow, and the skills this project expects

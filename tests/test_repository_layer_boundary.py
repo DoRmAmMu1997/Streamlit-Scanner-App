@@ -23,12 +23,13 @@ How the check works (no third-party tools, just the standard-library ``ast``):
 1. Importing from the *top-level* ``sqlalchemy`` package is rejected — that
    namespace is where ``select``, ``insert``, ``update``, ``delete``, ``text``,
    ``create_engine`` and friends live. App layers should never need it.
-2. Importing an engine/session/table *factory* from a sqlalchemy *submodule*
-   (for example ``from sqlalchemy.orm import sessionmaker``) is rejected.
-3. The legacy ``session.query(...)`` / ``session.execute(...)`` ORM API is
-   rejected when the receiver is obviously a database session/connection. (We
-   match by variable name so a pandas ``frame.query("a > 1")`` call inside a
-   screener is *not* a false positive.)
+2. SQLAlchemy submodule imports are rejected unless they are the explicit
+   ``Session`` type hint or an exception class used for graceful failures.
+3. Importing ``engine`` / ``SessionLocal`` / ``init_db`` through the storage
+   package is rejected because those names let callers bypass the repository.
+4. Direct ORM reads, writes, flushes, and transaction methods are rejected in
+   modules that import SQLAlchemy's ``Session`` type. Requiring that type import
+   keeps HTTP ``session.get(...)`` and pandas ``frame.query(...)`` valid.
 
 Deliberately allowed, because they are not "DB internals":
 
@@ -65,24 +66,43 @@ SCANNED_DIRS: tuple[Path, ...] = (
 # SQL, open engines, and create sessions.
 STORAGE_EXEMPT_FRAGMENT = "backend/storage/"
 
-# Names that may not be imported from a sqlalchemy *submodule* (``sqlalchemy.orm``,
-# ``sqlalchemy.engine``, ``sqlalchemy.schema``, ...) because they create database
-# engines, sessions, or table definitions. Importing directly from the top-level
-# ``sqlalchemy`` package is always rejected, so query builders such as ``select``
-# do not need to be listed here.
-SUBMODULE_BANNED_NAMES = frozenset(
-    {"create_engine", "sessionmaker", "scoped_session", "MetaData", "Table"}
-)
+# Only two SQLAlchemy import shapes belong outside persistence: the ``Session``
+# annotation used by caller-owned transactions and exception classes used for
+# graceful UI/service failures. Everything else exposes query or engine details.
+ALLOWED_SQLALCHEMY_IMPORTS = {"sqlalchemy.orm": frozenset({"Session"})}
+ALLOWED_SQLALCHEMY_MODULES = frozenset({"sqlalchemy.exc"})
+
+# ``backend.storage`` intentionally re-exports convenient public helpers, but
+# these infrastructure objects would let callers create connections or sessions
+# themselves. ``session_scope`` stays allowed because callers own transactions.
+BANNED_STORAGE_IMPORT_NAMES = frozenset({"engine", "SessionLocal", "init_db"})
 
 # Receiver variable names that, in this codebase, almost always refer to a
-# SQLAlchemy ``Session`` or ``Connection``. We use them to spot the legacy
-# ``session.query`` / ``session.execute`` API, which needs no sqlalchemy import
-# and would otherwise slip past the import checks above. Restricting to these
-# names keeps a pandas ``frame.query(...)`` call from being a false positive.
+# SQLAlchemy ``Session`` or ``Connection``. We inspect these names only when the
+# same module imports the SQLAlchemy ``Session`` type, which avoids confusing an
+# HTTP client session with a database session.
 SESSION_RECEIVER_NAMES = frozenset(
     {"session", "sess", "db_session", "db", "connection", "conn"}
 )
-SESSION_METHOD_NAMES = frozenset({"query", "execute"})
+SESSION_METHOD_NAMES = frozenset(
+    {
+        "add",
+        "add_all",
+        "begin",
+        "commit",
+        "delete",
+        "execute",
+        "expunge",
+        "flush",
+        "get",
+        "merge",
+        "query",
+        "refresh",
+        "rollback",
+        "scalar",
+        "scalars",
+    }
+)
 
 # Shown in the failure message so a future contributor knows exactly what to do.
 REMEDIATION = (
@@ -130,6 +150,12 @@ def _iter_violations(file_path: Path) -> Iterator[tuple[int, str]]:
     source = file_path.read_text(encoding="utf-8")
     # ``filename`` only improves error messages if the file fails to parse.
     tree = ast.parse(source, filename=str(file_path))
+    imports_sqlalchemy_session = any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "sqlalchemy.orm"
+        and any(alias.name == "Session" for alias in node.names)
+        for node in ast.walk(tree)
+    )
 
     for node in ast.walk(tree):
         # 1. ``import sqlalchemy`` or ``import sqlalchemy.orm as orm``.
@@ -152,18 +178,28 @@ def _iter_violations(file_path: Path) -> Iterator[tuple[int, str]]:
                     f"`from sqlalchemy import {imported}` "
                     "(the top-level sqlalchemy namespace is SQL construction)",
                 )
-            elif module.startswith("sqlalchemy."):
+            elif module.startswith("sqlalchemy.") and module not in ALLOWED_SQLALCHEMY_MODULES:
+                allowed_names = ALLOWED_SQLALCHEMY_IMPORTS.get(module, frozenset())
                 for alias in node.names:
-                    if alias.name in SUBMODULE_BANNED_NAMES:
+                    if alias.name not in allowed_names:
                         yield (
                             node.lineno,
                             f"`from {module} import {alias.name}` "
-                            "(creates engines/sessions/tables)",
+                            "(SQLAlchemy internals belong in backend/storage)",
+                        )
+            elif module in {"backend.storage", "backend.storage.database"}:
+                for alias in node.names:
+                    if alias.name in BANNED_STORAGE_IMPORT_NAMES:
+                        yield (
+                            node.lineno,
+                            f"`from {module} import {alias.name}` "
+                            "(connections and session factories stay inside storage)",
                         )
 
-        # 3. Legacy/raw ``session.query(...)`` or ``session.execute(...)`` calls.
+        # 3. Direct SQLAlchemy ``Session`` methods in service/UI modules.
         elif (
-            isinstance(node, ast.Call)
+            imports_sqlalchemy_session
+            and isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr in SESSION_METHOD_NAMES
         ):
@@ -249,3 +285,58 @@ def test_guard_detects_known_raw_access_patterns(tmp_path: Path) -> None:
     assert "OperationalError" not in joined
     assert "frame.query" not in joined
     assert "import Session " not in joined
+
+
+def test_guard_detects_submodule_factory_and_direct_session_bypasses(tmp_path: Path) -> None:
+    """Equivalent import paths and ORM methods must not bypass the boundary.
+
+    These examples are deliberately different from the original self-test. A
+    denylist that checks only top-level SQLAlchemy imports and ``query`` /
+    ``execute`` would miss all of them even though each one exposes database
+    mechanics outside ``backend/storage``.
+    """
+    sample = tmp_path / "subtle_offender.py"
+    sample.write_text(
+        "\n".join(
+            [
+                "from sqlalchemy.sql import select",
+                "from sqlalchemy.dialects.postgresql import insert",
+                "from sqlalchemy.exciting import create_engine",
+                "from sqlalchemy.orm import Session",
+                "from backend.storage import SessionLocal",
+                "def load(session: Session):",
+                "    row = session.get(object, 1)",
+                "    session.flush()",
+                "    return row",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    reasons = [reason for _lineno, reason in _iter_violations(sample)]
+    joined = " ".join(reasons)
+
+    assert "sqlalchemy.sql" in joined
+    assert "sqlalchemy.dialects.postgresql" in joined
+    assert "sqlalchemy.exciting" in joined
+    assert "SessionLocal" in joined
+    assert "session.get(...)" in joined
+    assert "session.flush(...)" in joined
+
+
+def test_guard_allows_non_database_session_and_dataframe_methods(tmp_path: Path) -> None:
+    """HTTP ``session.get`` and pandas ``frame.query`` remain valid application code."""
+    sample = tmp_path / "non_database_sessions.py"
+    sample.write_text(
+        "\n".join(
+            [
+                "import requests",
+                "def fetch(session: requests.Session, frame):",
+                "    response = session.get('https://example.com')",
+                "    return response, frame.query('score > 0')",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert list(_iter_violations(sample)) == []
