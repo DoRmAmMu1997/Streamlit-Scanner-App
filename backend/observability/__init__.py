@@ -88,6 +88,11 @@ EVENT_MANUAL_SCAN_STARTED = "manual_scan_started"
 EVENT_CONFIG_CHANGED = "config_changed"
 EVENT_EXPORT_DOWNLOADED = "export_downloaded"
 EVENT_ADMIN_PAGE_ACCESSED = "admin_page_accessed"
+# AUTH-003 role-model events. ``role_denied`` records an attempt to use a feature
+# above the actor's role (logged AND audited, like ``auth_denied``/``login_denied``);
+# ``role_changed`` records an admin assigning or revoking a role (old -> new).
+EVENT_ROLE_DENIED = "role_denied"
+EVENT_ROLE_CHANGED = "role_changed"
 
 # The custom attributes we attach to each ``logging.LogRecord``. Kept as private
 # constants so ``log_event`` and both formatters agree on the exact names. Neither

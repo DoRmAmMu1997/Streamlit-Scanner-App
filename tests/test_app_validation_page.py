@@ -378,7 +378,7 @@ def test_render_validation_page_passes_widget_filters_to_dashboard_service(monke
     )
     monkeypatch.setattr(validation_page, "summarize_validation_dashboard", summarize)
 
-    _render_validation_page()
+    _render_validation_page(can_export=True)
 
     assert captured_kwargs == {
         "screener_key": "envelope",
@@ -405,7 +405,7 @@ def test_render_validation_page_handles_summary_schema_operational_error(monkeyp
     monkeypatch.setattr(validation_page, "list_distinct_universe_keys", lambda _session: [])
     monkeypatch.setattr(validation_page, "summarize_validation_dashboard", summarize)
 
-    _render_validation_page()
+    _render_validation_page(can_export=True)
 
     assert fake_st.errors == [
         "Validation tables are missing or outdated. "
@@ -458,7 +458,7 @@ def test_render_validation_page_explains_no_computed_rows_without_blaming_hit_ra
         lambda _session, **_kwargs: _dashboard([row]),
     )
 
-    _render_validation_page()
+    _render_validation_page(can_export=True)
 
     assert any(expected_message in message for message in fake_st.infos)
     assert fake_st.tables
@@ -481,7 +481,7 @@ def test_render_validation_page_reports_benchmark_gap_only_after_computed_rows(
         lambda _session, **_kwargs: _dashboard([row]),
     )
 
-    _render_validation_page()
+    _render_validation_page(can_export=True)
 
     assert not fake_st.infos
     assert any("Benchmark/excess returns are unavailable" in text for text in fake_st.captions)
@@ -511,7 +511,7 @@ def test_render_validation_page_renders_dashboard_sections_and_safe_export(monke
         lambda **kwargs: audits.append(kwargs),
     )
 
-    _render_validation_page()
+    _render_validation_page(can_export=True)
 
     assert any("Return distribution" in title for title in fake_st.subheaders)
     assert any("Win rate by holding period" in title for title in fake_st.subheaders)
@@ -526,3 +526,20 @@ def test_render_validation_page_renders_dashboard_sections_and_safe_export(monke
     assert "'-RISK" in csv_text
     assert audits
     assert audits[0]["event"] == "export_downloaded"
+
+
+def test_viewer_validation_page_does_not_build_or_render_export(monkeypatch):
+    fake_st = _FakeValidationSt()
+    monkeypatch.setattr(validation_page, "st", fake_st)
+    monkeypatch.setattr(validation_page, "session_scope", _fake_session_scope)
+    monkeypatch.setattr(validation_page, "list_distinct_screener_keys", lambda _session: [])
+    monkeypatch.setattr(validation_page, "list_distinct_universe_keys", lambda _session: [])
+    monkeypatch.setattr(
+        validation_page,
+        "summarize_validation_dashboard",
+        lambda _session, **_kwargs: _dashboard([_row()]),
+    )
+
+    _render_validation_page(can_export=False)
+
+    assert fake_st.downloads == []

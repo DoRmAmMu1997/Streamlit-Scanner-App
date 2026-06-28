@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 from sqlalchemy.exc import OperationalError
 
+from backend.auth.roles import Role
 from backend.auth.session import AuthenticatedUser
 from backend.security import MASK
 from ui import audit_page
@@ -94,7 +95,7 @@ def test_audit_page_rejects_non_admin(monkeypatch):
     monkeypatch.setattr(audit_page, "st", fake_st)
 
     audit_page._render_audit_log_page(
-        AuthenticatedUser("person@example.com", "Person", is_admin=False)
+        AuthenticatedUser("person@example.com", "Person", role=Role.ANALYST)
     )
 
     assert fake_st.errors == ["Admin access is required to view the audit log."]
@@ -136,7 +137,7 @@ def test_audit_page_renders_table_for_admin(monkeypatch):
     )
 
     audit_page._render_audit_log_page(
-        AuthenticatedUser("admin@example.com", "Admin", is_admin=True)
+        AuthenticatedUser("admin@example.com", "Admin", role=Role.ADMIN)
     )
 
     assert len(fake_st.dataframes) == 1
@@ -155,7 +156,7 @@ def test_audit_page_handles_missing_table(monkeypatch):
     monkeypatch.setattr(audit_page, "session_scope", boom_scope)
 
     audit_page._render_audit_log_page(
-        AuthenticatedUser("admin@example.com", "Admin", is_admin=True)
+        AuthenticatedUser("admin@example.com", "Admin", role=Role.ADMIN)
     )
 
     assert any("alembic upgrade head" in message for message in fake_st.errors)

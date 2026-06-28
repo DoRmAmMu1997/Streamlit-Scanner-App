@@ -154,7 +154,7 @@ New event constants live in `backend/observability` (reusing the existing
 | `manual_scan_started` | `app.py` Run-button (`pending_run`) | Edge-triggered. Metadata: `screener_key`, `universe_key`. |
 | `data_refresh_started` | `app.py` `prefetch_data_assets()` | System event (`user_email=NULL`); schema bootstrap before best-effort write. |
 | `config_changed` | `backend/admin/config_service.update_config_value` | Form submit. Metadata: `setting`, `old_value`, `new_value` (redacted). |
-| `export_downloaded` | `app.py` results CSV + `ui/history_page.py` run CSV | `st.download_button` returns True on click. Metadata: `file_name`, `row_count`, `kind`. |
+| `export_downloaded` | live results + History + Comparison + Validation CSVs | `st.download_button` returns True on click. Metadata: `file_name`, `row_count`, `kind`. AUTH-003 renders/builds these only for `EXPORT_RESULTS`. |
 | `admin_page_accessed` | `app.py` before each admin view | First access per page per session. Metadata: `page`. |
 
 ---

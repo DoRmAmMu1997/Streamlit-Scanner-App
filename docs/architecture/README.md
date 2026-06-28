@@ -69,6 +69,8 @@ testing · extension points.
 - **[valid-002-handoff.md](valid-002-handoff.md)** — VALID-002 build brief plus resolved implementation decisions.
 - **[rank-001-final-scoring-model.md](rank-001-final-scoring-model.md)** — RANK-001 scoring methodology: the four v1 components, normalization, weighting, score ranges, missing-data behaviour, and the no-hidden-reasons invariant (no schema/migration).
 - **[rank-002-handoff.md](rank-002-handoff.md)** — RANK-002 implemented build brief for the `backend/scoring/` scorer (pure components + config + the `run_scan` call + UI sort/components + tests).
+- **[auth-003-role-model.md](auth-003-role-model.md)** — AUTH-003 role model: hierarchical viewer/analyst/admin, the capability→min-role map, the database-driven `user_roles` store with an `ADMIN_EMAILS` bootstrap floor, resolution precedence, defense-in-depth enforcement, and denial logging/audit.
+- **[auth-003-handoff.md](auth-003-handoff.md)** — AUTH-003 build brief for the `backend/auth/roles.py` policy + `user_roles` table/migration + repository + `require_capability` enforcement + the admin Roles page + tests.
 - **[audit-2026-06.md](audit-2026-06.md)** — June 2026 codebase audit & hardening register (QUAL-001/002/003, REF-001, PERF-001, DOC-001): what was found, fixed, and deferred.
 
 ## Conventions
