@@ -8,6 +8,7 @@ would have been called.
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -140,7 +141,9 @@ def _no_role_table(monkeypatch):
     tests below override it explicitly. This keeps the env-allowlist tests from
     touching the database.
     """
-    monkeypatch.setattr(session, "_lookup_table_role", lambda _email: None)
+    monkeypatch.setattr(session, "ensure_database_schema", lambda: True)
+    monkeypatch.setattr(session, "session_scope", lambda: nullcontext(object()))
+    monkeypatch.setattr(session, "get_user_role", lambda *_args: None)
 
 
 def test_unauthenticated_user_sees_google_login_and_cannot_continue():
@@ -422,7 +425,9 @@ def test_require_authorized_user_bootstraps_schema_before_denied_audit(
     with pytest.raises(_StopCalled):
         require_authorized_user(fake_st)
 
-    assert calls == ["schema", "audit"]
+    # Role lookup prepares the table first; the denied-audit path repeats the
+    # idempotent bootstrap immediately before its own durable write.
+    assert calls == ["schema", "schema", "audit"]
 
 
 def test_require_authorized_user_empty_allowlist_denies_in_production(monkeypatch):
@@ -474,7 +479,11 @@ def test_user_roles_row_authorizes_entry_and_sets_role(monkeypatch):
     monkeypatch.setenv("ADMIN_EMAILS", "")
     monkeypatch.setenv("SCANNER_ENV", "production")
     # Only the database grants this email access; it is on neither env list.
-    monkeypatch.setattr(session, "_lookup_table_role", lambda _email: Role.VIEWER)
+    monkeypatch.setattr(
+        session,
+        "_lookup_table_role",
+        lambda _email: session._RoleLookupResult("found", Role.VIEWER),
+    )
     fake_st = _signed_in("tabled@example.com", "Tabled")
 
     user = require_authorized_user(fake_st)
@@ -490,13 +499,110 @@ def test_admin_env_floor_overrides_a_lower_table_role(monkeypatch):
     monkeypatch.setenv("ALLOWED_EMAILS", "")
     monkeypatch.setenv("ADMIN_EMAILS", "boss@example.com")
     monkeypatch.setenv("SCANNER_ENV", "production")
-    monkeypatch.setattr(session, "_lookup_table_role", lambda _email: Role.VIEWER)
+    monkeypatch.setattr(
+        session,
+        "_lookup_table_role",
+        lambda _email: session._RoleLookupResult("found", Role.VIEWER),
+    )
     fake_st = _signed_in("boss@example.com", "Boss")
 
     user = require_authorized_user(fake_st)
 
     assert user.role is Role.ADMIN
     assert user.is_admin is True
+
+
+def test_role_lookup_reports_unavailable_when_schema_bootstrap_fails(monkeypatch):
+    """A migration/bootstrap failure must not look like an ordinary missing row."""
+    monkeypatch.setattr(session, "ensure_database_schema", lambda: False)
+    monkeypatch.setattr(session, "get_user_role", lambda *_args: None)
+
+    result = session._lookup_table_role("viewer@example.com")
+
+    assert getattr(result, "state", None) == "unavailable"
+
+
+def test_role_lookup_reports_missing_for_absent_assignment(monkeypatch):
+    """An ordinary missing row remains distinct from a storage failure."""
+    monkeypatch.setattr(session, "ensure_database_schema", lambda: True)
+    monkeypatch.setattr(session, "get_user_role", lambda *_args: None)
+    monkeypatch.setattr(session, "session_scope", lambda: nullcontext(object()))
+
+    result = session._lookup_table_role("unassigned@example.com")
+
+    assert result.state == "missing"
+    assert result.role is None
+    assert result.authorizes_entry is False
+
+
+def test_role_lookup_reports_invalid_for_unknown_stored_role(monkeypatch):
+    """A corrupt role value must remain distinguishable from an absent assignment."""
+    monkeypatch.setattr(session, "ensure_database_schema", lambda: True)
+    monkeypatch.setattr(session, "get_user_role", lambda *_args: "superuser")
+    monkeypatch.setattr(session, "session_scope", lambda: nullcontext(object()))
+
+    result = session._lookup_table_role("viewer@example.com")
+
+    assert getattr(result, "state", None) == "invalid"
+
+
+def test_allowlisted_user_falls_back_to_viewer_when_role_lookup_is_unavailable(
+    monkeypatch,
+):
+    """A database outage must never elevate an explicitly assigned viewer."""
+    monkeypatch.setenv("ALLOWED_EMAILS", "viewer@example.com")
+    monkeypatch.setenv("ADMIN_EMAILS", "")
+    monkeypatch.setenv("SCANNER_ENV", "production")
+    monkeypatch.setattr(session, "ensure_database_schema", lambda: False)
+    monkeypatch.setattr(session, "get_user_role", lambda *_args: None)
+    fake_st = _signed_in("viewer@example.com", "Viewer")
+
+    user = require_authorized_user(fake_st)
+
+    assert user.role is Role.VIEWER
+
+
+@pytest.mark.parametrize("lookup_state", ["unavailable", "invalid"])
+def test_table_only_user_is_denied_when_role_lookup_cannot_be_trusted(
+    monkeypatch, lookup_state
+):
+    """A stale remembered table grant cannot survive an unavailable/invalid read."""
+    monkeypatch.setenv("ALLOWED_EMAILS", "")
+    monkeypatch.setenv("ADMIN_EMAILS", "")
+    monkeypatch.setenv("SCANNER_ENV", "production")
+    monkeypatch.setattr(
+        session,
+        "_lookup_table_role",
+        lambda _email: session._RoleLookupResult(lookup_state),
+    )
+    fake_st = _signed_in("table-only@example.com", "Table only")
+
+    with pytest.raises(_StopCalled):
+        require_authorized_user(fake_st)
+
+    assert fake_st.errors == [
+        "You are not authorized to access this app. "
+        "Ask the administrator to add your email to the allowlist."
+    ]
+
+
+@pytest.mark.parametrize("lookup_state", ["unavailable", "invalid"])
+def test_env_admin_stays_admin_when_role_lookup_cannot_be_trusted(
+    monkeypatch, lookup_state
+):
+    """The ADMIN_EMAILS floor remains the independent break-glass authority."""
+    monkeypatch.setenv("ALLOWED_EMAILS", "")
+    monkeypatch.setenv("ADMIN_EMAILS", "boss@example.com")
+    monkeypatch.setenv("SCANNER_ENV", "production")
+    monkeypatch.setattr(
+        session,
+        "_lookup_table_role",
+        lambda _email: session._RoleLookupResult(lookup_state),
+    )
+
+    user = require_authorized_user(_signed_in("boss@example.com", "Boss"))
+
+    assert user.role is Role.ADMIN
 
 
 def test_require_capability_allows_when_role_has_capability():

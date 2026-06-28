@@ -83,7 +83,7 @@ Full design: [obs-003-audit-log.md](../obs-003-audit-log.md).
 | `get_recent_audit_logs(session, limit=100, *, event, user_email)` | Newest-first audit rows; optional event + case-insensitive email filters; `(created_at desc, id desc)` order. |
 | `list_distinct_audit_events(session)` | Distinct event names for the audit viewer's filter. |
 | `get_config_overrides(session)` / `set_config_override(session, *, key, value, updated_by)` | Read all overrides as `{key: value}`; upsert one and return the previous value (OBS-003). |
-| `get_user_role` / `set_user_role` / `delete_user_role` / `list_user_roles` / `count_user_role_admins` | AUTH-003 `user_roles` access: email-normalized read; upsert/delete returning the previous role; list (email-sorted) and admin count for the last-admin guard. |
+| `get_user_role` / `set_user_role` / `delete_user_role` / `list_user_roles` / `count_user_role_admins` / `list_user_role_admins_for_update` | AUTH-003 `user_roles` access: email-normalized read; upsert/delete returning the previous role; list (email-sorted); and a transactional `SELECT … FOR UPDATE` of admin assignments used before evaluating the last-admin invariant. |
 
 Type-coercion helpers (`_as_date`, `_as_decimal`, `_as_optional_str`, `_is_missing`, plus `_full_sha256`/`_as_utc_datetime` for receipts) keep typed columns strongly typed; `normalize_secret_safe_json` (from `result_contract`) makes every JSON blob JSON-safe + secret-masked (Decimal→str, dates→ISO, NumPy `.item()`, NaN→NULL).
 

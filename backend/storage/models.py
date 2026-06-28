@@ -673,9 +673,10 @@ class UserRole(Base):
     """AUTH-003 — one durable role assignment per user (viewer / analyst / admin).
 
     Where ``audit_logs`` records *what people did*, this table records *what a
-    person is allowed to do*. AUTH-001/002 still decide whether a Google identity
-    may sign in at all; AUTH-003 layers a role on top so capabilities split into
-    read-only (viewer), produce-work (analyst), and operate-the-system (admin).
+    person is allowed to do*. AUTH-001 authenticates the Google identity; entry is
+    authorized by the AUTH-002 env lists unioned with a valid row in this table.
+    AUTH-003 then splits capabilities into read-only (viewer), produce-work
+    (analyst), and operate-the-system (admin).
 
     The role store is database-driven on purpose: an admin can (re)assign roles at
     runtime from the admin Roles page without a redeploy. ``ADMIN_EMAILS`` (env)

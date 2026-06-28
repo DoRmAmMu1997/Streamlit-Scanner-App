@@ -43,6 +43,19 @@ _BLOCKED_PROMPT_INJECTIONS = _PROMPT_INJECTION_FIXTURES["blocked"]
 _ALLOWED_PROMPT_INJECTIONS = _PROMPT_INJECTION_FIXTURES["allowed"]
 
 
+@pytest.fixture(autouse=True)
+def _keep_fixed_sample_payload_fresh(monkeypatch):
+    """Keep this module's dated sample focused on agent behavior, not wall time.
+
+    ``_sample_screener_data`` deliberately uses one stable data date because the
+    verdict-cache assertions include that date in their keys. Once the real clock
+    passed the production 30-day TTL, the shared sample expired and dozens of
+    otherwise unrelated agent tests attempted a live refresh. Cache-expiry behavior
+    has dedicated tests; this module gives its stable sample a test-only long TTL.
+    """
+    monkeypatch.setenv("SCANNER_FUNDAMENTALS_TTL_DAYS", "36500")
+
+
 def _sample_screener_data() -> dict[str, Any]:
     """The data the agent should "find" via its fetch_company_data tool."""
     return {

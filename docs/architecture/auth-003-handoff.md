@@ -4,7 +4,7 @@
 |---|---|
 | **Ticket** | AUTH-003 — Add basic role model (viewer / analyst / admin) |
 | **Type / Priority** | Story · P1 |
-| **Status** | Design landed ([`auth-003-role-model.md`](auth-003-role-model.md)); implementation pending on `claude/auth-003-role-model` |
+| **Status** | Implemented and review-hardened on `claude/auth-003-role-model` |
 | **Owner / Reviewer** | Claude (design **and** implementation this cycle) / Codex review |
 | **Depends on** | AUTH-001/002 ([`backend/auth/session.py`](../../backend/auth/session.py)) · OBS-001/003 · SCAN-002 (storage + migrations) |
 | **Unblocks** | per-feature gating · watchlists (WATCH-*) · self-service access management |
@@ -278,9 +278,8 @@ Coverage stays **≥ 84%** (CI gate) — the pure `roles.py` carries the policy 
    `no such table: user_roles`, rebuild per the project workflow (delete `scanner.db`+`-wal`/`-shm` with
    the app stopped, then `ensure_database_schema()`).
 3. **`is_admin` is now derived** — don't also store it; set `role` and let the property answer.
-4. **Auth-off dev path** — when `auth_required=false`, `authenticated_user` is `None` in `app.py` today;
-   decide one consistent owner treatment (resolve to ADMIN) so admin views are reachable locally without
-   regressing the no-auth flow.
+4. **Auth-off dev path** — `app.py` creates the synthetic `local-owner@localhost` admin. Production
+   still forbids disabling auth; local admin pages and audit attribution remain usable.
 5. **Don't leak the table.** `role_denied`/logs carry the actor + attempted capability only.
 6. **UI hides, handler enforces.** Never rely on a hidden button alone. For **CSV export** there is no
    post-click handler — `st.download_button` builds its payload at render time, so guard `EXPORT_RESULTS`
@@ -288,7 +287,8 @@ Coverage stays **≥ 84%** (CI gate) — the pure `roles.py` carries the policy 
 7. **Re-resolve the role every run; never cache it in `st.session_state`.** `require_authorized_user`
    runs each rerun → look the table up each run so a demotion/revocation is honored on the target's next
    interaction (design §8.8). Caching the resolved `Role` opens a stale-authorization window.
-8. **Unknown stored role → `Role.parse` returns `None` → default (analyst), never admin** (design §8.9).
+8. **Role lookup state is explicit.** `missing` uses the analyst default; `unavailable`/`invalid`
+   restrict independently authorized users to viewer and deny table-only entry (design §8.9).
 9. **Lint/type/scan scope** — `ruff`/`mypy`/`bandit` cover `backend`/`app.py`/`ui`; `ruff` also `tests`.
    Keep `backend/auth/roles.py` clean; no `# type: ignore` without a reason. Migrations are out of lint
    scope.
@@ -307,9 +307,13 @@ alembic upgrade head   # schema change → exercise the migration round-trip
 ```
 (Gates are identical to CI. The `alembic` step matters this time — AUTH-003 changes the schema.)
 
-## 7. Open questions for the reviewer (Claude/Codex)
-- **Roles page placement** — standalone "Admin roles" view vs a section in **Admin settings**? (design §10 Q1)
-- **`DEFAULT_ROLE` as constant vs env knob** — constant `analyst` now? (design §10 Q2)
-- **Last-admin protection** — refuse a write leaving zero effective admins + refuse self-demotion? (design §10 Q3)
-- **Authorization widening** — confirm a `user_roles` row should also *authorize entry* (§5.1), or keep
-  entry strictly on `ALLOWED_EMAILS`/`ADMIN_EMAILS` and use the table for role only.
+## 7. Resolved implementation decisions
+- **Roles page placement** — standalone **Admin roles** view.
+- **Default role** — constant `analyst`; no environment knob.
+- **Admin protection** — refuse self-demotion/self-revocation and lock admin rows before the
+  last-admin check plus mutation.
+- **Authorization widening** — a valid `user_roles` row authorizes entry; failed/invalid lookups do not.
+- **Failure policy** — env admins remain admin, independently authorized users become viewer, and
+  table-only users are denied while the role store is unavailable.
+- **Viewer charts** — persisted History results reconstruct cache-only charts; no live data fetch.
+- **Exports** — `EXPORT_RESULTS` gates live, History, Comparison, and Validation payload construction.

@@ -17,6 +17,9 @@ download renders — and, once in, so each action is gated by the user's role.
 - **Authentication (AUTH-001)** — Google SSO via Streamlit's native OIDC (`st.login`/`st.user`/`st.logout`). Validates config presence, Authlib availability, login state, and the verified email claim.
 - **Authorization (AUTH-002)** — `ALLOWED_EMAILS` decides who may use the app; `ADMIN_EMAILS` are always allowed. Dev-permits-empty / prod-fails-closed.
 - **Role model (AUTH-003)** — every authorized user resolves to one hierarchical role (`viewer < analyst < admin`). The `user_roles` table is the runtime source of truth and **also authorizes sign-in** (a row grants entry, unioned with the env lists); `ADMIN_EMAILS` is a bootstrap-admin floor. Capabilities (run scan, export, manage config/health/audit/roles, …) gate features via `require_capability`, with the UI hiding controls **and** the handler re-checking (defense in depth). Default role for an authorized user with no row is **analyst** (preserves AUTH-002 access).
+- **Auth-disabled development** — the app creates the explicit synthetic identity
+  `local-owner@localhost` with the admin role. Admin-page authorization and audit
+  attribution therefore use the same identity instead of relying on a missing user.
 
 **Non-responsibilities**: parses no env directly (reads [configuration.md](configuration.md)); owns no per-object ACLs (role is the unit of authorization).
 
@@ -69,9 +72,9 @@ flowchart TD
 | **Dev-permits-empty, prod-fails-closed** | Local convenience vs deployed safety; mirrors config validation (prod requires an allow/admin email and forbids `AUTH_REQUIRED=false`). | Same behavior both — unsafe or annoying. |
 | **`auth_denied` logs email only, never the allowlist** | Operator audit without leaking who else has access. | Log the list — info leak. |
 | **`_stop()` guards fakes that don't stop** | A test fake whose `stop()` returns would otherwise run protected code; the guard raises. | Bare `st.stop()` — fakes leak through. |
-| **DB-driven roles + env-admin floor (AUTH-003)** | Admins reassign roles at runtime from the UI; `ADMIN_EMAILS` guarantees a bootstrap admin so the table can never lock everyone out, and a bad table write can only *lower* privilege. | More env lists (redeploy per change) / pure-DB (seed lockout risk). |
+| **DB-driven roles + env-admin floor (AUTH-003)** | Admins reassign roles at runtime from the UI; `ADMIN_EMAILS` guarantees a bootstrap admin so the table can never lock everyone out. Lookup outcomes distinguish a valid row, a missing row, an unavailable store, and an invalid stored role so failures cannot be mistaken for ordinary defaults. | More env lists (redeploy per change) / pure-DB (seed lockout risk). |
 | **Hierarchical roles + capability map** | `admin ⊇ analyst ⊇ viewer` + one min-role table is the whole policy — exhaustively testable; code checks capabilities, never `role == "admin"`. | Per-role permission sets — more to keep in sync. |
-| **Table also authorizes entry; best-effort + fail-closed lookup** | The Roles page is a real self-service access manager; a DB read error yields "no row" so a transient failure denies a table-only user rather than granting access. | Role-only table (two places to manage) / fail-open (unsafe). |
+| **Table also authorizes entry; explicit fail-closed lookup states** | The Roles page is a real self-service access manager. A missing row may use the normal analyst default, but an unavailable/invalid lookup never does: `ADMIN_EMAILS` stays admin, independently env-authorized users fall back to viewer, and table-only users are denied. | Role-only table (two places to manage) / conflating a DB failure with an absent row (unsafe). |
 | **`is_admin` is a derived property; role re-resolved every run** | Existing `is_admin` readers keep working with no drift-prone field; re-resolving each rerun makes a revocation effective on the next interaction (no stale-auth caching). | Settable `is_admin` field / caching the role in `session_state`. |
 
 ## 5. Failure modes
@@ -81,7 +84,10 @@ flowchart TD
 - No/unverified email → error + stop.
 - Not authorized → generic message + `auth_denied` event + stop (user stays signed in to switch accounts).
 - Lacks a capability → generic message + `role_denied` event (logged + audited) + stop.
-- `user_roles` read error during the gate → treated as no assignment (fail closed); env allow-listed/admin users are unaffected.
+- `user_roles` missing row → an independently authorized user receives the normal analyst default.
+- `user_roles` unavailable or invalid row → `ADMIN_EMAILS` stays admin; an independently
+  allow-listed user receives viewer-only access; a table-only user is denied. Diagnostics
+  name only the safe outcome/state and never expose role-table contents.
 
 ## 6. Configuration
 
@@ -89,10 +95,10 @@ flowchart TD
 
 ## 7. Testing
 
-- [`tests/test_auth_session.py`](../../../tests/test_auth_session.py) — config/login states, verified-claim handling, the `is_email_authorized` matrix, table-grants-entry, admin-floor-over-table, and the `require_capability` allow/deny (log + audit).
+- [`tests/test_auth_session.py`](../../../tests/test_auth_session.py) — config/login states, verified-claim handling, the `is_email_authorized` matrix, every role-lookup state, table-grants-entry, admin-floor-over-table, and the `require_capability` allow/deny (log + audit).
 - [`tests/test_auth_roles.py`](../../../tests/test_auth_roles.py) — pure `resolve_role` precedence + capability matrices + `Role.parse`.
-- [`tests/test_user_roles_repository.py`](../../../tests/test_user_roles_repository.py) — repository round-trip, CHECK rejection, normalization.
-- [`tests/test_admin_roles_service.py`](../../../tests/test_admin_roles_service.py) — assign/revoke + audit + last-admin guard.
+- [`tests/test_user_roles_repository.py`](../../../tests/test_user_roles_repository.py) — repository round-trip, CHECK rejection, normalization, and PostgreSQL row-lock query.
+- [`tests/test_admin_roles_service.py`](../../../tests/test_admin_roles_service.py) — assign/revoke + audit, self-demotion/revocation rejection, and locked last-admin guard.
 - [`tests/test_app_roles_page.py`](../../../tests/test_app_roles_page.py) — the admin Roles page guard + feedback flow.
 
 ## 8. Extension points

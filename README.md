@@ -670,7 +670,7 @@ same secret redactor used elsewhere in the app.
 | `login_success` / `login_denied` | INFO or WARNING | a sign-in is accepted / rejected (OBS-003 audit; also persisted to `audit_logs`) |
 | `manual_scan_started` | INFO | a user presses **Run screener** (OBS-003 audit; distinct from the service `scan_started`) |
 | `config_changed` | INFO | an admin changes a runtime setting via the settings form (OBS-003 audit; old/new redacted) |
-| `export_downloaded` | INFO | a results/history CSV is downloaded (OBS-003 audit) |
+| `export_downloaded` | INFO | a live-results, history, comparison, or validation CSV is downloaded (OBS-003 audit) |
 | `admin_page_accessed` | INFO | an admin opens an admin page (OBS-003 audit; once per page per session) |
 | `role_denied` | WARNING | a user attempts a feature above their role (AUTH-003 audit; logs the email + attempted capability + actual role, never the role table; deduped per session) |
 | `role_changed` | INFO | an admin assigns or revokes a role (AUTH-003 audit; records target email, old/new role, and who made the change) |
@@ -945,12 +945,15 @@ CSV download is reached.
   gated by *capability* (the UI hides controls **and** the handler re-checks);
   blocked attempts are logged and audited as `role_denied`. The default role for
   an authorized user with no row is **analyst**, so existing users keep their
-  scan/export access.
+  scan/export access. If the role table is unavailable or contains an invalid
+  assignment, independently authorized non-admins fall back to read-only viewer;
+  table-only users are denied until their assignment can be trusted.
 - **Dev-permits / prod-fails-closed** — with an empty `ALLOWED_EMAILS`,
-  development lets any signed-in Google user through when auth is enabled (treated
-  as a full-access local owner), but `APP_ENV=production` requires at least one
-  allowed or admin email and cannot disable auth. Missing SSO config in production
-  is a hard error, not a warning.
+  development lets any signed-in Google user through when auth is enabled. With
+  authentication disabled, the app uses an explicit `local-owner@localhost`
+  admin identity so admin pages and audit attribution remain available.
+  `APP_ENV=production` requires at least one allowed or admin email and cannot
+  disable auth. Missing SSO config in production is a hard error, not a warning.
 
 ---
 
@@ -992,8 +995,10 @@ re-running today's data, universe, or model.
   screener, universe, status badge, symbols scanned, shortlisted count, trigger,
   and error state. Filter by screener, universe, status, started-date range,
   trigger, or symbol (exact, case-insensitive), then click a run to see its
-  persisted results and download them as CSV. Failed runs show their full
-  (secret-redacted) error message.
+  persisted results, select a symbol for a cache-only historical chart, and (for
+  analysts/admins) download them as CSV. Failed runs show their full
+  (secret-redacted) error message. Viewers never build or receive CSV payloads;
+  the same export gate covers History, Comparison, and Validation.
 - **Scan comparison page (JOB-003)** — switch to **Scan comparison** to compare
   the latest finalized run with the immediately previous finalized run for a
   selected screener/universe pair. Finalized means `SUCCESS` or `PARTIAL`; the

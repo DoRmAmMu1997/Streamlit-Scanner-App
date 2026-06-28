@@ -7,6 +7,7 @@ browser, opening a Dhan connection, or rendering real UI widgets.
 
 from __future__ import annotations
 
+import inspect
 import os
 import time
 from datetime import date as real_date
@@ -75,6 +76,65 @@ class _FakeDataLoader:
         self.last_cache_misses = 0
         self.last_api_attempts = 0
         self.last_rate_limit_retries = 0
+
+
+def test_capability_flags_are_required_at_every_render_boundary():
+    """A forgotten call-site argument must fail closed instead of enabling actions."""
+    boundaries = [
+        (app._render_sidebar, "can_run"),
+        (app._render_scan_output, "can_export"),
+        (app._render_history_page, "can_export"),
+        (app._render_comparison_page, "can_export"),
+        (app._render_validation_page, "can_export"),
+    ]
+
+    for renderer, parameter_name in boundaries:
+        parameter = inspect.signature(renderer).parameters.get(parameter_name)
+        assert parameter is not None
+        assert parameter.default is inspect.Parameter.empty
+
+
+def test_shared_cached_chart_renderer_uses_mapped_security_id(monkeypatch):
+    """Live and historical charts share one cache-only rendering boundary."""
+    helper = getattr(chart_cache, "_render_cached_symbol_chart", None)
+    assert callable(helper)
+
+    rendered: list[tuple[str, int, bool]] = []
+    calls: list[tuple[object, ...]] = []
+    fake_st = SimpleNamespace(
+        info=lambda *_args, **_kwargs: None,
+        error=lambda *_args, **_kwargs: None,
+        caption=lambda *_args, **_kwargs: None,
+    )
+    fake_components = SimpleNamespace(
+        html=lambda html, *, height, scrolling: rendered.append(
+            (html, height, scrolling)
+        )
+    )
+    payload = SimpleNamespace(html="<div>chart</div>", height=640)
+    monkeypatch.setattr(chart_cache, "st", fake_st)
+    monkeypatch.setattr(chart_cache, "components", fake_components, raising=False)
+    monkeypatch.setattr(
+        chart_cache,
+        "_get_or_build_chart_payload",
+        lambda *args: calls.append(args) or payload,
+    )
+    selected = SimpleNamespace(key="demo", universe="nifty_500")
+    universe = pd.DataFrame([{"symbol": "TCS", "security_id": "11536"}])
+    loader = object()
+    params = {"lookback": 20}
+
+    result = helper(
+        selected=selected,
+        chart_symbol="TCS",
+        universe_df=universe,
+        data_loader=loader,
+        params_for_chart=params,
+    )
+
+    assert result == "TCS"
+    assert calls == [(selected, "TCS", "11536", loader, params)]
+    assert rendered == [("<div>chart</div>", 640, False)]
 
 
 def test_scan_history_start_date_subtracts_calendar_years_and_handles_leap_day(monkeypatch):
@@ -471,6 +531,64 @@ def test_admin_health_view_is_available_and_returns_before_screener_discovery(
     assert calls == ["schema", "view", "health:admin@example.com"]
 
 
+def test_auth_disabled_local_owner_can_open_admin_roles(monkeypatch):
+    """Local auth-off development gets the documented synthetic admin identity."""
+    calls: list[str] = []
+
+    def choose_admin_roles(_label, options, **_kwargs):
+        assert "Admin roles" in options
+        calls.append("view")
+        return "Admin roles"
+
+    monkeypatch.setattr(
+        app,
+        "get_settings",
+        lambda: get_settings(env={"AUTH_REQUIRED": "false"}),
+    )
+    monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
+    monkeypatch.setattr(app, "_configure_logging", lambda: None)
+    monkeypatch.setattr(app, "ensure_database_schema", lambda: calls.append("schema"))
+    monkeypatch.setattr(app, "apply_config_overrides", lambda: {})
+    monkeypatch.setattr(
+        app,
+        "_record_admin_page_access",
+        lambda user, page: calls.append(f"access:{user.email}:{page}"),
+    )
+    monkeypatch.setattr(
+        app,
+        "_render_roles_page",
+        lambda user: calls.append(f"roles:{user.email}:{user.role.name.lower()}"),
+    )
+    monkeypatch.setattr(
+        app,
+        "discover_screeners",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("admin roles must return before screener discovery")
+        ),
+    )
+    monkeypatch.setattr(
+        app,
+        "st",
+        SimpleNamespace(
+            set_page_config=lambda **_kwargs: None,
+            markdown=lambda *_args, **_kwargs: None,
+            title=lambda *_args, **_kwargs: None,
+            caption=lambda *_args, **_kwargs: None,
+            radio=choose_admin_roles,
+            session_state={},
+        ),
+    )
+
+    app.main()
+
+    assert calls == [
+        "schema",
+        "view",
+        "access:local-owner@localhost:Admin roles",
+        "roles:local-owner@localhost:admin",
+    ]
+
+
 def test_validation_view_is_available_to_all_authenticated_users(monkeypatch):
     """Any authenticated user can open the read-only validation dashboard."""
 
@@ -501,7 +619,7 @@ def test_validation_view_is_available_to_all_authenticated_users(monkeypatch):
     monkeypatch.setattr(
         app,
         "_render_validation_page",
-        lambda: calls.append("validation"),
+        lambda **kwargs: calls.append(f"validation:{kwargs['can_export']}"),
     )
     monkeypatch.setattr(
         app,
@@ -525,7 +643,7 @@ def test_validation_view_is_available_to_all_authenticated_users(monkeypatch):
 
     app.main()
 
-    assert calls == ["schema", "view", "validation"]
+    assert calls == ["schema", "view", "validation:True"]
 
 
 def test_comparison_view_is_available_to_all_authenticated_users(monkeypatch):
@@ -558,7 +676,7 @@ def test_comparison_view_is_available_to_all_authenticated_users(monkeypatch):
     monkeypatch.setattr(
         app,
         "_render_comparison_page",
-        lambda: calls.append("comparison"),
+        lambda **kwargs: calls.append(f"comparison:{kwargs['can_export']}"),
     )
     monkeypatch.setattr(
         app,
@@ -582,7 +700,7 @@ def test_comparison_view_is_available_to_all_authenticated_users(monkeypatch):
 
     app.main()
 
-    assert calls == ["schema", "view", "comparison"]
+    assert calls == ["schema", "view", "comparison:True"]
 
 
 def test_non_admin_cannot_select_admin_health(monkeypatch):
@@ -837,6 +955,7 @@ def test_app_reexports_helpers_from_extracted_ui_modules():
     assert app._sort_results_by_final_score is common._sort_results_by_final_score
     assert app._redact_secrets is common._redact_secrets
     assert app._get_or_build_chart_payload is chart_cache._get_or_build_chart_payload
+    assert app._render_cached_symbol_chart is chart_cache._render_cached_symbol_chart
     assert app._render_history_page is history_page._render_history_page
     assert app._render_admin_health_page is health_page._render_admin_health_page
     assert app._render_validation_page is validation_page._render_validation_page

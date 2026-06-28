@@ -35,7 +35,6 @@ from typing import Any, Literal
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 from streamlit.runtime.scriptrunner import get_script_run_ctx
 
 from backend.admin import apply_config_overrides
@@ -121,6 +120,7 @@ from ui.chart_cache import (  # noqa: F401
     _get_or_build_chart_payload,
     _json_cache_default,
     _remember_chart_payload,
+    _render_cached_symbol_chart,
 )
 from ui.common import (  # noqa: F401
     _RATING_BADGES,
@@ -159,6 +159,8 @@ from ui.history_page import (  # noqa: F401
 )
 from ui.roles_page import _render_roles_page
 from ui.validation_page import _render_validation_page
+
+_LOCAL_OWNER_EMAIL = "local-owner@localhost"
 
 # The CLI prefetch downloads ten years of daily candles for every stock in the
 # union of all universes. The window length is shared with the headless daily job
@@ -968,21 +970,24 @@ def main() -> None:
     # reaching back into Streamlit later. Streamlit's auth object is UI/session
     # state; the scan service only needs a plain audit string like "ui" or
     # "ui:person@example.com".
-    authenticated_user: AuthenticatedUser | None = None
+    authenticated_user: AuthenticatedUser
     if settings.auth_required:
         authenticated_user = require_authorized_user(st)
+    else:
+        # Production validation forbids disabling auth. In local development,
+        # use one explicit synthetic identity so admin pages and audit entries
+        # agree with AUTH-003's documented full-access owner model.
+        authenticated_user = AuthenticatedUser(
+            email=_LOCAL_OWNER_EMAIL,
+            name="Local development owner",
+            role=Role.ADMIN,
+        )
 
-    # AUTH-003: the effective role drives every capability check below. With auth
-    # disabled (local development only — production validation forbids it) there is
-    # no signed-in identity, so the single local operator is treated as a
-    # full-access owner for the scanner flow (admin pages still require a real
-    # signed-in admin so their audit trail has an actor).
-    current_role = (
-        authenticated_user.role if authenticated_user is not None else Role.ADMIN
-    )
-    current_email = (
-        authenticated_user.email if authenticated_user is not None else None
-    )
+    # AUTH-003: the effective role drives every capability check below. Auth-off
+    # development uses the synthetic local owner above, so admin pages remain
+    # reachable and every audit row still has an explicit actor.
+    current_role = authenticated_user.role
+    current_email = authenticated_user.email
 
     # Scan history and OBS-003 audit tables need the schema before any durable
     # write. Run this only after the auth gate so an unauthenticated tab still
@@ -990,7 +995,7 @@ def main() -> None:
     # signed-in session is auditable on a fresh database.
     ensure_database_schema()
 
-    if authenticated_user is not None:
+    if settings.auth_required:
         # OBS-003: record a successful sign-in once per browser session. The
         # once-helper marks the session only after the durable row is written, so
         # a transient DB failure can retry on the next Streamlit rerun.
@@ -1003,10 +1008,8 @@ def main() -> None:
 
     # OBS-003: stash the signed-in email so export handlers in the Scanner and
     # Scan history views (which do not receive the user object) can attribute a
-    # download. None when auth is disabled — those exports record as system.
-    st.session_state["_audit_user_email"] = (
-        authenticated_user.email if authenticated_user is not None else None
-    )
+    # download. Auth-off development records the synthetic local-owner identity.
+    st.session_state["_audit_user_email"] = authenticated_user.email
 
     # OBS-003: replay admin-set runtime overrides (e.g. LOG_LEVEL) now that the
     # schema exists and we are past the auth gate, then refresh logging so a
@@ -1027,9 +1030,7 @@ def main() -> None:
         "Scan comparison",
         "Validation / Signal Performance",
     ]
-    if authenticated_user is not None and role_has_capability(
-        current_role, VIEW_HEALTH
-    ):
+    if role_has_capability(current_role, VIEW_HEALTH):
         # AUTH-003: the admin tier sees the operate-the-system pages — health,
         # the runtime settings form, the audit log viewer, and role management.
         view_options.extend(
@@ -1044,13 +1045,19 @@ def main() -> None:
         key="main_view",
     )
     if view == "Scan history":
-        _render_history_page()
+        _render_history_page(
+            can_export=role_has_capability(current_role, EXPORT_RESULTS)
+        )
         return
     if view == "Scan comparison":
-        _render_comparison_page()
+        _render_comparison_page(
+            can_export=role_has_capability(current_role, EXPORT_RESULTS)
+        )
         return
     if view == "Validation / Signal Performance":
-        _render_validation_page()
+        _render_validation_page(
+            can_export=role_has_capability(current_role, EXPORT_RESULTS)
+        )
         return
     # AUTH-003 defense in depth: the view list already hides these from non-admins,
     # but the handler re-checks the capability before rendering — a stale rerun or a
@@ -1116,9 +1123,7 @@ def main() -> None:
         # for the headless daily job.
         record_audit_event(
             event=EVENT_MANUAL_SCAN_STARTED,
-            user_email=(
-                authenticated_user.email if authenticated_user is not None else None
-            ),
+            user_email=authenticated_user.email,
             metadata={"screener_key": selected.key, "universe_key": selected.universe},
         )
         cache = _execute_screener(
@@ -1140,7 +1145,7 @@ def main() -> None:
 
 
 def _render_sidebar(
-    screeners: dict[str, ScreenerDefinition], *, can_run: bool = True
+    screeners: dict[str, ScreenerDefinition], *, can_run: bool
 ) -> ScreenerDefinition:
     """Render the sidebar and return the selected screener definition.
 
@@ -1342,7 +1347,7 @@ def _execute_screener(
 
 
 def _render_scan_output(
-    selected: ScreenerDefinition, cache: dict[str, Any], *, can_export: bool = True
+    selected: ScreenerDefinition, cache: dict[str, Any], *, can_export: bool
 ) -> None:
     """Render the cached scan: stats + ranked selectable table + chart.
 
@@ -1523,50 +1528,13 @@ def _render_results_with_chart(
         help="Click a table row OR use this dropdown — whichever you use last wins.",
     )
 
-    universe_df: pd.DataFrame = cache["universe_df"]
-    universe_match = universe_df.loc[
-        universe_df["symbol"].astype(str).str.upper() == chart_symbol
-    ]
-    if universe_match.empty:
-        st.info(
-            f"Could not find `{chart_symbol}` in universe `{selected.universe}`. "
-            "Try refreshing universes via `python app.py`."
-        )
-        return chart_symbol
-    security_id = str(universe_match.iloc[0].get("security_id", "")).strip()
-    if not security_id:
-        st.info(f"`{chart_symbol}` has no mapped security_id; cannot load candles.")
-        return chart_symbol
-
-    data_loader: DailyDataLoader = cache["data_loader"]
-    try:
-        chart_payload = _get_or_build_chart_payload(
-            selected,
-            chart_symbol,
-            security_id,
-            data_loader,
-            cache["params_for_chart"],
-        )
-    except Exception as exc:
-        logger.exception("build_chart failed for %s on %s", selected.key, chart_symbol)
-        st.error(f"Could not build chart: {_redact_secrets(str(exc))}")
-        return chart_symbol
-
-    if chart_payload is None:
-        st.info(
-            f"No cached candles for `{chart_symbol}`. Run `python app.py` to "
-            "backfill the local cache for every stock in the union."
-        )
-        return chart_symbol
-
-    # The chart is an embedded Lightweight Charts widget. Its price scale is
-    # natively drag-to-scale — exactly the TradingView-style Y-axis zoom.
-    components.html(chart_payload.html, height=chart_payload.height, scrolling=False)
-    st.caption(
-        "Chart controls: drag the price scale (right edge) to scale the Y-axis · "
-        "drag the chart to pan · scroll to zoom · double-click to reset."
+    return _render_cached_symbol_chart(
+        selected=selected,
+        chart_symbol=chart_symbol,
+        universe_df=cache["universe_df"],
+        data_loader=cache["data_loader"],
+        params_for_chart=cache["params_for_chart"],
     )
-    return chart_symbol
 
 
 # ---------------------------------------------------------------------------

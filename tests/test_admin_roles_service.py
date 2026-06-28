@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from backend.admin import roles_service
 from backend.admin.roles_service import (
     RoleAssignmentError,
     assign_role,
@@ -147,6 +148,108 @@ def test_last_admin_guard_allows_demotion_with_another_admin(
         session_factory=file_session_factory,
     )
     assert result.changed is True
+
+
+def test_admin_cannot_demote_or_revoke_own_role_when_another_admin_exists(
+    file_session_factory, monkeypatch
+):
+    """Self-demotion is refused even when the last-admin invariant would survive."""
+    monkeypatch.setenv("ADMIN_EMAILS", "")
+    assign_role(
+        email="self@example.com",
+        role="admin",
+        assigned_by=None,
+        session_factory=file_session_factory,
+    )
+    assign_role(
+        email="other@example.com",
+        role="admin",
+        assigned_by=None,
+        session_factory=file_session_factory,
+    )
+
+    with pytest.raises(RoleAssignmentError, match="own admin role"):
+        assign_role(
+            email="self@example.com",
+            role="viewer",
+            assigned_by=" SELF@example.com ",
+            session_factory=file_session_factory,
+        )
+    with pytest.raises(RoleAssignmentError, match="own role assignment"):
+        revoke_role(
+            email="self@example.com",
+            revoked_by="SELF@example.com",
+            session_factory=file_session_factory,
+        )
+
+    with file_session_factory() as session:
+        assert get_user_role(session, "self@example.com") == "admin"
+
+
+def test_admin_cannot_revoke_own_non_admin_table_assignment(
+    file_session_factory, monkeypatch
+):
+    """Self-revocation is rejected even when ADMIN_EMAILS supplies effective admin."""
+    monkeypatch.setenv("ADMIN_EMAILS", "boss@example.com")
+    assign_role(
+        email="boss@example.com",
+        role="viewer",
+        assigned_by="other-admin@example.com",
+        session_factory=file_session_factory,
+    )
+
+    with pytest.raises(RoleAssignmentError, match="own role assignment"):
+        revoke_role(
+            email="boss@example.com",
+            revoked_by=" BOSS@example.com ",
+            session_factory=file_session_factory,
+        )
+
+    with file_session_factory() as session:
+        assert get_user_role(session, "boss@example.com") == "viewer"
+
+
+def test_admin_demotion_locks_admin_rows_before_checking_last_admin(
+    file_session_factory, monkeypatch
+):
+    """The guard and mutation share a transaction-level lock boundary."""
+    monkeypatch.setenv("ADMIN_EMAILS", "")
+    assign_role(
+        email="a@example.com",
+        role="admin",
+        assigned_by=None,
+        session_factory=file_session_factory,
+    )
+    assign_role(
+        email="b@example.com",
+        role="admin",
+        assigned_by=None,
+        session_factory=file_session_factory,
+    )
+    calls: list[str] = []
+    real_lock = getattr(roles_service, "list_user_role_admins_for_update", None)
+
+    def record_lock(session):
+        calls.append("lock")
+        if real_lock is None:
+            return []
+        return real_lock(session)
+
+    monkeypatch.setattr(
+        roles_service,
+        "list_user_role_admins_for_update",
+        record_lock,
+        raising=False,
+    )
+
+    assign_role(
+        email="a@example.com",
+        role="viewer",
+        assigned_by="b@example.com",
+        session_factory=file_session_factory,
+    )
+
+    assert calls == ["lock"]
 
 
 def test_last_admin_guard_noop_when_env_admin_configured(

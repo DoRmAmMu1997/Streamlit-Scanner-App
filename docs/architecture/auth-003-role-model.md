@@ -5,10 +5,10 @@
 | **Ticket** | AUTH-003 — Add basic role model (separate viewer / analyst / admin) |
 | **Type / Priority** | Story · P1 |
 | **Owner / Reviewer** | Claude (design) / Codex (implementation review) |
-| **Status** | Design complete (methodology + proposed schema only — **no code or migration lands here**) |
+| **Status** | Implemented and review-hardened (role model, migration, enforcement, tests, and approved failure policy) |
 | **Branch** | `claude/auth-003-role-model` |
 | **Depends on** | AUTH-001 (sign-in) · AUTH-002 (allowlist/admins) · OBS-001 (logging) · OBS-003 (audit trail) · SCAN-002 (storage/migrations) |
-| **Unblocks** | AUTH-003 implementation pass · per-feature gating · watchlists (WATCH-*) · self-service access management |
+| **Unblocks** | watchlists (WATCH-*) · future per-object authorization |
 
 > Goal (from the ticket): *Separate viewer, analyst, and admin capabilities.*
 > Acceptance (AUTH-003): role config is environment- or **database-driven** · admin-only features are
@@ -45,10 +45,10 @@ The roles are **hierarchical** (`admin ⊇ analyst ⊇ viewer`): every capabilit
 also has. This keeps the model small and matches the additive way the app already extends the view
 list for admins ([`app.py`](../../app.py) `main()`).
 
-**Why design-only here.** Per the repo's RANK-001 → RANK-002 split, this pass lands the methodology and
-the *proposed* schema (column-by-column, like [`scan-run-persistence.md`](scan-run-persistence.md))
-with **no code, no ORM model, and no migration**. The implementation pass lands the table together with
-its Alembic migration in one commit (the migration-drift guard requires it — handoff §5).
+**Implementation note.** This document began as the design contract. AUTH-003 now implements the
+role model, `user_roles` ORM/migration, capability gates, admin surface, cache-only viewer charts,
+and regression tests. The current failure and concurrency policies below include the hardening
+approved during PR #80 review.
 
 ---
 
@@ -96,7 +96,7 @@ action handlers ask `role_has_capability(user.role, CAP)`, never `role == "admin
 |---|---|---|
 | `VIEW_RESULTS` | viewer | Scan history, Scan comparison, Validation pages; results table + charts |
 | `RUN_SCAN` | analyst | Sidebar **Run screener** button → `_execute_screener` |
-| `EXPORT_RESULTS` | analyst | **Download results CSV** button (`EVENT_EXPORT_DOWNLOADED`) |
+| `EXPORT_RESULTS` | analyst | Live results, History, Comparison, and Validation CSV downloads (`EVENT_EXPORT_DOWNLOADED`) |
 | `CREATE_WATCHLIST` | analyst | *(reserved — feature not yet built)* |
 | `REFRESH_DATA` | admin | Any in-app data-refresh control *(today refresh is a CLI/prefetch path, outside the role model)* |
 | `MANAGE_UNIVERSES` | admin | Mutating universe actions *(viewing the universe **status** table stays viewer-level)* |
@@ -105,13 +105,14 @@ action handlers ask `role_has_capability(user.role, CAP)`, never `role == "admin
 | `VIEW_AUDIT_LOG` | admin | **Audit log** page (`ui/audit_page.py`) |
 | `MANAGE_ROLES` | admin | **Admin roles** page *(new this ticket)* |
 
-> Note on "view charts": charts render *inside* the Scanner results and history views. A viewer may
-> **open** the Scanner page and view cached results/charts (`VIEW_RESULTS`); only the **Run** and
-> **Export** actions on that page require `analyst` (§5.3). This is why we gate *actions*, not the page.
+> Note on "view charts": a viewer can select a persisted History result and reconstruct its chart
+> from local cached candles and the run's persisted parameters. This path never performs a live broker
+> fetch. Scanner charts remain available for an existing session cache; only **Run** and every CSV
+> **Export** require `analyst` (§5.3). This is why we gate actions, not read-only pages.
 
 ---
 
-## 4. Storage — `user_roles` (proposed; migration lands in the implementation pass)
+## 4. Storage — `user_roles` (implemented)
 
 The role store is a small, durable table. It is the runtime source of truth for who has which role
 **and** a runtime authorization source (a row authorizes entry — see §5.1). It mirrors the column and
@@ -126,12 +127,11 @@ timestamp conventions of the existing models in
 | `created_at` | `DateTime(timezone=True)`, default `now()` UTC | Matches the existing models' UTC timestamp pattern. |
 | `updated_at` | `DateTime(timezone=True)`, `onupdate=now()` UTC | Bumped on every reassignment. |
 
-**No schema lands here.** The implementation pass adds the ORM model **and** a hand-written Alembic
-migration `migrations/versions/<date>auth003_create_user_roles.py` in the **same commit**, and updates
-the two hard-coded table-name sets in
+The implementation includes the ORM model **and** the hand-written Alembic migration
+`migrations/versions/20260623auth003_create_user_roles.py`, and updates the table-name sets in
 [`tests/test_scan_storage_migrations.py`](../../tests/test_scan_storage_migrations.py) — the
-migration-drift guard (`alembic upgrade head` must equal `Base.metadata`) makes a model-only change red
-CI. This is called out as a sharp edge in handoff §5.
+migration-drift guard (`alembic upgrade head` must equal `Base.metadata`) keeps future model-only
+changes red in CI.
 
 **Why a table and not more env lists** — see the decision record in §7.
 
@@ -208,10 +208,10 @@ acts. Hiding a button is UX, not security; the handler check is the boundary.
 - **View list** ([`app.py`](../../app.py) `main()`): viewer sees the read-only views; the admin pages
   are appended only for `MANAGE_*`/`VIEW_HEALTH`/`VIEW_AUDIT_LOG` holders (replaces the current
   `is_admin` test). A new **Admin roles** page is appended for `MANAGE_ROLES`.
-- **Run / Export**: the sidebar **Run** button and the **Download CSV** button are shown only for
-  `RUN_SCAN` / `EXPORT_RESULTS`; the `_execute_screener` and download handlers call
-  `require_capability` first (defense-in-depth — a stale rerun or a crafted request cannot run a scan a
-  viewer's UI never offered).
+- **Run / Export**: the sidebar **Run** button is shown only for `RUN_SCAN`, and live-results,
+  History, Comparison, and Validation CSV payloads/buttons are built only for `EXPORT_RESULTS`.
+  `_execute_screener` re-checks `RUN_SCAN` (defense-in-depth — a stale rerun or crafted request cannot
+  run a scan a viewer's UI never offered).
 - **Admin pages**: each admin page handler calls `require_capability(..., <its capability>)` at the top,
   exactly as the pages already re-check `is_admin` today (`_record_admin_page_access` stays).
 
@@ -260,7 +260,7 @@ next to `EVENT_AUTH_DENIED` / `EVENT_ADMIN_PAGE_ACCESSED`.
 | **`ADMIN_EMAILS` retained as a bootstrap-admin floor** | An empty `user_roles` on day one would otherwise mean **no admin exists to populate it** — a lockout. Env admins are the anti-lockout safety and cannot be demoted by a bad table write (§5.2). | *Pure DB with a seeded admin row* — works, but a wrong/dropped seed re-introduces the lockout; env is the durable escape hatch. |
 | **Hierarchical roles + capability map** | `admin ⊇ analyst ⊇ viewer` plus one capability→min-role table is the entire policy — small, and exhaustively testable as a matrix. Matches how `app.py` already *adds* admin views. | *Per-role permission sets / full RBAC matrix* — more expressive, but more surface to keep in sync than three tiers need. |
 | **Default role = analyst; auth-off = owner** | Preserves current access: every existing `ALLOWED_EMAILS` user keeps scan/export, and local dev stays unrestricted. AUTH-003 ships **non-breaking**. | *Default viewer (least-privilege)* — safer in the abstract, but silently strips scan/export from current users until re-listed; rejected per your call. |
-| **Gate capabilities, not pages; enforce twice** | Hiding a control is UX; the handler re-check is the boundary. A viewer can view charts on the Scanner page while Run/Export stay analyst-only, and a stale rerun can't escalate. | *Hide-only* — a leftover/forged rerun could trigger an action the UI no longer shows. |
+| **Gate capabilities, not pages; enforce twice** | Hiding a control is UX; the handler re-check is the boundary. A viewer can reconstruct charts from persisted History while Run/all exports stay analyst-only, and a stale rerun cannot escalate. | *Hide-only* — a leftover/forged rerun could trigger an action the UI no longer shows. |
 | **`is_admin` kept as a derived field** | `is_admin := role is Role.ADMIN` keeps every existing `is_admin` reader and test working while the policy moves to capabilities. | *Remove `is_admin`* — a wider, riskier blast radius for no functional gain. |
 | **Reuse the OBS-001/003 denial idiom** | `role_denied` logs+audits exactly like `auth_denied`/`login_denied`, deduped per session — operators get one consistent trail; no new logging machinery. | *A bespoke role-denial sink* — divergent format, more to maintain. |
 
@@ -297,20 +297,19 @@ caching the table lookup if it becomes hot, and last-admin-deletion protection o
    **not** be stored in `st.session_state`. Otherwise an admin's **revocation/demotion** would only take
    effect on the user's next fresh session — a stale-authorization window. Re-resolving each run makes a
    role change effective on the target's very next interaction. *(Found by the design `/security-review`.)*
-9. **Unknown stored role fails toward non-escalation.** A corrupt/unknown `role` value parses to `None`
-   (`Role.parse`), which `resolve_role` treats as "no row" → falls to the default (analyst), **never**
-   to admin. A bad write can only ever *lower* effective privilege, not raise it. *(Found by the design
-   `/security-review`.)*
+9. **Lookup failures are distinct from missing rows.** Role lookup returns `found`, `missing`,
+   `unavailable`, or `invalid`. Only `missing` receives the analyst default. On `unavailable`/`invalid`,
+   env admins remain admin, independently authorized users become viewer, and table-only users are
+   denied. A database outage therefore cannot elevate an assigned viewer. *(Hardened in Codex review.)*
 10. **Export gating is render-time, not post-submit.** A CSV download has no separate server handler —
     `st.download_button` prepares its payload when the page renders. So `EXPORT_RESULTS` is enforced by
     guarding **before the export bytes are built and the button is rendered**, not by a (non-existent)
-    post-click handler. A viewer's run must never construct the export payload. *(Found by the design
-    `/security-review`.)*
+    post-click handler. A viewer's run must never construct the export payload on the live, History,
+    Comparison, or Validation surfaces. *(Hardened in Codex review.)*
 
-> Reviewed with `/security-review` against this design (threat lens: authz/privilege-escalation, input
-> validation, data exposure). No code exists yet, so the automated diff-scanner is N/A this pass and
-> re-runs on the real code in pass 2 (alongside `bandit`); the three design-hardening findings above
-> (items 8–10) are folded in here and mirrored in the handoff gotchas.
+> The implementation received a code and security hardening review (threat lens:
+> authorization/privilege escalation, lockout, input validation, and data exposure). Its resolved
+> findings are folded into items 8–10 and the handoff decisions below.
 
 ---
 
@@ -336,16 +335,12 @@ caching the table lookup if it becomes hot, and last-admin-deletion protection o
 `UserRole` model + migration + drift-test updates, repository helpers, the `session.py`/`app.py`
 enforcement edits, the admin Roles page, tests, and the `authentication.md` LLD update).
 
-**Open questions for the reviewer:**
-1. **Roles page placement** — a standalone "Admin roles" view vs a section inside the existing **Admin
-   settings** page. Default proposal: a standalone view (keeps `MANAGE_ROLES` cleanly separable from
-   `MODIFY_CONFIG`).
-2. **`DEFAULT_ROLE` exposure** — ship the default as a constant (`analyst`) only, or also as an env
-   knob? Default proposal: constant now; promote to a setting only if an operator needs `viewer`-by-
-   default later.
-3. **Last-admin protection** — confirm the Roles page should refuse a write that would leave zero
-   effective admins (counting env bootstrap admins) and refuse self-demotion. Default proposal: yes.
-4. **`MANAGE_UNIVERSES` / `REFRESH_DATA` surfaces** — these capabilities are defined now, but the
-   current app exposes data-refresh and universe building via CLI/prefetch, not a gated UI button. They
-   attach when/if an in-app control exists; viewing the universe **status** table stays viewer-level.
-   Confirm that's the intended boundary.
+**Resolved reviewer decisions:**
+1. **Roles page placement** — standalone **Admin roles** view, keeping `MANAGE_ROLES` separate from
+   `MODIFY_CONFIG`.
+2. **`DEFAULT_ROLE` exposure** — constant `analyst`; no environment knob until an operator needs it.
+3. **Admin protection** — refuse self-demotion/self-revocation and lock current admin rows before the
+   last-admin check and mutation.
+4. **Data/universe capabilities** — reserve `MANAGE_UNIVERSES` / `REFRESH_DATA` until in-app mutating
+   controls exist; the universe status table remains viewer-readable.
+5. **Local development** — auth-disabled runs use the synthetic `local-owner@localhost` admin.

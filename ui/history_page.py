@@ -20,8 +20,10 @@ import streamlit as st
 from sqlalchemy.exc import OperationalError
 
 from backend.audit import record_audit_event
+from backend.daily_data_loader import DailyDataLoader
 from backend.observability import EVENT_EXPORT_DOWNLOADED
 from backend.scanning import ScanStatus
+from backend.screener_registry import ScreenerRegistryError, discover_screeners
 from backend.storage import (
     ScanRun,
     count_scan_results_for_runs,
@@ -32,6 +34,8 @@ from backend.storage import (
     list_distinct_universe_keys,
     session_scope,
 )
+from backend.universe_loader import load_universe
+from ui.chart_cache import _render_cached_symbol_chart
 from ui.common import (
     _csv_safe,
     _decimal_column_config,
@@ -171,6 +175,7 @@ def _history_run_row(run: ScanRun, shortlisted: int) -> dict[str, Any]:
         "shortlisted": int(shortlisted),
         "triggered_by": run.triggered_by or "—",
         "error_message": run.error_message or "",
+        "params_for_chart": dict(run.params_json or {}),
     }
 
 
@@ -245,7 +250,7 @@ def _history_result_row(result: Any) -> dict[str, Any]:
     }
 
 
-def _render_history_page() -> None:
+def _render_history_page(*, can_export: bool) -> None:
     """Render the scan-history view: filters, runs table, and run details.
 
     Reads only — this page never writes to the database. SCAN-002 enabled
@@ -382,11 +387,15 @@ def _render_history_page() -> None:
         return
 
     _render_history_run_details(
-        rows[selected_index], symbol_filter=symbol_text.strip().upper()
+        rows[selected_index],
+        symbol_filter=symbol_text.strip().upper(),
+        can_export=can_export,
     )
 
 
-def _render_history_run_details(row: dict[str, Any], *, symbol_filter: str = "") -> None:
+def _render_history_run_details(
+    row: dict[str, Any], *, symbol_filter: str = "", can_export: bool
+) -> None:
     """Render one run's summary metrics, error state, and persisted results."""
     st.subheader(f"Run #{row['run_id']} — {row['screener']}")
 
@@ -458,23 +467,68 @@ def _render_history_run_details(row: dict[str, Any], *, symbol_filter: str = "")
                 column_config=_decimal_column_config(components_frame),
                 key=f"history_score_components_{row['run_id']}",
             )
-    history_file_name = f"scan_run_{row['run_id']}_results.csv"
-    # download_button returns True on the click rerun, doubling as the OBS-003
-    # export trigger. The signed-in email is stashed in session_state by main().
-    if st.download_button(
-        "Download run results CSV",
-        data=_csv_safe(display_df).to_csv(index=False).encode("utf-8"),
-        file_name=history_file_name,
-        mime="text/csv",
-        key=f"history_csv_{row['run_id']}",
-    ):
-        record_audit_event(
-            event=EVENT_EXPORT_DOWNLOADED,
-            user_email=st.session_state.get("_audit_user_email"),
-            metadata={
-                "file_name": history_file_name,
-                "row_count": len(results_df),
-                "kind": "history_results",
-                "run_id": int(row["run_id"]),
-            },
-        )
+    _render_history_chart(
+        row,
+        list(dict.fromkeys(str(symbol).strip().upper() for symbol in results_df["symbol"])),
+    )
+    if can_export:
+        history_file_name = f"scan_run_{row['run_id']}_results.csv"
+        # download_button returns True on the click rerun, doubling as the OBS-003
+        # export trigger. The signed-in email is stashed in session_state by main().
+        if st.download_button(
+            "Download run results CSV",
+            data=_csv_safe(display_df).to_csv(index=False).encode("utf-8"),
+            file_name=history_file_name,
+            mime="text/csv",
+            key=f"history_csv_{row['run_id']}",
+        ):
+            record_audit_event(
+                event=EVENT_EXPORT_DOWNLOADED,
+                user_email=st.session_state.get("_audit_user_email"),
+                metadata={
+                    "file_name": history_file_name,
+                    "row_count": len(results_df),
+                    "kind": "history_results",
+                    "run_id": int(row["run_id"]),
+                },
+            )
+
+
+def _render_history_chart(row: dict[str, Any], symbols: list[str]) -> None:
+    """Render a persisted result chart from local candles without live fetching.
+
+    Historical rows outlive screener modules and universe files, so every lookup
+    is optional: the result table stays usable when chart reconstruction is no
+    longer possible.
+    """
+    if not symbols:
+        return
+    try:
+        selected = discover_screeners().get(str(row["screener"]))
+    except ScreenerRegistryError as exc:
+        st.info(f"Historical chart unavailable: {_redact_secrets(str(exc))}")
+        return
+    if selected is None or selected.build_chart is None:
+        st.info("This historical screener does not provide a chart renderer.")
+        return
+
+    chart_symbol = st.selectbox(
+        "Chart symbol",
+        symbols,
+        key=f"history_chart_symbol_{row['run_id']}",
+        help="Charts use the selected run's persisted parameters and local cached candles.",
+    )
+    try:
+        universe_df = load_universe(str(row["universe"]))
+        data_loader = DailyDataLoader(client=None)
+    except Exception as exc:  # noqa: BLE001 - chart reconstruction is optional.
+        st.info(f"Historical chart unavailable: {_redact_secrets(str(exc))}")
+        return
+
+    _render_cached_symbol_chart(
+        selected=selected,
+        chart_symbol=chart_symbol,
+        universe_df=universe_df,
+        data_loader=data_loader,
+        params_for_chart=dict(row.get("params_for_chart") or {}),
+    )

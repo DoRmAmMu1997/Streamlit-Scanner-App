@@ -22,7 +22,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 from dataclasses import dataclass, replace
-from typing import Any, NoReturn
+from typing import Any, Literal, NoReturn
 
 from backend.audit import record_audit_event, record_audit_event_once
 from backend.auth.roles import DEFAULT_ROLE, Role, resolve_role, role_has_capability
@@ -36,6 +36,27 @@ from backend.observability import (
 from backend.storage import ensure_database_schema, get_user_role, session_scope
 
 logger = logging.getLogger(__name__)
+
+_RoleLookupState = Literal["found", "missing", "unavailable", "invalid"]
+
+
+@dataclass(frozen=True)
+class _RoleLookupResult:
+    """Outcome of reading one role assignment without collapsing failure states.
+
+    ``missing`` is an ordinary absence and may use the analyst default. By
+    contrast, ``unavailable`` and ``invalid`` mean the role policy could not be
+    trusted, so independently authorized non-admins are restricted to viewer and
+    table-only users are denied.
+    """
+
+    state: _RoleLookupState
+    role: Role | None = None
+
+    @property
+    def authorizes_entry(self) -> bool:
+        """Return whether a valid table row independently grants app entry."""
+        return self.state == "found" and self.role is not None
 
 
 # Streamlit names each OIDC provider by the nested table under [auth].
@@ -239,18 +260,17 @@ def require_authorized_user(st_module: Any) -> AuthenticatedUser:
     # frozensets of already-normalized email keys.
     allowed = _allowed_emails()
     admins = _admin_emails()
-    # AUTH-003: a user_roles row both authorizes sign-in (unioned with the env
-    # lists) and supplies the role. One best-effort lookup serves both; a DB error
-    # yields None, which fails closed for a table-only user (env allow-listed /
-    # admin users are unaffected) — see ``_lookup_table_role``.
-    table_role = _lookup_table_role(email)
+    # AUTH-003: a valid user_roles row both authorizes sign-in (unioned with the
+    # env lists) and supplies the role. The explicit lookup state prevents an
+    # outage or corrupt row from masquerading as an ordinary missing assignment.
+    table_lookup = _lookup_table_role(email)
 
     if not is_email_authorized(
         email,
         allowed=allowed,
         admins=admins,
         production=_is_production_mode(),
-        in_role_table=table_role is not None,
+        in_role_table=table_lookup.authorizes_entry,
     ):
         # Record the denied attempt for the operator's own audit trail. Only the
         # email is logged — never the allowlist itself — so the log cannot leak
@@ -297,13 +317,19 @@ def require_authorized_user(st_module: Any) -> AuthenticatedUser:
     # otherwise the table role, otherwise the analyst default (see resolve_role).
     # Replacing the email keeps the returned state in the canonical lowercase form
     # used for every authorization comparison.
-    role = resolve_role(
-        email,
-        in_admin_env=email in admins,
-        table_role=table_role,
-        default_role=DEFAULT_ROLE,
-        auth_required=True,
-    )
+    if table_lookup.state in {"unavailable", "invalid"} and email not in admins:
+        # The env/dev authorization source is still trustworthy, but the user's
+        # intended table role is not. Viewer is the safe read-only fallback: it
+        # preserves access without upgrading a deliberately restricted account.
+        role = Role.VIEWER
+    else:
+        role = resolve_role(
+            email,
+            in_admin_env=email in admins,
+            table_role=table_lookup.role,
+            default_role=DEFAULT_ROLE,
+            auth_required=True,
+        )
     return replace(user, email=email, role=role)
 
 
@@ -354,9 +380,10 @@ def require_capability(
     event — the actor's email and the attempted capability only, never the role
     table — then shows a generic message and ``st.stop()``s so code below never runs.
 
-    ``role``/``email`` are passed in (not read from a user object) so the auth-off
-    local-owner path (``role=ADMIN``, ``email=None``) and tests both work without
-    constructing an ``AuthenticatedUser``. Mirrors the AUTH-002 denial branch,
+    ``role``/``email`` are passed in (not read from a user object) so callers and
+    tests can use the guard without coupling it to an ``AuthenticatedUser``.
+    Auth-disabled development passes the explicit ``local-owner@localhost`` actor.
+    Mirrors the AUTH-002 denial branch,
     including the once-per-session dedup that keeps a viewer hammering a hidden
     control to a single audit row.
     """
@@ -394,27 +421,39 @@ def require_capability(
     _stop(st_module)
 
 
-def _lookup_table_role(email: str) -> Role | None:
-    """Return the AUTH-003 ``user_roles`` role for ``email``, best-effort.
+def _lookup_table_role(email: str) -> _RoleLookupResult:
+    """Return an explicit AUTH-003 role-table lookup result, best-effort.
 
     The role store lives in the database, but the auth gate runs before
     ``app.main()`` bootstraps the schema, so this ensures the schema first (a
     per-process no-op after the first call) and then reads the row. Any database
-    problem (or an unknown stored role) yields ``None`` — which both authorization
-    (treat as "no table grant") and ``resolve_role`` (fall back to the default
-    role) handle as fail-closed, so a transient DB error can never *grant* access.
+    problem yields ``unavailable`` and an unknown stored role yields ``invalid``.
+    Those states never grant table-only entry; independently authorized users get
+    the read-only viewer fallback rather than the analyst default.
     """
     try:
-        ensure_database_schema()
+        if not ensure_database_schema():
+            logger.warning(
+                "Could not prepare the user_roles table; role lookup unavailable."
+            )
+            return _RoleLookupResult("unavailable")
         with session_scope() as session:
             stored = get_user_role(session, email)
     except Exception:  # noqa: BLE001 - role lookup is best-effort and fails closed.
         logger.warning(
-            "Could not read the user_roles table; treating as no assignment.",
+            "Could not read the user_roles table; role lookup unavailable.",
             exc_info=True,
         )
-        return None
-    return Role.parse(stored)
+        return _RoleLookupResult("unavailable")
+    if stored is None:
+        return _RoleLookupResult("missing")
+    parsed = Role.parse(stored)
+    if parsed is None:
+        logger.warning(
+            "Ignoring an invalid user_roles assignment for the signed-in user."
+        )
+        return _RoleLookupResult("invalid")
+    return _RoleLookupResult("found", parsed)
 
 
 def _allowed_emails() -> frozenset[str]:
@@ -436,8 +475,8 @@ def _admin_emails() -> frozenset[str]:
 
     ``ADMIN_EMAILS`` uses the same comma-separated format as ``ALLOWED_EMAILS``.
     Admins are always authorized, even when ``ALLOWED_EMAILS`` is empty or does
-    not include them. AUTH-002 only identifies admins; actual admin-only feature
-    gating remains intentionally out of scope until AUTH-003.
+    not include them. AUTH-003 then maps that bootstrap identity to the admin role
+    and gates each privileged feature by capability.
     """
     # Admin parsing uses the same settings path as ALLOWED_EMAILS so casing and
     # whitespace behave identically for both lists.

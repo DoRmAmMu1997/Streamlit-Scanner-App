@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -12,6 +13,7 @@ from backend.storage import (
     delete_user_role,
     get_user_role,
     list_user_roles,
+    repository,
     set_user_role,
 )
 
@@ -75,6 +77,23 @@ def test_count_user_role_admins(db_session: Session):
     set_user_role(db_session, email="b@example.com", role="admin", assigned_by=None)
     set_user_role(db_session, email="c@example.com", role="viewer", assigned_by=None)
     assert count_user_role_admins(db_session) == 2
+
+
+def test_admin_lock_query_uses_for_update():
+    """Postgres role mutations must serialize against the same admin rows."""
+    statements: list[object] = []
+
+    class RecordingSession:
+        def scalars(self, statement):
+            statements.append(statement)
+            return []
+
+    helper = getattr(repository, "list_user_role_admins_for_update", None)
+    assert callable(helper)
+
+    assert helper(RecordingSession()) == []
+    sql = str(statements[0].compile(dialect=postgresql.dialect()))
+    assert "FOR UPDATE" in sql.upper()
 
 
 def test_check_constraint_rejects_unknown_role(db_session: Session):

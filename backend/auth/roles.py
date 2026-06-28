@@ -43,10 +43,10 @@ class Role(IntEnum):
     def parse(cls, value: object) -> Role | None:
         """Map a stored role name to a ``Role``; return ``None`` for unknown/missing.
 
-        This never raises. A blank, absent, or corrupt ``user_roles.role`` value
-        therefore resolves to "no assignment" (``None``), which ``resolve_role``
-        treats as "fall back to the default role" — so a bad row can only ever
-        *lower* effective privilege, never grant admin (AUTH-003 design §8.9).
+        This pure parser never raises. The database lookup boundary in
+        ``backend.auth.session`` distinguishes an absent row from an invalid stored
+        value before it calls ``resolve_role``; invalid values therefore take the
+        fail-closed viewer/deny path rather than the ordinary analyst default.
         """
         if isinstance(value, Role):
             return value
@@ -91,7 +91,7 @@ MIN_ROLE: dict[str, Role] = {
 # The role an authorized user gets when the database has no row for them. Analyst
 # preserves AUTH-002 behaviour (every allow-listed user could already scan/export),
 # so AUTH-003 is a non-breaking change. Kept a constant on purpose — promote it to
-# a setting only if an operator ever needs viewer-by-default (design §10 Q2).
+# a setting only if an operator ever needs viewer-by-default.
 DEFAULT_ROLE = Role.ANALYST
 
 

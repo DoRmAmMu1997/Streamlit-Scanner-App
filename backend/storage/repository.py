@@ -897,6 +897,23 @@ def count_user_role_admins(session: Session) -> int:
     return int(session.scalar(stmt) or 0)
 
 
+def list_user_role_admins_for_update(session: Session) -> list[UserRole]:
+    """Lock and return current table-admin rows in deterministic email order.
+
+    Postgres honors ``FOR UPDATE`` and makes concurrent demotion/revocation
+    transactions serialize on the same rows. SQLite ignores the clause, but its
+    write transaction/snapshot rules still prevent both stale writers from
+    committing; keeping one query shape preserves the repository abstraction.
+    """
+    stmt = (
+        select(UserRole)
+        .where(UserRole.role == "admin")
+        .order_by(UserRole.email.asc())
+        .with_for_update()
+    )
+    return list(session.scalars(stmt))
+
+
 def _build_ai_evaluation(
     record: Mapping[str, Any] | Any,
 ) -> AIEvaluation:
