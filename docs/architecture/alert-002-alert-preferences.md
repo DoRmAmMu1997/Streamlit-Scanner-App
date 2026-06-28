@@ -31,6 +31,8 @@ existing OBS-003 runtime-config rail — no new store, no new tables.
   (`TELEGRAM_CHAT_ID`, `ALERT_EMAIL_TO`) admin-editable via `EDITABLE_CONFIG_KEYS`.
   Enable/content are select boxes; destinations are validated **free-text** inputs — for
   which `EditableSetting` gains an optional empty `choices` (→ text input).
+- Treat destination values as privacy-sensitive: `app_config` stores the value the
+  job needs, while `config_changed`, structured logs, and post-save feedback mask it.
 - Channel **credentials** (`TELEGRAM_BOT_TOKEN`, `SMTP_PASSWORD`, `SMTP_HOST/USER`) stay
   environment-only, so the plaintext `app_config` table never stores a secret.
 - The headless daily job now calls `apply_config_overrides()` after schema bootstrap, so
@@ -63,7 +65,7 @@ outside this ticket's intent.
 ## Consequences
 
 - **Easier:** an admin toggles alerts, picks summary/full, and repoints the destination
-  from the UI, audited via `config_changed`, with no redeploy.
+  from the UI, audited via a value-masked `config_changed`, with no redeploy.
 - **Harder:** a future *secret* destination would need a different mechanism (by design,
   secrets are not runtime-editable).
 - **Revisit when:** multiple destinations or per-recipient delivery is needed (would

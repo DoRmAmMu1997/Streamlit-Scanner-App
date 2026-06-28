@@ -56,12 +56,15 @@ def test_email_from_falls_back_to_user() -> None:
 
 def test_safe_dict_hides_secret_values() -> None:
     safe = NotificationSettings(
-        telegram_bot_token="super-secret-token", smtp_password="super-secret-pw"
+        telegram_bot_token="super-secret-token",
+        smtp_password="super-secret-pw",
+        email_to="private-recipient@example.com",
     ).safe_dict()
     assert safe["has_telegram_bot_token"] is True
     assert safe["has_smtp_password"] is True
     assert "super-secret-token" not in repr(safe)
     assert "super-secret-pw" not in repr(safe)
+    assert "private-recipient@example.com" not in repr(safe)
 
 
 def test_secrets_are_registered_for_redaction(monkeypatch) -> None:
@@ -138,3 +141,20 @@ def test_parse_email_recipient_validates_and_blocks_header_injection() -> None:
         parse_email_recipient("not-an-email")
     with pytest.raises(SettingsError):
         parse_email_recipient("ops@example.com\nBcc: evil@example.com")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "ops@example.com,local-alias",
+        "ops@example.com;local-alias",
+        "Operations <ops@example.com>",
+        "ops@example.com.",
+        "ops@localhost",
+        f"{'a' * 243}@example.com",
+    ],
+)
+def test_parse_email_recipient_rejects_non_single_mailboxes(raw: str) -> None:
+    """The admin destination must be one bounded, Internet-style mailbox."""
+    with pytest.raises(SettingsError):
+        parse_email_recipient(raw)

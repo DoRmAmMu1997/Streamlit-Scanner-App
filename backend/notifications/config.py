@@ -19,6 +19,8 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from email.errors import HeaderParseError
+from email.headerregistry import Address
 
 from backend.config.settings import SettingsError, _parse_bool, load_environment
 
@@ -74,9 +76,9 @@ def _enabled_flag(raw: str) -> bool:
 # non-secret destinations (chat id, email recipient) plus the enable/content
 # toggles; the channel CREDENTIALS stay environment-only.
 
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _TELEGRAM_ID_RE = re.compile(r"^-?\d+$")
 _TELEGRAM_HANDLE_RE = re.compile(r"^@[A-Za-z0-9_]+$")
+_MAX_EMAIL_ADDRESS_LENGTH = 254
 
 
 def parse_alert_enabled(raw: str) -> str:
@@ -121,18 +123,27 @@ def parse_telegram_chat_id(raw: str) -> str:
 def parse_email_recipient(raw: str) -> str:
     """Validate an optional single email recipient for the admin form.
 
-    Empty clears the destination (disables email). A non-empty value must look
-    like one address and must not contain CR/LF — defense in depth against SMTP
-    header injection (the email channel guards this independently too).
+    Empty clears the destination (disables email). A non-empty value must be one
+    bounded Internet-style mailbox (not a display name or recipient list) and
+    must not contain CR/LF — defense in depth against SMTP header injection (the
+    email channel guards this independently too).
     """
     value = raw.strip()
     if not value:
         return ""
     if "\r" in value or "\n" in value:
         raise SettingsError("ALERT_EMAIL_TO must not contain line breaks.")
-    if not _EMAIL_RE.match(value):
+    if len(value) > _MAX_EMAIL_ADDRESS_LENGTH:
+        raise SettingsError(
+            f"ALERT_EMAIL_TO must be at most {_MAX_EMAIL_ADDRESS_LENGTH} characters."
+        )
+    try:
+        address = Address(addr_spec=value)
+    except (HeaderParseError, ValueError) as exc:
+        raise SettingsError(f"Invalid email address: {raw!r}.") from exc
+    if not address.username or not address.domain or "." not in address.domain:
         raise SettingsError(f"Invalid email address: {raw!r}.")
-    return value
+    return address.addr_spec
 
 
 @dataclass(frozen=True)
@@ -191,7 +202,7 @@ class NotificationSettings:
         return self.smtp_from or self.smtp_user
 
     def safe_dict(self) -> dict[str, object]:
-        """A log/debug-safe summary that never includes the two secret values."""
+        """Return log-safe status without credentials or recipient destinations."""
         return {
             "app_url": self.app_url,
             "alerts_enabled": self.alerts_enabled,
@@ -200,7 +211,6 @@ class NotificationSettings:
             "email_configured": self.email_configured,
             "smtp_host": self.smtp_host,
             "smtp_port": self.smtp_port,
-            "email_to": self.email_to,
             "has_telegram_bot_token": bool(self.telegram_bot_token),
             "has_smtp_password": bool(self.smtp_password),
         }

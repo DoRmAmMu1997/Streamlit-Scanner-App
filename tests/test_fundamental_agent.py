@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -41,6 +42,8 @@ _PROMPT_INJECTION_FIXTURES = json.loads(
 )
 _BLOCKED_PROMPT_INJECTIONS = _PROMPT_INJECTION_FIXTURES["blocked"]
 _ALLOWED_PROMPT_INJECTIONS = _PROMPT_INJECTION_FIXTURES["allowed"]
+_SAMPLE_FETCHED_AT = datetime.now(UTC).isoformat()
+_SAMPLE_DATA_DATE = _SAMPLE_FETCHED_AT[:10]
 
 
 def _sample_screener_data() -> dict[str, Any]:
@@ -49,7 +52,7 @@ def _sample_screener_data() -> dict[str, Any]:
         "symbol": "DEMO",
         "company_name": "Demo Industries Ltd.",
         "sector": "Banks",
-        "fetched_at": "2026-05-27T12:00:00+00:00",
+        "fetched_at": _SAMPLE_FETCHED_AT,
         "source_url": "http://test/demo",
         "current_price": 1500,
         "market_cap": 150000,
@@ -447,7 +450,7 @@ def test_fundamental_agent_caches_verdict_per_symbol_model_date(tmp_path):
 
     # First call writes to disk.
     agent.check("DEMO")
-    cached = cache.get_verdict("DEMO", "test-model::criteria", "2026-05-27")
+    cached = cache.get_verdict("DEMO", "test-model::criteria", _SAMPLE_DATA_DATE)
     assert cached is not None
     assert cached["rating"] == 8
 
@@ -504,7 +507,7 @@ def test_fundamental_agent_force_refresh_invalidates_cache_and_reruns(tmp_path):
 
     # Seed the verdict cache so we can prove force_refresh wipes it.
     agent.check("DEMO")
-    assert cache.get_verdict("DEMO", "test-model::criteria", "2026-05-27") is not None
+    assert cache.get_verdict("DEMO", "test-model::criteria", _SAMPLE_DATA_DATE) is not None
 
     # force_refresh bypasses the verdict cache, so the runner runs again.
     runner.calls = 0
@@ -862,7 +865,7 @@ def test_invalid_cached_fundamental_verdict_is_refreshed(tmp_path):
     cache.set_verdict(
         "DEMO",
         "test-model::criteria",
-        "2026-05-27",
+        _SAMPLE_DATA_DATE,
         invalid,
     )
     runner = _FakeRunner(_sample_verdict())
@@ -1119,8 +1122,8 @@ def test_fundamental_agent_verdict_cache_keys_by_mode(tmp_path):
     universal_agent.check("BOTH", mode="universal")
 
     # Two distinct cache files should exist for the same symbol + model + date.
-    cached_criteria = cache.get_verdict("BOTH", "test-model::criteria", "2026-05-27")
-    cached_universal = cache.get_verdict("BOTH", "test-model::universal", "2026-05-27")
+    cached_criteria = cache.get_verdict("BOTH", "test-model::criteria", _SAMPLE_DATA_DATE)
+    cached_universal = cache.get_verdict("BOTH", "test-model::universal", _SAMPLE_DATA_DATE)
     assert cached_criteria is not None
     assert cached_universal is not None
     assert cached_criteria["mode"] == "criteria"

@@ -1,8 +1,8 @@
 """Admin runtime-config page (OBS-003).
 
-A small admin-only form to change whitelisted *operational* settings
-(``LOG_LEVEL``, ``LOG_FORMAT``) without redeploying. Saving validates the value,
-persists it to the ``app_config`` table, applies it to the live process, and
+A small admin-only form to change whitelisted *operational* settings, including
+logging and ALERT-002 notification preferences, without redeploying. Saving
+validates the value, persists it to the ``app_config`` table, applies it to the live process, and
 records a ``config_changed`` audit event. The actual logic lives in
 ``backend.admin`` so it stays testable without Streamlit; this module is only the
 rendering.
@@ -78,9 +78,12 @@ def _render_config_page(authenticated_user: AuthenticatedUser | None) -> None:
             continue
         if result.changed:
             changed_any = True
-            st.success(
-                f"{EDITABLE_CONFIG_KEYS[key].label}: "
-                f"{result.old_value} → {result.new_value}"
-            )
+            setting = EDITABLE_CONFIG_KEYS[key]
+            if setting.redact_value:
+                st.success(f"{setting.label}: updated")
+            else:
+                st.success(
+                    f"{setting.label}: {result.old_value} → {result.new_value}"
+                )
     if not changed_any:
         st.info("No changes to save.")

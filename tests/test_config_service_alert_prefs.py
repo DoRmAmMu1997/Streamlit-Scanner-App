@@ -18,6 +18,8 @@ import pytest
 from backend.admin import apply_config_overrides, update_config_value
 from backend.config.settings import SettingsError
 from backend.notifications.config import load_notification_settings
+from backend.security import MASK
+from backend.storage import get_config_overrides, get_recent_audit_logs
 
 
 def test_update_alert_content_persists_applies_and_replays(
@@ -59,6 +61,33 @@ def test_update_alert_destination_round_trips(
     assert result.changed is True
     assert os.environ["TELEGRAM_CHAT_ID"] == "-1001234567890"
     assert load_notification_settings().telegram_chat_id == "-1001234567890"
+
+
+def test_update_alert_destination_masks_audit_values_but_persists_value(
+    file_session_factory, monkeypatch
+) -> None:
+    """Recipients are operational config, but audit/log copies must hide them."""
+    monkeypatch.setenv("ALERT_EMAIL_TO", "old-recipient@example.com")
+
+    update_config_value(
+        "ALERT_EMAIL_TO",
+        "new-recipient@example.com",
+        updated_by="admin@example.com",
+        session_factory=file_session_factory,
+    )
+
+    with file_session_factory() as session:
+        assert get_config_overrides(session)["ALERT_EMAIL_TO"] == (
+            "new-recipient@example.com"
+        )
+        audit_row = get_recent_audit_logs(session, event="config_changed")[0]
+        audit_metadata = dict(audit_row.metadata_json or {})
+
+    assert audit_metadata == {
+        "setting": "ALERT_EMAIL_TO",
+        "old_value": MASK,
+        "new_value": MASK,
+    }
 
 
 def test_update_rejects_invalid_email_destination(file_session_factory) -> None:

@@ -28,7 +28,7 @@ for *where data lives*, *which credentials exist*, *how logging renders*, and
 - Does **not** create the DB engine (that is [storage-persistence.md](storage-persistence.md)).
 - Does **not** itself perform redaction — it only *supplies* the secret values to [security.md](security.md).
 
-> **Runtime override (OBS-003 / ALERT-002).** `get_settings()` reads `os.environ` on every call (no caching), which lets an admin override the operational keys `LOG_LEVEL` / `LOG_FORMAT` — and the ALERT-002 alert preferences `ALERT_ENABLED` / `ALERT_CONTENT` plus the non-secret destinations `TELEGRAM_CHAT_ID` / `ALERT_EMAIL_TO` — at runtime: the value is validated with these same parsers, stored in `app_config`, applied into `os.environ`, and replayed on startup by `apply_config_overrides()`. Secrets and auth/infra keys are intentionally **not** overridable. See [audit-log.md](audit-log.md).
+> **Runtime override (OBS-003 / ALERT-002).** `get_settings()` reads `os.environ` on every call (no caching), which lets an admin override the operational keys `LOG_LEVEL` / `LOG_FORMAT` — and the ALERT-002 alert preferences `ALERT_ENABLED` / `ALERT_CONTENT` plus the non-secret destinations `TELEGRAM_CHAT_ID` / `ALERT_EMAIL_TO` — at runtime: each admin value is strictly validated, stored in `app_config`, applied into `os.environ`, and replayed on startup by `apply_config_overrides()`. Destination values are masked when copied into audit/log/UI feedback. Secrets and auth/infra keys are intentionally **not** overridable. See [audit-log.md](audit-log.md).
 
 ## 2. Position in the system
 

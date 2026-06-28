@@ -54,8 +54,8 @@ flowchart TD
 | `record_audit_event_once(*, session_state, dedup_key, event, ...) -> bool` | For audit-critical level-triggered events: check a session key, call `record_audit_event`, and mark the key only after the durable row is written. |
 | `should_record_once(session_state, key) -> bool` | `True` the first time `key` is seen in a session; marks it. Framework-free (takes a dict / `st.session_state`). |
 | `apply_config_overrides(*, session_factory=session_scope) -> dict[str,str]` | Replay stored whitelisted overrides into `os.environ`; best-effort. |
-| `update_config_value(key, raw_value, *, updated_by, session_factory=session_scope) -> ConfigUpdateResult` | Validate (startup parsers) → persist `app_config` → set `os.environ` → record `config_changed`. Raises `SettingsError` on invalid/non-editable. |
-| `EDITABLE_CONFIG_KEYS` | Whitelist mapping `LOG_LEVEL`/`LOG_FORMAT` and the ALERT-002 keys (`ALERT_ENABLED`, `ALERT_CONTENT`, `TELEGRAM_CHAT_ID`, `ALERT_EMAIL_TO`) → `EditableSetting` (label, parser, current, plus `choices` for a select box or empty for a validated text input). |
+| `update_config_value(key, raw_value, *, updated_by, session_factory=session_scope) -> ConfigUpdateResult` | Validate with the setting's strict admin parser → persist `app_config` → set `os.environ` → record `config_changed`. Raises `SettingsError` on invalid/non-editable. |
+| `EDITABLE_CONFIG_KEYS` | Whitelist mapping `LOG_LEVEL`/`LOG_FORMAT` and the ALERT-002 keys (`ALERT_ENABLED`, `ALERT_CONTENT`, `TELEGRAM_CHAT_ID`, `ALERT_EMAIL_TO`) → `EditableSetting` (label, parser, current, `choices`, and privacy-redaction policy). |
 
 ## 4. Recorded events & triggers
 
@@ -89,6 +89,7 @@ The admin form **edits** existing settings ([configuration.md](configuration.md)
 in `app_config` and are re-applied by `apply_config_overrides()` in `main()` after
 the schema bootstrap (then `configure_logging()` is refreshed so a changed level
 takes effect on the same run).
+Destination values are stored for delivery but masked in audit/log/UI feedback.
 
 ## 7. Testing
 

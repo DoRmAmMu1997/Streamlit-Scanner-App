@@ -124,7 +124,8 @@ none set, the scan runs normally and notification is skipped.
 `ALERT_CONTENT`, and the non-secret destinations `TELEGRAM_CHAT_ID` /
 `ALERT_EMAIL_TO` from the **Admin settings** page without a redeploy; changes are
 validated, audited, applied immediately, and replayed on the next start (the daily
-job included). Channel credentials stay environment-only.
+job included). Destination values are masked in audit/log/save feedback even though
+`app_config` stores them for delivery. Channel credentials stay environment-only.
 
 ---
 
@@ -225,10 +226,11 @@ Recording is best-effort: a database hiccup never blocks the user's action. Firs
 run paths bootstrap the schema before audit writes, so a missing row means the
 database could not be made ready or the write failed, not that the action failed.
 
-**Runtime settings (admins).** The *Admin settings* page edits `LOG_LEVEL` /
-`LOG_FORMAT` at runtime; changes are validated, stored in `app_config`, applied
-immediately, replayed on restart, and recorded as `config_changed`. Credentials
-and auth/infra settings are intentionally not editable there — change those via
+**Runtime settings (admins).** The *Admin settings* page edits `LOG_LEVEL`,
+`LOG_FORMAT`, and the ALERT-002 preferences/destinations at runtime; changes are
+validated, stored in `app_config`, applied immediately, replayed on restart, and
+recorded as `config_changed` (with destination values masked). Credentials and
+auth/infra settings are intentionally not editable there — change those via
 environment variables and restart.
 
 ---
