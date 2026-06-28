@@ -121,6 +121,32 @@ def test_repository_orders_latest_runs_newest_first(db_session):
     ]
 
 
+def test_get_scan_run_returns_one_run_or_none(db_session):
+    """Callers can reload one run by id without using ``Session.get`` themselves.
+
+    Beginner note:
+    The service layer owns the transaction, but the repository layer owns every
+    database operation performed inside that transaction. Returning ``None`` for
+    an unknown id mirrors SQLAlchemy's lookup behavior without exposing that ORM
+    method to the scan service.
+    """
+    from backend.storage import repository
+
+    assert hasattr(repository, "get_scan_run"), (
+        "REFACTOR-002 requires a repository lookup so services never call "
+        "Session.get() directly."
+    )
+
+    run = repository.create_scan_run(
+        db_session,
+        screener_key="envelope",
+        universe_key="nifty_500",
+    )
+
+    assert repository.get_scan_run(db_session, run.id) is run
+    assert repository.get_scan_run(db_session, run.id + 1_000_000) is None
+
+
 def test_repository_breaks_started_at_ties_by_id_descending(db_session):
     """Runs sharing a started_at fall back to a deterministic newest-id-first order."""
     from backend.storage.repository import create_scan_run, get_latest_scan_runs
