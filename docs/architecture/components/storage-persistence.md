@@ -65,6 +65,7 @@ Full design: [obs-003-audit-log.md](../obs-003-audit-log.md).
 
 | Function | Contract |
 |---|---|
+| `get_scan_run(session, run_id)` | Primary-key lookup returning one `ScanRun` or `None`; keeps `Session.get()` out of services. |
 | `create_scan_run(session, *, screener_key, universe_key, params, data_snapshot_date, app_version, git_commit_sha, triggered_by, symbols_scanned)` | Insert RUNNING header; `flush()` populates `run.id` without committing. |
 | `save_scan_results(session, run, rows)` | Map screener dicts → `ScanResult`; renames `close`→`close_price`; stores full row in `raw_result_json`; folds `provenance`/`provenance_json` (re-`normalize_secret_safe_json`-ed). |
 | `save_ai_evaluations(session, run, records)` | Validate + persist AI receipts (`AIEvaluationRecord`/mappings) → `ai_evaluations`. `_build_ai_evaluation` enforces full SHA-256 hashes, tz-aware UTC, confidence range, sanitized evidence URLs, and **cross-checks `validated_verdict_json` against the trusted receipt** so model output can't contradict the audit record. |

@@ -54,10 +54,11 @@ from backend.scanning.result_contract import ResultContractError, normalize_scre
 from backend.scoring import ScoringContext, load_scoring_config, score_candidates
 from backend.security import redact_text
 from backend.storage.database import session_scope
-from backend.storage.models import ScanRun, ScanStatus
+from backend.storage.models import ScanStatus
 from backend.storage.repository import (
     create_scan_run,
     finish_scan_run,
+    get_scan_run,
     save_ai_evaluations,
     save_scan_results,
 )
@@ -669,7 +670,7 @@ def _persist_run_outcome(
             # Fetch the header in this fresh session. The object returned by
             # _create_run_header() belonged to a different transaction and should
             # not be reused after that transaction has committed.
-            run = session.get(ScanRun, run_id)
+            run = get_scan_run(session, run_id)
             if run is None:
                 raise RuntimeError("scan run header disappeared before finish")
             save_scan_results(
@@ -710,7 +711,7 @@ def _mark_run_failed_after_persistence_error(
     )
     try:
         with session_factory() as session:
-            run = session.get(ScanRun, run_id)
+            run = get_scan_run(session, run_id)
             if run is None:
                 return
             finish_scan_run(
