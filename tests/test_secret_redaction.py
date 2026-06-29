@@ -60,6 +60,17 @@ def test_redact_text_masks_extra_secrets_for_streamlit_auth():
     assert "still-visible" in redacted
 
 
+def test_redact_text_masks_short_explicit_sensitive_value():
+    """Privacy-sensitive identifiers need masking even when shorter than secrets."""
+    redacted = redact_text(
+        "Telegram rejected chat 999",
+        extra_sensitive_values=["999"],
+    )
+
+    assert "999" not in redacted
+    assert MASK in redacted
+
+
 def test_redact_text_masks_common_secret_formats_without_hiding_normal_errors():
     """Pattern masking catches secrets we do not already know from settings."""
     # This raw string intentionally mixes several shapes from real error text:

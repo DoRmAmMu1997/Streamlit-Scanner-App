@@ -2,8 +2,8 @@
 
 A thin, fixed-endpoint client following the SerpAPI client pattern: one host,
 an injected ``requests.Session`` for tests, an enforced timeout, and exceptions
-scrubbed through ``redact_text`` with the bot token as an extra secret so a
-request URL (which embeds the token) can never leak into logs or errors.
+scrubbed through ``redact_text`` with the bot token and privacy-sensitive chat id
+as extra values so neither can leak into logs or errors.
 """
 
 from __future__ import annotations
@@ -59,7 +59,11 @@ def send_telegram(
         body = response.json()
     except requests.RequestException as exc:
         # A requests error can echo the full URL, which contains the bot token.
-        detail = redact_text(str(exc), extra_secrets=[token])
+        detail = redact_text(
+            str(exc),
+            extra_secrets=[token],
+            extra_sensitive_values=[settings.telegram_chat_id],
+        )
         raise TelegramSendError(f"Telegram request failed: {detail}") from exc
     except ValueError as exc:  # response.json() on a non-JSON body
         raise TelegramSendError("Telegram returned a non-JSON response.") from exc
@@ -69,7 +73,11 @@ def send_telegram(
     if not (isinstance(body, dict) and body.get("ok")):
         description = ""
         if isinstance(body, dict):
-            description = redact_text(str(body.get("description", "")), extra_secrets=[token])
+            description = redact_text(
+                str(body.get("description", "")),
+                extra_secrets=[token],
+                extra_sensitive_values=[settings.telegram_chat_id],
+            )
         raise TelegramSendError(
             f"Telegram API rejected the message: {description}".strip()
         )
