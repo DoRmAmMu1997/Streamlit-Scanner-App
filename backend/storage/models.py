@@ -736,6 +736,289 @@ class UserRole(Base):
         return f"UserRole(email={self.email!r}, role={self.role!r})"
 
 
+# ---------------------------------------------------------------------------
+# IPO-001 — IPO domain persistence
+# ---------------------------------------------------------------------------
+# These tables intentionally store normalized facts and immutable evaluation
+# receipts only. Scraping and raw-metric interpretation belong to later tickets.
+
+
+class IpoIssue(Base):
+    """One Indian IPO and its normalized issue-level facts."""
+
+    __tablename__ = "ipo_issues"
+    __table_args__ = (
+        CheckConstraint("issue_type IN ('mainboard', 'sme')", name="ck_ipo_issues_issue_type"),
+        CheckConstraint(
+            "status IN ('drhp_filed', 'rhp_filed', 'open', 'closed', 'listed')",
+            name="ck_ipo_issues_status",
+        ),
+        CheckConstraint(
+            "open_date IS NULL OR close_date IS NULL OR close_date >= open_date",
+            name="ck_ipo_issues_date_order",
+        ),
+        CheckConstraint(
+            "(price_band_low IS NULL OR price_band_low >= 0) AND "
+            "(price_band_high IS NULL OR price_band_high >= 0) AND "
+            "(price_band_low IS NULL OR price_band_high IS NULL OR price_band_high >= price_band_low)",
+            name="ck_ipo_issues_price_band",
+        ),
+        CheckConstraint("lot_size IS NULL OR lot_size > 0", name="ck_ipo_issues_lot_size"),
+        CheckConstraint(
+            "fresh_issue_amount IS NULL OR fresh_issue_amount >= 0",
+            name="ck_ipo_issues_fresh_amount",
+        ),
+        CheckConstraint("ofs_amount IS NULL OR ofs_amount >= 0", name="ck_ipo_issues_ofs_amount"),
+        CheckConstraint(
+            "source_confidence IN ('low', 'medium', 'high')",
+            name="ck_ipo_issues_source_confidence",
+        ),
+        Index("ix_ipo_issues_status_open_date", "status", "open_date"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
+    company_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    issue_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    open_date: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+    close_date: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+    price_band_low: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    price_band_high: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    lot_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fresh_issue_amount: Mapped[Decimal | None] = mapped_column(Numeric(20, 2), nullable=True)
+    ofs_amount: Mapped[Decimal | None] = mapped_column(Numeric(20, 2), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_confidence: Mapped[str] = mapped_column(String(8), nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.UTC)
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: dt.datetime.now(dt.UTC),
+        onupdate=lambda: dt.datetime.now(dt.UTC),
+    )
+
+    documents: Mapped[list[IpoDocument]] = relationship(
+        back_populates="issue", cascade="all, delete-orphan", passive_deletes=True
+    )
+    financials: Mapped[list[IpoFinancial]] = relationship(
+        back_populates="issue", cascade="all, delete-orphan", passive_deletes=True
+    )
+    subscriptions: Mapped[list[IpoSubscription]] = relationship(
+        back_populates="issue", cascade="all, delete-orphan", passive_deletes=True
+    )
+    scores: Mapped[list[IpoScore]] = relationship(
+        back_populates="issue", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class IpoDocument(Base):
+    """One DRHP/RHP or supporting document for an IPO."""
+
+    __tablename__ = "ipo_documents"
+    __table_args__ = (
+        UniqueConstraint(
+            "issue_id", "document_type", "document_url", name="uq_ipo_documents_issue_type_url"
+        ),
+        CheckConstraint(
+            "source_confidence IN ('low', 'medium', 'high')",
+            name="ck_ipo_documents_source_confidence",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
+    issue_id: Mapped[int] = mapped_column(
+        BigIntPrimaryKey, ForeignKey("ipo_issues.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    document_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    document_url: Mapped[str] = mapped_column(Text, nullable=False)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_confidence: Mapped[str] = mapped_column(String(8), nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.UTC)
+    )
+
+    issue: Mapped[IpoIssue] = relationship(back_populates="documents")
+    financials: Mapped[list[IpoFinancial]] = relationship(back_populates="source_document")
+
+
+class IpoFinancial(Base):
+    """One normalized annual or quarterly financial facts snapshot."""
+
+    __tablename__ = "ipo_financials"
+    __table_args__ = (
+        UniqueConstraint(
+            "issue_id", "period_end", "period_type", name="uq_ipo_financials_issue_period"
+        ),
+        CheckConstraint(
+            "period_type IN ('annual', 'quarterly')", name="ck_ipo_financials_period_type"
+        ),
+        CheckConstraint(
+            "source_confidence IN ('low', 'medium', 'high')",
+            name="ck_ipo_financials_source_confidence",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
+    issue_id: Mapped[int] = mapped_column(
+        BigIntPrimaryKey, ForeignKey("ipo_issues.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    period_end: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    period_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    source_document_id: Mapped[int | None] = mapped_column(
+        BigIntPrimaryKey,
+        ForeignKey("ipo_documents.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_confidence: Mapped[str] = mapped_column(String(8), nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.UTC)
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: dt.datetime.now(dt.UTC),
+        onupdate=lambda: dt.datetime.now(dt.UTC),
+    )
+
+    issue: Mapped[IpoIssue] = relationship(back_populates="financials")
+    source_document: Mapped[IpoDocument | None] = relationship(back_populates="financials")
+
+
+class IpoSubscription(Base):
+    """One timestamped QIB/NII/retail subscription snapshot."""
+
+    __tablename__ = "ipo_subscriptions"
+    __table_args__ = (
+        UniqueConstraint("issue_id", "captured_at", name="uq_ipo_subscriptions_issue_capture"),
+        CheckConstraint(
+            "(qib_multiple IS NULL OR qib_multiple >= 0) AND "
+            "(nii_multiple IS NULL OR nii_multiple >= 0) AND "
+            "(retail_multiple IS NULL OR retail_multiple >= 0) AND "
+            "(total_multiple IS NULL OR total_multiple >= 0)",
+            name="ck_ipo_subscriptions_nonnegative",
+        ),
+        CheckConstraint(
+            "source_confidence IN ('low', 'medium', 'high')",
+            name="ck_ipo_subscriptions_source_confidence",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
+    issue_id: Mapped[int] = mapped_column(
+        BigIntPrimaryKey, ForeignKey("ipo_issues.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    captured_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    qib_multiple: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    nii_multiple: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    retail_multiple: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    total_multiple: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_confidence: Mapped[str] = mapped_column(String(8), nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.UTC)
+    )
+
+    issue: Mapped[IpoIssue] = relationship(back_populates="subscriptions")
+
+
+class IpoScore(Base):
+    """Immutable normalized factor inputs and weighted score receipt."""
+
+    __tablename__ = "ipo_scores"
+    __table_args__ = (
+        *(
+            CheckConstraint(
+                f"{name} IS NULL OR ({name} >= 0 AND {name} <= 100)",
+                name=f"ck_ipo_scores_{name}_range",
+            )
+            for name in (
+                "business_quality",
+                "financial_growth",
+                "return_ratios",
+                "valuation",
+                "qib_subscription",
+                "promoter_quality",
+                "gmp_sentiment",
+            )
+        ),
+        CheckConstraint(
+            "total_score >= 0 AND total_score <= 100", name="ck_ipo_scores_total_range"
+        ),
+        Index("ix_ipo_scores_issue_scored_at", "issue_id", "scored_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
+    issue_id: Mapped[int] = mapped_column(
+        BigIntPrimaryKey, ForeignKey("ipo_issues.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    business_quality: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    financial_growth: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    return_ratios: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    valuation: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    qib_subscription: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    promoter_quality: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    gmp_sentiment: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
+    total_score: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)
+    contributions_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    missing_data_json: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    reasons_json: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    model_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    scored_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.UTC)
+    )
+
+    issue: Mapped[IpoIssue] = relationship(back_populates="scores")
+    recommendation: Mapped[IpoRecommendation | None] = relationship(
+        back_populates="score", cascade="all, delete-orphan", passive_deletes=True, uselist=False
+    )
+
+
+class IpoRecommendation(Base):
+    """Immutable binary verdict paired one-to-one with an IPO score."""
+
+    __tablename__ = "ipo_recommendations"
+    __table_args__ = (
+        CheckConstraint(
+            "recommendation IN ('Recommended', 'Not Recommended')",
+            name="ck_ipo_recommendations_binary",
+        ),
+        CheckConstraint(
+            "recommendation_type IN ('Apply confidently and consider holding if allotted', "
+            "'Apply primarily for listing gains', 'Skip')",
+            name="ck_ipo_recommendations_type",
+        ),
+        CheckConstraint(
+            "confidence IN ('low', 'medium', 'high')",
+            name="ck_ipo_recommendations_confidence",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
+    score_id: Mapped[int] = mapped_column(
+        BigIntPrimaryKey,
+        ForeignKey("ipo_scores.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    recommendation: Mapped[str] = mapped_column(String(32), nullable=False)
+    recommendation_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    confidence: Mapped[str] = mapped_column(String(8), nullable=False)
+    reasons_json: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    missing_data_json: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    source_documents_json: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.UTC)
+    )
+
+    score: Mapped[IpoScore] = relationship(back_populates="recommendation")
+
+
 # ============================================================================
 # NEXT: SCAN-002 (owner: Codex) — implement the database layer on top of this
 # schema. This file gives you the tables; SCAN-002 gives the app a way to talk

@@ -61,6 +61,15 @@ Indexes: `scan_runs(status, screener_key, universe_key)`, `scan_results(run_id, 
 
 Full design: [obs-003-audit-log.md](../obs-003-audit-log.md).
 
+### IPO-001 domain and evaluation tables
+
+`ipo_issues` is the cascade root for registered `ipo_documents`, normalized
+`ipo_financials`, timestamped `ipo_subscriptions`, and immutable `ipo_scores`;
+each score has exactly one `ipo_recommendations` verdict. SQL operations live in
+`backend/storage/ipo_repository.py`, while `backend/ipo/repository.py` owns typed
+transactions and detached DTOs. Full design:
+[ipo-001-domain-score-contract.md](../ipo-001-domain-score-contract.md).
+
 ## 4. Public interface (`repository.py`)
 
 | Function | Contract |

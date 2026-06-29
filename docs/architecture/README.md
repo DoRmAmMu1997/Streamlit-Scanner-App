@@ -62,6 +62,7 @@ testing · extension points.
 
 ## Ticket-scoped design docs (historical, still authoritative)
 
+- **[ipo-001-domain-score-contract.md](ipo-001-domain-score-contract.md)** — IPO domain tables, offline score contract, fail-closed verdict policy, and typed CRUD boundary.
 - **[scan-run-persistence.md](scan-run-persistence.md)** — SCAN-001 scan-run persistence schema (the column-by-column rationale the Storage LLD links to).
 - **[scan-002-handoff.md](scan-002-handoff.md)** — SCAN-002 database-layer implementation handoff brief.
 - **[obs-003-audit-log.md](obs-003-audit-log.md)** — OBS-003 audit log + runtime-config schema, recorder design, and the seven tracked events.

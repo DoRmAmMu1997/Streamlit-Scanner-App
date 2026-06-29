@@ -44,6 +44,12 @@ def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Pa
         "alembic_version",
         "app_config",
         "audit_logs",
+        "ipo_documents",
+        "ipo_financials",
+        "ipo_issues",
+        "ipo_recommendations",
+        "ipo_scores",
+        "ipo_subscriptions",
         "scan_runs",
         "scan_results",
         "signal_forward_returns",
@@ -89,6 +95,30 @@ def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Pa
     forward_keys = inspector.get_foreign_keys("signal_forward_returns")
     assert forward_keys[0]["referred_table"] == "scan_results"
     assert forward_keys[0]["options"] == {"ondelete": "CASCADE"}
+
+    # IPO-001: every source/evaluation table is reachable from the issue root,
+    # while a recommendation is paired one-to-one with its immutable score.
+    assert {index["name"] for index in inspector.get_indexes("ipo_issues")} >= {
+        "ix_ipo_issues_company_name",
+        "ix_ipo_issues_status",
+        "ix_ipo_issues_status_open_date",
+    }
+    assert {index["name"] for index in inspector.get_indexes("ipo_scores")} >= {
+        "ix_ipo_scores_issue_id",
+        "ix_ipo_scores_issue_scored_at",
+    }
+    recommendation_indexes = {
+        index["name"]: index for index in inspector.get_indexes("ipo_recommendations")
+    }
+    assert recommendation_indexes["ix_ipo_recommendations_score_id"]["unique"] == 1
+    for table in ("ipo_documents", "ipo_financials", "ipo_subscriptions", "ipo_scores"):
+        issue_fk = next(
+            fk for fk in inspector.get_foreign_keys(table) if fk["referred_table"] == "ipo_issues"
+        )
+        assert issue_fk["options"] == {"ondelete": "CASCADE"}
+    recommendation_fk = inspector.get_foreign_keys("ipo_recommendations")[0]
+    assert recommendation_fk["referred_table"] == "ipo_scores"
+    assert recommendation_fk["options"] == {"ondelete": "CASCADE"}
     engine.dispose()
 
     command.downgrade(config, "base")
@@ -140,6 +170,12 @@ def test_ensure_database_schema_creates_tables_and_short_circuits(monkeypatch, t
         "alembic_version",
         "app_config",
         "audit_logs",
+        "ipo_documents",
+        "ipo_financials",
+        "ipo_issues",
+        "ipo_recommendations",
+        "ipo_scores",
+        "ipo_subscriptions",
         "scan_runs",
         "scan_results",
         "signal_forward_returns",
