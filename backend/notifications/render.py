@@ -61,7 +61,10 @@ def _body_lines(report: DailyScanReport) -> list[str]:
             f"  - {line.screener_key}{universe}: {line.status}, "
             f"{line.shortlisted} shortlisted{detail}"
         )
-    lines += ["", "Top results:", *_ranked_lines(report.top_results)]
+    # ALERT-002: summary-only alerts stop here (status + counts); full alerts add
+    # the per-stock results list below.
+    if report.include_results:
+        lines += ["", "Top results:", *_ranked_lines(report.top_results)]
     if report.app_url:
         lines += ["", f"Open the app: {report.app_url}"]
     return lines

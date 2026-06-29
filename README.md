@@ -586,6 +586,15 @@ message link, then configure Telegram (`TELEGRAM_BOT_TOKEN`,
 dashboard. A notification failure is logged and never changes the scan exit
 code.
 
+**Alert preferences (ALERT-002).** `ALERT_ENABLED` (default `true`) turns the
+alert on/off without removing credentials, and `ALERT_CONTENT` (`summary` =
+status + counts; `full` = also the top-ranked results, the default) chooses the
+body. An admin can change these — and the non-secret destination
+(`TELEGRAM_CHAT_ID` / `ALERT_EMAIL_TO`) — at runtime from the **Admin settings**
+page (validated, audited, and applied without a redeploy); channel credentials
+stay environment-only. Destination values are masked in audit/log/save feedback.
+See [docs/operations.md](docs/operations.md).
+
 ---
 
 ## Deploying to Render
@@ -1093,13 +1102,14 @@ changed, and by whom?"* Every audit row carries the **user email**, a UTC
   `admin_page_accessed`, and the AUTH-003 `role_denied` / `role_changed` (see the
   event table under [Observability & logging](#observability--logging)).
 - **Admin pages** — admins gain three views in the top selector (alongside Admin
-  health): **Audit log** (browse/filter the trail), **Admin settings** (change the
-  operational settings `LOG_LEVEL` / `LOG_FORMAT` at runtime), and **Admin roles**
+  health): **Audit log** (browse/filter the trail), **Admin settings** (change
+  logging plus ALERT-002 preferences/destinations at runtime), and **Admin roles**
   (AUTH-003 — assign/revoke viewer/analyst/admin roles in the `user_roles` table,
   recorded as `role_changed`). A settings change is validated, persisted to
   `app_config`, applied immediately (`get_settings()` reads the environment live),
-  and recorded as `config_changed`. Only those non-secret operational keys are
-  editable — credentials and auth/infra settings are deliberately out of scope.
+  and recorded as `config_changed`. Only whitelisted non-secret operational keys
+  are editable — credentials and auth/infra settings are deliberately out of scope.
+  Destination values are masked when copied into audit/log/UI feedback.
 
 Full design: [`docs/architecture/obs-003-audit-log.md`](docs/architecture/obs-003-audit-log.md)
 and the LLD [`docs/architecture/components/audit-log.md`](docs/architecture/components/audit-log.md).

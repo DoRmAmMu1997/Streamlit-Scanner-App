@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import smtplib
+
 import pytest
 import requests
 
@@ -76,6 +78,19 @@ def test_telegram_api_level_failure_raises() -> None:
         send_telegram("hi", settings=TELEGRAM_SETTINGS, session=session)
 
 
+def test_telegram_api_failure_redacts_privacy_sensitive_destination() -> None:
+    chat_id = TELEGRAM_SETTINGS.telegram_chat_id
+    session = _FakeSession(
+        _FakeResponse({"ok": False, "description": f"chat {chat_id} not found"})
+    )
+
+    with pytest.raises(TelegramSendError) as excinfo:
+        send_telegram("hi", settings=TELEGRAM_SETTINGS, session=session)
+
+    assert chat_id not in str(excinfo.value)
+    assert "***REDACTED***" in str(excinfo.value)
+
+
 def test_telegram_request_error_is_wrapped_and_token_redacted() -> None:
     token = TELEGRAM_SETTINGS.telegram_bot_token
     boom = requests.RequestException(f"failed calling https://api.telegram.org/bot{token}/x")
@@ -137,8 +152,6 @@ def test_email_sends_with_starttls_then_login_then_send() -> None:
 
 
 def test_email_smtp_error_is_wrapped_and_password_redacted() -> None:
-    import smtplib
-
     def factory(host: str, port: int, *, timeout: float) -> _FakeSMTP:
         raise smtplib.SMTPException(
             f"auth failed for password {EMAIL_SETTINGS.smtp_password}"
@@ -147,6 +160,25 @@ def test_email_smtp_error_is_wrapped_and_password_redacted() -> None:
     with pytest.raises(EmailSendError) as excinfo:
         send_email("s", "b", settings=EMAIL_SETTINGS, smtp_factory=factory)
     assert EMAIL_SETTINGS.smtp_password not in str(excinfo.value)
+
+
+def test_email_recipient_refusal_redacts_privacy_sensitive_destination() -> None:
+    recipient = EMAIL_SETTINGS.email_to
+
+    class _RefusingSMTP(_FakeSMTP):
+        def send_message(self, msg: object) -> None:
+            raise smtplib.SMTPRecipientsRefused(
+                {recipient: (550, b"No such user")}
+            )
+
+    def factory(host: str, port: int, *, timeout: float) -> _FakeSMTP:
+        return _RefusingSMTP(host, port, timeout=timeout)
+
+    with pytest.raises(EmailSendError) as excinfo:
+        send_email("subject", "body", settings=EMAIL_SETTINGS, smtp_factory=factory)
+
+    assert recipient not in str(excinfo.value)
+    assert "***REDACTED***" in str(excinfo.value)
 
 
 def test_email_header_error_is_wrapped_before_smtp_connect() -> None:

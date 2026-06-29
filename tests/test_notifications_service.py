@@ -102,6 +102,36 @@ def test_unexpected_sender_errors_redact_channel_secrets() -> None:
     assert "***REDACTED***" in errors["email"]
 
 
+def test_unexpected_sender_errors_redact_channel_destinations() -> None:
+    settings = NotificationSettings(
+        telegram_bot_token="telegram-secret-token",
+        telegram_chat_id="private-chat-id",
+        smtp_host="smtp.example.com",
+        smtp_user="me@example.com",
+        smtp_password="smtp-secret-password",
+        email_to="private-recipient@example.com",
+    )
+
+    def telegram(_text: str, *, settings: NotificationSettings) -> None:
+        raise RuntimeError(f"chat rejected: {settings.telegram_chat_id}")
+
+    def email(_subject: str, _body: str, *, settings: NotificationSettings) -> None:
+        raise RuntimeError(f"recipient rejected: {settings.email_to}")
+
+    result = notify_daily_scan(
+        _Summary(),
+        settings=settings,
+        telegram_sender=telegram,
+        email_sender=email,
+    )
+
+    errors = {channel.channel: channel.error or "" for channel in result.channels}
+    assert settings.telegram_chat_id not in errors["telegram"]
+    assert settings.email_to not in errors["email"]
+    assert "***REDACTED***" in errors["telegram"]
+    assert "***REDACTED***" in errors["email"]
+
+
 def test_failed_run_renders_a_failure_alert() -> None:
     sent_text: list[str] = []
 
@@ -114,3 +144,19 @@ def test_failed_run_renders_a_failure_alert() -> None:
         telegram_sender=telegram,
     )
     assert "Daily scan FAILED" in sent_text[0]
+
+
+def test_disabled_alert_sends_nothing_even_when_configured() -> None:
+    # ALERT-002: an admin can switch alerts off without removing credentials.
+    calls: list[str] = []
+
+    def telegram(_text: str, *, settings: NotificationSettings) -> None:
+        calls.append("telegram")
+
+    disabled = NotificationSettings(
+        telegram_bot_token="t", telegram_chat_id="c", alerts_enabled=False
+    )
+    result = notify_daily_scan(_Summary(), settings=disabled, telegram_sender=telegram)
+
+    assert result.skipped is True
+    assert calls == []

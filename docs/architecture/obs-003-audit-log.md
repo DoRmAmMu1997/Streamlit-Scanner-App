@@ -42,8 +42,8 @@ This document is the OBS-003 design deliverable (sibling of
 
 **Out of scope (note for later tickets):**
 - Retention / rotation policy, log-tamper protection / signing, encryption at rest.
-- Editing security/infra/secret settings via the config form (only the non-secret
-  operational `LOG_LEVEL` / `LOG_FORMAT` are editable today).
+- Editing security/infra/secret settings via the config form (OBS-003 initially
+  exposed only the non-secret operational `LOG_LEVEL` / `LOG_FORMAT` keys).
 - Exporting the audit log itself.
 - UI de-duplication is best-effort, not a security control — audit completeness is
   not relied on for authorization.
@@ -140,6 +140,10 @@ them up live), and re-applied on startup via `apply_config_overrides`. Auth/infr
 keys and secrets are excluded so the form can never become an auth-bypass lever or
 a secret store.
 
+**Later extension (ALERT-002).** The same whitelist now includes alert enable/content
+and the non-secret Telegram/email destinations. Destination values remain plaintext
+operational config, but are masked when copied into audit/log metadata or save feedback.
+
 ---
 
 ## 5. Events → call sites
@@ -229,9 +233,8 @@ Full gate suite (identical to CI) is green: `pytest` (872 passed, 87% coverage �
 
 ## 10. Notes for the reviewer (Codex)
 
-- **Editable config whitelist is deliberately tiny** (`LOG_LEVEL`, `LOG_FORMAT`).
-  Extending it is a one-line `EDITABLE_CONFIG_KEYS` addition, but secrets and
-  auth/infra keys should stay out (§4.8).
+- **Editable config whitelist is deliberately tiny.** ALERT-002 later added four
+  notification keys; secrets and auth/infra keys still stay out (§4.8).
 - **`data_refresh_started` is the only system event.** It is recorded from the CLI
   prefetch path with `user_email=NULL`; the viewer renders it as `system`.
 - **Dedup is per session, not global.** Two browser sessions for the same user each

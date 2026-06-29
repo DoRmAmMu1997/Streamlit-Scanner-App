@@ -42,6 +42,8 @@ _PROMPT_INJECTION_FIXTURES = json.loads(
 )
 _BLOCKED_PROMPT_INJECTIONS = _PROMPT_INJECTION_FIXTURES["blocked"]
 _ALLOWED_PROMPT_INJECTIONS = _PROMPT_INJECTION_FIXTURES["allowed"]
+_SAMPLE_FETCHED_AT = datetime.now(UTC).isoformat()
+_SAMPLE_DATA_DATE = _SAMPLE_FETCHED_AT[:10]
 
 # Keep the shared cache fixture fresh for the entire test process. A formerly
 # hard-coded date eventually crossed the production 30-day TTL and made tests

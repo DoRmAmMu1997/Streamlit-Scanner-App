@@ -2,8 +2,9 @@
 
 Stdlib only (``smtplib`` + ``email.message``) — no new dependency. The SMTP
 factory is injectable so tests assert the STARTTLS -> login -> send order without
-a real server, and SMTP exceptions are scrubbed (with the password as an extra
-secret) before they leave this boundary.
+a real server, and SMTP exceptions are scrubbed (with the password and
+privacy-sensitive recipient as extra redaction values) before they leave this
+boundary.
 """
 
 from __future__ import annotations
@@ -60,6 +61,12 @@ def send_email(
             server.login(settings.smtp_user, settings.smtp_password)
             server.send_message(message)
     except (smtplib.SMTPException, OSError, ValueError) as exc:
-        # SMTP/network errors can echo credentials or the server banner.
-        detail = redact_text(str(exc), extra_secrets=[settings.smtp_password])
+        # SMTP/network errors can echo credentials, the recipient, or the server
+        # banner. The destination is not a credential, but ALERT-002 treats it as
+        # privacy-sensitive everywhere outside the operational config store.
+        detail = redact_text(
+            str(exc),
+            extra_secrets=[settings.smtp_password],
+            extra_sensitive_values=[settings.email_to],
+        )
         raise EmailSendError(f"SMTP send failed: {detail}") from exc

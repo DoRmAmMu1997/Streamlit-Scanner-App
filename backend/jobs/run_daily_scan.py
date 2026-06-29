@@ -338,13 +338,15 @@ def main(
     *,
     job_runner: Callable[..., DailyScanSummary] = run_daily_scan,
     schema_bootstrapper: Callable[[], bool] = ensure_database_schema,
+    logging_configurator: Callable[[], None] | None = None,
     output: TextIO | None = None,
 ) -> int:
     """Parse CLI arguments and return an integer process exit code.
 
-    ``job_runner`` and ``schema_bootstrapper`` are injectable for tests. That
-    lets tests prove argument parsing and call ordering without discovering real
-    screeners, creating a Dhan client, or migrating a real database.
+    ``job_runner``, ``schema_bootstrapper``, and ``logging_configurator`` are
+    injectable for tests. That lets tests prove argument parsing and call ordering
+    without discovering real screeners, mutating process-wide logging, creating a
+    Dhan client, or migrating a real database.
     """
     out = output or sys.stdout
     parser = argparse.ArgumentParser(
@@ -413,6 +415,22 @@ def main(
             )
         )
         return 1
+
+    # ALERT-002: now that the schema exists, replay admin runtime-config overrides
+    # (alert enable / content / destination, log level, ...) into the environment so
+    # this headless job honours changes an admin made in the UI. Best-effort and
+    # lazily imported, mirroring the notification import below.
+    try:
+        from backend.admin import apply_config_overrides
+
+        apply_config_overrides()
+        # The CLI entrypoint injects the idempotent refresher after its initial
+        # logging setup. Direct test calls leave it unset to avoid mutating the
+        # process-wide pytest capture handler.
+        if logging_configurator is not None:
+            logging_configurator()
+    except Exception:  # noqa: BLE001 - config replay must never fail the scan job
+        logger.warning("daily-scan could not apply config overrides", exc_info=True)
 
     if args.config_path:
         try:
@@ -705,4 +723,4 @@ if __name__ == "__main__":  # pragma: no cover - exercised by --help verificatio
     # development), and installs the SEC-002 redaction filter so the run_scan and
     # data-loader diagnostics stay secret-safe.
     configure_logging()
-    raise SystemExit(main())
+    raise SystemExit(main(logging_configurator=configure_logging))

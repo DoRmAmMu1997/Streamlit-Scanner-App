@@ -26,11 +26,14 @@ class _FakeForm:
 class _FakeStreamlit:
     """Minimal Streamlit surface used by the config page renderer tests."""
 
-    def __init__(self, *, submit: bool):
+    def __init__(self, *, submit: bool, text_values: dict[str, str] | None = None):
         self._submit = submit
+        self._text_values = text_values or {}
         self.successes: list[str] = []
         self.infos: list[str] = []
         self.errors: list[str] = []
+        self.selectboxes: list[str] = []
+        self.text_inputs: list[str] = []
 
     def subheader(self, *_args, **_kwargs):
         pass
@@ -41,8 +44,13 @@ class _FakeStreamlit:
     def form(self, *_args, **_kwargs):
         return _FakeForm()
 
-    def selectbox(self, _label, choices, index=0, **_kwargs):
+    def selectbox(self, label, choices, index=0, **_kwargs):
+        self.selectboxes.append(label)
         return choices[index]
+
+    def text_input(self, label, value="", **_kwargs):
+        self.text_inputs.append(label)
+        return self._text_values.get(label, value)
 
     def form_submit_button(self, *_args, **_kwargs):
         return self._submit
@@ -148,3 +156,49 @@ def test_config_page_surfaces_validation_errors(monkeypatch):
 
     assert fake_st.errors
     assert fake_st.successes == []
+
+
+def test_config_page_renders_alert_preference_controls(monkeypatch):
+    # ALERT-002: enable/content are choice select boxes; the destinations are
+    # free-text inputs (validated on save). All four must appear on the form.
+    fake_st = _FakeStreamlit(submit=False)
+    monkeypatch.setattr(config_page, "st", fake_st)
+
+    config_page._render_config_page(
+        AuthenticatedUser("admin@example.com", "Admin", role=Role.ADMIN)
+    )
+
+    assert "Daily alerts enabled" in fake_st.selectboxes
+    assert "Alert content" in fake_st.selectboxes
+    assert "Telegram chat id" in fake_st.text_inputs
+    assert "Alert email recipient" in fake_st.text_inputs
+
+
+def test_config_page_does_not_echo_destination_values_after_save(monkeypatch):
+    destination = "private-recipient@example.com"
+    old_destination = "old-recipient@example.com"
+    fake_st = _FakeStreamlit(
+        submit=True,
+        text_values={"Alert email recipient": destination},
+    )
+    monkeypatch.setattr(config_page, "st", fake_st)
+
+    def fake_update(key, value, *, updated_by):
+        old_value = old_destination if key == "ALERT_EMAIL_TO" else value
+        return ConfigUpdateResult(
+            key=key,
+            old_value=old_value,
+            new_value=value,
+            changed=key == "ALERT_EMAIL_TO",
+        )
+
+    monkeypatch.setattr(config_page, "update_config_value", fake_update)
+
+    config_page._render_config_page(
+        AuthenticatedUser("admin@example.com", "Admin", role=Role.ADMIN)
+    )
+
+    feedback = "\n".join(fake_st.successes)
+    assert "Alert email recipient" in feedback
+    assert destination not in feedback
+    assert old_destination not in feedback

@@ -83,6 +83,10 @@ def notify_daily_scan(
     notification problem can never change the scan job's exit code (ALERT-001).
     """
     settings = settings or load_notification_settings()
+    if not settings.alerts_enabled:
+        # ALERT-002: an admin can switch alerts off without removing credentials.
+        log_event(logger, EVENT_NOTIFICATION_SKIPPED, reason="disabled")
+        return NotificationResult()
     if not settings.any_configured:
         log_event(logger, EVENT_NOTIFICATION_SKIPPED, reason="no_channel_configured")
         return NotificationResult()
@@ -104,6 +108,7 @@ def notify_daily_scan(
                 report,
                 lambda: telegram_sender(text, settings=settings),
                 extra_secrets=[settings.telegram_bot_token],
+                extra_sensitive_values=[settings.telegram_chat_id],
             )
         )
     if settings.email_configured:
@@ -114,6 +119,7 @@ def notify_daily_scan(
                 report,
                 lambda: email_sender(subject, body, settings=settings),
                 extra_secrets=[settings.smtp_password],
+                extra_sensitive_values=[settings.email_to],
             )
         )
     return NotificationResult(channels=tuple(results))
@@ -125,15 +131,21 @@ def _attempt(
     send: Callable[[], None],
     *,
     extra_secrets: Iterable[str] = (),
+    extra_sensitive_values: Iterable[str] = (),
 ) -> ChannelResult:
     """Run one channel send, converting any failure into a logged ``ChannelResult``."""
     try:
         send()
     except Exception as exc:  # noqa: BLE001 - one channel must not break others/the job
-        # Channel implementations already scrub their own known secret values,
-        # but tests inject arbitrary senders too. Passing the channel secret here
-        # gives the service boundary one final redaction chance before logging.
-        detail = redact_exception(exc, extra_secrets=extra_secrets)
+        # Channel implementations already scrub their own secret and destination
+        # values, but tests and future integrations may inject arbitrary senders.
+        # Passing both classes here gives the service boundary one final redaction
+        # chance before the error reaches logs or a returned result.
+        detail = redact_exception(
+            exc,
+            extra_secrets=extra_secrets,
+            extra_sensitive_values=extra_sensitive_values,
+        )
         log_event(
             logger,
             EVENT_NOTIFICATION_FAILED,

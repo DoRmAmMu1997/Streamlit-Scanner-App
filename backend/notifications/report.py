@@ -75,6 +75,10 @@ class DailyScanReport:
     failed_symbols_or_findings: int
     top_results: tuple[RankedRow, ...]
     app_url: str
+    # ALERT-002: False when the admin chose the summary-only content level, so the
+    # renderer omits the per-stock results block. Defaults True (full) so existing
+    # constructions keep the ALERT-001 behaviour.
+    include_results: bool = True
 
 
 def _status_label(outcome: DailyScanOutcome) -> str:
@@ -168,6 +172,7 @@ def build_daily_scan_report(
         if outcome.run_id is not None
     }
 
+    include_results = settings.include_results
     total_symbols_scanned: int | None = None
     top_results: tuple[RankedRow, ...] = ()
     if run_ids:
@@ -178,22 +183,24 @@ def build_daily_scan_report(
                     run.symbols_scanned for run in runs if run.symbols_scanned is not None
                 ]
                 total_symbols_scanned = sum(scanned) if scanned else None
-                top_rows = get_top_ranked_results(
-                    session, run_ids, limit=TOP_RESULTS_LIMIT
-                )
-                ranked_rows: list[RankedRow] = []
-                for row in top_rows:
-                    score, score_source = _score_and_source(row)
-                    ranked_rows.append(
-                        RankedRow(
-                            symbol=row.symbol,
-                            rating=row.rating,
-                            score=score,
-                            screener_key=screener_by_run.get(row.run_id, ""),
-                            score_source=score_source,
-                        )
+                # Summary-only alerts skip the heavier top-N read entirely.
+                if include_results:
+                    top_rows = get_top_ranked_results(
+                        session, run_ids, limit=TOP_RESULTS_LIMIT
                     )
-                top_results = tuple(ranked_rows)
+                    ranked_rows: list[RankedRow] = []
+                    for row in top_rows:
+                        score, score_source = _score_and_source(row)
+                        ranked_rows.append(
+                            RankedRow(
+                                symbol=row.symbol,
+                                rating=row.rating,
+                                score=score,
+                                screener_key=screener_by_run.get(row.run_id, ""),
+                                score_source=score_source,
+                            )
+                        )
+                    top_results = tuple(ranked_rows)
         except Exception:  # noqa: BLE001 - a read failure must not block the alert
             logger.warning("daily-scan report DB read failed", exc_info=True)
             total_symbols_scanned = None
@@ -208,4 +215,5 @@ def build_daily_scan_report(
         failed_symbols_or_findings=failed_symbols_or_findings,
         top_results=top_results,
         app_url=settings.app_url,
+        include_results=include_results,
     )

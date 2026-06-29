@@ -51,13 +51,23 @@ _DATABASE_URL_PASSWORD_RE = re.compile(
 )
 
 
-def redact_text(text: Any, *, extra_secrets: Iterable[str] | None = None) -> Any:
+def redact_text(
+    text: Any,
+    *,
+    extra_secrets: Iterable[str] | None = None,
+    extra_sensitive_values: Iterable[str] | None = None,
+) -> Any:
     """Return ``text`` with configured secrets and common token patterns masked.
 
     ``extra_secrets`` lets a caller add values that do not live in process
     environment variables. The Streamlit app uses that for OIDC cookie/client
     secrets because those are stored in ``st.secrets`` instead of DEPLOY-004
     settings.
+
+    ``extra_sensitive_values`` is for exact privacy-sensitive identifiers such
+    as alert destinations. Unlike secrets, these may legitimately be shorter
+    than four characters, so the caller's explicit classification is enough to
+    mask them.
 
     Non-string values are returned unchanged. That keeps this helper easy to use
     in defensive UI/error paths where the input might already be ``None``.
@@ -69,7 +79,11 @@ def redact_text(text: Any, *, extra_secrets: Iterable[str] | None = None) -> Any
     # reliable signal we have: if the full Dhan token or database URL appears in
     # the text, replace that exact value before broader regexes start operating
     # on smaller pieces of the same string.
-    redacted = _redact_known_values(text, extra_secrets=extra_secrets)
+    redacted = _redact_known_values(
+        text,
+        extra_secrets=extra_secrets,
+        extra_sensitive_values=extra_sensitive_values,
+    )
     # Database URLs hide the password between ``user:`` and ``@host`` rather
     # than behind a ``password=...`` key. This pass preserves the scheme, user,
     # host, and database name so operators still know which connection failed.
@@ -99,6 +113,7 @@ def redact_exception(
     exc: BaseException,
     *,
     extra_secrets: Iterable[str] | None = None,
+    extra_sensitive_values: Iterable[str] | None = None,
 ) -> str:
     """Return a secret-safe one-line exception summary.
 
@@ -106,7 +121,11 @@ def redact_exception(
     to show. The raw message can contain request URLs, broker responses, or API
     tokens, so it passes through ``redact_text`` before leaving this boundary.
     """
-    message = redact_text(str(exc), extra_secrets=extra_secrets)
+    message = redact_text(
+        str(exc),
+        extra_secrets=extra_secrets,
+        extra_sensitive_values=extra_sensitive_values,
+    )
     if message:
         return f"{type(exc).__name__}: {message}"
     return type(exc).__name__
@@ -214,6 +233,7 @@ def _redact_known_values(
     text: str,
     *,
     extra_secrets: Iterable[str] | None,
+    extra_sensitive_values: Iterable[str] | None,
 ) -> str:
     """Mask exact configured/extra secret values, longest first.
 
@@ -225,6 +245,10 @@ def _redact_known_values(
     secrets: list[str] = []
     for raw_secret in (*_configured_secret_values(), *(extra_secrets or ())):
         cleaned = _clean_secret(raw_secret)
+        if cleaned:
+            secrets.append(cleaned)
+    for raw_value in extra_sensitive_values or ():
+        cleaned = str(raw_value or "").strip()
         if cleaned:
             secrets.append(cleaned)
     redacted = text
