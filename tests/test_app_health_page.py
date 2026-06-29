@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 
 import app
+from backend.auth.roles import Role
 from backend.auth.session import AuthenticatedUser
 from backend.health import (
     AdminHealthSnapshot,
@@ -136,7 +137,7 @@ def test_health_renderer_rejects_non_admin_without_collecting(monkeypatch):
     monkeypatch.setattr(health_page, "st", fake_st)
 
     app._render_admin_health_page(
-        AuthenticatedUser("person@example.com", "Person", is_admin=False),
+        AuthenticatedUser("person@example.com", "Person", role=Role.ANALYST),
         snapshot_loader=lambda: (_ for _ in ()).throw(
             AssertionError("health data must not load for non-admins")
         ),
@@ -175,7 +176,7 @@ def test_health_renderer_exposes_only_snapshot_exception_type(monkeypatch):
     monkeypatch.setattr(health_page, "st", fake_st)
 
     app._render_admin_health_page(
-        AuthenticatedUser("admin@example.com", "Admin", is_admin=True),
+        AuthenticatedUser("admin@example.com", "Admin", role=Role.ADMIN),
         snapshot_loader=lambda: (_ for _ in ()).throw(
             RuntimeError("postgresql://admin:secret@db.example/scanner")
         ),
@@ -193,7 +194,7 @@ def test_health_renderer_redacts_stored_failure_text(monkeypatch):
     monkeypatch.setenv("DHAN_ACCESS_TOKEN", "broker-secret")
 
     app._render_admin_health_page(
-        AuthenticatedUser("admin@example.com", "Admin", is_admin=True),
+        AuthenticatedUser("admin@example.com", "Admin", role=Role.ADMIN),
         snapshot_loader=lambda: _snapshot(
             failure_message="Dhan failed with broker-secret"
         ),
@@ -210,7 +211,7 @@ def test_health_renderer_shows_latest_data_quality_summary(monkeypatch):
     monkeypatch.setattr(health_page, "st", fake_st)
 
     app._render_admin_health_page(
-        AuthenticatedUser("admin@example.com", "Admin", is_admin=True),
+        AuthenticatedUser("admin@example.com", "Admin", role=Role.ADMIN),
         snapshot_loader=lambda: _snapshot(quality_run=_quality_run()),
     )
 
@@ -236,7 +237,7 @@ def test_health_renderer_notes_when_findings_are_truncated(monkeypatch):
     monkeypatch.setattr(health_page, "st", fake_st)
 
     app._render_admin_health_page(
-        AuthenticatedUser("admin@example.com", "Admin", is_admin=True),
+        AuthenticatedUser("admin@example.com", "Admin", role=Role.ADMIN),
         snapshot_loader=lambda: _snapshot(
             quality_run=_quality_run(total_findings=120, findings_truncated=True)
         ),

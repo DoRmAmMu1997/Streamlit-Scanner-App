@@ -136,7 +136,6 @@ def compute_pending_forward_returns(
             )
             _store_point(session, summary, signal.id, point, benchmark=benchmark)
 
-    session.flush()
     return summary
 
 

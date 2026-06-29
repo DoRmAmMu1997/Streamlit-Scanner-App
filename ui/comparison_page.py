@@ -85,7 +85,7 @@ def _safe_file_token(value: str) -> str:
     return token or "unknown"
 
 
-def _render_comparison_page() -> None:
+def _render_comparison_page(*, can_export: bool) -> None:
     """Render latest-vs-previous comparison for finalized scan history.
 
     Flow: list the screener/universe pairs that have finalized runs -> let the
@@ -186,6 +186,11 @@ def _render_comparison_page() -> None:
     ]
     for title, rows, key in sections:
         _render_section(title, rows, key=key)
+
+    # Viewer access is deliberately read-only. Return before building the export
+    # DataFrame or CSV payload; hiding the button alone would still do the work.
+    if not can_export:
+        return
 
     # One CSV bundles all sections. Nothing to download when every section is
     # empty (e.g. two identical runs), so skip the button in that case.

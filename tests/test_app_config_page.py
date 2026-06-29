@@ -7,6 +7,7 @@ service fully faked so no real database or environment write happens here.
 from __future__ import annotations
 
 from backend.admin import ConfigUpdateResult
+from backend.auth.roles import Role
 from backend.auth.session import AuthenticatedUser
 from backend.config.settings import SettingsError
 from ui import config_page
@@ -69,7 +70,7 @@ def test_config_page_rejects_non_admin(monkeypatch):
     monkeypatch.setattr(config_page, "st", fake_st)
 
     config_page._render_config_page(
-        AuthenticatedUser("person@example.com", "Person", is_admin=False)
+        AuthenticatedUser("person@example.com", "Person", role=Role.ANALYST)
     )
 
     assert fake_st.errors == ["Admin access is required to change settings."]
@@ -96,7 +97,7 @@ def test_config_page_does_nothing_until_submitted(monkeypatch):
     )
 
     config_page._render_config_page(
-        AuthenticatedUser("admin@example.com", "Admin", is_admin=True)
+        AuthenticatedUser("admin@example.com", "Admin", role=Role.ADMIN)
     )
 
     assert fake_st.successes == []
@@ -115,7 +116,7 @@ def test_config_page_reports_a_change_on_submit(monkeypatch):
     )
 
     config_page._render_config_page(
-        AuthenticatedUser("admin@example.com", "Admin", is_admin=True)
+        AuthenticatedUser("admin@example.com", "Admin", role=Role.ADMIN)
     )
 
     assert fake_st.successes  # at least one "old -> new" confirmation
@@ -134,7 +135,7 @@ def test_config_page_reports_no_changes(monkeypatch):
     )
 
     config_page._render_config_page(
-        AuthenticatedUser("admin@example.com", "Admin", is_admin=True)
+        AuthenticatedUser("admin@example.com", "Admin", role=Role.ADMIN)
     )
 
     assert fake_st.infos == ["No changes to save."]
@@ -150,7 +151,7 @@ def test_config_page_surfaces_validation_errors(monkeypatch):
     monkeypatch.setattr(config_page, "update_config_value", boom)
 
     config_page._render_config_page(
-        AuthenticatedUser("admin@example.com", "Admin", is_admin=True)
+        AuthenticatedUser("admin@example.com", "Admin", role=Role.ADMIN)
     )
 
     assert fake_st.errors
@@ -164,7 +165,7 @@ def test_config_page_renders_alert_preference_controls(monkeypatch):
     monkeypatch.setattr(config_page, "st", fake_st)
 
     config_page._render_config_page(
-        AuthenticatedUser("admin@example.com", "Admin", is_admin=True)
+        AuthenticatedUser("admin@example.com", "Admin", role=Role.ADMIN)
     )
 
     assert "Daily alerts enabled" in fake_st.selectboxes
@@ -194,7 +195,7 @@ def test_config_page_does_not_echo_destination_values_after_save(monkeypatch):
     monkeypatch.setattr(config_page, "update_config_value", fake_update)
 
     config_page._render_config_page(
-        AuthenticatedUser("admin@example.com", "Admin", is_admin=True)
+        AuthenticatedUser("admin@example.com", "Admin", role=Role.ADMIN)
     )
 
     feedback = "\n".join(fake_st.successes)

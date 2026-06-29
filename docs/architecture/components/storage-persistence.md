@@ -5,7 +5,7 @@
 | **Component** | Scan-run persistence (engine, session, repository, migrations) |
 | **Source** | [`backend/storage/models.py`](../../../backend/storage/models.py), [`backend/storage/database.py`](../../../backend/storage/database.py), [`backend/storage/repository.py`](../../../backend/storage/repository.py), [`migrations/`](../../../migrations) |
 | **Layer** | Persistence (`backend/`) |
-| **Status** | Stable (SCAN-001 schema · SCAN-002 DB layer · SCAN-004 `symbols_scanned` · JOB-003 finalized comparison helpers · PROV-003 `ai_evaluations` · OBS-003 `audit_logs`/`app_config` · VALID-001/002 `signal_forward_returns` · VALID-003A/004 aggregate and dashboard read models) |
+| **Status** | Stable (SCAN-001 schema · SCAN-002 DB layer · SCAN-004 `symbols_scanned` · JOB-003 finalized comparison helpers · PROV-003 `ai_evaluations` · OBS-003 `audit_logs`/`app_config` · VALID-001/002 `signal_forward_returns` · VALID-003A/004 aggregate and dashboard read models · AUTH-003 `user_roles`) |
 | **Related** | **[scan-run-persistence.md](../scan-run-persistence.md)** (full SCAN-001 design) · [scan-002-handoff.md](../scan-002-handoff.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [validation.md](validation.md) · [ui-pages.md](ui-pages.md) · [HLD](../high-level-design.md) |
 
 > **This LLD summarizes the *current* persistence layer and how it is used.** The
@@ -20,7 +20,7 @@ Record every scan execution and its shortlisted rows so the app can later answer
 universe, or model.
 
 **Three sub-layers (strict direction):**
-1. **`models.py`** — table *shapes* only (`Base`, `ScanRun`, `ScanResult`, `SignalForwardReturn`, `AIEvaluation`, `AuditLog`, `AppConfig`, `ScanStatus`, `ForwardReturnStatus`, `BigIntPrimaryKey`). No connections.
+1. **`models.py`** — table *shapes* only (`Base`, `ScanRun`, `ScanResult`, `SignalForwardReturn`, `AIEvaluation`, `AuditLog`, `AppConfig`, `UserRole`, `ScanStatus`, `ForwardReturnStatus`, `BigIntPrimaryKey`). No connections.
 2. **`database.py`** — *where* data lives: engine, `SessionLocal`, `session_scope()`, SQLite pragmas, `ensure_database_schema()` (auto-migrate).
 3. **`repository.py`** — the *only* place that builds queries; typed read/write helpers. Does **not** own sessions.
 
@@ -56,12 +56,16 @@ Indexes: `scan_runs(status, screener_key, universe_key)`, `scan_results(run_id, 
 - `audit_logs` (user-action trail): `id`, `created_at` (tz-aware UTC), `event` (String), `user_email` (nullable — NULL for system actions), `metadata_json` (redacted). Indexes on `created_at`, `event`, `user_email`.
 - `app_config` (admin runtime overrides): `key` (PK env-var name), `value` (Text), `updated_at`, `updated_by`.
 
+**AUTH-003 standalone table** (no FK):
+- `user_roles` (durable role assignments): `email` (PK, normalized lowercase), `role` (String + CHECK `viewer`/`analyst`/`admin`), `assigned_by` (nullable), `created_at`/`updated_at`. Full design: [auth-003-role-model.md](../auth-003-role-model.md).
+
 Full design: [obs-003-audit-log.md](../obs-003-audit-log.md).
 
 ## 4. Public interface (`repository.py`)
 
 | Function | Contract |
 |---|---|
+| `get_scan_run(session, run_id)` | Primary-key lookup returning one `ScanRun` or `None`; keeps `Session.get()` out of services. |
 | `create_scan_run(session, *, screener_key, universe_key, params, data_snapshot_date, app_version, git_commit_sha, triggered_by, symbols_scanned)` | Insert RUNNING header; `flush()` populates `run.id` without committing. |
 | `save_scan_results(session, run, rows)` | Map screener dicts → `ScanResult`; renames `close`→`close_price`; stores full row in `raw_result_json`; folds `provenance`/`provenance_json` (re-`normalize_secret_safe_json`-ed). |
 | `save_ai_evaluations(session, run, records)` | Validate + persist AI receipts (`AIEvaluationRecord`/mappings) → `ai_evaluations`. `_build_ai_evaluation` enforces full SHA-256 hashes, tz-aware UTC, confidence range, sanitized evidence URLs, and **cross-checks `validated_verdict_json` against the trusted receipt** so model output can't contradict the audit record. |
@@ -80,6 +84,7 @@ Full design: [obs-003-audit-log.md](../obs-003-audit-log.md).
 | `get_recent_audit_logs(session, limit=100, *, event, user_email)` | Newest-first audit rows; optional event + case-insensitive email filters; `(created_at desc, id desc)` order. |
 | `list_distinct_audit_events(session)` | Distinct event names for the audit viewer's filter. |
 | `get_config_overrides(session)` / `set_config_override(session, *, key, value, updated_by)` | Read all overrides as `{key: value}`; upsert one and return the previous value (OBS-003). |
+| `get_user_role` / `set_user_role` / `delete_user_role` / `list_user_roles` / `count_user_role_admins` / `list_user_role_admins_for_update` | AUTH-003 `user_roles` access: email-normalized read; upsert/delete returning the previous role; list (email-sorted); and a transactional `SELECT … FOR UPDATE` of admin assignments used before evaluating the last-admin invariant. |
 
 Type-coercion helpers (`_as_date`, `_as_decimal`, `_as_optional_str`, `_is_missing`, plus `_full_sha256`/`_as_utc_datetime` for receipts) keep typed columns strongly typed; `normalize_secret_safe_json` (from `result_contract`) makes every JSON blob JSON-safe + secret-masked (Decimal→str, dates→ISO, NumPy `.item()`, NaN→NULL).
 
@@ -98,7 +103,7 @@ Type-coercion helpers (`_as_date`, `_as_decimal`, `_as_optional_str`, `_is_missi
 
 ## 6. Migrations
 
-[`migrations/`](../../../migrations) (root-level, kept out of the lint target). Revisions are chained linearly through `…obs003_create_audit_logs` (OBS-003, creates `audit_logs` + `app_config`) and `20260618valid001_create_signal_forward_returns` (VALID-001, creates `signal_forward_returns` + `scan_results(symbol, signal_date)`). `migrations/env.py` reads the URL from `get_database_url()` (no hardcoded URL). A drift test guards ORM-vs-migration sync.
+[`migrations/`](../../../migrations) (root-level, kept out of the lint target). Revisions are chained linearly through `…obs003_create_audit_logs` (OBS-003, creates `audit_logs` + `app_config`), `20260618valid001_create_signal_forward_returns` (VALID-001, creates `signal_forward_returns` + `scan_results(symbol, signal_date)`), and `20260623auth003_create_user_roles` (AUTH-003, creates `user_roles`). `migrations/env.py` reads the URL from `get_database_url()` (no hardcoded URL). A drift test guards ORM-vs-migration sync.
 
 ## 7. Failure modes
 

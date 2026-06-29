@@ -47,6 +47,7 @@ def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Pa
         "scan_runs",
         "scan_results",
         "signal_forward_returns",
+        "user_roles",
     }
     assert {index["name"] for index in inspector.get_indexes("audit_logs")} >= {
         "ix_audit_logs_created_at",
@@ -142,6 +143,7 @@ def test_ensure_database_schema_creates_tables_and_short_circuits(monkeypatch, t
         "scan_runs",
         "scan_results",
         "signal_forward_returns",
+        "user_roles",
     }
     engine.dispose()
 

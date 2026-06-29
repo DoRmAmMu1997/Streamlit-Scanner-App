@@ -16,10 +16,12 @@ through ``streamlit run``; importing it just defines functions.
 from __future__ import annotations
 
 import datetime as dt
+from contextlib import contextmanager, nullcontext
 from decimal import Decimal
 from types import SimpleNamespace
 
 import app
+import ui.history_page as history_page
 from backend.storage.models import ScanRun, ScanStatus
 
 # ---------------------------------------------------------------------------
@@ -159,6 +161,18 @@ def test_history_run_row_captures_every_page_column():
         "shortlisted": 5,
         "triggered_by": "job:daily_scan",
         "error_message": "",
+        "params_for_chart": {},
+    }
+
+
+def test_history_run_row_carries_persisted_chart_parameters():
+    run = _make_run(params_json={"period": 20, "start_date": "2026-01-01"})
+
+    row = app._history_run_row(run, shortlisted=1)
+
+    assert row.get("params_for_chart") == {
+        "period": 20,
+        "start_date": "2026-01-01",
     }
 
 
@@ -275,3 +289,190 @@ def test_history_error_is_redacted_before_preview_truncation():
     assert redactor_inputs == [f"Provider returned secret {secret}"]
     assert secret[: app._HISTORY_ERROR_PREVIEW_CHARS] not in frame.iloc[0]["Error"]
     assert "***REDACTED***" in frame.iloc[0]["Error"]
+
+
+def test_viewer_history_details_do_not_build_or_render_export(monkeypatch):
+    """Read-only history renders results without constructing CSV bytes."""
+
+    class Column:
+        def metric(self, *_args, **_kwargs):
+            return None
+
+    class FakeHistorySt:
+        def __init__(self):
+            self.downloads: list[dict[str, object]] = []
+            self.session_state = {"_audit_user_email": "viewer@example.com"}
+
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def container(self, **_kwargs):
+            return nullcontext()
+
+        def columns(self, count):
+            return [Column() for _ in range(count)]
+
+        def caption(self, *_args, **_kwargs):
+            return None
+
+        def error(self, *_args, **_kwargs):
+            return None
+
+        def info(self, *_args, **_kwargs):
+            return None
+
+        def dataframe(self, *_args, **_kwargs):
+            return None
+
+        def expander(self, *_args, **_kwargs):
+            return nullcontext()
+
+        def download_button(self, *_args, **kwargs):
+            self.downloads.append(kwargs)
+            return False
+
+    @contextmanager
+    def fake_session_scope():
+        yield object()
+
+    fake_st = FakeHistorySt()
+    result = SimpleNamespace(
+        symbol="TCS",
+        signal_date=dt.date(2026, 6, 1),
+        close_price=Decimal("100.00"),
+        rating="BUY",
+        final_score=Decimal("80.00"),
+        reason="test",
+        provenance_json={},
+    )
+    row = {
+        "run_id": 7,
+        "screener": "envelope",
+        "status": "success",
+        "started": "2026-06-01 09:00 UTC",
+        "finished": "2026-06-01 09:01 UTC",
+        "duration": "1.0m",
+        "symbols_scanned": 1,
+        "shortlisted": 1,
+        "universe": "nifty_500",
+        "triggered_by": "ui:analyst@example.com",
+        "error_message": "",
+    }
+    monkeypatch.setattr(history_page, "st", fake_st)
+    monkeypatch.setattr(history_page, "session_scope", fake_session_scope)
+    monkeypatch.setattr(history_page, "get_scan_results", lambda *_args: [result])
+    monkeypatch.setattr(history_page, "_render_history_chart", lambda *_args: None)
+
+    history_page._render_history_run_details(row, can_export=False)
+
+    assert fake_st.downloads == []
+
+
+def test_viewer_history_details_render_selected_symbol_from_cached_candles(monkeypatch):
+    """A fresh viewer can chart a persisted result without running a scan."""
+
+    class Column:
+        def metric(self, *_args, **_kwargs):
+            return None
+
+    class FakeHistorySt:
+        def __init__(self):
+            self.session_state = {"_audit_user_email": "viewer@example.com"}
+
+        def subheader(self, *_args, **_kwargs):
+            return None
+
+        def container(self, **_kwargs):
+            return nullcontext()
+
+        def columns(self, count):
+            return [Column() for _ in range(count)]
+
+        def caption(self, *_args, **_kwargs):
+            return None
+
+        def error(self, *_args, **_kwargs):
+            return None
+
+        def info(self, *_args, **_kwargs):
+            return None
+
+        def dataframe(self, *_args, **_kwargs):
+            return None
+
+        def expander(self, *_args, **_kwargs):
+            return nullcontext()
+
+        def selectbox(self, _label, options, **_kwargs):
+            assert options == ["TCS"]
+            return "TCS"
+
+    @contextmanager
+    def fake_session_scope():
+        yield object()
+
+    result = SimpleNamespace(
+        symbol="TCS",
+        signal_date=dt.date(2026, 6, 1),
+        close_price=Decimal("100.00"),
+        rating="BUY",
+        final_score=Decimal("80.00"),
+        reason="test",
+        provenance_json={},
+    )
+    row = {
+        "run_id": 7,
+        "screener": "envelope",
+        "status": "success",
+        "started": "2026-06-01 09:00 UTC",
+        "finished": "2026-06-01 09:01 UTC",
+        "duration": "1.0m",
+        "symbols_scanned": 1,
+        "shortlisted": 1,
+        "universe": "nifty_500",
+        "triggered_by": "ui:analyst@example.com",
+        "error_message": "",
+        "params_for_chart": {"period": 20},
+    }
+    selected = SimpleNamespace(
+        key="envelope", universe="nifty_500", build_chart=object()
+    )
+    universe = SimpleNamespace()
+    loader = object()
+    rendered: list[dict[str, object]] = []
+    monkeypatch.setattr(history_page, "st", FakeHistorySt())
+    monkeypatch.setattr(history_page, "session_scope", fake_session_scope)
+    monkeypatch.setattr(history_page, "get_scan_results", lambda *_args: [result])
+    monkeypatch.setattr(
+        history_page,
+        "discover_screeners",
+        lambda: {"envelope": selected},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        history_page, "load_universe", lambda _key: universe, raising=False
+    )
+    monkeypatch.setattr(
+        history_page,
+        "DailyDataLoader",
+        lambda *, client: loader if client is None else None,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        history_page,
+        "_render_cached_symbol_chart",
+        lambda **kwargs: rendered.append(kwargs) or kwargs["chart_symbol"],
+        raising=False,
+    )
+
+    history_page._render_history_run_details(row, can_export=False)
+
+    assert rendered == [
+        {
+            "selected": selected,
+            "chart_symbol": "TCS",
+            "universe_df": universe,
+            "data_loader": loader,
+            "params_for_chart": {"period": 20},
+        }
+    ]

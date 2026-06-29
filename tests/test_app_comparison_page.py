@@ -206,7 +206,7 @@ def test_render_comparison_page_passes_selected_pair_to_read_model(monkeypatch):
     )
     monkeypatch.setattr(comparison_page, "build_scan_comparison", build)
 
-    comparison_page._render_comparison_page()
+    comparison_page._render_comparison_page(can_export=True)
 
     assert captured == {"screener_key": "envelope", "universe_key": "nifty_500"}
     assert [table.kwargs["key"] for table in fake_st.tables] == [
@@ -241,7 +241,7 @@ def test_render_comparison_page_audits_csv_export(monkeypatch):
         lambda **kwargs: audit_events.append(kwargs),
     )
 
-    comparison_page._render_comparison_page()
+    comparison_page._render_comparison_page(can_export=True)
 
     assert audit_events == [
         {
@@ -260,6 +260,26 @@ def test_render_comparison_page_audits_csv_export(monkeypatch):
     ]
 
 
+def test_viewer_comparison_page_does_not_build_or_render_export(monkeypatch):
+    fake_st = _FakeComparisonSt()
+    monkeypatch.setattr(comparison_page, "st", fake_st)
+    monkeypatch.setattr(comparison_page, "session_scope", _fake_session_scope)
+    monkeypatch.setattr(
+        comparison_page,
+        "list_finalized_scan_groups",
+        lambda _session: [("envelope", "nifty_500")],
+    )
+    monkeypatch.setattr(
+        comparison_page,
+        "build_scan_comparison",
+        lambda _session, **_kwargs: _comparison(),
+    )
+
+    comparison_page._render_comparison_page(can_export=False)
+
+    assert fake_st.downloads == []
+
+
 def test_render_comparison_page_handles_schema_operational_error(monkeypatch):
     fake_st = _FakeComparisonSt()
 
@@ -270,7 +290,7 @@ def test_render_comparison_page_handles_schema_operational_error(monkeypatch):
     monkeypatch.setattr(comparison_page, "session_scope", _fake_session_scope)
     monkeypatch.setattr(comparison_page, "list_finalized_scan_groups", fail)
 
-    comparison_page._render_comparison_page()
+    comparison_page._render_comparison_page(can_export=True)
 
     assert fake_st.errors == [
         "Scan comparison tables are missing or outdated. "
@@ -299,7 +319,7 @@ def test_render_comparison_page_explains_when_only_one_run_exists(monkeypatch):
         lambda _session, **_kwargs: latest_only,
     )
 
-    comparison_page._render_comparison_page()
+    comparison_page._render_comparison_page(can_export=True)
 
     assert any("Need at least two finalized runs" in message for message in fake_st.infos)
     assert fake_st.tables == []
@@ -320,7 +340,7 @@ def test_render_comparison_page_handles_value_error_from_build(monkeypatch):
     )
     monkeypatch.setattr(comparison_page, "build_scan_comparison", build)
 
-    comparison_page._render_comparison_page()
+    comparison_page._render_comparison_page(can_export=True)
 
     assert any(
         "No finalized runs are available" in message for message in fake_st.infos

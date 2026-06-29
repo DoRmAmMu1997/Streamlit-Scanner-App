@@ -11,11 +11,25 @@ from backend.admin.config_service import (
     apply_config_overrides,
     update_config_value,
 )
+from backend.admin.roles_service import (
+    RoleAssignment,
+    RoleAssignmentError,
+    RoleChangeResult,
+    assign_role,
+    list_role_assignments,
+    revoke_role,
+)
 
 __all__ = [
     "EDITABLE_CONFIG_KEYS",
     "ConfigUpdateResult",
     "EditableSetting",
+    "RoleAssignment",
+    "RoleAssignmentError",
+    "RoleChangeResult",
     "apply_config_overrides",
+    "assign_role",
+    "list_role_assignments",
+    "revoke_role",
     "update_config_value",
 ]

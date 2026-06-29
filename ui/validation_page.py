@@ -354,7 +354,7 @@ def _cached_sector_lookup(universe_keys: tuple[str, ...]) -> dict[tuple[str, str
     return load_universe_sector_lookup(universe_keys)
 
 
-def _render_validation_page() -> None:
+def _render_validation_page(*, can_export: bool) -> None:
     """Render the read-only validation / signal-performance dashboard.
 
     Reads only: it calls ``summarize_validation_metrics`` over rows the VALID-002
@@ -464,27 +464,28 @@ def _render_validation_page() -> None:
         hide_index=True,
         key="validation_summary_table",
     )
-    validation_file_name = "validation_signal_performance.csv"
-    # The download button is also the OBS-003 export audit trigger. The page is
-    # otherwise read-only; this records only that a user downloaded the displayed
-    # summary, not a mutation of validation data.
-    if st.download_button(
-        label="Download validation summary CSV",
-        data=_validation_summary_csv(summary_frame),
-        file_name=validation_file_name,
-        mime="text/csv",
-        key="validation_summary_csv",
-    ):
-        session_state = getattr(st, "session_state", {})
-        record_audit_event(
-            event=EVENT_EXPORT_DOWNLOADED,
-            user_email=session_state.get("_audit_user_email"),
-            metadata={
-                "file_name": validation_file_name,
-                "row_count": len(summary_frame),
-                "kind": "validation_summary",
-            },
-        )
+    if can_export:
+        validation_file_name = "validation_signal_performance.csv"
+        # The download button is also the OBS-003 export audit trigger. The page is
+        # otherwise read-only; this records only that a user downloaded the displayed
+        # summary, not a mutation of validation data.
+        if st.download_button(
+            label="Download validation summary CSV",
+            data=_validation_summary_csv(summary_frame),
+            file_name=validation_file_name,
+            mime="text/csv",
+            key="validation_summary_csv",
+        ):
+            session_state = getattr(st, "session_state", {})
+            record_audit_event(
+                event=EVENT_EXPORT_DOWNLOADED,
+                user_email=session_state.get("_audit_user_email"),
+                metadata={
+                    "file_name": validation_file_name,
+                    "row_count": len(summary_frame),
+                    "kind": "validation_summary",
+                },
+            )
 
     _render_dashboard_sections(dashboard)
 

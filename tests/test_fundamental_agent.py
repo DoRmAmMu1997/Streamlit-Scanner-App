@@ -45,6 +45,27 @@ _ALLOWED_PROMPT_INJECTIONS = _PROMPT_INJECTION_FIXTURES["allowed"]
 _SAMPLE_FETCHED_AT = datetime.now(UTC).isoformat()
 _SAMPLE_DATA_DATE = _SAMPLE_FETCHED_AT[:10]
 
+# Keep the shared cache fixture fresh for the entire test process. A formerly
+# hard-coded date eventually crossed the production 30-day TTL and made tests
+# start fetching from the network merely because the calendar moved forward.
+# Capturing the timestamp once also prevents a midnight rollover from changing
+# the expected verdict-cache key halfway through one test run.
+_SAMPLE_FETCHED_AT = datetime.now(UTC).replace(microsecond=0).isoformat()
+_SAMPLE_DATA_DATE = _SAMPLE_FETCHED_AT[:10]
+
+
+@pytest.fixture(autouse=True)
+def _keep_fixed_sample_payload_fresh(monkeypatch):
+    """Keep this module's dated sample focused on agent behavior, not wall time.
+
+    ``_sample_screener_data`` deliberately uses one stable data date because the
+    verdict-cache assertions include that date in their keys. Once the real clock
+    passed the production 30-day TTL, the shared sample expired and dozens of
+    otherwise unrelated agent tests attempted a live refresh. Cache-expiry behavior
+    has dedicated tests; this module gives its stable sample a test-only long TTL.
+    """
+    monkeypatch.setenv("SCANNER_FUNDAMENTALS_TTL_DAYS", "36500")
+
 
 def _sample_screener_data() -> dict[str, Any]:
     """The data the agent should "find" via its fetch_company_data tool."""
@@ -108,7 +129,7 @@ def _sample_verdict() -> AgentVerdict:
             "balance sheet. Minor concern on promoter holding decrease but overall "
             "fundamentals remain solid."
         ),
-        data_freshness="2026-05-27T12:00:00+00:00",
+        data_freshness=_SAMPLE_FETCHED_AT,
         model_used="test-model",
     )
 
@@ -1122,8 +1143,12 @@ def test_fundamental_agent_verdict_cache_keys_by_mode(tmp_path):
     universal_agent.check("BOTH", mode="universal")
 
     # Two distinct cache files should exist for the same symbol + model + date.
-    cached_criteria = cache.get_verdict("BOTH", "test-model::criteria", _SAMPLE_DATA_DATE)
-    cached_universal = cache.get_verdict("BOTH", "test-model::universal", _SAMPLE_DATA_DATE)
+    cached_criteria = cache.get_verdict(
+        "BOTH", "test-model::criteria", _SAMPLE_DATA_DATE
+    )
+    cached_universal = cache.get_verdict(
+        "BOTH", "test-model::universal", _SAMPLE_DATA_DATE
+    )
     assert cached_criteria is not None
     assert cached_universal is not None
     assert cached_criteria["mode"] == "criteria"

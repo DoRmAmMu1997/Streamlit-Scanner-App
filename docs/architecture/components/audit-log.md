@@ -66,7 +66,7 @@ flowchart TD
 | `manual_scan_started` | `app.py` Run button | edge-triggered |
 | `data_refresh_started` | `app.py` prefetch | system event (`user_email=NULL`) |
 | `config_changed` | `admin/config_service` | form submit |
-| `export_downloaded` | results + history CSV buttons | `download_button` click |
+| `export_downloaded` | live-results, history, comparison, and validation CSV buttons | `download_button` click |
 | `admin_page_accessed` | `app.py` admin views | first access per page/session |
 
 ## 5. Key design decisions & trade-offs

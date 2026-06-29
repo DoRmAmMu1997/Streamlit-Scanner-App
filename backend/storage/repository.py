@@ -33,6 +33,7 @@ from backend.storage.models import (
     ScanRun,
     ScanStatus,
     SignalForwardReturn,
+    UserRole,
 )
 
 if TYPE_CHECKING:
@@ -60,6 +61,17 @@ class ForwardReturnMetricRecord:
     excess_return_pct: Decimal | None
     max_adverse_excursion_pct: Decimal | None
     max_favorable_excursion_pct: Decimal | None
+
+
+def get_scan_run(session: Session, run_id: int) -> ScanRun | None:
+    """Return one scan run by primary key, or ``None`` when it does not exist.
+
+    Beginner note:
+    ``Session.get`` is a database lookup even though it does not look like a SQL
+    statement. Keeping that call here means services can own a transaction and
+    still avoid knowing which ORM class or lookup primitive backs a scan run.
+    """
+    return session.get(ScanRun, run_id)
 
 
 def create_scan_run(
@@ -821,6 +833,96 @@ def set_config_override(
         existing.updated_at = dt.datetime.now(dt.UTC)
     session.flush()
     return previous
+
+
+# ---------------------------------------------------------------------------
+# AUTH-003 — durable role assignments (user_roles)
+# ---------------------------------------------------------------------------
+# Email is the primary key, so every helper normalizes to the same lowercase form
+# the auth gate uses. That keeps a single row per person even if a caller passes
+# "Boss@Example.COM" — no case-variant duplicates can sneak in.
+
+
+def get_user_role(session: Session, email: str) -> str | None:
+    """Return the stored role name for ``email``, or ``None`` when unassigned."""
+    row = session.get(UserRole, email.strip().lower())
+    return row.role if row is not None else None
+
+
+def set_user_role(
+    session: Session,
+    *,
+    email: str,
+    role: str,
+    assigned_by: str | None,
+) -> str | None:
+    """Upsert one role assignment and return the PREVIOUS role (or ``None``).
+
+    Returning the old value lets the caller record a precise ``role_changed``
+    audit entry (old -> new) without a second query. Mirrors ``set_config_override``.
+    The ``role`` string is constrained by the model's CHECK; the admin service
+    validates it against the ``Role`` enum before calling here.
+    """
+    normalized = email.strip().lower()
+    existing = session.get(UserRole, normalized)
+    previous = existing.role if existing is not None else None
+    if existing is None:
+        session.add(UserRole(email=normalized, role=role, assigned_by=assigned_by))
+    else:
+        existing.role = role
+        existing.assigned_by = assigned_by
+        existing.updated_at = dt.datetime.now(dt.UTC)
+    session.flush()
+    return previous
+
+
+def delete_user_role(session: Session, email: str) -> str | None:
+    """Delete a role assignment and return the PREVIOUS role (``None`` if absent).
+
+    Because a ``user_roles`` row also authorizes sign-in (AUTH-003 entry widening),
+    deleting a row both removes the role and revokes table-granted access — the
+    revoke path the admin Roles page exposes.
+    """
+    existing = session.get(UserRole, email.strip().lower())
+    if existing is None:
+        return None
+    previous = existing.role
+    session.delete(existing)
+    session.flush()
+    return previous
+
+
+def list_user_roles(session: Session) -> list[UserRole]:
+    """Return all role assignments, sorted by email for a stable admin table."""
+    stmt = select(UserRole).order_by(UserRole.email.asc())
+    return list(session.scalars(stmt))
+
+
+def count_user_role_admins(session: Session) -> int:
+    """Return how many rows currently assign the ``admin`` role.
+
+    The admin Roles page combines this with the env ``ADMIN_EMAILS`` floor to
+    refuse a change that would leave zero effective admins (last-admin guard).
+    """
+    stmt = select(func.count()).select_from(UserRole).where(UserRole.role == "admin")
+    return int(session.scalar(stmt) or 0)
+
+
+def list_user_role_admins_for_update(session: Session) -> list[UserRole]:
+    """Lock and return current table-admin rows in deterministic email order.
+
+    Postgres honors ``FOR UPDATE`` and makes concurrent demotion/revocation
+    transactions serialize on the same rows. SQLite ignores the clause, but its
+    write transaction/snapshot rules still prevent both stale writers from
+    committing; keeping one query shape preserves the repository abstraction.
+    """
+    stmt = (
+        select(UserRole)
+        .where(UserRole.role == "admin")
+        .order_by(UserRole.email.asc())
+        .with_for_update()
+    )
+    return list(session.scalars(stmt))
 
 
 def _build_ai_evaluation(

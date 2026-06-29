@@ -19,9 +19,11 @@ from pathlib import Path
 from typing import Any
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from backend.charts import render_chart_html
 from backend.screener_registry import ScreenerDefinition
+from ui.common import _redact_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -197,3 +199,61 @@ def _get_or_build_chart_payload(
     )
     _remember_chart_payload(store, cache_key, payload)
     return payload
+
+
+def _render_cached_symbol_chart(
+    *,
+    selected: ScreenerDefinition,
+    chart_symbol: str,
+    universe_df: Any,
+    data_loader: Any,
+    params_for_chart: dict[str, Any],
+) -> str:
+    """Render one symbol chart from local candles only and return its symbol.
+
+    Both the live scanner and persisted History view resolve the instrument here,
+    so missing mappings, cache misses, redacted failures, and chart controls stay
+    identical. ``_get_or_build_chart_payload`` calls ``read_cached_history``;
+    this boundary never performs a live broker request.
+    """
+    normalized_symbol = str(chart_symbol).strip().upper()
+    universe_match = universe_df.loc[
+        universe_df["symbol"].astype(str).str.upper() == normalized_symbol
+    ]
+    if universe_match.empty:
+        st.info(
+            f"Could not find `{normalized_symbol}` in universe `{selected.universe}`. "
+            "Try refreshing universes via `python app.py`."
+        )
+        return normalized_symbol
+    security_id = str(universe_match.iloc[0].get("security_id", "")).strip()
+    if not security_id:
+        st.info(f"`{normalized_symbol}` has no mapped security_id; cannot load candles.")
+        return normalized_symbol
+
+    try:
+        chart_payload = _get_or_build_chart_payload(
+            selected,
+            normalized_symbol,
+            security_id,
+            data_loader,
+            params_for_chart,
+        )
+    except Exception as exc:  # noqa: BLE001 - chart failures stay isolated from the page.
+        logger.exception("build_chart failed for %s on %s", selected.key, normalized_symbol)
+        st.error(f"Could not build chart: {_redact_secrets(str(exc))}")
+        return normalized_symbol
+
+    if chart_payload is None:
+        st.info(
+            f"No cached candles for `{normalized_symbol}`. Run `python app.py` to "
+            "backfill the local cache for every stock in the union."
+        )
+        return normalized_symbol
+
+    components.html(chart_payload.html, height=chart_payload.height, scrolling=False)
+    st.caption(
+        "Chart controls: drag the price scale (right edge) to scale the Y-axis · "
+        "drag the chart to pan · scroll to zoom · double-click to reset."
+    )
+    return normalized_symbol
