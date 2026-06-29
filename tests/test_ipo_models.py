@@ -7,7 +7,16 @@ from decimal import Decimal
 import pytest
 
 from backend import ipo
-from backend.ipo.models import FactorAssessment, IpoScoreInput, IpoValidationError
+from backend.ipo.models import (
+    Confidence,
+    FactorAssessment,
+    IpoIssueType,
+    IpoScoreInput,
+    IpoStatus,
+    IpoValidationError,
+    Recommendation,
+    _parse_enum,
+)
 
 
 def _assessment(score: object = 80, reason: str = "Evidence-backed assessment") -> FactorAssessment:
@@ -35,6 +44,27 @@ def test_factor_assessment_normalizes_a_finite_score() -> None:
 
     assert assessment.score == Decimal("78.25")
     assert assessment.reason == "Strong growth"
+
+
+def test_factor_assessment_quantizes_score_half_up_to_two_decimals() -> None:
+    # Quantizing to two decimals matches the Numeric(5, 2) score columns so a
+    # value reads back identically on SQLite (verbatim) and Postgres (rounded).
+    assert FactorAssessment(score="78.255").score == Decimal("78.26")
+    assert FactorAssessment(score="78.254").score == Decimal("78.25")
+
+
+def test_parse_enum_accepts_exact_then_case_normalized_values() -> None:
+    # Lowercase enums tolerate any input casing the caller supplies...
+    assert _parse_enum("MAINBOARD", IpoIssueType, "issue_type") is IpoIssueType.MAINBOARD
+    assert _parse_enum("High", Confidence, "source_confidence") is Confidence.HIGH
+    # ...while a non-lowercase enum still parses from its canonical value, which
+    # the previous unconditional lower() would have rejected.
+    assert (
+        _parse_enum("Recommended", Recommendation, "recommendation")
+        is Recommendation.RECOMMENDED
+    )
+    with pytest.raises(IpoValidationError):
+        _parse_enum("rumoured", IpoStatus, "status")
 
 
 def test_factor_assessment_redacts_secret_shaped_reason_text() -> None:

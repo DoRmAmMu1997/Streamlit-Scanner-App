@@ -346,6 +346,29 @@ def test_evaluation_history_is_immutable_ordered_and_deletable_as_a_pair(
     ) is False
 
 
+def test_get_latest_recommendation_handles_missing_issue_and_empty_history(
+    file_session_factory,
+) -> None:
+    with pytest.raises(IpoNotFoundError, match="IPO issue 999"):
+        get_latest_recommendation(999, session_factory=file_session_factory)
+
+    issue = create_issue(_issue_data(), session_factory=file_session_factory)
+    # An existing but unscored issue is distinct from a missing one: it returns
+    # None instead of raising, without loading any evaluation history.
+    assert (
+        get_latest_recommendation(issue.id, session_factory=file_session_factory)
+        is None
+    )
+
+    create_document(issue.id, _document_data(), session_factory=file_session_factory)
+    evaluate_issue(issue.id, _score_input(), session_factory=file_session_factory)
+    newest = evaluate_issue(issue.id, _score_input(), session_factory=file_session_factory)
+    assert (
+        get_latest_recommendation(issue.id, session_factory=file_session_factory)
+        == newest.result
+    )
+
+
 def test_evaluation_rejects_company_or_document_provenance_mismatch(
     file_session_factory,
 ) -> None:

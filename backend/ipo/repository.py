@@ -39,6 +39,7 @@ from backend.storage.ipo_repository import (
     get_ipo_financial,
     get_ipo_issue,
     get_ipo_subscription,
+    get_latest_ipo_evaluation_rows,
     insert_ipo_document,
     insert_ipo_evaluation,
     insert_ipo_financial,
@@ -528,8 +529,17 @@ def list_evaluations(
 def get_latest_recommendation(
     issue_id: int, *, session_factory: SessionFactory = session_scope
 ) -> IpoRecommendationResult | None:
-    evaluations = list_evaluations(issue_id, session_factory=session_factory)
-    return evaluations[0].result if evaluations else None
+    """Return the newest recommendation for an issue, or ``None`` if unscored.
+
+    Reads only the most recent evaluation pair (``LIMIT 1``) rather than loading
+    the full append-only history. A missing issue still raises ``IpoNotFoundError``
+    so callers can distinguish "no such issue" from "issue exists but unscored".
+    """
+    with session_factory() as session:
+        if get_ipo_issue(session, issue_id) is None:
+            raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
+        rows = get_latest_ipo_evaluation_rows(session, issue_id)
+        return _evaluation_record(*rows).result if rows is not None else None
 
 
 def delete_evaluation(

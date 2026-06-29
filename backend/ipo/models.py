@@ -70,11 +70,17 @@ _EnumT = TypeVar("_EnumT", bound=enum.Enum)
 def _parse_enum(value: object, enum_type: type[_EnumT], field_name: str) -> _EnumT:
     if isinstance(value, enum_type):
         return value
-    try:
-        return enum_type(str(value).strip().lower())
-    except ValueError as exc:
-        allowed = ", ".join(str(member.value) for member in enum_type)
-        raise IpoValidationError(f"{field_name} must be one of: {allowed}.") from exc
+    text = str(value).strip()
+    # Try the canonical value first so enums whose members are not lowercase
+    # (e.g. ``Recommendation`` -> "Recommended") still parse, then fall back to
+    # a case-normalized match for the lowercase enums callers usually supply.
+    for candidate in (text, text.lower()):
+        try:
+            return enum_type(candidate)
+        except ValueError:
+            continue
+    allowed = ", ".join(str(member.value) for member in enum_type)
+    raise IpoValidationError(f"{field_name} must be one of: {allowed}.")
 
 
 def _optional_money(value: object | None, field_name: str) -> Decimal | None:
@@ -103,14 +109,19 @@ def _optional_safe_url(value: object | None, field_name: str) -> str | None:
 
 
 def _score_decimal(value: Any) -> Decimal:
-    """Convert one factor score to a finite Decimal in the inclusive 0..100 range."""
+    """Convert one factor score to a finite Decimal in the inclusive 0..100 range.
+
+    The result is quantized to two decimals (half-up) to match the ``Numeric(5, 2)``
+    storage columns. Without this, SQLite would persist the raw input verbatim while
+    Postgres rounds it, so the same score could read back differently per backend.
+    """
     try:
         parsed = Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError) as exc:
         raise IpoValidationError("Factor scores must be numeric values from 0 to 100.") from exc
     if not parsed.is_finite() or parsed < 0 or parsed > 100:
         raise IpoValidationError("Factor scores must be finite values from 0 to 100.")
-    return parsed
+    return parsed.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 @dataclass(frozen=True)

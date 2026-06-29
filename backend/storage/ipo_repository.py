@@ -10,7 +10,7 @@ import datetime as dt
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from backend.storage.models import (
     IpoDocument,
@@ -244,10 +244,14 @@ def insert_ipo_evaluation(
 def get_ipo_evaluation_rows(
     session: Session, issue_id: int, score_id: int
 ) -> tuple[IpoScore, IpoRecommendation] | None:
+    # ``joinedload(IpoScore.issue)`` eager-loads the parent issue so the domain
+    # layer can read ``score.issue.company_name`` without a follow-up SELECT.
+    # The issue is many-to-one, so this adds no row fan-out to the result.
     stmt = (
         select(IpoScore, IpoRecommendation)
         .join(IpoRecommendation, IpoRecommendation.score_id == IpoScore.id)
         .where(IpoScore.issue_id == issue_id, IpoScore.id == score_id)
+        .options(joinedload(IpoScore.issue))
     )
     row = session.execute(stmt).one_or_none()
     return (row[0], row[1]) if row is not None else None
@@ -261,8 +265,31 @@ def list_ipo_evaluation_rows(
         .join(IpoRecommendation, IpoRecommendation.score_id == IpoScore.id)
         .where(IpoScore.issue_id == issue_id)
         .order_by(IpoScore.scored_at.desc(), IpoScore.id.desc())
+        .options(joinedload(IpoScore.issue))
     )
     return [(row[0], row[1]) for row in session.execute(stmt)]
+
+
+def get_latest_ipo_evaluation_rows(
+    session: Session, issue_id: int
+) -> tuple[IpoScore, IpoRecommendation] | None:
+    """Return only the newest score/recommendation pair for one issue.
+
+    Evaluation history is append-only and can grow without bound, so the
+    "latest recommendation" read uses ``LIMIT 1`` with the same deterministic
+    ordering as :func:`list_ipo_evaluation_rows` instead of materializing the
+    whole history just to keep its first row.
+    """
+    stmt = (
+        select(IpoScore, IpoRecommendation)
+        .join(IpoRecommendation, IpoRecommendation.score_id == IpoScore.id)
+        .where(IpoScore.issue_id == issue_id)
+        .order_by(IpoScore.scored_at.desc(), IpoScore.id.desc())
+        .options(joinedload(IpoScore.issue))
+        .limit(1)
+    )
+    row = session.execute(stmt).one_or_none()
+    return (row[0], row[1]) if row is not None else None
 
 
 def delete_ipo_evaluation_row(session: Session, issue_id: int, score_id: int) -> bool:
