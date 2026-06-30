@@ -7,8 +7,10 @@ from backend.ipo.models import (
     IpoDocumentData,
     IpoDocumentRecord,
     IpoEvaluationRecord,
+    IpoFilingData,
     IpoFinancialData,
     IpoFinancialRecord,
+    IpoIngestionSummary,
     IpoIssueData,
     IpoIssueRecord,
     IpoIssueType,
@@ -20,6 +22,8 @@ from backend.ipo.models import (
     IpoSubscriptionRecord,
     IpoValidationError,
     Recommendation,
+    SebiFiling,
+    SebiFilingCategory,
 )
 from backend.ipo.repository import (
     IpoNotFoundError,
@@ -37,8 +41,10 @@ from backend.ipo.repository import (
     get_evaluation,
     get_financial,
     get_issue,
+    get_latest_filing_date,
     get_latest_recommendation,
     get_subscription,
+    ingest_filings,
     list_documents,
     list_evaluations,
     list_financials,
@@ -50,6 +56,7 @@ from backend.ipo.repository import (
     update_subscription,
 )
 from backend.ipo.scorecard import score_ipo
+from backend.ipo.sources.sebi import fetch_sebi_filings
 from backend.ipo.verdict import build_recommendation
 
 __all__ = [
@@ -59,8 +66,10 @@ __all__ = [
     "IpoDocumentData",
     "IpoDocumentRecord",
     "IpoEvaluationRecord",
+    "IpoFilingData",
     "IpoFinancialData",
     "IpoFinancialRecord",
+    "IpoIngestionSummary",
     "IpoIssueData",
     "IpoIssueRecord",
     "IpoIssueType",
@@ -73,6 +82,8 @@ __all__ = [
     "IpoSubscriptionRecord",
     "IpoValidationError",
     "Recommendation",
+    "SebiFiling",
+    "SebiFilingCategory",
     "build_recommendation",
     "create_document",
     "create_financial",
@@ -84,12 +95,15 @@ __all__ = [
     "delete_issue",
     "delete_subscription",
     "evaluate_issue",
+    "fetch_sebi_filings",
     "get_document",
     "get_evaluation",
     "get_financial",
     "get_issue",
+    "get_latest_filing_date",
     "get_latest_recommendation",
     "get_subscription",
+    "ingest_filings",
     "list_documents",
     "list_evaluations",
     "list_financials",

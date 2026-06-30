@@ -748,7 +748,9 @@ class IpoIssue(Base):
 
     __tablename__ = "ipo_issues"
     __table_args__ = (
-        CheckConstraint("issue_type IN ('mainboard', 'sme')", name="ck_ipo_issues_issue_type"),
+        CheckConstraint(
+            "issue_type IN ('mainboard', 'sme', 'unknown')", name="ck_ipo_issues_issue_type"
+        ),
         CheckConstraint(
             "status IN ('drhp_filed', 'rhp_filed', 'open', 'closed', 'listed')",
             name="ck_ipo_issues_status",
@@ -774,10 +776,12 @@ class IpoIssue(Base):
             name="ck_ipo_issues_source_confidence",
         ),
         Index("ix_ipo_issues_status_open_date", "status", "open_date"),
+        Index("ux_ipo_issues_sebi_company_key", "sebi_company_key", unique=True),
     )
 
     id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
     company_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    sebi_company_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     issue_type: Mapped[str] = mapped_column(String(16), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
     open_date: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
@@ -825,6 +829,12 @@ class IpoDocument(Base):
             "source_confidence IN ('low', 'medium', 'high')",
             name="ck_ipo_documents_source_confidence",
         ),
+        CheckConstraint(
+            "record_hash IS NULL OR length(record_hash) = 64",
+            name="ck_ipo_documents_record_hash_length",
+        ),
+        Index("ix_ipo_documents_filing_date", "filing_date"),
+        Index("ux_ipo_documents_record_hash", "record_hash", unique=True),
     )
 
     id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
@@ -835,6 +845,8 @@ class IpoDocument(Base):
     document_url: Mapped[str] = mapped_column(Text, nullable=False)
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_confidence: Mapped[str] = mapped_column(String(8), nullable=False)
+    filing_date: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+    record_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.UTC)
     )

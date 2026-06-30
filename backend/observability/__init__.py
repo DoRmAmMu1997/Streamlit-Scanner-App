@@ -69,6 +69,10 @@ EVENT_NOTIFICATION_SKIPPED = "notification_skipped"
 EVENT_FORWARD_RETURNS_JOB_STARTED = "forward_returns_job_started"
 EVENT_FORWARD_RETURNS_JOB_COMPLETED = "forward_returns_job_completed"
 EVENT_FORWARD_RETURNS_JOB_FAILED = "forward_returns_job_failed"
+EVENT_IPO_FILING_SCAN_STARTED = "ipo_filing_scan_started"
+EVENT_IPO_FILING_CATEGORY_COMPLETED = "ipo_filing_category_completed"
+EVENT_IPO_FILING_CATEGORY_FAILED = "ipo_filing_category_failed"
+EVENT_IPO_FILING_SCAN_COMPLETED = "ipo_filing_scan_completed"
 EVENT_EXTERNAL_API_FAILED = "external_api_failed"
 # DATA-001 candle-quality events. ``_warning`` = a usable frame with suspicious
 # data; ``_failed`` = a frame quarantined before scanning. Both log finding
@@ -126,6 +130,10 @@ __all__ = [
     "EVENT_FORWARD_RETURNS_JOB_COMPLETED",
     "EVENT_FORWARD_RETURNS_JOB_FAILED",
     "EVENT_FORWARD_RETURNS_JOB_STARTED",
+    "EVENT_IPO_FILING_CATEGORY_COMPLETED",
+    "EVENT_IPO_FILING_CATEGORY_FAILED",
+    "EVENT_IPO_FILING_SCAN_COMPLETED",
+    "EVENT_IPO_FILING_SCAN_STARTED",
     "EVENT_LOGIN_DENIED",
     "EVENT_LOGIN_SUCCESS",
     "EVENT_MANUAL_SCAN_STARTED",

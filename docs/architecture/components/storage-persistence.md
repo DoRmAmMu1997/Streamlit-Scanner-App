@@ -61,7 +61,7 @@ Indexes: `scan_runs(status, screener_key, universe_key)`, `scan_results(run_id, 
 
 Full design: [obs-003-audit-log.md](../obs-003-audit-log.md).
 
-### IPO-001 domain and evaluation tables
+### IPO-001 domain, IPO-002 filing identity, and evaluation tables
 
 `ipo_issues` is the cascade root for registered `ipo_documents`, normalized
 `ipo_financials`, timestamped `ipo_subscriptions`, and immutable `ipo_scores`;
@@ -69,6 +69,14 @@ each score has exactly one `ipo_recommendations` verdict. SQL operations live in
 `backend/storage/ipo_repository.py`, while `backend/ipo/repository.py` owns typed
 transactions and detached DTOs. Full design:
 [ipo-001-domain-score-contract.md](../ipo-001-domain-score-contract.md).
+
+IPO-002 keeps manual rows valid while adding nullable ingestion identity:
+`ipo_issues.sebi_company_key` is uniquely indexed, and `ipo_documents` adds the
+SEBI publication `filing_date` plus unique metadata `record_hash`. Source SQL
+lookups match issues by company key and documents by fingerprint then URL; the
+typed repository owns monotonic lifecycle updates and category-level transaction
+boundaries. Full design:
+[ipo-002-sebi-filing-ingestion.md](../ipo-002-sebi-filing-ingestion.md).
 
 ## 4. Public interface (`repository.py`)
 

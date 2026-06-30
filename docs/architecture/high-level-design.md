@@ -110,7 +110,7 @@ flowchart TB
 | Screener catalog | [screener-catalog](components/screener-catalog.md) | The 10 strategies |
 | Scan service & provenance | [scan-service-and-provenance](components/scan-service-and-provenance.md) | `run_scan` lifecycle + strict result/provenance contract + AI evaluation receipts |
 | Ranking scorer | [scoring](components/scoring.md) | RANK-002 additive `final_score` scorer, score receipts, cache-only liquidity/risk, UI component breakdown |
-| IPO domain | [IPO-001 design](ipo-001-domain-score-contract.md) | Offline IPO source facts, fixed-weight scorecard, binary fail-closed recommendations, immutable evaluation history |
+| IPO domain and filing ingestion | [IPO-001 design](ipo-001-domain-score-contract.md), [IPO-002 design](ipo-002-sebi-filing-ingestion.md) | Official-SEBI filing inventory, normalized source facts, fixed-weight scorecard, binary fail-closed recommendations, immutable evaluation history |
 | Storage & persistence | [storage-persistence](components/storage-persistence.md) | ORM (`scan_runs`/`scan_results`/`ai_evaluations`/`audit_logs`/`app_config`), engine/session, repository, finalized comparison helpers, Alembic |
 | Scan comparison | [scan-comparison](components/scan-comparison.md) | JOB-003 latest-vs-previous shortlist read model over `scan_runs`/`scan_results` + finalized-run helpers |
 | Forward-return validation | [validation](components/validation.md) | VALID-002 calculator/service, VALID-003A/004 aggregate/dashboard metrics for `signal_forward_returns` rows, the read-only Validation / Signal Performance dashboard, and the headless compute job |
