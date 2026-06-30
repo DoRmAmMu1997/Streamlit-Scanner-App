@@ -442,8 +442,12 @@ class IpoFilingData:
         object.__setattr__(self, "issue_type", _parse_enum(self.issue_type, IpoIssueType, "issue_type"))
         object.__setattr__(self, "status", _parse_enum(self.status, IpoStatus, "status"))
         document_type = str(self.document_type).strip().lower()
-        if document_type not in {"drhp", "rhp", "final_offer"}:
-            raise IpoValidationError("document_type must be drhp, rhp, or final_offer.")
+        # The allowed document types are exactly the SEBI listing categories, so
+        # derive the set from the enum rather than duplicating the contract here.
+        allowed_types = {category.value for category in SebiFilingCategory}
+        if document_type not in allowed_types:
+            allowed = ", ".join(sorted(allowed_types))
+            raise IpoValidationError(f"document_type must be one of: {allowed}.")
         object.__setattr__(self, "document_type", document_type)
         if not isinstance(self.filing_date, dt.date):
             raise IpoValidationError("filing_date must be a date.")

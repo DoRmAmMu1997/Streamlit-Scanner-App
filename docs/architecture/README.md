@@ -44,6 +44,7 @@ testing · extension points.
 - [universe-management.md](components/universe-management.md) — universe build/load.
 - [storage-persistence.md](components/storage-persistence.md) — ORM, engine/session, repository, Alembic.
 - [validation.md](components/validation.md) — VALID-002 forward-return calculator + benchmark comparison service.
+- [ipo-screener.md](components/ipo-screener.md) — IPO-001 domain/scorecard/verdict + IPO-002 hardened SEBI filing ingestion (sources, identity, lifecycle, job).
 
 ### AI subsystems
 - [fundamentals-ai.md](components/fundamentals-ai.md) — Check Fundamentals agent + screener.in scraper + PDF reader + cache (the shared SDK plumbing).
@@ -62,9 +63,8 @@ testing · extension points.
 
 ## Ticket-scoped design docs (historical, still authoritative)
 
-- **[ipo-002-sebi-filing-ingestion.md](ipo-002-sebi-filing-ingestion.md)** - hardened official-SEBI listing inventory, deterministic filing identity, category-atomic persistence, and recovery semantics.
-
 - **[ipo-001-domain-score-contract.md](ipo-001-domain-score-contract.md)** — IPO domain tables, offline score contract, fail-closed verdict policy, and typed CRUD boundary.
+- **[ipo-002-sebi-filing-ingestion.md](ipo-002-sebi-filing-ingestion.md)** — hardened official-SEBI listing inventory, deterministic filing identity, category-atomic persistence, and recovery semantics.
 - **[scan-run-persistence.md](scan-run-persistence.md)** — SCAN-001 scan-run persistence schema (the column-by-column rationale the Storage LLD links to).
 - **[scan-002-handoff.md](scan-002-handoff.md)** — SCAN-002 database-layer implementation handoff brief.
 - **[obs-003-audit-log.md](obs-003-audit-log.md)** — OBS-003 audit log + runtime-config schema, recorder design, and the seven tracked events.
