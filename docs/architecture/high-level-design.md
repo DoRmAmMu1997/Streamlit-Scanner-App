@@ -21,7 +21,7 @@ interactive TradingView Lightweight Charts. Shortlisted rows can be sent to a
 **Check Fundamentals** Claude agent. Two screeners are themselves AI-assisted
 (Technical Analysis, 67 Ka Funda). Every scan — from the UI or a headless daily
 job — is recorded to a scan-history database. Access is gated behind Google SSO
-with an email allowlist.
+with an email allowlist for the interactive Streamlit surface.
 
 The backend also inventories official SEBI DRHP, RHP, and final-offer listings
 and stores immutable IPO score/recommendation history. IPO filing ingestion and
@@ -66,7 +66,7 @@ flowchart TD
     APP -->|agentic analysis via subscription| Claude["Claude Agent SDK / CLI"]
     APP -->|web research| Serp["SerpAPI (Google)"]
     APP -->|chart lib via CDN+SRI| CDN["unpkg: Lightweight Charts"]
-    APP --> DB[("SQLite / Postgres scan history")]
+    APP --> DB[("SQLite / Postgres application database")]
     IPOJOB --> DB
     APP --> Cache[("Local Parquet + JSON caches")]
 ```
