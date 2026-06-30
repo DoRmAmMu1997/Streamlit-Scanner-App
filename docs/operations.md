@@ -57,7 +57,9 @@ command explicitly when they are ready for validation backfills.
 
 ## Inventorying official SEBI IPO filings
 
-Run the backend-only IPO-002 inventory command manually or from a scheduler:
+The consolidated component boundary is documented in the
+[IPO Screener LLD](architecture/components/ipo-screener.md). Run the backend-only
+IPO-002 inventory command manually or from a scheduler:
 
 ```bash
 python -m backend.jobs.scan_ipo_filings

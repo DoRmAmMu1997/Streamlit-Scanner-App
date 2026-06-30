@@ -1,12 +1,12 @@
-# LLD — Storage & persistence (scan history)
+# LLD — Storage & persistence
 
 | | |
 |---|---|
-| **Component** | Scan-run persistence (engine, session, repository, migrations) |
-| **Source** | [`backend/storage/models.py`](../../../backend/storage/models.py), [`backend/storage/database.py`](../../../backend/storage/database.py), [`backend/storage/repository.py`](../../../backend/storage/repository.py), [`migrations/`](../../../migrations) |
+| **Component** | Shared ORM, engine/session, isolated query modules, and migrations |
+| **Source** | [`backend/storage/models.py`](../../../backend/storage/models.py), [`backend/storage/database.py`](../../../backend/storage/database.py), [`backend/storage/repository.py`](../../../backend/storage/repository.py), [`backend/storage/ipo_repository.py`](../../../backend/storage/ipo_repository.py), [`migrations/`](../../../migrations) |
 | **Layer** | Persistence (`backend/`) |
-| **Status** | Stable (SCAN-001 schema · SCAN-002 DB layer · SCAN-004 `symbols_scanned` · JOB-003 finalized comparison helpers · PROV-003 `ai_evaluations` · OBS-003 `audit_logs`/`app_config` · VALID-001/002 `signal_forward_returns` · VALID-003A/004 aggregate and dashboard read models · AUTH-003 `user_roles`) |
-| **Related** | **[scan-run-persistence.md](../scan-run-persistence.md)** (full SCAN-001 design) · [scan-002-handoff.md](../scan-002-handoff.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [validation.md](validation.md) · [ui-pages.md](ui-pages.md) · [HLD](../high-level-design.md) |
+| **Status** | Stable (scan history + validation + audit/config + roles · IPO-001 domain/evaluation · IPO-002 SEBI filing identity) |
+| **Related** | **[scan-run-persistence.md](../scan-run-persistence.md)** (full SCAN-001 design) · [scan-002-handoff.md](../scan-002-handoff.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [validation.md](validation.md) · [ipo-screener.md](ipo-screener.md) · [ui-pages.md](ui-pages.md) · [HLD](../high-level-design.md) |
 
 > **This LLD summarizes the *current* persistence layer and how it is used.** The
 > authoritative schema rationale (column-by-column design, why `Numeric` not float,
@@ -15,14 +15,16 @@
 
 ## 1. Purpose & responsibilities
 
-Record every scan execution and its shortlisted rows so the app can later answer
-*"why was this stock shortlisted on date D?"* without re-running today's data,
-universe, or model.
+Provide one portable SQLite/Postgres persistence foundation for scan history,
+audit/config/role state, validation rows, and the IPO domain. Scan history can
+answer *"why was this stock shortlisted on date D?"*; IPO history preserves the
+source facts and immutable score/verdict pair behind each recommendation.
 
-**Three sub-layers (strict direction):**
-1. **`models.py`** — table *shapes* only (`Base`, `ScanRun`, `ScanResult`, `SignalForwardReturn`, `AIEvaluation`, `AuditLog`, `AppConfig`, `UserRole`, `ScanStatus`, `ForwardReturnStatus`, `BigIntPrimaryKey`). No connections.
+**Four sub-layers (strict direction):**
+1. **`models.py`** — table *shapes* only (shared `Base`, scan/audit/config/role/validation models, and six IPO models). No connections.
 2. **`database.py`** — *where* data lives: engine, `SessionLocal`, `session_scope()`, SQLite pragmas, `ensure_database_schema()` (auto-migrate).
-3. **`repository.py`** — the *only* place that builds queries; typed read/write helpers. Does **not** own sessions.
+3. **`repository.py`** — scan/audit/config/role/validation queries and typed helpers. Does **not** own sessions.
+4. **`ipo_repository.py`** — every IPO-specific SQLAlchemy statement. It also does **not** own sessions or decide scoring/verdict policy.
 
 ## 2. Position in the system
 
@@ -33,8 +35,11 @@ flowchart TD
     SVC["scanning.service.run_scan"] -->|create→save→finish| REPO
     VAL["validation.service"] -->|upserts forward returns| REPO
     MET["validation.metrics"] -->|reads joined metric records| REPO
+    IPO["ipo.repository"] -->|typed IPO transactions| IPOREPO["ipo_repository.py (IPO queries only)"]
     REPO --> MODELS["models.py (ScanRun, ScanResult, AIEvaluation, SignalForwardReturn)"]
+    IPOREPO --> MODELS
     REPO -.uses session.- SS["session_scope()"]
+    IPOREPO -.uses caller session.- SS
     SS --> ENG["engine (database.py)"]
     ENG -->|DATABASE_URL| SQLITE[("SQLite data/scanner.db (dev)")]
     ENG -->|DATABASE_URL| PG[("Postgres (prod)")]
@@ -103,6 +108,19 @@ boundaries. Full design:
 | `get_config_overrides(session)` / `set_config_override(session, *, key, value, updated_by)` | Read all overrides as `{key: value}`; upsert one and return the previous value (OBS-003). |
 | `get_user_role` / `set_user_role` / `delete_user_role` / `list_user_roles` / `count_user_role_admins` / `list_user_role_admins_for_update` | AUTH-003 `user_roles` access: email-normalized read; upsert/delete returning the previous role; list (email-sorted); and a transactional `SELECT … FOR UPDATE` of admin assignments used before evaluating the last-admin invariant. |
 
+### IPO query interface (`ipo_repository.py`)
+
+The IPO query module exposes session-injected helpers for issue/document/
+financial/subscription CRUD, SEBI-key/legacy-name/fingerprint/URL ownership
+lookups, the latest filing-date watermark, atomic score/recommendation inserts,
+evaluation reads, and paired deletion. It returns ORM rows only to
+`backend/ipo/repository.py`; callers outside storage use the detached contracts
+documented in [ipo-screener.md](ipo-screener.md).
+
+This split is deliberate: storage enforces query shape, keys, and constraints;
+the typed IPO repository owns validation, status monotonicity, category
+transactions, scoring, verdict policy, and detached return objects.
+
 Type-coercion helpers (`_as_date`, `_as_decimal`, `_as_optional_str`, `_is_missing`, plus `_full_sha256`/`_as_utc_datetime` for receipts) keep typed columns strongly typed; `normalize_secret_safe_json` (from `result_contract`) makes every JSON blob JSON-safe + secret-masked (Decimal→str, dates→ISO, NumPy `.item()`, NaN→NULL).
 
 ## 5. Key design decisions & trade-offs (current-state highlights)
@@ -120,7 +138,14 @@ Type-coercion helpers (`_as_date`, `_as_decimal`, `_as_optional_str`, `_is_missi
 
 ## 6. Migrations
 
-[`migrations/`](../../../migrations) (root-level, kept out of the lint target). Revisions are chained linearly through `…obs003_create_audit_logs` (OBS-003, creates `audit_logs` + `app_config`), `20260618valid001_create_signal_forward_returns` (VALID-001, creates `signal_forward_returns` + `scan_results(symbol, signal_date)`), and `20260623auth003_create_user_roles` (AUTH-003, creates `user_roles`). `migrations/env.py` reads the URL from `get_database_url()` (no hardcoded URL). A drift test guards ORM-vs-migration sync.
+[`migrations/`](../../../migrations) (root-level, kept out of the lint target).
+Revisions are chained linearly through `20260623auth003`, then
+`20260629ipo001` (six IPO domain/evaluation tables), and `20260630ipo002`
+(nullable SEBI company key, filing date, record hash, and `unknown` issue type).
+The IPO-002 downgrade checks for identity data and refuses before DDL when column
+removal or issue-type narrowing would be lossy. `migrations/env.py` reads the URL
+from `get_database_url()` (no hardcoded URL). A drift test guards ORM-vs-migration
+sync, constraints, and index parity.
 
 ## 7. Failure modes
 
@@ -129,6 +154,12 @@ Type-coercion helpers (`_as_date`, `_as_decimal`, `_as_optional_str`, `_is_missi
 - Bad/exotic value in a result row → the strict `result_contract` normalizer raises `ResultContractError`; the scan service drops that row (counted as rejected) rather than persisting malformed JSON.
 - Invalid AI receipt (bad hash, contradictory verdict) → `save_ai_evaluations` raises; the run is marked `FAILED` by the service.
 - Forward-return rerun sees an existing pending row → `upsert_forward_return` updates it in place; the unique `(result_id, horizon_days)` constraint prevents duplicates.
+- IPO fingerprint or canonical URL belongs to another issue → typed validation
+  aborts the category transaction; ownership is never silently changed.
+- IPO evaluation insert fails after either row is prepared → the caller-owned
+  transaction rolls back both score and recommendation.
+- IPO-002 downgrade sees SEBI identity or an `unknown` issue → downgrade refuses
+  before schema mutation instead of discarding data.
 
 ## 8. Testing
 
@@ -140,7 +171,21 @@ Type-coercion helpers (`_as_date`, `_as_decimal`, `_as_optional_str`, `_is_missi
 - [`tests/test_audit_repository.py`](../../../tests/test_audit_repository.py) — OBS-003 audit + config-override CRUD, filters, redaction.
 - [`tests/test_forward_return_service.py`](../../../tests/test_forward_return_service.py) — VALID-002 service orchestration + idempotent persistence.
 - [`tests/test_validation_metrics.py`](../../../tests/test_validation_metrics.py) — VALID-003A/004 aggregate and dashboard read models over stored forward returns.
+- [`tests/test_ipo_repository.py`](../../../tests/test_ipo_repository.py) and
+  [`tests/test_ipo_sebi_ingestion.py`](../../../tests/test_ipo_sebi_ingestion.py)
+  — typed CRUD/evaluation transactions, identity ownership, status progression,
+  rollback, and idempotency.
+- [`tests/test_ipo_persistence_models.py`](../../../tests/test_ipo_persistence_models.py)
+  and [`tests/test_scan_storage_migrations.py`](../../../tests/test_scan_storage_migrations.py)
+  — IPO constraints, cascades, ORM parity, upgrade, and lossless downgrade refusal.
 
 ## 9. Extension points
 
-`final_score` is reserved for RANK-* and JOB-003 compares it before falling back to numeric `raw_result_json["confidence"]` when both runs use the same score source. VALID-003A/004 aggregates `signal_forward_returns` into hit rate, median/average return, benchmark-relative metrics, MAE/MFE, best/worst signals, return distribution, monthly signal counts, and sector concentration without changing the per-signal schema. Sector labels are best-effort local metadata and fall back to `Unknown` when current universe CSVs lack sector columns. The PROV-003 `ai_evaluations` ledger is in place and richer AI evidence rides in its `provenance_json` without a flag-day. A schema change is a real change: add an Alembic migration **and** update `models.py` **and** [scan-run-persistence.md](../scan-run-persistence.md).
+`final_score` is reserved for RANK-* and JOB-003 compares it before falling back
+to numeric `raw_result_json["confidence"]` when both runs use the same score
+source. VALID-003A/004 aggregates stored forward returns without changing the
+per-signal schema. The PROV-003 ledger accepts richer hashed evidence through
+`provenance_json`. Future IPO facts can use the period-scoped JSON seams, but a
+new durable identity or query key requires a real schema review. Any schema
+change requires an Alembic migration, matching `models.py` metadata, repository
+helpers, and updates to the owning scan-history or IPO design document.

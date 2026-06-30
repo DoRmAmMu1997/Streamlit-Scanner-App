@@ -51,7 +51,8 @@ port on the developer machine.
 | **Runtime data** | `scanner-data` mounts at `/data`; `DATA_DIR=/data`. |
 | **Database** | `postgres:16-bookworm` stores data in `postgres-data`; `DATABASE_URL=postgresql+psycopg://...@postgres:5432/...`. |
 | **Secrets/config** | Root `.env` feeds non-secret and secret env values to Compose; `.streamlit/secrets.toml` is mounted read-only for Google OIDC. |
-| **Daily job** | `docker compose run --rm scanner-ui python -m backend.jobs.run_daily_scan --config config/daily_scans.yaml`. |
+| **Daily scan job** | `docker compose run --rm scanner-ui python -m backend.jobs.run_daily_scan --config config/daily_scans.yaml`. |
+| **IPO filing inventory** | `docker compose run --rm scanner-ui python -m backend.jobs.scan_ipo_filings`; the image contains the CLI, but Compose and Render do not schedule it. |
 
 ## 4. Key design decisions & trade-offs
 
@@ -62,7 +63,7 @@ port on the developer machine.
 | **`streamlit run app.py`, not `python app.py`** | The plain-Python entrypoint does local prefetch-then-launch-browser; a container should become a web server immediately. | `python app.py` — would try to open a browser and run the prefetch wrapper at boot. |
 | **Production + auth-required defaults** | A deployed image and Compose stack fail closed until real prod env + OIDC secrets are present. | Permissive defaults — an exposed container would run unauthenticated. |
 | **Non-root `appuser`** | Least privilege; mutable state is confined to `/data` and the user's home cache. | Run as root — unnecessary privilege in a long-lived container. |
-| **Compose has `scanner-ui` + `postgres` only** | The acceptance scope is app + database. The daily scan job can run on demand against the same volumes with `docker compose run`. | Add `scanner-job` now — more moving parts before scheduling semantics are designed. |
+| **Compose has `scanner-ui` + `postgres` only** | The acceptance scope is app + database. Daily scan and IPO filing commands can run on demand against the same image, volumes, and database with `docker compose run`. | Add daemon job services now — more moving parts before each scheduling contract is designed. |
 | **Postgres has no host port** | Only the app needs database access in normal local production mode; no host `5432` reduces accidental exposure. | Publish `5432:5432` by default — convenient but broader than the app needs. |
 | **Separate `scanner-data` and `postgres-data` volumes** | Candle/cache resets should not wipe scan history, and DB resets should not require deleting app caches. | One shared volume — harder to reason about backups and resets. |
 | **Secrets mounted, not baked** | `.streamlit/secrets.toml` contains Google OIDC credentials and belongs outside Docker layers and build context. | `COPY` secrets into the image — leaks through image history and registries. |
@@ -141,6 +142,10 @@ port on the developer machine.
 - **Add a scheduled `scanner-job` service** only after the scheduler contract is
   designed. For now, the documented one-off command keeps the stack simple:
   `docker compose run --rm scanner-ui python -m backend.jobs.run_daily_scan`.
+- **Schedule IPO filing inventory** only through an explicit future orchestration
+  decision. IPO-002 provides a scheduler-compatible command, but does not add a
+  Render cron, Compose daemon, or cadence/overlap policy beyond the CLI's own
+  watermark window.
 - **Slim the image** further by adding `tests/`, `docs/`, `.github/` to
   `.dockerignore` (deferred — marginal while the image is small).
 - **Pin the base by digest** (`python:3.11-slim-bookworm@sha256:...`) for fully
