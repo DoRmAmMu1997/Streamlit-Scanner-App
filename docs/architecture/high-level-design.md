@@ -8,7 +8,7 @@
 
 | | |
 |---|---|
-| **System** | Pluggable daily-candle stock scanner for Indian equities (DhanHQ data + Streamlit UI + optional Claude-agent analysis). |
+| **System** | Pluggable daily-candle stock scanner plus a backend-only Indian IPO filing and evaluation subsystem (DhanHQ + official SEBI data, Streamlit UI, optional Claude-agent analysis). |
 | **Audience** | New contributors, reviewers, and the Claude/Codex split working the backlog. |
 | **Status** | Living document — reflects `main`. |
 
@@ -21,7 +21,12 @@ interactive TradingView Lightweight Charts. Shortlisted rows can be sent to a
 **Check Fundamentals** Claude agent. Two screeners are themselves AI-assisted
 (Technical Analysis, 67 Ka Funda). Every scan — from the UI or a headless daily
 job — is recorded to a scan-history database. Access is gated behind Google SSO
-with an email allowlist.
+with an email allowlist for the interactive Streamlit surface.
+
+The backend also inventories official SEBI DRHP, RHP, and final-offer listings
+and stores immutable IPO score/recommendation history. IPO filing ingestion and
+evaluation are explicit headless operations; they are not exposed in Streamlit,
+and ingestion does not download PDFs or automatically derive factor scores.
 
 ## 2. Goals & requirements
 
@@ -31,6 +36,8 @@ with an email allowlist.
 - Per-stock AI fundamental analysis + two AI-assisted screeners (graceful degradation when AI is unavailable).
 - Persist every scan run + shortlist for later "why was this shortlisted on date D?" audit.
 - Headless daily job for schedulers; Google-SSO gate + allowlist.
+- Inventory official SEBI IPO filing metadata and preserve deterministic,
+  explicitly invoked IPO score/recommendation history without inventing missing evidence.
 
 **Non-functional**
 - **Single-writer research tool**, not a high-availability service: correctness, auditability, and low cost over throughput.
@@ -39,7 +46,10 @@ with an email allowlist.
 - **Secret-safe & fail-closed**: redaction on every output sink; production refuses unsafe config.
 - **Portable storage**: SQLite locally, Postgres in deployment, same schema.
 
-**Constraints**: Python 3.11+; DhanHQ account for data; TA-Lib/pandas_ta optional (pure-pandas fallback); Claude Agent SDK + SerpAPI optional.
+**Constraints**: Python 3.11+; DhanHQ account for candle data; `requests` +
+Beautiful Soup for official SEBI listing HTML; TA-Lib/pandas_ta optional
+(pure-pandas fallback); Claude Agent SDK + SerpAPI optional. IPO prospectus
+download/parsing and raw-factor derivation remain out of scope.
 
 ## 3. Context — external systems
 
@@ -48,21 +58,30 @@ flowchart TD
     User["User (browser)"] --> APP["Streamlit Scanner App"]
     Cron["Scheduler / cron"] --> JOB["Daily scan job"]
     JOB --> APP
+    Operator["Operator / scheduler"] --> IPOJOB["IPO filing job"]
+    IPOJOB -->|DRHP, RHP, final-offer listings| SEBI["Official SEBI"]
     APP -->|OIDC sign-in| Google["Google OIDC"]
     APP -->|daily candles, instrument master| Dhan["DhanHQ API"]
     APP -->|company data scrape| ScreenerIn["screener.in"]
     APP -->|agentic analysis via subscription| Claude["Claude Agent SDK / CLI"]
     APP -->|web research| Serp["SerpAPI (Google)"]
     APP -->|chart lib via CDN+SRI| CDN["unpkg: Lightweight Charts"]
-    APP --> DB[("SQLite / Postgres scan history")]
+    APP --> DB[("SQLite / Postgres application database")]
+    IPOJOB --> DB
     APP --> Cache[("Local Parquet + JSON caches")]
 ```
 
-External data and AI text are treated as **untrusted evidence**, never instructions (prompt-injection posture): a shared quarantine (TEST-003) scans scraped/search/transcript evidence before it reaches any model and the AI agents fail closed on a hit; server-side fetches pass SSRF guards.
+External data and AI text are treated as **untrusted evidence**, never
+instructions. A shared quarantine (TEST-003) scans scraped/search/transcript
+evidence before it reaches any model and the AI agents fail closed on a hit.
+Server-side fetches pass SSRF guards; the IPO source further restricts every hop
+to exact HTTPS SEBI hosts, bounded responses/pages, and fail-closed row parsing.
 
 ## 4. Architecture overview
 
-The deliberate boundary: **strategy logic in `screeners/`, plumbing in `backend/`**. Three entrypoints share one backend.
+The deliberate boundary: **strategy logic in `screeners/`, plumbing in
+`backend/`**. The Streamlit/prefetch path and independent headless jobs share one
+backend without forcing those jobs through the UI.
 
 ```mermaid
 flowchart TB
@@ -70,6 +89,7 @@ flowchart TB
       PRE["python app.py — prefetch (CLI)"]
       UI["streamlit run app.py — UI"]
       JOB["python -m backend.jobs.run_daily_scan"]
+      IPOJOB["python -m backend.jobs.scan_ipo_filings"]
     end
     subgraph Strategy["screeners/ (strategy)"]
       SCR["10 screeners : BaseScanner subclasses"]
@@ -78,12 +98,14 @@ flowchart TB
       REG["screener_registry"]; BASE["scanner_base"]; IND["indicators"]
       DATA["dhan_client + daily_data_loader"]; UNI["universe_*"]
       SVC["scanning.service + result_contract"]; VAL["validation"]; STORE["storage + migrations"]
+      IPO["ipo domain + SEBI source"]
       AIF["fundamentals"]; AIT["technical"]; AI67["sixty_seven"]
       CH["charts"]; AUTH["auth"]; CFG["config"]; OBS["observability"]; SEC["security"]; HLT["health"]
     end
     PRE --> UNI & DATA
     UI --> AUTH --> REG --> SCR
     UI --> SVC; JOB --> SVC
+    IPOJOB --> IPO --> STORE
     SCR --> BASE --> IND
     SVC --> SCR --> DATA --> UNI
     SVC --> STORE
@@ -110,8 +132,8 @@ flowchart TB
 | Screener catalog | [screener-catalog](components/screener-catalog.md) | The 10 strategies |
 | Scan service & provenance | [scan-service-and-provenance](components/scan-service-and-provenance.md) | `run_scan` lifecycle + strict result/provenance contract + AI evaluation receipts |
 | Ranking scorer | [scoring](components/scoring.md) | RANK-002 additive `final_score` scorer, score receipts, cache-only liquidity/risk, UI component breakdown |
-| IPO domain | [IPO-001 design](ipo-001-domain-score-contract.md) | Offline IPO source facts, fixed-weight scorecard, binary fail-closed recommendations, immutable evaluation history |
-| Storage & persistence | [storage-persistence](components/storage-persistence.md) | ORM (`scan_runs`/`scan_results`/`ai_evaluations`/`audit_logs`/`app_config`), engine/session, repository, finalized comparison helpers, Alembic |
+| IPO Screener (domain + filing ingestion) | [ipo-screener](components/ipo-screener.md) ([IPO-001](ipo-001-domain-score-contract.md), [IPO-002](ipo-002-sebi-filing-ingestion.md)) | Official-SEBI filing inventory, normalized source facts, fixed-weight scorecard, binary fail-closed recommendations, immutable evaluation history |
+| Storage & persistence | [storage-persistence](components/storage-persistence.md) | Shared ORM/engine/session/Alembic layer, scan/audit/config/role/validation tables, six `ipo_*` tables, and isolated scan-history/IPO query modules |
 | Scan comparison | [scan-comparison](components/scan-comparison.md) | JOB-003 latest-vs-previous shortlist read model over `scan_runs`/`scan_results` + finalized-run helpers |
 | Forward-return validation | [validation](components/validation.md) | VALID-002 calculator/service, VALID-003A/004 aggregate/dashboard metrics for `signal_forward_returns` rows, the read-only Validation / Signal Performance dashboard, and the headless compute job |
 | Daily scan job | [daily-scan-job](components/daily-scan-job.md) | Headless CLI + YAML schedule |
@@ -182,16 +204,41 @@ flowchart LR
     Z -->|yes| OK["scanner / history (+ admin health if admin)"]
 ```
 
+### 6d. Official SEBI IPO filing inventory
+```mermaid
+sequenceDiagram
+    participant O as Operator / scheduler
+    participant Job as scan_ipo_filings
+    participant SEBI as Official SEBI listings
+    participant Repo as ipo.repository
+    participant DB as ipo_* tables
+    O->>Job: run inclusive date window
+    loop DRHP, RHP, final_offer
+        Job->>SEBI: bounded fetch + fail-closed parse
+        SEBI-->>Job: frozen filing rows
+        Job->>Repo: ingest_filings(category rows)
+        Repo->>DB: one atomic category transaction
+    end
+    Job-->>O: exit 1 if any category failed; otherwise 0
+```
+
+The three categories commit independently, so one failed category does not erase
+earlier successes; any category failure still makes the aggregate command fail
+and creates a secret-safe system audit containing only category/date context and
+exception class. The source inventories filing-detail URLs and publication dates
+without downloading or parsing prospectus PDFs.
+
 ## 7. Cross-cutting concerns
 
 - **Auth** — one gate at the top of `main()`; nothing renders before it. ([authentication](components/authentication.md))
-- **Observability** — named structured events, JSON in prod, identical across all three entrypoints. ([observability](components/observability.md))
-- **Audit trail (OBS-003)** — important user actions (sign-ins, manual scans, the startup data refresh, config changes, CSV exports, admin-page access) are recorded to a durable `audit_logs` table with the actor email, a UTC timestamp, and redacted metadata. Recording is best-effort (never breaks the action) and routes through the same redactor as scan provenance; admins browse it in an in-app viewer. ([audit-log](components/audit-log.md))
-- **Security** — secret redaction on every sink (logs, UI errors, persisted messages); SSRF guards on scraped fetches; CSV-injection escaping; a shared prompt-injection quarantine (TEST-003) that scans external evidence before model exposure and fails the AI screeners closed on a hit. ([security](components/security.md))
+- **Observability** — named structured events and JSON in production are identical across every entrypoint. IPO-002 adds scan-started/completed and category-completed/failed events with bounded fields only. ([observability](components/observability.md))
+- **Audit trail (OBS-003)** — important user actions (sign-ins, manual scans, the startup data refresh, config changes, CSV exports, admin-page access) are recorded to a durable `audit_logs` table with the actor email, a UTC timestamp, and redacted metadata. IPO category failures add system audit rows with `user_email=NULL`; successful categories remain log-only. Recording is best-effort (never breaks the action) and routes through the same redactor as scan provenance; admins browse it in an in-app viewer. ([audit-log](components/audit-log.md))
+- **Security** — secret redaction on every sink (logs, UI errors, persisted messages); SSRF guards on scraped fetches; CSV-injection escaping; a shared prompt-injection quarantine (TEST-003) that scans external evidence before model exposure and fails the AI screeners closed on a hit. The SEBI client is stricter than generic provenance validation: fixed exact HTTPS hosts, manual bounded redirects, response/page caps, and fail-closed parsing. ([security](components/security.md), [ipo-screener](components/ipo-screener.md))
 - **Persistence, provenance, comparison, and validation** — every shortlisted row carries a deterministic receipt (PROV-002: `triggered_rules` + `indicator_values` + `source`, built by `BaseScanner.build_provenance`); AI screeners add a tamper-evident verdict receipt (PROV-003: model, semantic prompt version, prompt/evidence/context SHA-256, sanitized source URLs — never raw scraped/model text) persisted to the `ai_evaluations` ledger. JOB-003 compares the latest finalized shortlist with the immediately previous finalized shortlist per screener/universe pair. VALID-002 computes per-signal forward returns into `signal_forward_returns` without re-running the screener, VALID-003A/004 aggregate those stored rows into screener/universe/horizon performance metrics and dashboard slices, VALID-003B/004 surface them in a read-only Validation / Signal Performance dashboard, and VALID-004 adds the headless compute job for pending rows. ([scan-service-and-provenance](components/scan-service-and-provenance.md), [storage-persistence](components/storage-persistence.md), [validation](components/validation.md))
 - **Caching** — Parquet candle cache (incremental), per-day AI verdict cache (**HMAC-signed and verified before reuse** — a tampered entry is rejected and recomputed), per-session chart cache, 30/60s Streamlit data caches.
 - **Graceful AI degradation** — cheap gate first; if the SDK/SerpAPI is absent, Technical Analysis falls back to a gate-only BUY while 67 Ka Funda skips the candidate (partial run) — neither crashes the scan. Approved, rejected, **and** error AI decisions are all recorded in `ai_evaluations` for audit.
 - **Trustworthy AI output (AI-004)** — every AI verdict is parsed into a strict Pydantic schema; malformed/incomplete output may be retried within the configured attempt budget (`SCANNER_AI_MAX_ATTEMPTS`, default 2; 1 disables retries) and is then **rejected** as `AIValidationError`, while the run records the count distinctly (`ai_validation_failures`, `phase="ai_validation"`) so junk output can never silently corrupt scan results. ([scan-service-and-provenance](components/scan-service-and-provenance.md))
+- **IPO evidence and evaluation** — six `ipo_*` tables keep mutable source facts separate from immutable score/recommendation pairs. Missing fundamental factors force `Not Recommended` / `Skip`; optional gaps score zero without reweighting. Filing ingestion populates issue/document evidence only and never manufactures an evaluation. ([ipo-screener](components/ipo-screener.md))
 
 ## 8. Tech stack
 
@@ -199,11 +246,33 @@ Python 3.11+ · Streamlit · pandas / pyarrow · SQLAlchemy 2 + Alembic · `dhan
 
 ## 9. Data & storage
 
-Runtime data under `DATA_DIR` (default `./data`, git-ignored): `cache/daily/*.parquet` (candles), `cache/fundamentals/` (JSON data + verdicts + concall PDFs), `universes/*.csv`, `scanner.db` (SQLite). Scan history = `scan_runs` (1) ──< `scan_results` (many), `scan_runs` (1) ──< `ai_evaluations` (many — the AI verdict ledger of approved/rejected/error receipts), and `scan_results` (1) ──< `signal_forward_returns` (many — VALID-002 per-horizon validation rows, aggregated by VALID-003A); deterministic columns for queries + `raw_result_json`/`provenance_json` for flexible audit. JOB-003 scan comparison is derived from those existing scan history tables, so it adds no runtime table. Full design: [scan-run-persistence.md](scan-run-persistence.md). OBS-003 adds two standalone tables on the same database: `audit_logs` (the user-action trail) and `app_config` (admin runtime-config overrides) — design: [obs-003-audit-log.md](obs-003-audit-log.md).
+Runtime data under `DATA_DIR` (default `./data`, git-ignored):
+`cache/daily/*.parquet` (candles), `cache/fundamentals/` (JSON data +
+verdicts + concall PDFs), `universes/*.csv`, and `scanner.db` (SQLite). Scan
+history = `scan_runs` (1) ──< `scan_results` (many), `scan_runs` (1) ──<
+`ai_evaluations` (many — the AI verdict ledger of
+approved/rejected/error receipts), and `scan_results` (1) ──<
+`signal_forward_returns` (many — VALID-002 per-horizon validation rows,
+aggregated by VALID-003A); deterministic columns support queries while
+`raw_result_json`/`provenance_json` preserve flexible audit evidence. JOB-003
+comparison is derived from those tables. Full design:
+[scan-run-persistence.md](scan-run-persistence.md).
+
+The same database also carries `audit_logs`, `app_config`, `user_roles`, and six
+IPO tables: `ipo_issues` is the cascade root for `ipo_documents`,
+`ipo_financials`, `ipo_subscriptions`, and immutable `ipo_scores`; each score has
+exactly one immutable `ipo_recommendations` row. Score/recommendation creation is
+atomic. IPO-002 adds nullable SEBI identity and filing metadata so legacy/manual
+rows remain valid. Designs: [OBS-003](obs-003-audit-log.md),
+[IPO Screener](components/ipo-screener.md).
 
 ## 10. Deployment & runtime
 
 - **Local dev**: `AUTH_REQUIRED=false` default, SQLite, repo-local `data/`, optional providers off.
+- **IPO filing CLI**: available in the same Python/image runtime as
+  `python -m backend.jobs.scan_ipo_filings`; it is operator-invoked or available
+  to an external scheduler, but current Compose/Render definitions do not run it
+  automatically.
 - **Docker image**: `python:3.11-slim-bookworm`, runtime dependencies installed with `requirements.txt` + `constraints.txt`, non-root `appuser`, `DATA_DIR=/data`, `EXPOSE 8501`, Streamlit bound to `0.0.0.0:8501`, and a `/_stcore/health` health check. The image runs `streamlit run app.py`, not the local `python app.py` prefetch wrapper.
 - **Docker Compose local production mode**: `docker-compose.yml` starts exactly two long-lived services, `scanner-ui` and `postgres`. `scanner-ui -> postgres` uses the private Compose network and `postgresql+psycopg://...@postgres:5432/...`; only Streamlit's `${SCANNER_UI_PORT:-8501}:8501` is published to the host. `scanner-data` keeps `/data` app state separate from `postgres-data` database storage.
 - **Render managed hosting (DEPLOY-003 / DEPLOY-003B)**: `render.yaml` Blueprint reusing the same image — a `scanner-web` web service (persistent disk at `DATA_DIR=/data` for the candle cache) + a managed `scanner-db` Postgres auto-wired into `DATABASE_URL` with public ingress closed + an ephemeral `scanner-daily-scan` cron. Render disks are single-attach, so the disk lives on the web service while the cron re-fetches candles and writes to the shared Postgres. Env secrets are dashboard-provided (`sync: false`); Google OIDC uses the Render Docker secret file at `/etc/secrets/streamlit-secrets.toml`. DEPLOY-003B keeps the cron deployable by committing `config/daily_scans.yaml` as the deterministic default schedule while AI-heavy jobs stay opt-in.
@@ -224,6 +293,8 @@ Runtime data under `DATA_DIR` (default `./data`, git-ignored): `cache/daily/*.pa
 | **Claude-subscription billing** | AI features draw on the plan's Agent SDK credit; `ANTHROPIC_API_KEY` is deliberately kept unset. |
 | **Tamper-evident AI receipts** | AI verdicts persist hashed evidence + a semantic prompt version as an audit ledger (`ai_evaluations`); the on-disk verdict cache is HMAC-signed so a forged/edited entry is rejected and recomputed, never trusted. Raw scraped text and raw model responses are never stored. |
 | **Strict result contract, truthful status** | Rows are validated against the provenance contract *before* the DataFrame is built; contract-rejected rows and persistence failures downgrade the run to `PARTIAL`/`FAILED` rather than reporting a false success. |
+| **IPO verdicts fail closed (IPO-001)** | The scorecard uses fixed weights without renormalizing missing factors. Missing fundamental evidence forces `Not Recommended` / `Skip`, and evaluation atomically appends an immutable score/recommendation pair rather than mutating history. |
+| **SEBI ingestion is bounded and category-atomic (IPO-002)** | Only fixed official HTTPS SEBI listings may be fetched. Redirects, retries, response bytes, and page count are bounded; malformed filing rows fail the category. DRHP/RHP/final-offer categories commit independently for recovery, while any failed category still produces a nonzero aggregate exit. |
 | **Validate within a bounded attempt budget (AI-004)** | Strict-schema parsing may retry malformed output within the configured 1–3 attempt budget (never SDK/usage-limit errors); a budget of 1 disables retries, and invalid output is rejected and counted, never persisted. |
 | **Quarantine bad candle data at the loader boundary (DATA-001)** | A pure validator screens every OHLCV frame; structurally impossible candles (high<low, NaN, dup dates) are withheld from scanners and downgrade the run (`PARTIAL`/`FAILED`), while stale/gappy data passes as a recorded warning. Each run persists a bounded, redacted quality receipt (`scan_runs.data_quality_json`) so the app does not trust raw vendor candles without an audit trail. |
 | **Forward validation uses elapsed data only (VALID-002)** | Historical signal validation enters at the next trading day's open and exits at the Nth trading day's close. Rows stay `pending` while the window has not elapsed, become `insufficient_data` only after stale missing data, and never forward-fill absent bars. |
@@ -238,5 +309,5 @@ Runtime data under `DATA_DIR` (default `./data`, git-ignored): `cache/daily/*.pa
 
 - **AI/external dependency** — Dhan/screener.in/SerpAPI/CLI changes can break features; mitigated by fallbacks, caches, and untrusted-evidence handling.
 - **Single-writer SQLite locally** — WAL + short sessions mitigate; Postgres for real concurrency.
-- **Recently shipped**: PROV-002 (deterministic per-screener receipts via `build_provenance`), PROV-003 (AI verdict receipts + the `ai_evaluations` ledger + HMAC verdict-cache integrity), DATA-001 (candle data-quality quarantine + per-run receipt), DEPLOY-001 (Docker runtime packaging), DEPLOY-002 (Docker Compose local production stack), DEPLOY-003/DEPLOY-003B (Render Blueprint + DB-URL driver normalization + committed daily-scan schedule), OBS-003 (user-action audit log + admin runtime-config form/viewer), JOB-003 (latest-vs-previous scan comparison), RANK-002 (deterministic `final_score` scorer + score component UI), and VALID-001/VALID-002/VALID-003A/VALID-003B/VALID-004 (forward-return schema, calculator/service, backend aggregate metrics, read-only validation dashboard, dashboard slices/export, and headless compute job) are now in flight.
-- **Roadmap (backlog)**: RANK-003 (fundamental/valuation components), richer validation visualizations beyond v1 tables, AUTH-003 (role-gated features), and later DEPLOY-* hosting automation. These land in reserved columns / JSON or runtime docs without flag-day migrations.
+- **Recently shipped**: PROV-002 (deterministic per-screener receipts via `build_provenance`), PROV-003 (AI verdict receipts + the `ai_evaluations` ledger + HMAC verdict-cache integrity), DATA-001 (candle data-quality quarantine + per-run receipt), DEPLOY-001 (Docker runtime packaging), DEPLOY-002 (Docker Compose local production stack), DEPLOY-003/DEPLOY-003B (Render Blueprint + DB-URL driver normalization + committed daily-scan schedule), OBS-003 (user-action audit log + admin runtime-config form/viewer), JOB-003 (latest-vs-previous scan comparison), RANK-002 (deterministic `final_score` scorer + score component UI), VALID-001/VALID-002/VALID-003A/VALID-003B/VALID-004 (forward-return schema, calculator/service, backend aggregate metrics, read-only validation dashboard, dashboard slices/export, and headless compute job), and IPO-001/IPO-002 (fail-closed IPO evaluation plus hardened official-SEBI filing inventory) are now in flight.
+- **Roadmap (backlog)**: RANK-003 (fundamental/valuation components), richer validation visualizations beyond v1 tables, AUTH-003 (role-gated features), later DEPLOY-* hosting automation, and future IPO prospectus extraction, raw-factor derivation, read-only UI, and explicit deployment scheduling. These land through existing typed/JSON seams or separately reviewed runtime contracts without flag-day migrations.

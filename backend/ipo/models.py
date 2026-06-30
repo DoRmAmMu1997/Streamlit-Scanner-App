@@ -30,6 +30,15 @@ class IpoIssueType(enum.StrEnum):
 
     MAINBOARD = "mainboard"
     SME = "sme"
+    UNKNOWN = "unknown"
+
+
+class SebiFilingCategory(enum.StrEnum):
+    """Official SEBI listing categories scanned by IPO-002."""
+
+    DRHP = "drhp"
+    RHP = "rhp"
+    FINAL_OFFER = "final_offer"
 
 
 class IpoStatus(enum.StrEnum):
@@ -106,6 +115,33 @@ def _optional_safe_url(value: object | None, field_name: str) -> str | None:
         raise IpoValidationError(f"Unsafe {field_name}: {url!r}.")
     parsed = urlsplit(url)
     return urlunsplit((parsed.scheme.lower(), parsed.netloc, parsed.path, "", ""))
+
+
+def _safe_url_with_query(value: object, field_name: str) -> str:
+    """Validate a public URL while retaining a non-secret listing query string."""
+    url = str(redact_text(str(value).strip()))
+    if not is_safe_http_url(url):
+        raise IpoValidationError(f"Unsafe {field_name}: {url!r}.")
+    parsed = urlsplit(url)
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc.lower(), parsed.path, parsed.query, ""))
+
+
+def _optional_company_key(value: object | None) -> str | None:
+    if value is None:
+        return None
+    key = str(value).strip()
+    if not key or len(key) > 255:
+        raise IpoValidationError("sebi_company_key must contain 1 to 255 characters.")
+    return key
+
+
+def _optional_record_hash(value: object | None) -> str | None:
+    if value is None:
+        return None
+    fingerprint = str(value).strip().lower()
+    if len(fingerprint) != 64 or any(character not in "0123456789abcdef" for character in fingerprint):
+        raise IpoValidationError("record_hash must be a 64-character SHA-256 hexadecimal digest.")
+    return fingerprint
 
 
 def _score_decimal(value: Any) -> Decimal:
@@ -244,6 +280,7 @@ class IpoIssueData:
     fresh_issue_amount: Decimal | None = None
     ofs_amount: Decimal | None = None
     source_url: str | None = None
+    sebi_company_key: str | None = None
 
     def __post_init__(self) -> None:
         company = str(self.company_name).strip()
@@ -279,6 +316,7 @@ class IpoIssueData:
         ):
             raise IpoValidationError("price_band_high cannot be below price_band_low.")
         object.__setattr__(self, "source_url", _optional_safe_url(self.source_url, "source_url"))
+        object.__setattr__(self, "sebi_company_key", _optional_company_key(self.sebi_company_key))
 
 
 @dataclass(frozen=True)
@@ -298,6 +336,7 @@ class IpoIssueRecord:
     fresh_issue_amount: Decimal | None
     ofs_amount: Decimal | None
     source_url: str | None
+    sebi_company_key: str | None
     created_at: dt.datetime
     updated_at: dt.datetime
 
@@ -310,6 +349,8 @@ class IpoDocumentData:
     document_url: str
     source_confidence: Confidence
     source_url: str | None = None
+    filing_date: dt.date | None = None
+    record_hash: str | None = None
 
     def __post_init__(self) -> None:
         document_type = str(self.document_type).strip().lower()
@@ -326,6 +367,9 @@ class IpoDocumentData:
             "source_confidence",
             _parse_enum(self.source_confidence, Confidence, "source_confidence"),
         )
+        if self.filing_date is not None and not isinstance(self.filing_date, dt.date):
+            raise IpoValidationError("filing_date must be a date when provided.")
+        object.__setattr__(self, "record_hash", _optional_record_hash(self.record_hash))
 
 
 @dataclass(frozen=True)
@@ -338,7 +382,96 @@ class IpoDocumentRecord:
     document_url: str
     source_url: str | None
     source_confidence: Confidence
+    filing_date: dt.date | None
+    record_hash: str | None
     created_at: dt.datetime
+
+
+@dataclass(frozen=True)
+class SebiFiling:
+    """One filing row parsed from an official SEBI listing page."""
+
+    category: SebiFilingCategory
+    title: str
+    filing_date: dt.date
+    document_url: str
+    source_url: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "category",
+            _parse_enum(self.category, SebiFilingCategory, "category"),
+        )
+        title = str(self.title).strip()
+        if not title:
+            raise IpoValidationError("title is required.")
+        object.__setattr__(self, "title", title)
+        if not isinstance(self.filing_date, dt.date):
+            raise IpoValidationError("filing_date must be a date.")
+        document_url = _optional_safe_url(self.document_url, "document_url")
+        if document_url is None:
+            raise IpoValidationError("document_url is required.")
+        object.__setattr__(self, "document_url", document_url)
+        object.__setattr__(self, "source_url", _safe_url_with_query(self.source_url, "source_url"))
+
+
+@dataclass(frozen=True)
+class IpoFilingData:
+    """Normalized, persistence-ready SEBI filing identity."""
+
+    company_name: str
+    sebi_company_key: str
+    issue_type: IpoIssueType
+    status: IpoStatus
+    document_type: str
+    filing_date: dt.date
+    document_url: str
+    source_url: str
+    record_hash: str
+
+    def __post_init__(self) -> None:
+        company_name = str(self.company_name).strip()
+        if not company_name:
+            raise IpoValidationError("company_name is required.")
+        object.__setattr__(self, "company_name", company_name)
+        company_key = _optional_company_key(self.sebi_company_key)
+        if company_key is None:
+            raise IpoValidationError("sebi_company_key is required.")
+        object.__setattr__(self, "sebi_company_key", company_key)
+        object.__setattr__(self, "issue_type", _parse_enum(self.issue_type, IpoIssueType, "issue_type"))
+        object.__setattr__(self, "status", _parse_enum(self.status, IpoStatus, "status"))
+        document_type = str(self.document_type).strip().lower()
+        # The allowed document types are exactly the SEBI listing categories, so
+        # derive the set from the enum rather than duplicating the contract here.
+        allowed_types = {category.value for category in SebiFilingCategory}
+        if document_type not in allowed_types:
+            allowed = ", ".join(sorted(allowed_types))
+            raise IpoValidationError(f"document_type must be one of: {allowed}.")
+        object.__setattr__(self, "document_type", document_type)
+        if not isinstance(self.filing_date, dt.date):
+            raise IpoValidationError("filing_date must be a date.")
+        document_url = _optional_safe_url(self.document_url, "document_url")
+        if document_url is None:
+            raise IpoValidationError("document_url is required.")
+        object.__setattr__(self, "document_url", document_url)
+        object.__setattr__(self, "source_url", _safe_url_with_query(self.source_url, "source_url"))
+        fingerprint = _optional_record_hash(self.record_hash)
+        if fingerprint is None:
+            raise IpoValidationError("record_hash is required.")
+        object.__setattr__(self, "record_hash", fingerprint)
+
+
+@dataclass(frozen=True)
+class IpoIngestionSummary:
+    """Counts returned after one category is atomically persisted."""
+
+    received: int = 0
+    issues_created: int = 0
+    issues_updated: int = 0
+    documents_created: int = 0
+    documents_updated: int = 0
+    unchanged: int = 0
 
 
 @dataclass(frozen=True)

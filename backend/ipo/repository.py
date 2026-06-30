@@ -11,8 +11,10 @@ from backend.ipo.models import (
     IpoDocumentData,
     IpoDocumentRecord,
     IpoEvaluationRecord,
+    IpoFilingData,
     IpoFinancialData,
     IpoFinancialRecord,
+    IpoIngestionSummary,
     IpoIssueData,
     IpoIssueRecord,
     IpoIssueType,
@@ -35,11 +37,15 @@ from backend.storage.ipo_repository import (
     delete_ipo_issue_row,
     delete_ipo_subscription_row,
     get_ipo_document,
+    get_ipo_document_by_record_hash,
+    get_ipo_document_by_url,
     get_ipo_evaluation_rows,
     get_ipo_financial,
     get_ipo_issue,
+    get_ipo_issue_by_sebi_key,
     get_ipo_subscription,
     get_latest_ipo_evaluation_rows,
+    get_latest_ipo_filing_date,
     insert_ipo_document,
     insert_ipo_evaluation,
     insert_ipo_financial,
@@ -50,7 +56,9 @@ from backend.storage.ipo_repository import (
     list_ipo_financial_rows,
     list_ipo_issue_rows,
     list_ipo_subscription_rows,
+    list_unclaimed_ipo_issues_by_company_name,
     update_ipo_document_row,
+    update_ipo_document_values,
     update_ipo_financial_row,
     update_ipo_issue_row,
     update_ipo_subscription_row,
@@ -70,6 +78,7 @@ def _utc(value: dt.datetime) -> dt.datetime:
 def _issue_values(data: IpoIssueData) -> dict[str, Any]:
     return {
         "company_name": data.company_name,
+        "sebi_company_key": data.sebi_company_key,
         "issue_type": data.issue_type.value,
         "status": data.status.value,
         "open_date": data.open_date,
@@ -98,6 +107,7 @@ def _issue_record(row: Any) -> IpoIssueRecord:
         fresh_issue_amount=row.fresh_issue_amount,
         ofs_amount=row.ofs_amount,
         source_url=row.source_url,
+        sebi_company_key=row.sebi_company_key,
         source_confidence=Confidence(row.source_confidence),
         created_at=_utc(row.created_at),
         updated_at=_utc(row.updated_at),
@@ -155,6 +165,8 @@ def _document_values(data: IpoDocumentData) -> dict[str, Any]:
         "document_url": data.document_url,
         "source_url": data.source_url,
         "source_confidence": data.source_confidence.value,
+        "filing_date": data.filing_date,
+        "record_hash": data.record_hash,
     }
 
 
@@ -166,6 +178,8 @@ def _document_record(row: Any) -> IpoDocumentRecord:
         document_url=row.document_url,
         source_url=row.source_url,
         source_confidence=Confidence(row.source_confidence),
+        filing_date=row.filing_date,
+        record_hash=row.record_hash,
         created_at=_utc(row.created_at),
     )
 
@@ -228,6 +242,134 @@ def delete_document(
 ) -> bool:
     with session_factory() as session:
         return delete_ipo_document_row(session, issue_id, document_id)
+
+
+_STATUS_ORDER = {
+    IpoStatus.DRHP_FILED: 0,
+    IpoStatus.RHP_FILED: 1,
+    IpoStatus.OPEN: 2,
+    IpoStatus.CLOSED: 3,
+    IpoStatus.LISTED: 4,
+}
+
+
+def _ingestion_issue_values(data: IpoFilingData) -> dict[str, Any]:
+    return {
+        "company_name": data.company_name,
+        "sebi_company_key": data.sebi_company_key,
+        "issue_type": data.issue_type.value,
+        "status": data.status.value,
+        "source_url": data.source_url,
+        "source_confidence": Confidence.HIGH.value,
+    }
+
+
+def _ingestion_document_values(data: IpoFilingData) -> dict[str, Any]:
+    return {
+        "document_type": data.document_type,
+        "document_url": data.document_url,
+        "source_url": data.source_url,
+        "source_confidence": Confidence.HIGH.value,
+        "filing_date": data.filing_date,
+        "record_hash": data.record_hash,
+    }
+
+
+def _changed_values(row: Any, desired: dict[str, Any]) -> dict[str, Any]:
+    return {name: value for name, value in desired.items() if getattr(row, name) != value}
+
+
+def ingest_filings(
+    filings: tuple[IpoFilingData, ...] | list[IpoFilingData],
+    *,
+    session_factory: SessionFactory = session_scope,
+) -> IpoIngestionSummary:
+    """Atomically create/update issues and documents for one fetched category.
+
+    Beginner note:
+    The caller opens one invocation per SEBI category. If any ownership conflict
+    appears, the session context rolls the whole category back while other
+    categories handled by the job remain independently committed.
+    """
+    counts = {
+        "received": len(filings),
+        "issues_created": 0,
+        "issues_updated": 0,
+        "documents_created": 0,
+        "documents_updated": 0,
+        "unchanged": 0,
+    }
+    with session_factory() as session:
+        for filing in filings:
+            issue = get_ipo_issue_by_sebi_key(session, filing.sebi_company_key)
+            issue_changed = False
+            if issue is None:
+                legacy_matches = list_unclaimed_ipo_issues_by_company_name(
+                    session, filing.company_name
+                )
+                if len(legacy_matches) == 1:
+                    issue = legacy_matches[0]
+                    update_ipo_issue_row(
+                        session,
+                        issue.id,
+                        {"sebi_company_key": filing.sebi_company_key},
+                    )
+                    issue_changed = True
+                    counts["issues_updated"] += 1
+                else:
+                    issue = insert_ipo_issue(session, _ingestion_issue_values(filing))
+                    counts["issues_created"] += 1
+
+            desired_issue: dict[str, Any] = {}
+            current_status = IpoStatus(issue.status)
+            if issue.source_confidence != Confidence.HIGH.value:
+                desired_issue["source_confidence"] = Confidence.HIGH.value
+            if issue.source_url is None:
+                desired_issue["source_url"] = filing.source_url
+            if _STATUS_ORDER[filing.status] > _STATUS_ORDER[current_status]:
+                desired_issue.update(
+                    status=filing.status.value,
+                    source_url=filing.source_url,
+                    source_confidence=Confidence.HIGH.value,
+                )
+            if issue.issue_type == IpoIssueType.UNKNOWN.value and filing.issue_type is IpoIssueType.SME:
+                desired_issue["issue_type"] = IpoIssueType.SME.value
+            changes = _changed_values(issue, desired_issue)
+            if changes:
+                update_ipo_issue_row(session, issue.id, changes)
+                if not issue_changed:
+                    counts["issues_updated"] += 1
+                issue_changed = True
+
+            document = get_ipo_document_by_record_hash(session, filing.record_hash)
+            if document is None:
+                document = get_ipo_document_by_url(session, filing.document_url)
+            if document is not None and document.issue_id != issue.id:
+                raise IpoValidationError(
+                    "SEBI filing fingerprint or URL is owned by another IPO issue."
+                )
+
+            document_values = _ingestion_document_values(filing)
+            if document is None:
+                insert_ipo_document(session, issue.id, document_values)
+                counts["documents_created"] += 1
+            else:
+                document_changes = _changed_values(document, document_values)
+                if document_changes:
+                    update_ipo_document_values(session, document, document_changes)
+                    counts["documents_updated"] += 1
+                elif not issue_changed:
+                    counts["unchanged"] += 1
+
+    return IpoIngestionSummary(**counts)
+
+
+def get_latest_filing_date(
+    *, session_factory: SessionFactory = session_scope
+) -> dt.date | None:
+    """Return the newest persisted SEBI filing date across all categories."""
+    with session_factory() as session:
+        return get_latest_ipo_filing_date(session)
 
 
 def _financial_values(data: IpoFinancialData) -> dict[str, Any]:

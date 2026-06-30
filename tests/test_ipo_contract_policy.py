@@ -7,21 +7,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 IPO_PACKAGE = ROOT / "backend" / "ipo"
-BANNED_IMPORT_ROOTS = {
+BANNED_NETWORK_IMPORT_ROOTS = {
     "dhanhq",
     "httpx",
     "playwright",
     "requests",
     "selenium",
-    "streamlit",
     "urllib.request",
 }
+BANNED_UI_IMPORT_ROOTS = {"streamlit"}
 
 
-def test_ipo_domain_has_no_network_or_ui_dependencies() -> None:
-    """IPO-001 is a pure backend contract: no scraper, HTTP client, or Streamlit."""
+def test_ipo_networking_is_isolated_to_sources_and_all_ipo_code_is_ui_free() -> None:
+    """IPO-002 permits HTTP only in sources and never permits Streamlit."""
     violations: list[str] = []
-    files = sorted(IPO_PACKAGE.glob("*.py"))
+    files = sorted(IPO_PACKAGE.rglob("*.py"))
     assert {path.name for path in files} >= {
         "models.py",
         "repository.py",
@@ -38,11 +38,18 @@ def test_ipo_domain_has_no_network_or_ui_dependencies() -> None:
             elif isinstance(node, ast.ImportFrom) and node.module:
                 modules.append(node.module)
             for module in modules:
-                if any(
+                is_network = any(
                     module == banned or module.startswith(f"{banned}.")
-                    for banned in BANNED_IMPORT_ROOTS
-                ):
-                    relative = path.relative_to(ROOT).as_posix()
-                    violations.append(f"{relative}:{node.lineno} imports {module}")
+                    for banned in BANNED_NETWORK_IMPORT_ROOTS
+                )
+                is_ui = any(
+                    module == banned or module.startswith(f"{banned}.")
+                    for banned in BANNED_UI_IMPORT_ROOTS
+                )
+                relative = path.relative_to(ROOT).as_posix()
+                if is_network and "sources" not in path.relative_to(IPO_PACKAGE).parts:
+                    violations.append(f"{relative}:{node.lineno} imports network module {module}")
+                if is_ui:
+                    violations.append(f"{relative}:{node.lineno} imports UI module {module}")
 
-    assert not violations, "IPO-001 must remain offline and UI-free:\n" + "\n".join(violations)
+    assert not violations, "IPO boundaries were violated:\n" + "\n".join(violations)

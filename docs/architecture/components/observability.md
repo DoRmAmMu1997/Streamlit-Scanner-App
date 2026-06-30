@@ -10,9 +10,10 @@
 
 ## 1. Purpose & responsibilities
 
-Give every entrypoint (Streamlit UI, `python app.py` prefetch, headless daily
-job) **one identical logging setup** that emits **named, structured, secret-safe**
-events — readable text in development, one JSON object per line in production.
+Give every entrypoint (Streamlit UI, `python app.py` prefetch, daily scan,
+forward-return compute, and IPO filing inventory jobs) **one identical logging
+setup** that emits **named, structured, secret-safe** events — readable text in
+development, one JSON object per line in production.
 
 **Responsibilities**
 - Define the stable event-name constants (`EVENT_SCAN_STARTED`, `EVENT_EXTERNAL_API_FAILED`, …).
@@ -31,6 +32,7 @@ flowchart TD
     APP["app.py prefetch"] --> CL["configure_logging()"]
     UI["Streamlit main()"] --> CL
     JOB["run_daily_scan"] --> CL
+    IPOJOB["scan_ipo_filings"] --> CL
     CL --> FMT{"_use_json(settings)?"}
     FMT -->|prod / json| JSON["JsonEventFormatter"]
     FMT -->|dev / text| TEXT["TextEventFormatter"]
@@ -64,6 +66,9 @@ flowchart TD
 | `auth_denied` | WARNING | signed-in email not on allowlist (logs the email, never the list) |
 | `daily_job_started` / `daily_job_completed` | INFO/ERROR | headless command lifecycle |
 | `daily_job_config_loaded` / `daily_job_config_invalid` | INFO/ERROR | JOB-002 YAML schedule |
+| `ipo_filing_scan_started` / `ipo_filing_scan_completed` | INFO/ERROR | aggregate IPO inventory lifecycle and final exit status |
+| `ipo_filing_category_completed` | INFO | one DRHP/RHP/final-offer category committed |
+| `ipo_filing_category_failed` | ERROR | one category failed; also written as a durable system audit row |
 | `data_refresh_started` / `data_refresh_completed` | INFO/ERROR | universe/candle prefetch lifecycle |
 | `login_success` / `login_denied` | INFO/WARNING | OBS-003 audit: sign-in accepted / rejected (also persisted) |
 | `manual_scan_started` / `export_downloaded` / `admin_page_accessed` | INFO | OBS-003 audit: user actions (also persisted) |
@@ -72,6 +77,11 @@ flowchart TD
 > The OBS-003 events above are emitted here **and** written to the durable
 > `audit_logs` table by the [audit recorder](audit-log.md); the recorder routes
 > metadata through the same redactor before either sink.
+
+IPO failure events follow the same sink rule but deliberately persist only
+bounded category/date context and exception class. Response bodies, exception
+messages, and fetched URLs are never included. Successful categories emit a log
+event only; they do not create durable audit noise.
 
 ## 5. Key design decisions & trade-offs
 
@@ -94,4 +104,7 @@ Driven by [configuration.md](configuration.md): `LOG_LEVEL` (default `WARNING`, 
 
 ## 8. Extension points
 
-Add a new event: declare an `EVENT_*` constant + `__all__` entry, then call `log_event(logger, EVENT_X, level=…, **fields)` at the site. No formatter change needed — unknown fields serialize automatically. Document it in the HLD/README event table.
+Add a new event: declare an `EVENT_*` constant + `__all__` entry, then call
+`log_event(logger, EVENT_X, level=…, **fields)` at the site. No formatter change
+is needed — unknown fields serialize automatically. Document the event in this
+catalog and update the HLD when it introduces a system-wide lifecycle.

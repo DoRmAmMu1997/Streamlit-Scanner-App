@@ -102,6 +102,49 @@ def test_all_six_ipo_tables_round_trip_with_exact_money(db_session: Session) -> 
     assert recommendation.score_id == score.id
 
 
+def test_sebi_identity_columns_are_nullable_for_legacy_rows_and_unique_when_present(
+    db_session: Session,
+) -> None:
+    legacy = _issue(company_name="Legacy Limited", issue_type="unknown")
+    first = _issue(company_name="Example Limited", sebi_company_key="example limited")
+    second = _issue(company_name="Other Limited", sebi_company_key="example limited")
+    document = IpoDocument(
+        issue=legacy,
+        document_type="drhp",
+        document_url="https://www.sebi.gov.in/filings/legacy.html",
+        source_confidence="high",
+        filing_date=dt.date(2026, 6, 26),
+        record_hash="a" * 64,
+    )
+    db_session.add_all([legacy, first, document])
+    db_session.flush()
+
+    assert legacy.sebi_company_key is None
+    assert document.filing_date == dt.date(2026, 6, 26)
+
+    db_session.add(second)
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+
+
+def test_record_hash_is_unique_and_exactly_sha256_length(db_session: Session) -> None:
+    issue = _issue(issue_type="unknown")
+    db_session.add_all(
+        [
+            IpoDocument(
+                issue=issue,
+                document_type="drhp",
+                document_url="https://www.sebi.gov.in/filings/one.html",
+                source_confidence="high",
+                record_hash="b" * 63,
+            )
+        ]
+    )
+
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [("issue_type", "rights_issue"), ("status", "rumoured")],

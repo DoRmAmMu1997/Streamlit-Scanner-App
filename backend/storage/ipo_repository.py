@@ -9,7 +9,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
 from backend.storage.models import (
@@ -31,6 +31,22 @@ def insert_ipo_issue(session: Session, values: dict[str, Any]) -> IpoIssue:
 
 def get_ipo_issue(session: Session, issue_id: int) -> IpoIssue | None:
     return session.get(IpoIssue, issue_id)
+
+
+def get_ipo_issue_by_sebi_key(session: Session, company_key: str) -> IpoIssue | None:
+    """Return the single issue claimed by one normalized SEBI company key."""
+    return session.scalar(select(IpoIssue).where(IpoIssue.sebi_company_key == company_key))
+
+
+def list_unclaimed_ipo_issues_by_company_name(
+    session: Session, company_name: str
+) -> list[IpoIssue]:
+    """Find legacy rows eligible for one conservative, case-insensitive claim."""
+    stmt = select(IpoIssue).where(
+        IpoIssue.sebi_company_key.is_(None),
+        func.lower(IpoIssue.company_name) == company_name.casefold(),
+    )
+    return list(session.scalars(stmt))
 
 
 def list_ipo_issue_rows(session: Session) -> list[IpoIssue]:
@@ -81,6 +97,33 @@ def get_ipo_document(
         IpoDocument.id == document_id, IpoDocument.issue_id == issue_id
     )
     return session.scalar(stmt)
+
+
+def get_ipo_document_by_record_hash(
+    session: Session, record_hash: str
+) -> IpoDocument | None:
+    return session.scalar(
+        select(IpoDocument).where(IpoDocument.record_hash == record_hash)
+    )
+
+
+def get_ipo_document_by_url(session: Session, document_url: str) -> IpoDocument | None:
+    return session.scalar(
+        select(IpoDocument).where(IpoDocument.document_url == document_url)
+    )
+
+
+def update_ipo_document_values(
+    session: Session, document: IpoDocument, values: dict[str, Any]
+) -> IpoDocument:
+    for name, value in values.items():
+        setattr(document, name, value)
+    session.flush()
+    return document
+
+
+def get_latest_ipo_filing_date(session: Session) -> dt.date | None:
+    return session.scalar(select(func.max(IpoDocument.filing_date)))
 
 
 def list_ipo_document_rows(session: Session, issue_id: int) -> list[IpoDocument]:

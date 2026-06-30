@@ -10,9 +10,10 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 
 from backend.storage import database
 from backend.storage.models import Base
@@ -102,6 +103,15 @@ def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Pa
         "ix_ipo_issues_company_name",
         "ix_ipo_issues_status",
         "ix_ipo_issues_status_open_date",
+        "ux_ipo_issues_sebi_company_key",
+    }
+    issue_columns = {column["name"] for column in inspector.get_columns("ipo_issues")}
+    assert "sebi_company_key" in issue_columns
+    document_columns = {column["name"] for column in inspector.get_columns("ipo_documents")}
+    assert {"filing_date", "record_hash"} <= document_columns
+    assert {index["name"] for index in inspector.get_indexes("ipo_documents")} >= {
+        "ix_ipo_documents_filing_date",
+        "ux_ipo_documents_record_hash",
     }
     assert {index["name"] for index in inspector.get_indexes("ipo_scores")} >= {
         "ix_ipo_scores_issue_id",
@@ -149,6 +159,41 @@ def test_migration_matches_orm_metadata(monkeypatch, tmp_path: Path):
     orm_schema = _reflect_schema(orm_engine)
 
     assert migrated_schema == orm_schema
+
+
+def test_ipo002_downgrade_refuses_to_discard_ingested_identity(monkeypatch, tmp_path: Path):
+    """Downgrade fails before DDL when IPO-002-only values would be lost."""
+    db_path = tmp_path / "ipo002-downgrade.db"
+    database_url = f"sqlite:///{db_path.as_posix()}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = Config("alembic.ini")
+    command.upgrade(config, "head")
+
+    engine = create_engine(database_url, future=True)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO ipo_issues "
+                "(company_name, sebi_company_key, issue_type, status, source_confidence, "
+                "created_at, updated_at) VALUES "
+                "('Example Limited', 'example limited', 'unknown', 'drhp_filed', 'high', "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            )
+        )
+    engine.dispose()
+
+    with pytest.raises(RuntimeError, match="discard IPO-002 filing identities"):
+        command.downgrade(config, "20260629ipo001")
+
+    engine = create_engine(database_url, future=True)
+    assert "sebi_company_key" in {
+        column["name"] for column in inspect(engine).get_columns("ipo_issues")
+    }
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT sebi_company_key FROM ipo_issues")) == (
+            "example limited"
+        )
+    engine.dispose()
 
 
 def test_ensure_database_schema_creates_tables_and_short_circuits(monkeypatch, tmp_path: Path):

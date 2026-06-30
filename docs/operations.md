@@ -55,6 +55,39 @@ It does not re-run screeners, mutate scan history, or enable any AI jobs. Render
 does not get a second cron service in this task; deployments can schedule this
 command explicitly when they are ready for validation backfills.
 
+## Inventorying official SEBI IPO filings
+
+The consolidated component boundary is documented in the
+[IPO Screener LLD](architecture/components/ipo-screener.md). Run the backend-only
+IPO-002 inventory command manually or from a scheduler:
+
+```bash
+python -m backend.jobs.scan_ipo_filings
+```
+
+The default inclusive window starts seven days before the newest stored SEBI
+filing publication date and ends today. A new database starts 30 days back. Use
+an explicit window when replaying an incident, or request the full archive
+deliberately:
+
+```bash
+python -m backend.jobs.scan_ipo_filings --from-date 2026-06-01 --to-date 2026-06-30
+python -m backend.jobs.scan_ipo_filings --full-history
+```
+
+The command scans fixed official DRHP, RHP, and final-offer categories. It stores
+the SEBI filing-detail URL and publication date but does **not** download or parse
+PDFs. Each category commits atomically and independently. Exit code `0` means all
+three categories succeeded; exit code `1` means at least one failed even if the
+others committed. Failed categories emit structured lifecycle logs and durable
+system audit events containing only category/date context and exception class.
+
+Recovery is a normal rerun: correct the network/upstream parsing problem or
+resolve the reported issue/document ownership conflict, then run the same date
+window again. The seven-day overlap plus deterministic fingerprints makes the
+operation idempotent. Avoid `--full-history` in routine schedules because it is
+an explicit archive-import mode bounded by the client's 200-page safety cap.
+
 ### Scheduling on Windows (Task Scheduler)
 
 ```powershell
