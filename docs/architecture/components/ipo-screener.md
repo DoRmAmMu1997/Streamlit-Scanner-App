@@ -32,30 +32,31 @@ landed halves that share one persistence model:
 
 ```mermaid
 flowchart LR
-    SEBI[(Official SEBI<br/>listing pages)]
-    subgraph sources [backend/ipo/sources]
-      Fetch[fetch_sebi_filings]
-      Build[build_filing_data]
+    Operator["Operator / scheduler"] --> Job["scan_ipo_filings CLI"]
+    SEBI[("Official SEBI listings")]
+    subgraph Ingestion [Filing ingestion]
+      Fetch["fetch_sebi_filings"]
+      Build["build_filing_data -> IpoFilingData"]
+      Ingest["ingest_filings"]
     end
-    subgraph repo [backend/ipo/repository]
-      Ingest[ingest_filings]
-      Eval[evaluate_issue]
+    subgraph Evaluation [Explicit evaluation]
+      Caller["Scoring caller with IpoScoreInput"]
+      Eval["evaluate_issue"]
+      Score["score_ipo"]
+      Verdict["build_recommendation"]
     end
-    subgraph domain [backend/ipo domain]
-      Score[score_ipo]
-      Verdict[build_recommendation]
-    end
-    Storage[(ipo_* tables<br/>via backend/storage)]
-    Job[[backend/jobs/scan_ipo_filings]]
+    Storage[("ipo_* tables via backend/storage")]
 
     Job --> Fetch
     SEBI --> Fetch --> Build --> Ingest --> Storage
-    Storage -. normalized facts .-> Score --> Verdict --> Eval --> Storage
+    Caller --> Eval --> Score --> Verdict
+    Eval -->|atomically persists score + verdict| Storage
 ```
 
-The headless job orchestrates ingestion; scoring is invoked separately once an
-issue has enough normalized factors. Both paths persist only through
-`backend/storage`.
+The headless job orchestrates ingestion; evaluation is a separate, explicit call
+that receives a complete `IpoScoreInput`. Persisted financial and subscription
+facts are **not** automatically converted into factor scores, and filing ingestion
+never triggers a recommendation. Both paths persist only through `backend/storage`.
 
 ## 3. Module boundaries
 
@@ -65,7 +66,7 @@ issue has enough normalized factors. Both paths persist only through
 | `backend/ipo/scorecard.py` | Fixed PDF weights, half-up rounding, missing-data receipt. | `models` |
 | `backend/ipo/verdict.py` | Score bands, confidence, fail-closed override. | `models` |
 | `backend/ipo/sources/sebi.py` | **Only** module allowed network I/O + hostile-HTML parsing. | `requests`, `bs4`, `models` |
-| `backend/ipo/repository.py` | Typed transactions, ingestion identity/lifecycle, atomic evaluation. | `storage`, `scanning.result_contract`, `sources.sebi` |
+| `backend/ipo/repository.py` | Typed transactions, ingestion identity/lifecycle, atomic evaluation. | `models`, `scorecard`, `verdict`, `scanning.result_contract`, `storage` |
 | `backend/storage/ipo_repository.py` | Every SQLAlchemy statement for the `ipo_*` tables. | `sqlalchemy`, `storage.models` |
 | `backend/jobs/scan_ipo_filings.py` | CLI boundary: windows, per-category loop, exit code, audits. | `ipo`, `audit`, `observability`, `storage.database` |
 
@@ -184,8 +185,11 @@ every response as hostile:
   scoring contracts stay unchanged.
 - **Factor derivation**: a future ticket can turn normalized `ipo_financials` /
   `ipo_subscriptions` facts into the scorecard's 0-100 factor inputs.
-- **Automation & UI**: schedule `scan_ipo_filings`, then add a read-only IPO
-  surface that renders `IpoRecommendationResult.to_dict()`.
+- **Automation & UI**: `python -m backend.jobs.scan_ipo_filings` is manually
+  runnable and scheduler-compatible, but IPO-002 does not add a scheduler,
+  Render cron, Compose daemon, or Streamlit entrypoint. A future orchestration
+  ticket can schedule it, and a later read-only IPO surface can render
+  `IpoRecommendationResult.to_dict()`.
 
 Any extension must preserve URL safety, never invent missing evidence, and route
 all SQL through `backend/storage`.
