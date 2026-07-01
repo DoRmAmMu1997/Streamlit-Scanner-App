@@ -30,6 +30,6 @@
 - [x] Add beginner-friendly docstrings/comments across IPO-001/002/003 and tests.
 - [x] Update HLD, LLD, storage, security, observability, configuration, and operations docs.
 - [x] Run focused/full local quality, security, and migration gates.
-- [ ] Run Docker/Compose/PostgreSQL gates in hosted CI (Docker is unavailable locally).
+- [x] Run Docker/Compose/PostgreSQL gates in hosted CI (Docker is unavailable locally).
 - [x] Run Codex Security diff review and harden both suppressed observations.
-- [ ] Commit with Codex co-authorship, push, open a draft PR, and monitor CI.
+- [x] Commit with Codex co-authorship, push, open a draft PR, and monitor CI.
