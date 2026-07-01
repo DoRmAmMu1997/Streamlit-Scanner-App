@@ -31,6 +31,6 @@ pytest, Decimal.
   and operations documentation plus teaching-policy coverage.
 - [x] Run focused/full quality, security, migration, and rendered-browser
   verification. Docker is unavailable on this workstation, so the image and
-  Compose smoke gates remain delegated to hosted CI.
-- [ ] Commit with Codex co-authorship, push, open a draft PR, and monitor hosted
-  checks.
+  Compose smoke gates were verified by hosted CI.
+- [x] Commit with Codex co-authorship, push, open draft PR #85, and monitor the
+  Docker plus Python 3.11/3.12 hosted checks to a green result.
