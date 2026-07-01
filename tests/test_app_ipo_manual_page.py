@@ -198,3 +198,85 @@ def test_form_mapping_builds_complete_domain_payload_without_actor_fields() -> N
     assert payload.net_worth == Decimal("80.0000")
     assert payload.periods[2].period_end == dt.date(2025, 3, 31)
     assert not hasattr(payload, "entered_by_email")
+
+
+class _PeerEditorFakeStreamlit:
+    """Capture the DataFrame the peer grid hands to ``st.data_editor``.
+
+    Beginner note:
+    ``st.data_editor`` only renders columns that already exist in the DataFrame it
+    receives; ``column_config`` for a missing column is silently ignored. This fake
+    records that frame so a test can prove the metric columns are present even before
+    any peer data exists, without launching a browser.
+    """
+
+    class _ColumnConfig:
+        """Stand in for the ``st.column_config`` factory the grid calls."""
+
+        def TextColumn(self, *_args, **_kwargs) -> None:
+            """Accept a text-column spec without building a real widget config."""
+
+        def NumberColumn(self, *_args, **_kwargs) -> None:
+            """Accept a number-column spec without building a real widget config."""
+
+    def __init__(self) -> None:
+        """Prepare the capture slot and the column-config factory."""
+        self.captured_frame: object | None = None
+        self.column_config = self._ColumnConfig()
+
+    def markdown(self, *_args, **_kwargs) -> None:
+        """Accept section headings without rendering a real browser widget."""
+
+    def data_editor(self, dataframe, **_kwargs):
+        """Record the incoming frame and echo it back like the real editor."""
+        self.captured_frame = dataframe
+        return dataframe
+
+
+def test_peer_editor_seeds_every_metric_column_on_a_fresh_form(monkeypatch) -> None:
+    """A first-time IPO entry must still expose all six peer-metric columns.
+
+    Beginner note:
+    Regression guard for a silent-drop defect: Streamlit ignores ``column_config``
+    for columns absent from the DataFrame, so the grid must seed them itself. Without
+    this the admin could never enter a peer metric for a brand-new IPO, and the
+    domain (which requires at least one metric per peer) would reject every save.
+    """
+    fake_st = _PeerEditorFakeStreamlit()
+    monkeypatch.setattr(ipo_manual_page, "st", fake_st)
+
+    ipo_manual_page._render_peer_controls(5, None)
+
+    assert fake_st.captured_frame is not None
+    assert list(fake_st.captured_frame.columns) == [
+        "company_name",
+        "source_page",
+        *[metric.value for metric in IpoPeerMetric],
+    ]
+
+
+def test_peer_rows_skip_blank_spare_row_with_nan_source_page() -> None:
+    """A pandas ``NaN`` in the untouched spare row must not fail the whole form.
+
+    Beginner note:
+    ``st.data_editor`` returns ``float('nan')`` for an empty numeric cell, so the
+    trailing spare row an admin never touched must be skipped rather than rejected as
+    a nameless partial peer.
+    """
+    peers = ipo_manual_page._peer_rows_to_domain(
+        [
+            {"company_name": "Peer One Ltd", "source_page": 210, "pe": "20"},
+            {"company_name": "", "source_page": float("nan"), "eps": ""},
+        ]
+    )
+
+    assert len(peers) == 1
+    assert peers[0].company_name == "Peer One Ltd"
+
+
+def test_peer_rows_reject_named_row_even_with_nan_source_page() -> None:
+    """A named peer whose page is a pandas ``NaN`` still surfaces a validation error."""
+    with pytest.raises(IpoValidationError):
+        ipo_manual_page._peer_rows_to_domain(
+            [{"company_name": "Peer One Ltd", "source_page": float("nan"), "pe": "20"}]
+        )

@@ -10,6 +10,7 @@ bug cannot bypass the backend's provenance rules.
 from __future__ import annotations
 
 import datetime as dt
+import math
 from collections.abc import Mapping, Sequence
 from decimal import Decimal
 from typing import Any, cast
@@ -38,6 +39,29 @@ from backend.ipo.repository import (
     submit_manual_extraction,
 )
 from ui.common import _redact_secrets
+
+# ``st.data_editor`` only renders columns that already exist in the DataFrame it is
+# handed; ``column_config`` keys with no matching column are silently ignored. Seeding
+# the peer grid with this full, ordered column set guarantees every metric column
+# appears even on the very first (no prior revision) entry for an IPO.
+_PEER_METRIC_COLUMNS: tuple[str, ...] = tuple(metric.value for metric in IpoPeerMetric)
+_PEER_EDITOR_COLUMNS: tuple[str, ...] = ("company_name", "source_page", *_PEER_METRIC_COLUMNS)
+
+
+def _is_blank(value: object) -> bool:
+    """Treat ``None``, pandas ``NaN``, and empty/whitespace strings as an empty cell.
+
+    Beginner note:
+    ``st.data_editor`` returns a pandas DataFrame, and an empty numeric cell arrives
+    as ``float('nan')`` rather than ``None`` (``nan in (None, "")`` is ``False``).
+    Centralising the blank check here keeps the peer converter from mistaking a blank
+    spare row for partially entered input.
+    """
+    if value is None:
+        return True
+    if isinstance(value, float) and math.isnan(value):
+        return True
+    return not str(value).strip()
 
 
 def _decimal_text(value: object, field_name: str) -> Decimal:
@@ -81,14 +105,21 @@ def _peer_rows_to_domain(
     """
     peers: list[IpoPeerValuationData] = []
     for row in rows:
-        company_name = str(row.get("company_name") or "").strip()
+        raw_name = row.get("company_name")
+        company_name = "" if _is_blank(raw_name) else str(raw_name).strip()
         page = row.get("source_page")
         raw_metrics = {
             metric: row.get(metric.value)
             for metric in IpoPeerMetric
-            if str(row.get(metric.value) or "").strip()
+            if not _is_blank(row.get(metric.value))
         }
-        if not company_name and page in (None, "") and not raw_metrics:
+        # Skip only the wholly blank spare row Streamlit's dynamic editor always
+        # leaves at the bottom. ``_is_blank`` recognises the ``float('nan')`` pandas
+        # puts in an empty numeric ``source_page`` cell, so an untouched spare row is
+        # ignored instead of being rejected as a nameless partial peer. A row with a
+        # name (or any metric) still reaches the domain validator, which reports the
+        # missing page/metric.
+        if not company_name and _is_blank(page) and not raw_metrics:
             continue
         peers.append(
             IpoPeerValuationData(
@@ -496,9 +527,17 @@ def _render_peer_controls(
             for peer in latest.peers
         ]
     if not rows:
-        rows = [{"company_name": "", "source_page": None}]
+        # First entry for this IPO: seed one empty row that already carries every
+        # metric column. Without these keys the metric columns are absent from the
+        # DataFrame, ``st.data_editor`` drops them, and the admin cannot enter any
+        # peer metric — which the domain requires, so the save would always fail.
+        rows = [
+            {"company_name": "", "source_page": None, **dict.fromkeys(_PEER_METRIC_COLUMNS, "")}
+        ]
     edited = st.data_editor(
-        pd.DataFrame(rows),
+        # Pin the column set/order so every configured column renders regardless of
+        # whether a prior revision happened to supply it.
+        pd.DataFrame(rows, columns=list(_PEER_EDITOR_COLUMNS)),
         num_rows="dynamic",
         hide_index=True,
         use_container_width=True,
