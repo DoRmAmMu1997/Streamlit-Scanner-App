@@ -294,6 +294,7 @@ def test_private_dns_answer_is_rejected_before_http(tmp_path: Path) -> None:
     def private_resolver(
         _host: str, port: int, **_kwargs: object
     ) -> list[tuple[object, ...]]:
+        """Simulate DNS rebinding the allowed SEBI name to loopback."""
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", port))]
 
     with pytest.raises(IpoDocumentDownloadError) as caught:

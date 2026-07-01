@@ -30,12 +30,12 @@ def test_document_parse_status_has_only_the_ipo_003_lifecycle_values() -> None:
 
 
 def _assessment(score: object = 80, reason: str = "Evidence-backed assessment") -> FactorAssessment:
-    """Provide the assessment step used by the IPO workflow."""
+    """Build the reusable assessment fixture used by the scenarios below."""
     return FactorAssessment(score=score, reason=reason)
 
 
 def _score_input(**overrides: object) -> IpoScoreInput:
-    """Provide the score input step used by the IPO workflow."""
+    """Build the reusable score input fixture used by the scenarios below."""
     values: dict[str, object] = {
         "company_name": " Example Ltd ",
         "business_quality": _assessment(),
@@ -52,7 +52,7 @@ def _score_input(**overrides: object) -> IpoScoreInput:
 
 
 def test_factor_assessment_normalizes_a_finite_score() -> None:
-    """Verify that factor assessment normalizes a finite score."""
+    """Pin factor assessment normalizes a finite score as an executable IPO regression contract."""
     assessment = FactorAssessment(score="78.25", reason="  Strong growth  ")
 
     assert assessment.score == Decimal("78.25")
@@ -62,14 +62,14 @@ def test_factor_assessment_normalizes_a_finite_score() -> None:
 def test_factor_assessment_quantizes_score_half_up_to_two_decimals() -> None:
     # Quantizing to two decimals matches the Numeric(5, 2) score columns so a
     # value reads back identically on SQLite (verbatim) and Postgres (rounded).
-    """Verify that factor assessment quantizes score half up to two decimals."""
+    """Pin factor assessment quantizes score half up to two decimals as an executable IPO regression contract."""
     assert FactorAssessment(score="78.255").score == Decimal("78.26")
     assert FactorAssessment(score="78.254").score == Decimal("78.25")
 
 
 def test_parse_enum_accepts_exact_then_case_normalized_values() -> None:
     # Lowercase enums tolerate any input casing the caller supplies...
-    """Verify that parse enum accepts exact then case normalized values."""
+    """Pin parse enum accepts exact then case normalized values as an executable IPO regression contract."""
     assert _parse_enum("MAINBOARD", IpoIssueType, "issue_type") is IpoIssueType.MAINBOARD
     assert _parse_enum("High", Confidence, "source_confidence") is Confidence.HIGH
     # ...while a non-lowercase enum still parses from its canonical value, which
@@ -83,7 +83,7 @@ def test_parse_enum_accepts_exact_then_case_normalized_values() -> None:
 
 
 def test_factor_assessment_redacts_secret_shaped_reason_text() -> None:
-    """Verify that factor assessment redacts secret shaped reason text."""
+    """Pin factor assessment redacts secret shaped reason text as an executable IPO regression contract."""
     assessment = FactorAssessment(
         score=78,
         reason="Verified from provider response: api_key=supersecret",
@@ -94,13 +94,13 @@ def test_factor_assessment_redacts_secret_shaped_reason_text() -> None:
 
 @pytest.mark.parametrize("score", [-1, 100.01, "NaN", "Infinity", object()])
 def test_factor_assessment_rejects_invalid_scores(score: object) -> None:
-    """Verify that factor assessment rejects invalid scores."""
+    """Pin factor assessment rejects invalid scores as an executable IPO regression contract."""
     with pytest.raises(IpoValidationError):
         FactorAssessment(score=score, reason="Bad score")
 
 
 def test_score_input_normalizes_company_and_source_documents() -> None:
-    """Verify that score input normalizes company and source documents."""
+    """Pin score input normalizes company and source documents as an executable IPO regression contract."""
     score_input = _score_input()
 
     assert score_input.company_name == "Example Ltd"
@@ -108,7 +108,7 @@ def test_score_input_normalizes_company_and_source_documents() -> None:
 
 
 def test_score_input_strips_query_and_fragment_from_provenance_urls() -> None:
-    """Verify that score input strips query and fragment from provenance urls."""
+    """Pin score input strips query and fragment from provenance urls as an executable IPO regression contract."""
     score_input = _score_input(
         source_documents=(
             "https://www.sebi.gov.in/example-rhp.pdf?api_key=supersecret#page=7",
@@ -127,13 +127,13 @@ def test_score_input_strips_query_and_fragment_from_provenance_urls() -> None:
     ],
 )
 def test_score_input_rejects_unsafe_document_urls(url: str) -> None:
-    """Verify that score input rejects unsafe document urls."""
+    """Pin score input rejects unsafe document urls as an executable IPO regression contract."""
     with pytest.raises(IpoValidationError):
         _score_input(source_documents=(url,))
 
 
 def test_public_ipo_package_exports_the_domain_and_repository_contract() -> None:
-    """Verify that public ipo package exports the domain and repository contract."""
+    """Pin public ipo package exports the domain and repository contract as an executable IPO regression contract."""
     expected = {
         "Confidence",
         "FactorAssessment",

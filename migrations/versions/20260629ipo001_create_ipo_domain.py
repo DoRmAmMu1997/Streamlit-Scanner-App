@@ -21,7 +21,11 @@ def _big_int_primary_key() -> sa.BigInteger:
 
 
 def _source_confidence_constraint(table: str) -> sa.CheckConstraint:
-    """Provide the source confidence constraint step used by the IPO workflow."""
+    """Create the same three-level evidence-confidence CHECK for source tables.
+
+    Naming the constraint from its table keeps Alembic upgrade/downgrade and ORM
+    parity checks deterministic on both SQLite batch mode and PostgreSQL 16.
+    """
     return sa.CheckConstraint(
         "source_confidence IN ('low', 'medium', 'high')",
         name=f"ck_{table}_source_confidence",
@@ -29,7 +33,13 @@ def _source_confidence_constraint(table: str) -> sa.CheckConstraint:
 
 
 def upgrade() -> None:
-    """Create all six additive IPO-001 tables and their lookup indexes."""
+    """Create six additive tables for facts and immutable evaluation history.
+
+    Numeric INR columns avoid floating-point money, timezone-aware timestamps
+    establish UTC intent, and cascading foreign keys make an issue the ownership
+    root. Score/recommendation rows remain separate but one-to-one so their audit
+    history cannot be edited through ordinary CRUD.
+    """
     op.create_table(
         "ipo_issues",
         sa.Column("id", _big_int_primary_key(), nullable=False),
@@ -224,7 +234,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drop IPO tables in reverse foreign-key order."""
+    """Drop children before parents so every foreign-key dependency is valid."""
     op.drop_table("ipo_recommendations")
     op.drop_table("ipo_scores")
     op.drop_table("ipo_subscriptions")

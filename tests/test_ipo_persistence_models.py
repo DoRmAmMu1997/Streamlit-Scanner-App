@@ -21,7 +21,7 @@ from backend.storage import (
 
 
 def _issue(**overrides: object) -> IpoIssue:
-    """Provide the issue step used by the IPO workflow."""
+    """Build the reusable issue fixture used by the scenarios below."""
     values: dict[str, object] = {
         "company_name": "Example Ltd",
         "issue_type": "mainboard",
@@ -41,7 +41,7 @@ def _issue(**overrides: object) -> IpoIssue:
 
 
 def test_all_six_ipo_tables_round_trip_with_exact_money(db_session: Session) -> None:
-    """Verify that all six ipo tables round trip with exact money."""
+    """Pin all six ipo tables round trip with exact money as an executable IPO regression contract."""
     issue = _issue()
     document = IpoDocument(
         issue=issue,
@@ -167,7 +167,11 @@ def test_ipo_document_rejects_inconsistent_cache_metadata(
 def test_sebi_identity_columns_are_nullable_for_legacy_rows_and_unique_when_present(
     db_session: Session,
 ) -> None:
-    """Verify that sebi identity columns are nullable for legacy rows and unique when present."""
+    """Keep legacy identity nullable while enforcing uniqueness once claimed.
+
+    This lets pre-IPO-002 rows survive the migration without weakening the
+    idempotency guarantee for newly inventoried SEBI companies.
+    """
     legacy = _issue(company_name="Legacy Limited", issue_type="unknown")
     first = _issue(company_name="Example Limited", sebi_company_key="example limited")
     second = _issue(company_name="Other Limited", sebi_company_key="example limited")
@@ -191,7 +195,7 @@ def test_sebi_identity_columns_are_nullable_for_legacy_rows_and_unique_when_pres
 
 
 def test_record_hash_is_unique_and_exactly_sha256_length(db_session: Session) -> None:
-    """Verify that record hash is unique and exactly sha256 length."""
+    """Pin record hash is unique and exactly sha256 length as an executable IPO regression contract."""
     issue = _issue(issue_type="unknown")
     db_session.add_all(
         [
@@ -216,7 +220,7 @@ def test_record_hash_is_unique_and_exactly_sha256_length(db_session: Session) ->
 def test_issue_check_constraints_reject_unknown_enum_values(
     db_session: Session, field: str, value: str
 ) -> None:
-    """Verify that issue check constraints reject unknown enum values."""
+    """Pin issue check constraints reject unknown enum values as an executable IPO regression contract."""
     db_session.add(_issue(**{field: value}))
 
     with pytest.raises(IntegrityError):
@@ -224,7 +228,7 @@ def test_issue_check_constraints_reject_unknown_enum_values(
 
 
 def test_one_recommendation_is_allowed_per_immutable_score(db_session: Session) -> None:
-    """Verify that one recommendation is allowed per immutable score."""
+    """Pin one recommendation is allowed per immutable score as an executable IPO regression contract."""
     issue = _issue()
     score = IpoScore(
         issue=issue,
@@ -262,7 +266,7 @@ def test_one_recommendation_is_allowed_per_immutable_score(db_session: Session) 
 
 
 def test_deleting_issue_cascades_to_every_ipo_child_table(db_session: Session) -> None:
-    """Verify that deleting issue cascades to every ipo child table."""
+    """Pin deleting issue cascades to every ipo child table as an executable IPO regression contract."""
     issue = _issue()
     document = IpoDocument(
         issue=issue,

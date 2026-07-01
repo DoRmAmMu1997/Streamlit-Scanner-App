@@ -744,7 +744,12 @@ class UserRole(Base):
 
 
 class IpoIssue(Base):
-    """One Indian IPO and its normalized issue-level facts."""
+    """Ownership root for one Indian IPO and all of its evidence/history.
+
+    CHECK constraints mirror strict domain enums, exact Numeric columns preserve
+    INR values, and relationships cascade issue deletion to owned facts and
+    evaluations. ``sebi_company_key`` stays nullable for pre-ingestion/manual rows.
+    """
 
     __tablename__ = "ipo_issues"
     __table_args__ = (
@@ -818,7 +823,12 @@ class IpoIssue(Base):
 
 
 class IpoDocument(Base):
-    """One DRHP/RHP or supporting document for an IPO."""
+    """Store filing identity separately from verified downloaded-byte provenance.
+
+    IPO-002 owns URL/date/``record_hash`` metadata. IPO-003 owns the grouped
+    content hash, relative path, UTC download time, and parse status. Database
+    checks keep those trusted cache fields wholly present or wholly absent.
+    """
 
     __tablename__ = "ipo_documents"
     __table_args__ = (
@@ -896,7 +906,12 @@ class IpoDocument(Base):
 
 
 class IpoFinancial(Base):
-    """One normalized annual or quarterly financial facts snapshot."""
+    """Store one issue period with flexible, secret-safe normalized metrics.
+
+    JSON is the deliberate evolution seam until raw extraction stabilizes. An
+    optional source-document foreign key becomes NULL when that metadata row is
+    deleted, preserving the financial period without false dangling ownership.
+    """
 
     __tablename__ = "ipo_financials"
     __table_args__ = (
@@ -942,7 +957,7 @@ class IpoFinancial(Base):
 
 
 class IpoSubscription(Base):
-    """One timestamped QIB/NII/retail subscription snapshot."""
+    """Capture demand multiples at one UTC instant without overwriting history."""
 
     __tablename__ = "ipo_subscriptions"
     __table_args__ = (
@@ -979,7 +994,12 @@ class IpoSubscription(Base):
 
 
 class IpoScore(Base):
-    """Immutable normalized factor inputs and weighted score receipt."""
+    """Persist one immutable seven-factor calculation and its audit breakdown.
+
+    Nullable factor columns preserve missing evidence, while JSON contributions,
+    reasons, and missing labels reproduce the exact deterministic score receipt.
+    Corrections append a new row instead of editing this one.
+    """
 
     __tablename__ = "ipo_scores"
     __table_args__ = (
@@ -1031,7 +1051,12 @@ class IpoScore(Base):
 
 
 class IpoRecommendation(Base):
-    """Immutable binary verdict paired one-to-one with an IPO score."""
+    """Persist the fail-closed verdict paired one-to-one with a score receipt.
+
+    The unique score foreign key prevents conflicting recommendations for the
+    same calculation; deleting that score cascades to this dependent half of the
+    evaluation pair.
+    """
 
     __tablename__ = "ipo_recommendations"
     __table_args__ = (

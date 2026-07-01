@@ -1,4 +1,10 @@
-"""Static IPO-001 boundary guards."""
+"""Static architecture and teaching-documentation guards for the IPO subsystem.
+
+These tests inspect source syntax rather than executing business logic. They keep
+two easy-to-erode design promises visible in CI: only reviewed adapters may use
+network clients, and every IPO-owned definition must explain itself to a reader
+who is still learning the repository.
+"""
 
 from __future__ import annotations
 
@@ -17,24 +23,98 @@ BANNED_NETWORK_IMPORT_ROOTS = {
 }
 BANNED_UI_IMPORT_ROOTS = {"streamlit"}
 
+DocumentedDefinition = ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
 
-def _public_definitions(tree: ast.Module) -> list[ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef]:
-    """Return module definitions plus class methods covered by the teaching policy."""
-    definitions: list[ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef] = []
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            definitions.append(node)
+# Most targets are wholly IPO-owned, so every named definition in them belongs
+# to this teaching pass. Shared files are handled separately below to avoid
+# rewriting unrelated scanner, authentication, or persistence code.
+FULL_DOCUMENTATION_TARGETS = (
+    ROOT / "backend" / "jobs" / "scan_ipo_filings.py",
+    ROOT / "backend" / "storage" / "ipo_repository.py",
+    ROOT / "tests" / "test_scan_ipo_filings_job.py",
+)
+SHARED_DOCUMENTATION_TARGETS: dict[Path, frozenset[str]] = {
+    ROOT / "backend" / "config" / "settings.py": frozenset({"ipo_document_dir"}),
+    ROOT / "backend" / "storage" / "models.py": frozenset(
+        {
+            "IpoIssue",
+            "IpoDocument",
+            "IpoFinancial",
+            "IpoSubscription",
+            "IpoScore",
+            "IpoRecommendation",
+        }
+    ),
+    ROOT / "tests" / "test_scan_storage_migrations.py": frozenset(
+        {
+            "test_ipo002_downgrade_refuses_to_discard_ingested_identity",
+            "test_ipo003_downgrade_refuses_to_discard_download_provenance",
+        }
+    ),
+}
+
+
+def _documented_definitions(tree: ast.AST) -> list[DocumentedDefinition]:
+    """Return every named definition covered by the teaching policy.
+
+    ``ast.walk`` deliberately includes methods and nested test callbacks, not
+    just public top-level functions. Nested fakes often model the hardest parts
+    of the workflow—an HTTP failure, concurrent source edit, or rollback—so a
+    beginner needs an explanation there just as much as on the outer test.
+    """
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    ]
+
+
+def _full_documentation_targets() -> list[Path]:
+    """Build the deterministic list of files wholly owned by the IPO subsystem.
+
+    Keeping discovery here prevents a new IPO module, migration, or focused test
+    from bypassing the documentation guard merely because this test's file list
+    was not manually updated in the same pull request.
+    """
+    files = list(IPO_PACKAGE.rglob("*.py"))
+    files.extend(FULL_DOCUMENTATION_TARGETS)
+    files.extend((ROOT / "migrations" / "versions").glob("*ipo*.py"))
+    files.extend((ROOT / "tests").glob("test_ipo*.py"))
+    return sorted(set(files))
+
+
+def _shared_ipo_definitions(path: Path, tree: ast.Module) -> list[DocumentedDefinition]:
+    """Select IPO-owned definitions from a file shared with other subsystems.
+
+    Class selection includes its methods because the class owns their teaching
+    contract. Function selection is name-based and intentionally narrow: the
+    wider file may contain mature code unrelated to IPO-001/002/003.
+    """
+    selected_names = SHARED_DOCUMENTATION_TARGETS[path]
+    selected: list[DocumentedDefinition] = []
+    for node in _documented_definitions(tree):
+        if node.name in selected_names:
+            selected.append(node)
             if isinstance(node, ast.ClassDef):
-                definitions.extend(
+                selected.extend(
                     child
-                    for child in node.body
-                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    for child in ast.walk(node)
+                    if child is not node
+                    and isinstance(
+                        child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                    )
                 )
-    return definitions
+    return selected
 
 
 def test_ipo_networking_is_isolated_to_sources_and_all_ipo_code_is_ui_free() -> None:
-    """Permit HTTP only in source adapters and the exact IPO-003 downloader."""
+    """Keep network and Streamlit imports inside their reviewed trust boundaries.
+
+    IPO-002 may fetch listing metadata from its source adapter, and IPO-003 may
+    fetch one prospectus through the exact downloader module. Everything else in
+    the domain package must remain offline and UI-independent so scoring and
+    persistence are deterministic and reusable from jobs or tests.
+    """
     violations: list[str] = []
     files = sorted(IPO_PACKAGE.rglob("*.py"))
     assert {path.name for path in files} >= {
@@ -79,24 +159,28 @@ def test_ipo_networking_is_isolated_to_sources_and_all_ipo_code_is_ui_free() -> 
 
 
 def test_ipo_owned_code_and_tests_keep_beginner_friendly_docstrings() -> None:
-    """Prevent later IPO edits from silently eroding the requested teaching layer."""
-    files = list(IPO_PACKAGE.rglob("*.py"))
-    files.extend(
-        [
-            ROOT / "backend" / "jobs" / "scan_ipo_filings.py",
-            ROOT / "backend" / "storage" / "ipo_repository.py",
-        ]
-    )
-    files.extend((ROOT / "migrations" / "versions").glob("*ipo*.py"))
-    files.extend((ROOT / "tests").glob("test_ipo*.py"))
-    files.append(ROOT / "tests" / "test_scan_ipo_filings_job.py")
+    """Require a docstring on every IPO-owned definition, including test fakes.
 
+    This structural check proves coverage, not writing quality. Human review is
+    still responsible for rejecting tautologies such as "provide the foo step";
+    the AST guard simply ensures no future helper silently loses the teaching
+    layer altogether.
+    """
     missing: list[str] = []
-    for path in sorted(set(files)):
+    for path in _full_documentation_targets():
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         if ast.get_docstring(tree) is None:
             missing.append(f"{path.relative_to(ROOT).as_posix()}:1 module")
-        for definition in _public_definitions(tree):
+        for definition in _documented_definitions(tree):
+            if ast.get_docstring(definition) is None:
+                missing.append(
+                    f"{path.relative_to(ROOT).as_posix()}:{definition.lineno} "
+                    f"{definition.name}"
+                )
+
+    for path in sorted(SHARED_DOCUMENTATION_TARGETS):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for definition in _shared_ipo_definitions(path, tree):
             if ast.get_docstring(definition) is None:
                 missing.append(
                     f"{path.relative_to(ROOT).as_posix()}:{definition.lineno} "

@@ -65,7 +65,7 @@ from backend.storage import IpoRecommendation, IpoScore
 
 
 def _issue_data(**overrides: object) -> IpoIssueData:
-    """Provide the issue data step used by the IPO workflow."""
+    """Build the reusable issue data fixture used by the scenarios below."""
     values: dict[str, object] = {
         "company_name": "Example Ltd",
         "issue_type": IpoIssueType.MAINBOARD,
@@ -85,7 +85,7 @@ def _issue_data(**overrides: object) -> IpoIssueData:
 
 
 def test_issue_crud_returns_detached_typed_records(file_session_factory) -> None:
-    """Verify that issue crud returns detached typed records."""
+    """Pin issue crud returns detached typed records as an executable IPO regression contract."""
     created = create_issue(_issue_data(), session_factory=file_session_factory)
 
     assert created.id > 0
@@ -109,7 +109,7 @@ def test_issue_crud_returns_detached_typed_records(file_session_factory) -> None
 
 
 def test_list_issues_uses_stable_open_date_then_company_order(file_session_factory) -> None:
-    """Verify that list issues uses stable open date then company order."""
+    """Pin list issues uses stable open date then company order as an executable IPO regression contract."""
     later = create_issue(
         _issue_data(company_name="Zulu Ltd", open_date=dt.date(2026, 8, 1), close_date=None),
         session_factory=file_session_factory,
@@ -131,13 +131,13 @@ def test_list_issues_uses_stable_open_date_then_company_order(file_session_facto
 
 
 def test_update_missing_issue_raises_typed_not_found(file_session_factory) -> None:
-    """Verify that update missing issue raises typed not found."""
+    """Pin update missing issue raises typed not found as an executable IPO regression contract."""
     with pytest.raises(IpoNotFoundError, match="IPO issue 999"):
         update_issue(999, _issue_data(), session_factory=file_session_factory)
 
 
 def _document_data(**overrides: object) -> IpoDocumentData:
-    """Provide the document data step used by the IPO workflow."""
+    """Build the reusable document data fixture used by the scenarios below."""
     values: dict[str, object] = {
         "document_type": "rhp",
         "document_url": "https://www.sebi.gov.in/example-rhp.pdf",
@@ -149,7 +149,7 @@ def _document_data(**overrides: object) -> IpoDocumentData:
 
 
 def test_document_crud_is_scoped_to_its_parent_issue(file_session_factory) -> None:
-    """Verify that document crud is scoped to its parent issue."""
+    """Pin document crud is scoped to its parent issue as an executable IPO regression contract."""
     issue = create_issue(_issue_data(), session_factory=file_session_factory)
     other = create_issue(
         _issue_data(company_name="Other Ltd"), session_factory=file_session_factory
@@ -189,7 +189,7 @@ def test_document_crud_is_scoped_to_its_parent_issue(file_session_factory) -> No
 
 
 def test_create_document_requires_an_existing_issue(file_session_factory) -> None:
-    """Verify that create document requires an existing issue."""
+    """Pin create document requires an existing issue as an executable IPO regression contract."""
     with pytest.raises(IpoNotFoundError, match="IPO issue 999"):
         create_document(999, _document_data(), session_factory=file_session_factory)
 
@@ -222,6 +222,7 @@ def test_download_document_closes_read_transaction_before_downloader(
 
     @contextmanager
     def tracked_session_factory():
+        """Count open sessions so the downloader can assert the lock-free gap."""
         nonlocal active_transactions
         with file_session_factory() as session:
             active_transactions += 1
@@ -231,6 +232,7 @@ def test_download_document_closes_read_transaction_before_downloader(
                 active_transactions -= 1
 
     def fake_downloader(record, **_kwargs: object) -> IpoDocumentDownloadResult:
+        """Return verified metadata only after proving no session remains open."""
         assert active_transactions == 0
         return _download_result(record.id)
 
@@ -262,9 +264,11 @@ def test_download_failure_clears_metadata_records_safe_audit_and_reraises(
     audits: list[dict[str, Any]] = []
 
     def failing_downloader(*_args: object, **_kwargs: object) -> IpoDocumentDownloadResult:
+        """Model a categorized network failure without unsafe exception text."""
         raise IpoDocumentDownloadError(IpoDocumentDownloadErrorCode.NETWORK_ERROR)
 
     def capture_audit(**kwargs: Any) -> bool:
+        """Capture the secondary audit call for exact secret-safe assertions."""
         audits.append(kwargs)
         return True
 
@@ -307,6 +311,7 @@ def test_final_offer_is_rejected_without_calling_downloader(
     called = False
 
     def forbidden_downloader(*_args: object, **_kwargs: object) -> IpoDocumentDownloadResult:
+        """Fail loudly if unsupported final-offer metadata reaches networking."""
         nonlocal called
         called = True
         raise AssertionError("downloader must not be called")
@@ -473,7 +478,7 @@ def test_audit_sink_failure_does_not_hide_authoritative_download_status(
 def test_financial_crud_normalizes_secret_safe_metrics_and_source_ownership(
     file_session_factory,
 ) -> None:
-    """Verify that financial crud normalizes secret safe metrics and source ownership."""
+    """Keep financial JSON secret-safe and document provenance issue-scoped."""
     issue = create_issue(_issue_data(), session_factory=file_session_factory)
     other = create_issue(
         _issue_data(company_name="Other Ltd"), session_factory=file_session_factory
@@ -543,7 +548,7 @@ def test_financial_crud_normalizes_secret_safe_metrics_and_source_ownership(
 
 
 def _subscription_data(**overrides: object) -> IpoSubscriptionData:
-    """Provide the subscription data step used by the IPO workflow."""
+    """Build the reusable subscription data fixture used by the scenarios below."""
     values: dict[str, object] = {
         "captured_at": dt.datetime(2026, 7, 2, 10, 30, tzinfo=dt.UTC),
         "qib_multiple": Decimal("25.50"),
@@ -560,7 +565,7 @@ def _subscription_data(**overrides: object) -> IpoSubscriptionData:
 def test_subscription_crud_is_timestamp_ordered_and_parent_scoped(
     file_session_factory,
 ) -> None:
-    """Verify that subscription crud is timestamp ordered and parent scoped."""
+    """Pin subscription crud is timestamp ordered and parent scoped as an executable IPO regression contract."""
     issue = create_issue(_issue_data(), session_factory=file_session_factory)
     first = create_subscription(
         issue.id, _subscription_data(), session_factory=file_session_factory
@@ -595,8 +600,9 @@ def test_subscription_crud_is_timestamp_ordered_and_parent_scoped(
 
 
 def _score_input(company_name: str = "Example Ltd") -> IpoScoreInput:
-    """Provide the score input step used by the IPO workflow."""
+    """Build one complete deterministic score input tied to a registered URL."""
     def factor(score: object | None, reason: str) -> FactorAssessment:
+        """Keep seven test factors concise while retaining readable reasons."""
         return FactorAssessment(score=score, reason=reason)
 
     return IpoScoreInput(
@@ -615,7 +621,7 @@ def _score_input(company_name: str = "Example Ltd") -> IpoScoreInput:
 def test_evaluation_history_is_immutable_ordered_and_deletable_as_a_pair(
     file_session_factory,
 ) -> None:
-    """Verify that evaluation history is immutable ordered and deletable as a pair."""
+    """Pin evaluation history is immutable ordered and deletable as a pair as an executable IPO regression contract."""
     issue = create_issue(_issue_data(), session_factory=file_session_factory)
     create_document(issue.id, _document_data(), session_factory=file_session_factory)
 
@@ -647,7 +653,7 @@ def test_evaluation_history_is_immutable_ordered_and_deletable_as_a_pair(
 def test_get_latest_recommendation_handles_missing_issue_and_empty_history(
     file_session_factory,
 ) -> None:
-    """Verify that get latest recommendation handles missing issue and empty history."""
+    """Distinguish a missing issue from a valid issue with no evaluation yet."""
     with pytest.raises(IpoNotFoundError, match="IPO issue 999"):
         get_latest_recommendation(999, session_factory=file_session_factory)
 
@@ -671,7 +677,7 @@ def test_get_latest_recommendation_handles_missing_issue_and_empty_history(
 def test_evaluation_rejects_company_or_document_provenance_mismatch(
     file_session_factory,
 ) -> None:
-    """Verify that evaluation rejects company or document provenance mismatch."""
+    """Pin evaluation rejects company or document provenance mismatch as an executable IPO regression contract."""
     issue = create_issue(_issue_data(), session_factory=file_session_factory)
 
     with pytest.raises(IpoValidationError, match="company_name"):
@@ -685,7 +691,7 @@ def test_evaluation_rejects_company_or_document_provenance_mismatch(
 def test_evaluation_score_and_verdict_rollback_together(
     file_session_factory, monkeypatch
 ) -> None:
-    """Verify that evaluation score and verdict rollback together."""
+    """Pin evaluation score and verdict rollback together as an executable IPO regression contract."""
     from backend.ipo import repository as ipo_repository
 
     issue = create_issue(_issue_data(), session_factory=file_session_factory)
@@ -693,6 +699,7 @@ def test_evaluation_score_and_verdict_rollback_together(
     real_builder = ipo_repository.build_recommendation
 
     def invalid_builder(score_result) -> IpoRecommendationResult:
+        """Create a verdict that violates the recommendation-type CHECK."""
         valid = real_builder(score_result)
         return IpoRecommendationResult(
             company_name=valid.company_name,

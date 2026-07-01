@@ -41,7 +41,12 @@ _METADATA_CHECK = (
 
 
 def upgrade() -> None:
-    """Add nullable cache provenance while preserving every metadata-only row."""
+    """Add constrained cache provenance while preserving metadata-only rows.
+
+    No content-hash index is created because cache lookup addresses the filesystem
+    directly by digest. The grouped CHECK ensures callers cannot persist a path,
+    hash, or timestamp separately and accidentally make partial bytes look valid.
+    """
     with op.batch_alter_table("ipo_documents") as batch_op:
         batch_op.add_column(sa.Column("content_sha256", sa.String(length=64), nullable=True))
         batch_op.add_column(sa.Column("downloaded_at", sa.DateTime(timezone=True), nullable=True))
@@ -69,7 +74,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Remove IPO-003 columns only when doing so cannot discard cache history."""
+    """Refuse to remove IPO-003 columns while any cache receipt would be lost."""
     protected_rows = op.get_bind().execute(
         sa.text(
             "SELECT COUNT(*) FROM ipo_documents WHERE "
