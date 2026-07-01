@@ -21,6 +21,7 @@ def _score_result(
     *,
     missing_data: tuple[str, ...] = (),
 ) -> IpoScoreResult:
+    """Provide the score result step used by the IPO workflow."""
     return IpoScoreResult(
         company_name="Example Ltd",
         score=Decimal(score),
@@ -47,6 +48,7 @@ def test_verdict_uses_the_exact_pdf_score_bands(
     recommendation: Recommendation,
     recommendation_type: str,
 ) -> None:
+    """Verify that verdict uses the exact pdf score bands."""
     result = build_recommendation(_score_result(score))
 
     assert result.recommendation is recommendation
@@ -64,6 +66,7 @@ def test_verdict_uses_the_exact_pdf_score_bands(
     ],
 )
 def test_missing_critical_data_forces_a_fail_closed_verdict(critical_factor: str) -> None:
+    """Verify that missing critical data forces a fail closed verdict."""
     result = build_recommendation(_score_result("90", missing_data=(critical_factor,)))
 
     assert result.recommendation is Recommendation.NOT_RECOMMENDED
@@ -85,12 +88,14 @@ def test_missing_critical_data_forces_a_fail_closed_verdict(critical_factor: str
 def test_confidence_reflects_factor_completeness(
     missing_data: tuple[str, ...], confidence: Confidence
 ) -> None:
+    """Verify that confidence reflects factor completeness."""
     assert build_recommendation(
         _score_result("78", missing_data=missing_data)
     ).confidence is confidence
 
 
 def test_json_contract_has_exact_keys_and_json_native_values() -> None:
+    """Verify that json contract has exact keys and json native values."""
     payload = build_recommendation(_score_result("78")).to_dict()
 
     assert payload == {

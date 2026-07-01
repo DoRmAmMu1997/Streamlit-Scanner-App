@@ -27,6 +27,8 @@ The backend also inventories official SEBI DRHP, RHP, and final-offer listings
 and stores immutable IPO score/recommendation history. IPO filing ingestion and
 evaluation are explicit headless operations; they are not exposed in Streamlit,
 and ingestion does not download PDFs or automatically derive factor scores.
+The separate IPO-003 repository service may explicitly download a registered
+DRHP/RHP into a verified local cache; it does not parse or score that PDF.
 
 ## 2. Goals & requirements
 
@@ -132,7 +134,7 @@ flowchart TB
 | Screener catalog | [screener-catalog](components/screener-catalog.md) | The 10 strategies |
 | Scan service & provenance | [scan-service-and-provenance](components/scan-service-and-provenance.md) | `run_scan` lifecycle + strict result/provenance contract + AI evaluation receipts |
 | Ranking scorer | [scoring](components/scoring.md) | RANK-002 additive `final_score` scorer, score receipts, cache-only liquidity/risk, UI component breakdown |
-| IPO Screener (domain + filing ingestion) | [ipo-screener](components/ipo-screener.md) ([IPO-001](ipo-001-domain-score-contract.md), [IPO-002](ipo-002-sebi-filing-ingestion.md)) | Official-SEBI filing inventory, normalized source facts, fixed-weight scorecard, binary fail-closed recommendations, immutable evaluation history |
+| IPO Screener (domain + filing ingestion + cache) | [ipo-screener](components/ipo-screener.md) ([IPO-001](ipo-001-domain-score-contract.md), [IPO-002](ipo-002-sebi-filing-ingestion.md), [IPO-003](ipo-003-document-downloader-cache.md)) | Official-SEBI filing inventory, secure content-addressed DRHP/RHP cache, normalized source facts, fail-closed recommendations, immutable evaluation history |
 | Storage & persistence | [storage-persistence](components/storage-persistence.md) | Shared ORM/engine/session/Alembic layer, scan/audit/config/role/validation tables, six `ipo_*` tables, and isolated scan-history/IPO query modules |
 | Scan comparison | [scan-comparison](components/scan-comparison.md) | JOB-003 latest-vs-previous shortlist read model over `scan_runs`/`scan_results` + finalized-run helpers |
 | Forward-return validation | [validation](components/validation.md) | VALID-002 calculator/service, VALID-003A/004 aggregate/dashboard metrics for `signal_forward_returns` rows, the read-only Validation / Signal Performance dashboard, and the headless compute job |
@@ -228,12 +230,33 @@ and creates a secret-safe system audit containing only category/date context and
 exception class. The source inventories filing-detail URLs and publication dates
 without downloading or parsing prospectus PDFs.
 
+### 6e. Explicit IPO document download
+
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant Repo as ipo.repository
+    participant DB as ipo_documents
+    participant SEBI as Official SEBI detail/PDF
+    participant Cache as DATA_DIR/ipo/documents
+    Caller->>Repo: download_document(issue_id, document_id)
+    Repo->>DB: read and detach source row
+    Repo-->>Repo: close transaction
+    Repo->>SEBI: validated, bounded requests
+    Repo->>Cache: stream/hash/fsync/atomic rename
+    Repo->>DB: short success or failure transaction
+```
+
+IPO-003 is not called by IPO-002. It is an explicit backend operation so listing
+inventory remains cheap and idempotent, while PDF retrieval has a separately
+reviewable SSRF, resource-limit, filesystem, and provenance boundary.
+
 ## 7. Cross-cutting concerns
 
 - **Auth** — one gate at the top of `main()`; nothing renders before it. ([authentication](components/authentication.md))
-- **Observability** — named structured events and JSON in production are identical across every entrypoint. IPO-002 adds scan-started/completed and category-completed/failed events with bounded fields only. ([observability](components/observability.md))
+- **Observability** — named structured events and JSON in production are identical across every entrypoint. IPO-002 adds filing lifecycle events; IPO-003 adds document-download completion/failure events with bounded identifiers and safe error codes only. ([observability](components/observability.md))
 - **Audit trail (OBS-003)** — important user actions (sign-ins, manual scans, the startup data refresh, config changes, CSV exports, admin-page access) are recorded to a durable `audit_logs` table with the actor email, a UTC timestamp, and redacted metadata. IPO category failures add system audit rows with `user_email=NULL`; successful categories remain log-only. Recording is best-effort (never breaks the action) and routes through the same redactor as scan provenance; admins browse it in an in-app viewer. ([audit-log](components/audit-log.md))
-- **Security** — secret redaction on every sink (logs, UI errors, persisted messages); SSRF guards on scraped fetches; CSV-injection escaping; a shared prompt-injection quarantine (TEST-003) that scans external evidence before model exposure and fails the AI screeners closed on a hit. The SEBI client is stricter than generic provenance validation: fixed exact HTTPS hosts, manual bounded redirects, response/page caps, and fail-closed parsing. ([security](components/security.md), [ipo-screener](components/ipo-screener.md))
+- **Security** — secret redaction on every sink (logs, UI errors, persisted messages); SSRF guards on scraped fetches; CSV-injection escaping; and fail-closed AI evidence handling. SEBI listing and document clients use exact HTTPS hosts, public DNS checks where stored URLs become requests, manual bounded redirects, response caps, and hostile-input parsing. ([security](components/security.md), [ipo-screener](components/ipo-screener.md))
 - **Persistence, provenance, comparison, and validation** — every shortlisted row carries a deterministic receipt (PROV-002: `triggered_rules` + `indicator_values` + `source`, built by `BaseScanner.build_provenance`); AI screeners add a tamper-evident verdict receipt (PROV-003: model, semantic prompt version, prompt/evidence/context SHA-256, sanitized source URLs — never raw scraped/model text) persisted to the `ai_evaluations` ledger. JOB-003 compares the latest finalized shortlist with the immediately previous finalized shortlist per screener/universe pair. VALID-002 computes per-signal forward returns into `signal_forward_returns` without re-running the screener, VALID-003A/004 aggregate those stored rows into screener/universe/horizon performance metrics and dashboard slices, VALID-003B/004 surface them in a read-only Validation / Signal Performance dashboard, and VALID-004 adds the headless compute job for pending rows. ([scan-service-and-provenance](components/scan-service-and-provenance.md), [storage-persistence](components/storage-persistence.md), [validation](components/validation.md))
 - **Caching** — Parquet candle cache (incremental), per-day AI verdict cache (**HMAC-signed and verified before reuse** — a tampered entry is rejected and recomputed), per-session chart cache, 30/60s Streamlit data caches.
 - **Graceful AI degradation** — cheap gate first; if the SDK/SerpAPI is absent, Technical Analysis falls back to a gate-only BUY while 67 Ka Funda skips the candidate (partial run) — neither crashes the scan. Approved, rejected, **and** error AI decisions are all recorded in `ai_evaluations` for audit.
@@ -248,7 +271,8 @@ Python 3.11+ · Streamlit · pandas / pyarrow · SQLAlchemy 2 + Alembic · `dhan
 
 Runtime data under `DATA_DIR` (default `./data`, git-ignored):
 `cache/daily/*.parquet` (candles), `cache/fundamentals/` (JSON data +
-verdicts + concall PDFs), `universes/*.csv`, and `scanner.db` (SQLite). Scan
+verdicts + concall PDFs), `ipo/documents/<sha256>.pdf` (verified IPO cache),
+`universes/*.csv`, and `scanner.db` (SQLite). Scan
 history = `scan_runs` (1) ──< `scan_results` (many), `scan_runs` (1) ──<
 `ai_evaluations` (many — the AI verdict ledger of
 approved/rejected/error receipts), and `scan_results` (1) ──<
@@ -264,7 +288,8 @@ IPO tables: `ipo_issues` is the cascade root for `ipo_documents`,
 exactly one immutable `ipo_recommendations` row. Score/recommendation creation is
 atomic. IPO-002 adds nullable SEBI identity and filing metadata so legacy/manual
 rows remain valid. Designs: [OBS-003](obs-003-audit-log.md),
-[IPO Screener](components/ipo-screener.md).
+[IPO Screener](components/ipo-screener.md), and
+[IPO-003 cache](ipo-003-document-downloader-cache.md).
 
 ## 10. Deployment & runtime
 

@@ -35,6 +35,7 @@ def _filing(
     document_url: str = "https://www.sebi.gov.in/filings/example-drhp.html",
     record_hash: str | None = None,
 ) -> IpoFilingData:
+    """Provide the filing step used by the IPO workflow."""
     smid = {"drhp": 10, "rhp": 11, "final_offer": 12}[document_type]
     status = {
         "drhp": IpoStatus.DRHP_FILED,
@@ -62,6 +63,7 @@ def _filing(
 def test_ingest_creates_issue_document_and_is_repeat_run_idempotent(
     file_session_factory,
 ) -> None:
+    """Verify that ingest creates issue document and is repeat run idempotent."""
     filing = _filing()
 
     first = ingest_filings((filing,), session_factory=file_session_factory)
@@ -83,6 +85,7 @@ def test_ingest_creates_issue_document_and_is_repeat_run_idempotent(
 def test_later_documents_advance_status_but_older_filings_never_regress_it(
     file_session_factory,
 ) -> None:
+    """Verify that later documents advance status but older filings never regress it."""
     ingest_filings((_filing(),), session_factory=file_session_factory)
     ingest_filings(
         (
@@ -111,6 +114,7 @@ def test_later_documents_advance_status_but_older_filings_never_regress_it(
 
 
 def test_single_case_insensitive_legacy_company_is_claimed_once(file_session_factory) -> None:
+    """Verify that single case insensitive legacy company is claimed once."""
     legacy = create_issue(
         IpoIssueData(
             company_name="EXAMPLE LIMITED",
@@ -135,6 +139,7 @@ def test_single_case_insensitive_legacy_company_is_claimed_once(file_session_fac
 def test_cross_issue_fingerprint_or_url_conflict_rolls_back_whole_batch(
     file_session_factory,
 ) -> None:
+    """Verify that cross issue fingerprint or url conflict rolls back whole batch."""
     owner = create_issue(
         IpoIssueData(
             company_name="Owner Limited",
@@ -184,6 +189,7 @@ def test_cross_issue_fingerprint_or_url_conflict_rolls_back_whole_batch(
 def test_same_issue_url_match_claims_missing_fingerprint_and_updates_metadata(
     file_session_factory,
 ) -> None:
+    """Verify that same issue url match claims missing fingerprint and updates metadata."""
     issue = create_issue(
         IpoIssueData(
             company_name="Example Limited",
@@ -213,6 +219,7 @@ def test_same_issue_url_match_claims_missing_fingerprint_and_updates_metadata(
 
 
 def test_latest_filing_date_is_the_global_ingestion_watermark(file_session_factory) -> None:
+    """Verify that latest filing date is the global ingestion watermark."""
     assert get_latest_filing_date(session_factory=file_session_factory) is None
     ingest_filings(
         (

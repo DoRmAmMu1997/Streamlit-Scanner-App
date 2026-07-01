@@ -21,6 +21,7 @@ def _big_int_primary_key() -> sa.BigInteger:
 
 
 def _source_confidence_constraint(table: str) -> sa.CheckConstraint:
+    """Provide the source confidence constraint step used by the IPO workflow."""
     return sa.CheckConstraint(
         "source_confidence IN ('low', 'medium', 'high')",
         name=f"ck_{table}_source_confidence",

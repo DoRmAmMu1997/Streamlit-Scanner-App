@@ -75,6 +75,7 @@ def category_listing_url(category: SebiFilingCategory) -> str:
 
 
 def _canonical_sebi_url(value: str, *, base_url: str | None = None) -> str:
+    """Provide the canonical sebi url step used by the IPO workflow."""
     candidate = urljoin(base_url or AJAX_URL, value.strip())
     parsed = urlsplit(candidate)
     host = (parsed.hostname or "").casefold()
@@ -133,6 +134,7 @@ def normalize_company_identity(title: str) -> tuple[str, str, IpoIssueType]:
 
 def _extract_title(anchor: Any) -> str:
     # Parse a copy so removing nested PDF anchors cannot mutate the caller's tree.
+    """Provide the extract title step used by the IPO workflow."""
     copy = BeautifulSoup(str(anchor), "html.parser").find("a")
     if copy is None:
         return ""
@@ -142,6 +144,7 @@ def _extract_title(anchor: Any) -> str:
 
 
 def _pagination_value(soup: BeautifulSoup, name: str, default: int) -> int:
+    """Provide the pagination value step used by the IPO workflow."""
     element = soup.find(id=lambda value: isinstance(value, str) and value.casefold() == name.casefold())
     raw = element.get("value") if element is not None else None
     if raw is None:
@@ -251,6 +254,7 @@ def build_filing_data(filing: SebiFiling) -> IpoFilingData:
 
 
 def _read_bounded_html(response: Any) -> str:
+    """Provide the read bounded html step used by the IPO workflow."""
     content_type = str(response.headers.get("Content-Type", "")).casefold()
     if "text/html" not in content_type:
         raise SebiSourceError("SEBI response had an unexpected content type.")
@@ -280,6 +284,7 @@ def _request_following_redirects(
     url: str,
     data: dict[str, str] | None,
 ) -> Any:
+    """Provide the request following redirects step used by the IPO workflow."""
     current_method = method
     current_url = _canonical_sebi_url(url)
     current_data = data
@@ -315,6 +320,7 @@ def _fetch_page(
     payload: dict[str, str],
     sleeper: Callable[[float], None],
 ) -> str:
+    """Provide the fetch page step used by the IPO workflow."""
     for attempt in range(len(RETRY_DELAYS_SECONDS) + 1):
         response = None
         try:

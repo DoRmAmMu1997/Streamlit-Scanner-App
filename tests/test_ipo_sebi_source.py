@@ -22,6 +22,7 @@ from backend.ipo.sources.sebi import (
 
 
 def _page(*rows: str, total_pages: int = 1, next_value: int = 1) -> str:
+    """Provide the page step used by the IPO workflow."""
     return (
         "<table>"
         + "".join(rows)
@@ -32,6 +33,7 @@ def _page(*rows: str, total_pages: int = 1, next_value: int = 1) -> str:
 
 
 def _row(date: str, title: str, detail: str = "/filings/example.html") -> str:
+    """Provide the row step used by the IPO workflow."""
     return (
         f"<tr><td>{date}</td><td>"
         f'<a href="{detail}">{title}<br>'
@@ -41,6 +43,7 @@ def _row(date: str, title: str, detail: str = "/filings/example.html") -> str:
 
 
 class FakeResponse:
+    """Provide the FakeResponse step used by the IPO workflow."""
     def __init__(
         self,
         body: str = "",
@@ -49,6 +52,7 @@ class FakeResponse:
         url: str = AJAX_URL,
         headers: dict[str, str] | None = None,
     ) -> None:
+        """Initialize the deterministic FakeResponse test double without live I/O."""
         self.body = body.encode()
         self.status_code = status_code
         self.url = url
@@ -56,19 +60,24 @@ class FakeResponse:
         self.closed = False
 
     def iter_content(self, chunk_size: int) -> Iterator[bytes]:
+        """Provide the iter content step used by the IPO workflow."""
         del chunk_size
         yield self.body
 
     def close(self) -> None:
+        """Provide the close step used by the IPO workflow."""
         self.closed = True
 
 
 class FakeSession:
+    """Provide the FakeSession step used by the IPO workflow."""
     def __init__(self, outcomes: list[FakeResponse | Exception]) -> None:
+        """Initialize the deterministic FakeSession test double without live I/O."""
         self.outcomes = outcomes
         self.calls: list[tuple[str, str, dict[str, object]]] = []
 
     def request(self, method: str, url: str, **kwargs: object) -> FakeResponse:
+        """Provide the request step used by the IPO workflow."""
         self.calls.append((method, url, kwargs))
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
@@ -117,6 +126,7 @@ def test_company_identity_normalizes_markers_suffixes_and_explicit_sme(
     expected_key: str,
     expected_type: IpoIssueType,
 ) -> None:
+    """Verify that company identity normalizes markers suffixes and explicit sme."""
     assert normalize_company_identity(title) == (
         expected_name,
         expected_key,
@@ -128,6 +138,7 @@ def test_company_identity_normalizes_markers_suffixes_and_explicit_sme(
 def test_parse_listing_page_uses_outer_detail_anchor_for_every_category(
     category: SebiFilingCategory,
 ) -> None:
+    """Verify that parse listing page uses outer detail anchor for every category."""
     parsed = parse_listing_page(
         _page(_row("Jun 26, 2026", "Example Limited - Prospectus")),
         category=category,
@@ -142,6 +153,7 @@ def test_parse_listing_page_uses_outer_detail_anchor_for_every_category(
 
 
 def test_build_filing_data_maps_category_and_produces_stable_fingerprint() -> None:
+    """Verify that build filing data maps category and produces stable fingerprint."""
     parsed = parse_listing_page(
         _page(_row("Jun 26, 2026", "Example Ltd - RHP")),
         category=SebiFilingCategory.RHP,
@@ -165,6 +177,7 @@ def test_build_filing_data_maps_category_and_produces_stable_fingerprint() -> No
     ],
 )
 def test_nonempty_malformed_pages_fail_closed(body: str) -> None:
+    """Verify that nonempty malformed pages fail closed."""
     with pytest.raises(SebiParseError):
         parse_listing_page(
             body,
@@ -174,6 +187,7 @@ def test_nonempty_malformed_pages_fail_closed(body: str) -> None:
 
 
 def test_fetch_paginates_filters_dates_and_uses_expected_ajax_payload() -> None:
+    """Verify that fetch paginates filters dates and uses expected ajax payload."""
     first = FakeResponse(
         _page(
             _row("Jun 30, 2026", "Newest Limited - DRHP", "/filings/newest.html"),
@@ -209,6 +223,7 @@ def test_fetch_paginates_filters_dates_and_uses_expected_ajax_payload() -> None:
 
 
 def test_fetch_retries_timeout_and_429_then_closes_every_response() -> None:
+    """Verify that fetch retries timeout and 429 then closes every response."""
     throttled = FakeResponse(status_code=429)
     session = FakeSession(
         [
@@ -233,6 +248,7 @@ def test_fetch_retries_timeout_and_429_then_closes_every_response() -> None:
 
 
 def test_fetch_rejects_cross_host_redirect_and_closes_response() -> None:
+    """Verify that fetch rejects cross host redirect and closes response."""
     redirect = FakeResponse(
         status_code=302,
         headers={"Location": "https://evil.example/steal"},
@@ -251,6 +267,7 @@ def test_fetch_rejects_cross_host_redirect_and_closes_response() -> None:
 
 
 def test_fetch_rejects_non_html_oversized_and_excessive_pagination() -> None:
+    """Verify that fetch rejects non html oversized and excessive pagination."""
     non_html = FakeResponse(headers={"Content-Type": "application/pdf"})
     with pytest.raises(SebiSourceError, match="content type"):
         fetch_sebi_filings(

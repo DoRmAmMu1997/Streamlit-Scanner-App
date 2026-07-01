@@ -9,10 +9,12 @@ from backend.ipo.scorecard import PDF_WEIGHTS, score_ipo
 
 
 def _factor(score: object | None, reason: str | None = None) -> FactorAssessment:
+    """Provide the factor step used by the IPO workflow."""
     return FactorAssessment(score=score, reason=reason)
 
 
 def _input(**overrides: object) -> IpoScoreInput:
+    """Provide the input step used by the IPO workflow."""
     values: dict[str, object] = {
         "company_name": "Example Ltd",
         "business_quality": _factor(100, "Market-leading business"),
@@ -29,6 +31,7 @@ def _input(**overrides: object) -> IpoScoreInput:
 
 
 def test_pdf_weights_are_the_authoritative_100_point_framework() -> None:
+    """Verify that pdf weights are the authoritative 100 point framework."""
     assert PDF_WEIGHTS == {
         "business_quality": 25,
         "financial_growth": 20,
@@ -42,6 +45,7 @@ def test_pdf_weights_are_the_authoritative_100_point_framework() -> None:
 
 
 def test_scorecard_applies_pdf_weights_without_mutating_the_input() -> None:
+    """Verify that scorecard applies pdf weights without mutating the input."""
     score_input = _input()
 
     result = score_ipo(score_input)
@@ -60,6 +64,7 @@ def test_scorecard_applies_pdf_weights_without_mutating_the_input() -> None:
 
 
 def test_missing_optional_factors_contribute_zero_without_weight_renormalization() -> None:
+    """Verify that missing optional factors contribute zero without weight renormalization."""
     result = score_ipo(
         _input(
             financial_growth=_factor(100),
@@ -78,6 +83,7 @@ def test_missing_optional_factors_contribute_zero_without_weight_renormalization
 
 
 def test_scorecard_rounds_half_up_to_two_decimal_places() -> None:
+    """Verify that scorecard rounds half up to two decimal places."""
     result = score_ipo(
         _input(
             business_quality=_factor(0),
@@ -94,6 +100,7 @@ def test_scorecard_rounds_half_up_to_two_decimal_places() -> None:
 
 
 def test_scorecard_preserves_reasons_in_pdf_factor_order() -> None:
+    """Verify that scorecard preserves reasons in pdf factor order."""
     result = score_ipo(_input())
 
     assert result.reasons == (

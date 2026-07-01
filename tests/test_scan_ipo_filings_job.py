@@ -13,6 +13,7 @@ from backend.storage import AuditLog
 
 
 def _filing(category: SebiFilingCategory) -> SebiFiling:
+    """Provide the filing step used by the IPO workflow."""
     return SebiFiling(
         category=category,
         title="Example Limited - Prospectus",
@@ -26,6 +27,7 @@ def _filing(category: SebiFilingCategory) -> SebiFiling:
 
 
 def test_default_window_overlaps_watermark_by_seven_days(file_session_factory) -> None:
+    """Verify that default window overlaps watermark by seven days."""
     job = importlib.import_module("backend.jobs.scan_ipo_filings")
     fetch_calls: list[tuple[object, object, object]] = []
     ingested: list[tuple[object, ...]] = []
@@ -56,6 +58,7 @@ def test_default_window_overlaps_watermark_by_seven_days(file_session_factory) -
 
 
 def test_empty_database_defaults_to_thirty_day_window(file_session_factory) -> None:
+    """Verify that empty database defaults to thirty day window."""
     job = importlib.import_module("backend.jobs.scan_ipo_filings")
     windows: list[tuple[dt.date | None, dt.date]] = []
 
@@ -77,6 +80,7 @@ def test_empty_database_defaults_to_thirty_day_window(file_session_factory) -> N
 
 
 def test_full_history_has_no_lower_bound(file_session_factory) -> None:
+    """Verify that full history has no lower bound."""
     job = importlib.import_module("backend.jobs.scan_ipo_filings")
     windows: list[dt.date | None] = []
 
@@ -101,6 +105,7 @@ def test_full_history_has_no_lower_bound(file_session_factory) -> None:
 def test_failed_category_is_audited_redacted_and_does_not_block_others(
     file_session_factory,
 ) -> None:
+    """Verify that failed category is audited redacted and does not block others."""
     job = importlib.import_module("backend.jobs.scan_ipo_filings")
     output = io.StringIO()
     persisted: list[SebiFilingCategory] = []
@@ -142,6 +147,7 @@ def test_failed_category_is_audited_redacted_and_does_not_block_others(
 
 
 def test_main_parses_dates_and_full_history(monkeypatch) -> None:
+    """Verify that main parses dates and full history."""
     job = importlib.import_module("backend.jobs.scan_ipo_filings")
     captured: list[dict[str, object]] = []
 
@@ -165,6 +171,7 @@ def test_main_parses_dates_and_full_history(monkeypatch) -> None:
 
 
 def test_failed_category_writes_durable_secret_safe_system_audit(file_session_factory) -> None:
+    """Verify that failed category writes durable secret safe system audit."""
     job = importlib.import_module("backend.jobs.scan_ipo_filings")
 
     def fetcher(category, _from_date, _to_date):

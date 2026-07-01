@@ -66,7 +66,7 @@ Indexes: `scan_runs(status, screener_key, universe_key)`, `scan_results(run_id, 
 
 Full design: [obs-003-audit-log.md](../obs-003-audit-log.md).
 
-### IPO-001 domain, IPO-002 filing identity, and evaluation tables
+### IPO-001 domain, IPO-002 filing identity, IPO-003 cache, and evaluation tables
 
 `ipo_issues` is the cascade root for registered `ipo_documents`, normalized
 `ipo_financials`, timestamped `ipo_subscriptions`, and immutable `ipo_scores`;
@@ -82,6 +82,15 @@ lookups match issues by company key and documents by fingerprint then URL; the
 typed repository owns monotonic lifecycle updates and category-level transaction
 boundaries. Full design:
 [ipo-002-sebi-filing-ingestion.md](../ipo-002-sebi-filing-ingestion.md).
+
+IPO-003 extends `ipo_documents` without adding a seventh IPO table:
+`content_sha256` proves the downloaded bytes, `downloaded_at` is timezone-aware
+UTC, `file_path` is relative to `DATA_DIR`, `page_count` is reserved and null,
+and `parse_status` is `not_downloaded`, `pending`, or `download_failed`.
+Portable CHECK constraints keep the metadata trio all-present only for pending
+rows and all-null otherwise. No hash index is added because IPO-003 performs no
+database lookup by content hash; the filesystem itself is addressed by digest.
+Full design: [ipo-003-document-downloader-cache.md](../ipo-003-document-downloader-cache.md).
 
 ## 4. Public interface (`repository.py`)
 
@@ -117,6 +126,17 @@ evaluation reads, and paired deletion. It returns ORM rows only to
 `backend/ipo/repository.py`; callers outside storage use the detached contracts
 documented in [ipo-screener.md](ipo-screener.md).
 
+Document download orchestration deliberately performs a read transaction,
+closes it for DNS/HTTP/filesystem work, and opens a second transaction to persist
+success or failure. This avoids holding SQLite write locks or PostgreSQL
+connections during a slow external transfer. The filesystem rename can precede
+a failed database commit, so a harmless orphan content-addressed file is an
+accepted recovery case rather than pretending the two resources are atomic.
+The second transaction performs a source URL/type compare-and-set. A source edit
+that wins during network I/O therefore leaves the revised row `not_downloaded`
+and rejects the stale result with `source_changed` instead of misattributing its
+bytes or failure status.
+
 This split is deliberate: storage enforces query shape, keys, and constraints;
 the typed IPO repository owns validation, status monotonicity, category
 transactions, scoring, verdict policy, and detached return objects.
@@ -141,11 +161,14 @@ Type-coercion helpers (`_as_date`, `_as_decimal`, `_as_optional_str`, `_is_missi
 [`migrations/`](../../../migrations) (root-level, kept out of the lint target).
 Revisions are chained linearly through `20260623auth003`, then
 `20260629ipo001` (six IPO domain/evaluation tables), and `20260630ipo002`
-(nullable SEBI company key, filing date, record hash, and `unknown` issue type).
+(nullable SEBI company key, filing date, record hash, and `unknown` issue type),
+then `20260630ipo003` (document-cache provenance and constrained status).
 The IPO-002 downgrade checks for identity data and refuses before DDL when column
 removal or issue-type narrowing would be lossy. `migrations/env.py` reads the URL
 from `get_database_url()` (no hardcoded URL). A drift test guards ORM-vs-migration
 sync, constraints, and index parity.
+The IPO-003 downgrade similarly refuses before DDL when any cache metadata or
+nondefault status would be lost.
 
 ## 7. Failure modes
 
@@ -156,6 +179,11 @@ sync, constraints, and index parity.
 - Forward-return rerun sees an existing pending row → `upsert_forward_return` updates it in place; the unique `(result_id, horizon_days)` constraint prevents duplicates.
 - IPO fingerprint or canonical URL belongs to another issue → typed validation
   aborts the category transaction; ownership is never silently changed.
+- IPO document download fails → verified provenance is cleared and
+  `download_failed` is committed; a normal explicit retry is safe.
+- IPO document source changes while a transfer is in flight → the atomic source
+  predicate rejects the stale success/failure update and preserves the revised
+  `not_downloaded` row.
 - IPO evaluation insert fails after either row is prepared → the caller-owned
   transaction rolls back both score and recommendation.
 - IPO-002 downgrade sees SEBI identity or an `unknown` issue → downgrade refuses

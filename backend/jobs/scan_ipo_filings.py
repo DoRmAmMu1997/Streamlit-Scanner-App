@@ -56,10 +56,12 @@ class IpoFilingJobOutcome:
 
     @property
     def exit_code(self) -> int:
+        """Return a nonzero process status when any category or fatal setup failed."""
         return int(self.fatal or any(item.error_type for item in self.categories))
 
 
 def _print_category(out: TextIO, outcome: IpoFilingCategoryOutcome) -> None:
+    """Provide the print category step used by the IPO workflow."""
     if outcome.error_type:
         print(
             f"[ipo-filings] category={outcome.category.value} FAILED "
@@ -202,6 +204,7 @@ def run_scan_ipo_filings(
 
 
 def _parse_iso_date(value: str) -> dt.date:
+    """Parse and validate iso date into its typed representation."""
     try:
         return dt.date.fromisoformat(value)
     except ValueError as exc:

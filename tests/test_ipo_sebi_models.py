@@ -21,6 +21,7 @@ from backend.ipo.models import (
 
 
 def test_unknown_issue_type_is_supported_by_the_domain() -> None:
+    """Verify that unknown issue type is supported by the domain."""
     issue = IpoIssueData(
         company_name="Example Limited",
         issue_type="UNKNOWN",
@@ -32,6 +33,7 @@ def test_unknown_issue_type_is_supported_by_the_domain() -> None:
 
 
 def test_sebi_filing_is_frozen_and_validates_its_date_window() -> None:
+    """Verify that sebi filing is frozen and validates its date window."""
     filing = SebiFiling(
         category=SebiFilingCategory.DRHP,
         title="Example Limited - Draft Red Herring Prospectus",
@@ -45,6 +47,7 @@ def test_sebi_filing_is_frozen_and_validates_its_date_window() -> None:
 
 
 def test_normalized_filing_requires_a_sha256_fingerprint() -> None:
+    """Verify that normalized filing requires a sha256 fingerprint."""
     with pytest.raises(IpoValidationError, match="record_hash"):
         IpoFilingData(
             company_name="Example Limited",
@@ -60,6 +63,7 @@ def test_normalized_filing_requires_a_sha256_fingerprint() -> None:
 
 
 def test_manual_issue_and_document_contracts_keep_new_fields_nullable() -> None:
+    """Verify that manual issue and document contracts keep new fields nullable."""
     issue = IpoIssueData(
         company_name="Legacy Limited",
         issue_type=IpoIssueType.MAINBOARD,
