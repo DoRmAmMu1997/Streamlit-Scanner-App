@@ -1033,8 +1033,11 @@ def main() -> None:
         "Validation / Signal Performance",
     ]
     if role_has_capability(current_role, VIEW_HEALTH):
-        # AUTH-003: the admin tier sees the operate-the-system pages — health,
-        # the runtime settings form, the audit log viewer, and role management.
+        # AUTH-003: the admin tier sees the operate-the-system pages — health, the
+        # runtime settings form, the IPO manual-extraction form, the audit log viewer,
+        # and role management. The menu is gated on VIEW_HEALTH (all admin-only), but
+        # each handler below re-checks its own specific capability as the real boundary
+        # (e.g. the IPO page requires MANAGE_IPO_DATA).
         view_options.extend(
             [
                 "Admin health",

@@ -209,11 +209,19 @@ class IpoManualExtractionData:
     a browser from claiming that another administrator entered the evidence.
     """
 
+    # Which cached document these numbers were read from. The repository re-checks it
+    # against the parent issue before insert. Actor + timestamp are deliberately
+    # absent (see the class docstring) so the browser can never supply them.
     source_document_id: int
+    # The reported scales; every monetary/share value below is expressed in these and
+    # converted to canonical units later, in the detached record.
     financial_amount_unit: IpoAmountUnit
     issue_amount_unit: IpoAmountUnit
     equity_share_unit: IpoShareUnit
+    # Exactly three annual income-statement rows (revenue/EBITDA/PAT), each sourced.
     periods: tuple[IpoManualPeriodData, ...]
+    # Balance-sheet and cash-flow singletons -- once-per-IPO facts -- each paired with
+    # the prospectus page it was read from.
     net_worth: Decimal
     net_worth_page: int
     total_debt: Decimal
@@ -228,20 +236,33 @@ class IpoManualExtractionData:
     eps_page: int
     nav_book_value: Decimal
     nav_book_value_page: int
+    # Free-text "objects of the issue" (what the raised money will fund) plus its page.
     objects_of_issue: str
     objects_of_issue_page: int
+    # Issue structure: fresh capital raised by the company vs offer-for-sale by
+    # existing shareholders.
     fresh_issue_amount: Decimal
     fresh_issue_amount_page: int
     ofs_amount: Decimal
     ofs_amount_page: int
+    # Promoter ownership before and after the issue (percentages), each with its page.
     promoter_holding_pre_issue: Decimal
     promoter_holding_pre_issue_page: int
     promoter_holding_post_issue: Decimal
     promoter_holding_post_issue_page: int
+    # One or more prospectus peer companies with allowlisted valuation ratios.
     peers: tuple[IpoPeerValuationData, ...]
 
     def __post_init__(self) -> None:
-        """Enforce completeness, chronology, numeric ranges, and provenance."""
+        """Enforce completeness, chronology, numeric ranges, and provenance.
+
+        Beginner note:
+        A frozen dataclass cannot use normal assignment in ``__post_init__`` (the
+        instance is read-only), so validated values are written back through
+        ``object.__setattr__``. That is why every normalization below uses it.
+        """
+        # ``bool`` is a subclass of ``int`` in Python, so ``True`` would otherwise pass
+        # the ``<= 0`` test and act like the id ``1``. Reject it explicitly.
         if isinstance(self.source_document_id, bool) or self.source_document_id <= 0:
             raise IpoValidationError("source_document_id must be positive.")
         financial_unit = _parse_enum(
@@ -258,6 +279,8 @@ class IpoManualExtractionData:
             raise IpoValidationError("Manual extraction requires exactly three fiscal periods.")
         if not all(isinstance(period, IpoManualPeriodData) for period in periods):
             raise IpoValidationError("periods must contain IpoManualPeriodData values.")
+        # Sort by date so the stored order is always oldest-to-newest regardless of the
+        # order the form happened to submit, then confirm the three dates are distinct.
         periods = tuple(sorted(periods, key=lambda period: period.period_end))
         if len({period.period_end for period in periods}) != 3:
             raise IpoValidationError("Fiscal periods require distinct period_end dates.")
@@ -337,12 +360,17 @@ class IpoManualExtractionRecord:
     giving a future factor-derivation service an exact and convenient input.
     """
 
+    # Database identity and the frozen source snapshot (the FK may later become NULL,
+    # but the copied URL/hashes keep the evidence self-describing).
     id: int
     issue_id: int
     source_document_id: int | None
     source_document_url: str
     source_record_hash: str | None
     source_content_sha256: str
+    # From here down this mirrors IpoManualExtractionData's reported values (kept in
+    # their original units as audit evidence) and adds the server-supplied actor and
+    # timestamp at the end. Canonical-unit access is via the properties below.
     financial_amount_unit: IpoAmountUnit
     issue_amount_unit: IpoAmountUnit
     equity_share_unit: IpoShareUnit

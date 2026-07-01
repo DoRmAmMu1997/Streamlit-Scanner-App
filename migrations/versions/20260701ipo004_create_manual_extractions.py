@@ -22,12 +22,23 @@ depends_on = None
 
 
 def _big_int_primary_key() -> sa.TypeEngine:
-    """Use BIGINT in Postgres while preserving SQLite auto-increment behavior."""
+    """Use BIGINT in Postgres while preserving SQLite auto-increment behavior.
+
+    Beginner note:
+    SQLite only auto-increments an ``INTEGER PRIMARY KEY`` (that column aliases the
+    internal rowid), so a literal ``BIGINT`` there would silently break id generation.
+    ``with_variant`` keeps a real ``BIGINT`` on Postgres while falling back to
+    ``INTEGER`` on SQLite, matching the ``BigIntPrimaryKey`` type used by the ORM.
+    """
     return sa.BigInteger().with_variant(sa.Integer(), "sqlite")
 
 
 def upgrade() -> None:
     """Create the revision header, three-period children, and peer rows."""
+    # Parent first: the child tables reference ``ipo_manual_extractions.id``, so the
+    # header must exist before their foreign keys can point at it. Every column, CHECK,
+    # unique constraint, and index below mirrors backend/storage/models.py exactly --
+    # the ORM/Alembic parity test (test_scan_storage_migrations.py) compares the two.
     op.create_table(
         "ipo_manual_extractions",
         sa.Column("id", _big_int_primary_key(), nullable=False),

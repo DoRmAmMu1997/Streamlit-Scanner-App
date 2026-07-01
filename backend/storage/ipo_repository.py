@@ -297,7 +297,14 @@ def insert_ipo_manual_extraction(
 
 
 def _manual_extraction_options() -> tuple[Any, ...]:
-    """Return eager-load options needed before detached records are built."""
+    """Return eager-load options needed before detached records are built.
+
+    Beginner note:
+    The domain layer reads ``row.periods`` and ``row.peers`` after the session has
+    closed. ``selectinload`` fetches both child collections up front (one extra query
+    each) so that later access does not trigger a lazy load on a now-detached row,
+    which SQLAlchemy would raise as a ``DetachedInstanceError``.
+    """
     return (
         selectinload(IpoManualExtraction.periods),
         selectinload(IpoManualExtraction.peers),
@@ -338,7 +345,12 @@ def list_ipo_manual_extraction_rows(
 def get_latest_ipo_manual_extraction(
     session: Session, issue_id: int
 ) -> IpoManualExtraction | None:
-    """Load only the newest complete revision for the scoring-data bridge."""
+    """Load only the newest complete revision for the scoring-data bridge.
+
+    Uses ``LIMIT 1`` with the same ``submitted_at DESC, id DESC`` ordering as
+    :func:`list_ipo_manual_extraction_rows`, so "latest" is exactly that list's first
+    row -- without materializing the whole append-only history to keep one record.
+    """
     stmt = (
         select(IpoManualExtraction)
         .where(IpoManualExtraction.issue_id == issue_id)

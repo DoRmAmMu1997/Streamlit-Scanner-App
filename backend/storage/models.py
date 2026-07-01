@@ -981,7 +981,15 @@ class IpoManualExtraction(Base):
     """
 
     __tablename__ = "ipo_manual_extractions"
+    # Every rule the Python domain enforces is mirrored here as a database CHECK, so
+    # the evidence stays trustworthy even if a future non-UI caller ever inserts rows
+    # directly. Keep each SQL string byte-identical to migration 20260701ipo004 or the
+    # ORM/Alembic parity test (test_scan_storage_migrations.py) will fail.
     __table_args__ = (
+        # The three unit columns are closed vocabularies. We store the *reported*
+        # scale (crore, lakh, ...) rather than pre-multiplying to rupees so the row
+        # stays faithful to the prospectus; conversion happens later in the domain
+        # record, never in the database.
         CheckConstraint(
             "financial_amount_unit IN ('inr', 'thousand_inr', 'lakh_inr', "
             "'million_inr', 'crore_inr')",
@@ -997,6 +1005,11 @@ class IpoManualExtraction(Base):
             "'million_shares', 'crore_shares')",
             name="ck_ipo_manual_extractions_share_unit",
         ),
+        # The copied content digest must be a 64-char lowercase hex string. SQLite has
+        # no regex, so the nested replace() calls strip every hex digit (0-9, a-f) and
+        # assert the remainder is empty -- a portable "is this pure hex?" test that
+        # runs identically on SQLite and PostgreSQL. Byte-identical to the IPO-003
+        # document check so both stay under one reviewed pattern.
         CheckConstraint(
             "length(source_content_sha256) = 64 AND "
             "source_content_sha256 = lower(source_content_sha256) AND "
@@ -1007,20 +1020,29 @@ class IpoManualExtraction(Base):
             "'b', ''), 'c', ''), 'd', ''), 'e', ''), 'f', '') = ''",
             name="ck_ipo_manual_extractions_content_hash",
         ),
+        # The SEBI filing fingerprint is optional (a manually attached document may
+        # lack one), but when present it is the same 64-char width as everywhere else.
         CheckConstraint(
             "source_record_hash IS NULL OR length(source_record_hash) = 64",
             name="ck_ipo_manual_extractions_record_hash",
         ),
+        # Fields that cannot be negative under this contract. Net worth, EBITDA, cash
+        # flow, EPS, and NAV are deliberately *absent* here because a genuine loss or
+        # negative book value is truthful evidence we must be able to record.
         CheckConstraint(
             "total_debt >= 0 AND cash >= 0 AND equity_shares > 0 AND "
             "fresh_issue_amount >= 0 AND ofs_amount >= 0",
             name="ck_ipo_manual_extractions_nonnegative",
         ),
+        # Promoter holdings are percentages, so both must fall within 0..100.
         CheckConstraint(
             "promoter_holding_pre_issue >= 0 AND promoter_holding_pre_issue <= 100 AND "
             "promoter_holding_post_issue >= 0 AND promoter_holding_post_issue <= 100",
             name="ck_ipo_manual_extractions_promoter_range",
         ),
+        # Every value carries a prospectus page citation, and a page number is always
+        # positive. Enforcing it per column makes page-level provenance non-optional
+        # at the database, not just in the form.
         CheckConstraint(
             "net_worth_page > 0 AND total_debt_page > 0 AND cash_page > 0 AND "
             "cash_flow_from_operations_page > 0 AND equity_shares_page > 0 AND "
@@ -1029,6 +1051,9 @@ class IpoManualExtraction(Base):
             "promoter_holding_pre_issue_page > 0 AND promoter_holding_post_issue_page > 0",
             name="ck_ipo_manual_extractions_pages",
         ),
+        # "Latest revision for an issue" is the hot read path (form prefill + the
+        # scoring-data bridge). This composite index serves the issue_id filter plus
+        # the submitted_at DESC, id DESC ordering without a separate sort step.
         Index(
             "ix_ipo_manual_extractions_issue_submitted",
             "issue_id",
@@ -1038,21 +1063,34 @@ class IpoManualExtraction(Base):
     )
 
     id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
+    # The owning IPO. ON DELETE CASCADE means removing an issue also removes its
+    # manual revisions -- they have no meaning without their parent company.
     issue_id: Mapped[int] = mapped_column(
         BigIntPrimaryKey, ForeignKey("ipo_issues.id", ondelete="CASCADE"), nullable=False
     )
+    # The cached DRHP/RHP these values were transcribed from. ON DELETE SET NULL lets
+    # an operator prune the document-metadata row later without erasing the revision;
+    # the URL and hashes copied just below preserve provenance after the FK is NULLed.
     source_document_id: Mapped[int | None] = mapped_column(
         BigIntPrimaryKey,
         ForeignKey("ipo_documents.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
     )
+    # Frozen source snapshot: the document URL, the optional SEBI filing fingerprint,
+    # and the exact PDF content digest are copied in at submission time so a revision
+    # stays self-describing regardless of what later happens to the document row.
     source_document_url: Mapped[str] = mapped_column(Text, nullable=False)
     source_record_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source_content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    # The scales the values were reported in (validated by the CHECK vocabularies
+    # above); the frozen domain record uses these to convert to canonical INR/shares.
     financial_amount_unit: Mapped[str] = mapped_column(String(24), nullable=False)
     issue_amount_unit: Mapped[str] = mapped_column(String(24), nullable=False)
     equity_share_unit: Mapped[str] = mapped_column(String(24), nullable=False)
+    # Money and share counts use Numeric(24, 4): exact base-10 arithmetic (never
+    # float, so rupees never drift) with room for large crore-scale figures and four
+    # decimal places. Each value is paired with a *_page column citing the prospectus.
     net_worth: Mapped[Decimal] = mapped_column(Numeric(24, 4), nullable=False)
     net_worth_page: Mapped[int] = mapped_column(Integer, nullable=False)
     total_debt: Mapped[Decimal] = mapped_column(Numeric(24, 4), nullable=False)
@@ -1073,10 +1111,15 @@ class IpoManualExtraction(Base):
     fresh_issue_amount_page: Mapped[int] = mapped_column(Integer, nullable=False)
     ofs_amount: Mapped[Decimal] = mapped_column(Numeric(24, 4), nullable=False)
     ofs_amount_page: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Promoter holdings are percentages, so Numeric(7, 4) (max 999.9999) is ample and
+    # far tighter than the crore-scale money columns above.
     promoter_holding_pre_issue: Mapped[Decimal] = mapped_column(Numeric(7, 4), nullable=False)
     promoter_holding_pre_issue_page: Mapped[int] = mapped_column(Integer, nullable=False)
     promoter_holding_post_issue: Mapped[Decimal] = mapped_column(Numeric(7, 4), nullable=False)
     promoter_holding_post_issue_page: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Actor and time come from the authenticated server session and the server clock,
+    # never from the browser form, so a revision cannot be back-dated or attributed to
+    # another administrator. submitted_at is timezone-aware and stored as UTC.
     entered_by_email: Mapped[str] = mapped_column(Text, nullable=False)
     submitted_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -1084,6 +1127,9 @@ class IpoManualExtraction(Base):
     source_document: Mapped[IpoDocument | None] = relationship(
         back_populates="manual_extractions"
     )
+    # The three annual periods and the peer rows are wholly owned by this revision.
+    # delete-orphan + passive_deletes lets the database FK cascade remove them as one
+    # unit when a revision (or its issue) is deleted, so no half-written history remains.
     periods: Mapped[list[IpoManualFinancialPeriod]] = relationship(
         back_populates="extraction", cascade="all, delete-orphan", passive_deletes=True
     )
@@ -1093,18 +1139,30 @@ class IpoManualExtraction(Base):
 
 
 class IpoManualFinancialPeriod(Base):
-    """Store one of the three annual revenue/EBITDA/PAT rows in a revision."""
+    """Store one of the three annual revenue/EBITDA/PAT rows in a revision.
+
+    Beginner note:
+    A prospectus reports three fiscal years, so the header owns exactly three of
+    these child rows. ``ordinal`` (1..3) records their chronological slot while
+    ``period_end`` records the actual date; the unique constraints below stop a form
+    bug from writing two "year 1" rows or repeating the same period twice.
+    """
 
     __tablename__ = "ipo_manual_financial_periods"
     __table_args__ = (
+        # One row per ordinal slot and one row per date within a revision: together
+        # these guarantee three distinct, correctly-numbered fiscal years.
         UniqueConstraint(
             "extraction_id", "ordinal", name="uq_ipo_manual_periods_ordinal"
         ),
         UniqueConstraint(
             "extraction_id", "period_end", name="uq_ipo_manual_periods_date"
         ),
+        # Belt-and-braces for the ordinal range; the domain also enforces "exactly 3".
         CheckConstraint("ordinal >= 1 AND ordinal <= 3", name="ck_ipo_manual_periods_ordinal"),
+        # Revenue cannot be negative; EBITDA and PAT can (a loss-making year is real).
         CheckConstraint("revenue >= 0", name="ck_ipo_manual_periods_revenue"),
+        # Each of the three values keeps its own positive prospectus page citation.
         CheckConstraint(
             "revenue_page > 0 AND ebitda_page > 0 AND pat_page > 0",
             name="ck_ipo_manual_periods_pages",
@@ -1112,6 +1170,7 @@ class IpoManualFinancialPeriod(Base):
     )
 
     id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
+    # ON DELETE CASCADE: a period only exists as part of its parent revision.
     extraction_id: Mapped[int] = mapped_column(
         BigIntPrimaryKey,
         ForeignKey("ipo_manual_extractions.id", ondelete="CASCADE"),
@@ -1120,6 +1179,7 @@ class IpoManualFinancialPeriod(Base):
     )
     ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
     period_end: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    # Same Numeric(24, 4) money type and page-citation pairing as the header columns.
     revenue: Mapped[Decimal] = mapped_column(Numeric(24, 4), nullable=False)
     revenue_page: Mapped[int] = mapped_column(Integer, nullable=False)
     ebitda: Mapped[Decimal] = mapped_column(Numeric(24, 4), nullable=False)
@@ -1131,10 +1191,21 @@ class IpoManualFinancialPeriod(Base):
 
 
 class IpoManualPeerValuation(Base):
-    """Store one peer row and its allowlisted flexible valuation metrics."""
+    """Store one peer row and its allowlisted flexible valuation metrics.
+
+    Beginner note:
+    A prospectus peer table lists other listed companies and a handful of ratios.
+    The number of ratios varies, so they live in ``metrics_json`` rather than fixed
+    columns -- but only the allowlisted keys (EPS, P/E, NAV, RoNW, EV/EBITDA,
+    Price/Sales) are accepted, and each value is stored as an exact decimal string.
+    ``company_key`` is a normalized form of the display name used purely to reject
+    accidental duplicates like "Example Ltd" vs "example-limited".
+    """
 
     __tablename__ = "ipo_manual_peer_valuations"
     __table_args__ = (
+        # De-duplicate peers within a revision by their normalized key, not their raw
+        # display name, so two spellings of the same company cannot both be stored.
         UniqueConstraint(
             "extraction_id", "company_key", name="uq_ipo_manual_peers_company"
         ),
@@ -1142,6 +1213,7 @@ class IpoManualPeerValuation(Base):
     )
 
     id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
+    # ON DELETE CASCADE: a peer row only exists as part of its parent revision.
     extraction_id: Mapped[int] = mapped_column(
         BigIntPrimaryKey,
         ForeignKey("ipo_manual_extractions.id", ondelete="CASCADE"),
@@ -1151,6 +1223,7 @@ class IpoManualPeerValuation(Base):
     company_name: Mapped[str] = mapped_column(String(255), nullable=False)
     company_key: Mapped[str] = mapped_column(String(255), nullable=False)
     source_page: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Allowlisted metric -> exact decimal string map (see the domain's IpoPeerMetric).
     metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
 
     extraction: Mapped[IpoManualExtraction] = relationship(back_populates="peers")

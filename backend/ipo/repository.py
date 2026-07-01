@@ -484,7 +484,14 @@ def download_document(
 
 
 def _manual_email(value: str) -> str:
-    """Normalize the authenticated actor email without accepting UI overrides."""
+    """Normalize the authenticated actor email without accepting UI overrides.
+
+    Beginner note:
+    This value comes from the signed-in session, never the form. We casefold it so the
+    same person is one audit identity regardless of capitalization, and apply only a
+    minimal sanity check (non-empty, within the RFC 5321 320-char limit, exactly one
+    ``@``) -- full email validation is the auth layer's job, not this adapter's.
+    """
     email = str(value).strip().casefold()
     if not email or len(email) > 320 or email.count("@") != 1:
         raise IpoValidationError("entered_by_email must be a valid authenticated email.")
@@ -537,7 +544,11 @@ def _manual_header_values(
 
 
 def _manual_period_values(data: IpoManualExtractionData) -> list[dict[str, Any]]:
-    """Build the exactly three annual child rows in chronological order."""
+    """Build the exactly three annual child rows in chronological order.
+
+    ``data.periods`` is already sorted oldest-to-newest by the domain contract, so
+    numbering them 1..3 with ``enumerate`` records a stable FY1/FY2/FY3 slot.
+    """
     return [
         {
             "ordinal": ordinal,
@@ -554,7 +565,14 @@ def _manual_period_values(data: IpoManualExtractionData) -> list[dict[str, Any]]
 
 
 def _manual_peer_values(data: IpoManualExtractionData) -> list[dict[str, Any]]:
-    """Serialize allowlisted peer metrics as exact decimal strings for JSON."""
+    """Serialize allowlisted peer metrics as exact decimal strings for JSON.
+
+    Beginner note:
+    JSON has no decimal type, and storing a ratio as a float would reintroduce the
+    binary rounding the domain worked to avoid. ``format(value, "f")`` writes the exact
+    decimal as text (e.g. ``"21.4000"``); the detached record parses it straight back
+    into ``Decimal`` on read.
+    """
     return [
         {
             "company_name": peer.company_name,
