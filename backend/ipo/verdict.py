@@ -26,12 +26,21 @@ OPTIONAL_FACTORS = ("qib_subscription", "gmp_sentiment")
 
 
 def build_recommendation(score_result: IpoScoreResult) -> IpoRecommendationResult:
-    """Map one score receipt to the binary recommendation JSON contract."""
+    """Apply score bands, mandatory-data rules, and confidence to one receipt.
+
+    The recommendation is deliberately binary. Missing any fundamental factor
+    forces ``Not Recommended`` even when the numeric total is high, because a
+    partial score must never look like positive investment advice. QIB demand
+    and GMP sentiment are optional timing signals, so their absence lowers
+    confidence without independently forcing a rejection.
+    """
     missing = set(score_result.missing_data)
     missing_critical = [name for name in CRITICAL_FACTORS if name in missing]
 
     reasons = list(score_result.reasons)
     if missing_critical:
+        # Put the safety explanation first so consumers cannot overlook why an
+        # apparently adequate numeric score was rejected.
         labels = ", ".join(name.replace("_", " ") for name in missing_critical)
         reasons.insert(0, f"Missing critical data: {labels}.")
         recommendation = Recommendation.NOT_RECOMMENDED
@@ -47,6 +56,8 @@ def build_recommendation(score_result: IpoScoreResult) -> IpoRecommendationResul
         recommendation_type = SKIP
 
     missing_optional_count = sum(name in missing for name in OPTIONAL_FACTORS)
+    # Confidence describes evidence completeness, not recommendation strength.
+    # A well-supported rejection can therefore still carry high confidence.
     if missing_critical or missing_optional_count == len(OPTIONAL_FACTORS):
         confidence = Confidence.LOW
     elif missing_optional_count == 1:

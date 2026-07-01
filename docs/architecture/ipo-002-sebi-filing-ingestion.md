@@ -5,6 +5,8 @@
 IPO-002 adds a backend-only command that inventories official SEBI DRHP, RHP,
 and final-offer listing rows. It creates or updates IPO-001 issue/document facts;
 it never downloads a prospectus, parses a PDF, calculates a score, or renders UI.
+IPO-003 later adds a separate, explicitly invoked repository service for DRHP/RHP
+downloads; this IPO-002 command remains metadata-only and never calls it.
 
 The three source categories are fixed in code. `backend/ipo/sources/sebi.py` is
 the only IPO module allowed to perform HTTP or parse hostile HTML. The headless

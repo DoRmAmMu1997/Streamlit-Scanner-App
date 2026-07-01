@@ -75,6 +75,12 @@ def category_listing_url(category: SebiFilingCategory) -> str:
 
 
 def _canonical_sebi_url(value: str, *, base_url: str | None = None) -> str:
+    """Canonicalize one official HTTPS URL or reject it before any request.
+
+    The exact host, credential, scheme, and port checks are repeated for listing
+    links and redirects. Removing fragments also ensures the record fingerprint
+    identifies a server resource rather than browser-only navigation state.
+    """
     candidate = urljoin(base_url or AJAX_URL, value.strip())
     parsed = urlsplit(candidate)
     host = (parsed.hostname or "").casefold()
@@ -132,7 +138,11 @@ def normalize_company_identity(title: str) -> tuple[str, str, IpoIssueType]:
 
 
 def _extract_title(anchor: Any) -> str:
-    # Parse a copy so removing nested PDF anchors cannot mutate the caller's tree.
+    """Read the outer filing title while ignoring nested abridged-PDF anchors.
+
+    A copy is parsed so removing nested anchors cannot mutate the caller's soup
+    tree and accidentally affect later row validation.
+    """
     copy = BeautifulSoup(str(anchor), "html.parser").find("a")
     if copy is None:
         return ""
@@ -142,6 +152,12 @@ def _extract_title(anchor: Any) -> str:
 
 
 def _pagination_value(soup: BeautifulSoup, name: str, default: int) -> int:
+    """Extract a positive SEBI pagination integer from either markup variant.
+
+    Current responses expose hidden inputs, while older fragments embed the same
+    values in surrounding text. A malformed explicit value fails closed instead
+    of silently resetting the scan to page one.
+    """
     element = soup.find(id=lambda value: isinstance(value, str) and value.casefold() == name.casefold())
     raw = element.get("value") if element is not None else None
     if raw is None:
@@ -251,6 +267,11 @@ def build_filing_data(filing: SebiFiling) -> IpoFilingData:
 
 
 def _read_bounded_html(response: Any) -> str:
+    """Stream one HTML response within the 2 MiB hostile-input budget.
+
+    ``Content-Length`` provides an early rejection, but streamed bytes are still
+    counted because that header is optional and may be dishonest.
+    """
     content_type = str(response.headers.get("Content-Type", "")).casefold()
     if "text/html" not in content_type:
         raise SebiSourceError("SEBI response had an unexpected content type.")
@@ -280,6 +301,12 @@ def _request_following_redirects(
     url: str,
     data: dict[str, str] | None,
 ) -> Any:
+    """Follow at most three redirects while revalidating every destination.
+
+    Automatic redirects are disabled so a trusted SEBI URL cannot bounce the
+    process to another host. Each intermediate response is closed before the
+    next request, and 301/302/303 switch to GET according to browser semantics.
+    """
     current_method = method
     current_url = _canonical_sebi_url(url)
     current_data = data
@@ -315,6 +342,12 @@ def _fetch_page(
     payload: dict[str, str],
     sleeper: Callable[[float], None],
 ) -> str:
+    """Fetch one AJAX page with bounded retries and guaranteed response closure.
+
+    Only transient network errors, HTTP 429, and 5xx responses are retried.
+    Permanent 4xx or malformed content fails immediately so repeated scans do
+    not amplify an invalid request.
+    """
     for attempt in range(len(RETRY_DELAYS_SECONDS) + 1):
         response = None
         try:

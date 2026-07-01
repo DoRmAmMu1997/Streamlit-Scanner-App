@@ -19,7 +19,7 @@ for *where data lives*, *which credentials exist*, *how logging renders*, and
 **Responsibilities**
 - Parse + normalize env vars (booleans, log levels, log format, email sets, paths).
 - Support legacy aliases during migration (`SCANNER_ENV`→`APP_ENV`, `DHAN_CLIENT_CODE`→`DHAN_CLIENT_ID`).
-- Derive all runtime directory paths from `DATA_DIR` (universe CSVs, parquet cache, fundamentals cache, PDFs).
+- Derive all runtime directory paths from `DATA_DIR` (universe CSVs, candle/fundamentals caches, and the IPO document cache).
 - **Fail closed in production** (`validate_production_settings`).
 - Expose secret-safe summaries (`safe_dict`, custom `__repr__`) and the list of secret values for redaction (`secret_values`).
 
@@ -54,7 +54,7 @@ working after `config.py` became the `config/` package.
 
 | Symbol | Kind | Contract |
 |---|---|---|
-| `AppSettings` | frozen dataclass | Typed config; `repr=False` + custom `__repr__` so secrets never print. Properties: `is_production`, `universe_dir`, `daily_cache_dir`, `fundamentals_cache_dir`, `fundamentals_pdf_dir`. Methods: `safe_dict()`. |
+| `AppSettings` | frozen dataclass | Typed config; `repr=False` + custom `__repr__` so secrets never print. Path properties include `universe_dir`, candle/fundamentals caches, and `ipo_document_dir = DATA_DIR/ipo/documents`. |
 | `get_settings(*, env=None, validate=False)` | fn | Build settings from `os.environ` (after `load_environment()`), or from an injected `env` mapping in tests. |
 | `validate_production_settings(settings=None)` | fn | Raise `SettingsError` if production is missing `DATABASE_URL`/`DATA_DIR`/Dhan creds, has `AUTH_REQUIRED=false`, or has no allow/admin email. |
 | `get_dhan_credentials(required=False)` | fn | `DhanCredentials | None`; raises with setup hint when `required=True` and missing. |

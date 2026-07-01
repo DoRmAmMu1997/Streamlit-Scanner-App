@@ -88,6 +88,37 @@ window again. The seven-day overlap plus deterministic fingerprints makes the
 operation idempotent. Avoid `--full-history` in routine schedules because it is
 an explicit archive-import mode bounded by the client's 200-page safety cap.
 
+## Downloading a registered IPO prospectus
+
+IPO-003 intentionally adds no command-line job or scheduler hook. A backend
+caller that already knows the parent issue and document ids explicitly invokes
+the typed repository service:
+
+```python
+from backend.ipo import download_document
+
+result = download_document(issue_id=42, document_id=108)
+print(result.file_path, result.content_sha256, result.cache_hit)
+```
+
+Only registered DRHP/RHP rows are eligible. The service validates SEBI DNS,
+every redirect, detail-page iframe shape, response type/size, PDF magic, and
+cache-path containment. It then stores the file beneath
+`DATA_DIR/ipo/documents/<sha256>.pdf`; `page_count` stays null because this sprint
+does not parse PDFs. Repeating the call rehashes a candidate cache file and uses
+it without HTTP only when the bytes still match the stored digest.
+
+On failure, the row becomes `download_failed` with no trusted file/hash metadata.
+The durable audit contains only ids, document type, and a safe error code. Fix
+the network/upstream/storage condition and call the service again. Do not delete
+hash-named files manually to repair database state: one file may be shared by
+multiple rows, and orphan cleanup is intentionally a later maintenance feature.
+If the filing URL or document type is corrected during a transfer, the service
+returns `source_changed`, preserves the revised row as `not_downloaded`, and
+requires a fresh explicit call. This is expected provenance protection rather
+than a cache failure. A secondary audit-store outage does not change the database
+status or the stable error returned to the caller.
+
 ### Scheduling on Windows (Task Scheduler)
 
 ```powershell

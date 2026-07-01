@@ -67,6 +67,7 @@ UNIVERSE_DIR = _settings.universe_dir
 DAILY_CACHE_DIR = _settings.daily_cache_dir
 FUNDAMENTALS_CACHE_DIR = _settings.fundamentals_cache_dir
 FUNDAMENTALS_PDF_DIR = _settings.fundamentals_pdf_dir
+IPO_DOCUMENT_DIR = _settings.ipo_document_dir
 
 # __all__ documents the public surface of backend.config. It also helps readers
 # see which names are intentionally supported versus merely imported as an
@@ -81,6 +82,7 @@ __all__ = [
     "ENV_PATH",
     "FUNDAMENTALS_CACHE_DIR",
     "FUNDAMENTALS_PDF_DIR",
+    "IPO_DOCUMENT_DIR",
     "NIFTY_100_URL",
     "NIFTY_500_URL",
     "PROJECT_ROOT",

@@ -37,7 +37,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class IpoFilingCategoryOutcome:
-    """Result of fetching and persisting one independently atomic category."""
+    """Describe one category's committed success or sanitized failure.
+
+    ``summary`` is present only after repository commit; ``error_type`` contains
+    a safe exception class name rather than an upstream message or response body.
+    """
 
     category: SebiFilingCategory
     fetched: int = 0
@@ -47,7 +51,12 @@ class IpoFilingCategoryOutcome:
 
 @dataclass(frozen=True)
 class IpoFilingJobOutcome:
-    """Overall command result, including partial-category failure state."""
+    """Aggregate independently processed categories into one CLI exit contract.
+
+    Successful categories remain committed when a sibling fails, but any failure
+    still produces a nonzero exit code so an operator or scheduler notices the
+    incomplete inventory.
+    """
 
     from_date: dt.date | None = None
     to_date: dt.date = field(default_factory=dt.date.today)
@@ -56,10 +65,12 @@ class IpoFilingJobOutcome:
 
     @property
     def exit_code(self) -> int:
+        """Return a nonzero process status when any category or fatal setup failed."""
         return int(self.fatal or any(item.error_type for item in self.categories))
 
 
 def _print_category(out: TextIO, outcome: IpoFilingCategoryOutcome) -> None:
+    """Write one bounded, response-body-free operator summary to the CLI stream."""
     if outcome.error_type:
         print(
             f"[ipo-filings] category={outcome.category.value} FAILED "
@@ -93,7 +104,13 @@ def run_scan_ipo_filings(
     session_factory: Any = session_scope,
     output: TextIO | None = None,
 ) -> IpoFilingJobOutcome:
-    """Fetch all fixed categories and persist each successful one independently."""
+    """Inventory all fixed SEBI categories with overlap and failure isolation.
+
+    The default lower bound overlaps the newest stored filing by seven days so a
+    late correction is revisited safely through idempotent hashes. An empty store
+    starts 30 days back; ``full_history`` alone removes the lower bound. IPO-002
+    stores metadata only—this job never invokes the IPO-003 downloader.
+    """
     out = output or sys.stdout
     upper_bound = to_date or today or dt.date.today()
     try:
@@ -135,6 +152,9 @@ def run_scan_ipo_filings(
     )
     outcomes: list[IpoFilingCategoryOutcome] = []
     for category in SebiFilingCategory:
+        # The try block intentionally surrounds exactly one category. Its
+        # repository call owns one transaction, so a malformed RHP page cannot
+        # roll back a successfully committed DRHP inventory.
         try:
             parsed = tuple(fetcher(category, lower_bound, upper_bound))
             normalized = tuple(build_filing_data(filing) for filing in parsed)
@@ -202,6 +222,7 @@ def run_scan_ipo_filings(
 
 
 def _parse_iso_date(value: str) -> dt.date:
+    """Convert one CLI YYYY-MM-DD value into a date with argparse-safe errors."""
     try:
         return dt.date.fromisoformat(value)
     except ValueError as exc:
@@ -213,7 +234,11 @@ def main(
     *,
     job_runner: Callable[..., IpoFilingJobOutcome] = run_scan_ipo_filings,
 ) -> int:
-    """Parse CLI dates/history mode and return the scheduler-facing exit code."""
+    """Parse command options, configure logs, and return the job's process code.
+
+    Dependency injection keeps argument parsing testable without live SEBI or
+    database access; the production module entry point supplies the real runner.
+    """
     parser = argparse.ArgumentParser(
         description="Inventory official SEBI DRHP, RHP, and final-offer filing listings."
     )

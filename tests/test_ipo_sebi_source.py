@@ -22,6 +22,7 @@ from backend.ipo.sources.sebi import (
 
 
 def _page(*rows: str, total_pages: int = 1, next_value: int = 1) -> str:
+    """Build the reusable page fixture used by the scenarios below."""
     return (
         "<table>"
         + "".join(rows)
@@ -32,6 +33,7 @@ def _page(*rows: str, total_pages: int = 1, next_value: int = 1) -> str:
 
 
 def _row(date: str, title: str, detail: str = "/filings/example.html") -> str:
+    """Build the reusable row fixture used by the scenarios below."""
     return (
         f"<tr><td>{date}</td><td>"
         f'<a href="{detail}">{title}<br>'
@@ -41,6 +43,8 @@ def _row(date: str, title: str, detail: str = "/filings/example.html") -> str:
 
 
 class FakeResponse:
+    """Build the reusable FakeResponse fixture used by the scenarios below."""
+
     def __init__(
         self,
         body: str = "",
@@ -49,6 +53,7 @@ class FakeResponse:
         url: str = AJAX_URL,
         headers: dict[str, str] | None = None,
     ) -> None:
+        """Initialize the deterministic FakeResponse test double without live I/O."""
         self.body = body.encode()
         self.status_code = status_code
         self.url = url
@@ -56,19 +61,25 @@ class FakeResponse:
         self.closed = False
 
     def iter_content(self, chunk_size: int) -> Iterator[bytes]:
+        """Yield the prepared body once, matching requests' streaming interface."""
         del chunk_size
         yield self.body
 
     def close(self) -> None:
+        """Record response closure so resource-lifetime assertions stay explicit."""
         self.closed = True
 
 
 class FakeSession:
+    """Build the reusable FakeSession fixture used by the scenarios below."""
+
     def __init__(self, outcomes: list[FakeResponse | Exception]) -> None:
+        """Initialize the deterministic FakeSession test double without live I/O."""
         self.outcomes = outcomes
         self.calls: list[tuple[str, str, dict[str, object]]] = []
 
     def request(self, method: str, url: str, **kwargs: object) -> FakeResponse:
+        """Return FIFO outcomes while recording the exact hardened request."""
         self.calls.append((method, url, kwargs))
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
@@ -117,6 +128,7 @@ def test_company_identity_normalizes_markers_suffixes_and_explicit_sme(
     expected_key: str,
     expected_type: IpoIssueType,
 ) -> None:
+    """Pin company identity normalizes markers suffixes and explicit sme as an executable IPO regression contract."""
     assert normalize_company_identity(title) == (
         expected_name,
         expected_key,
@@ -128,6 +140,7 @@ def test_company_identity_normalizes_markers_suffixes_and_explicit_sme(
 def test_parse_listing_page_uses_outer_detail_anchor_for_every_category(
     category: SebiFilingCategory,
 ) -> None:
+    """Pin parse listing page uses outer detail anchor for every category as an executable IPO regression contract."""
     parsed = parse_listing_page(
         _page(_row("Jun 26, 2026", "Example Limited - Prospectus")),
         category=category,
@@ -142,6 +155,7 @@ def test_parse_listing_page_uses_outer_detail_anchor_for_every_category(
 
 
 def test_build_filing_data_maps_category_and_produces_stable_fingerprint() -> None:
+    """Pin build filing data maps category and produces stable fingerprint as an executable IPO regression contract."""
     parsed = parse_listing_page(
         _page(_row("Jun 26, 2026", "Example Ltd - RHP")),
         category=SebiFilingCategory.RHP,
@@ -165,6 +179,7 @@ def test_build_filing_data_maps_category_and_produces_stable_fingerprint() -> No
     ],
 )
 def test_nonempty_malformed_pages_fail_closed(body: str) -> None:
+    """Pin nonempty malformed pages fail closed as an executable IPO regression contract."""
     with pytest.raises(SebiParseError):
         parse_listing_page(
             body,
@@ -174,6 +189,7 @@ def test_nonempty_malformed_pages_fail_closed(body: str) -> None:
 
 
 def test_fetch_paginates_filters_dates_and_uses_expected_ajax_payload() -> None:
+    """Pin fetch paginates filters dates and uses expected ajax payload as an executable IPO regression contract."""
     first = FakeResponse(
         _page(
             _row("Jun 30, 2026", "Newest Limited - DRHP", "/filings/newest.html"),
@@ -209,6 +225,7 @@ def test_fetch_paginates_filters_dates_and_uses_expected_ajax_payload() -> None:
 
 
 def test_fetch_retries_timeout_and_429_then_closes_every_response() -> None:
+    """Pin fetch retries timeout and 429 then closes every response as an executable IPO regression contract."""
     throttled = FakeResponse(status_code=429)
     session = FakeSession(
         [
@@ -233,6 +250,7 @@ def test_fetch_retries_timeout_and_429_then_closes_every_response() -> None:
 
 
 def test_fetch_rejects_cross_host_redirect_and_closes_response() -> None:
+    """Pin fetch rejects cross host redirect and closes response as an executable IPO regression contract."""
     redirect = FakeResponse(
         status_code=302,
         headers={"Location": "https://evil.example/steal"},
@@ -251,6 +269,7 @@ def test_fetch_rejects_cross_host_redirect_and_closes_response() -> None:
 
 
 def test_fetch_rejects_non_html_oversized_and_excessive_pagination() -> None:
+    """Pin fetch rejects non html oversized and excessive pagination as an executable IPO regression contract."""
     non_html = FakeResponse(headers={"Content-Type": "application/pdf"})
     with pytest.raises(SebiSourceError, match="content type"):
         fetch_sebi_filings(

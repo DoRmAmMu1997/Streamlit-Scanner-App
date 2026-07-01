@@ -2,11 +2,14 @@
 
 | | |
 |---|---|
-| **Component** | Backend-only IPO ingestion, scoring, and recommendation subsystem |
+| **Component** | Backend-only IPO ingestion, document cache, scoring, and recommendation subsystem |
 | **Source** | [`backend/ipo/`](../../../backend/ipo), [`backend/ipo/sources/sebi.py`](../../../backend/ipo/sources/sebi.py), [`backend/jobs/scan_ipo_filings.py`](../../../backend/jobs/scan_ipo_filings.py), [`backend/storage/ipo_repository.py`](../../../backend/storage/ipo_repository.py), [`backend/storage/models.py`](../../../backend/storage/models.py), [`migrations/versions/`](../../../migrations/versions) |
 | **Layer** | Standalone IPO domain (no Streamlit surface yet) |
-| **Status** | Implemented: IPO-001 (domain + scoring), IPO-002 (SEBI filing ingestion) |
+| **Status** | Implemented: IPO-001 scoring, IPO-002 filing ingestion, IPO-003 document cache |
 | **Related** | [HLD](../high-level-design.md) - [IPO-001 design](../ipo-001-domain-score-contract.md) - [IPO-002 design](../ipo-002-sebi-filing-ingestion.md) - [storage-persistence.md](storage-persistence.md) - [security.md](security.md) - [observability.md](observability.md) |
+
+IPO-003's detailed cache and failure contract is documented in
+[ipo-003-document-downloader-cache.md](../ipo-003-document-downloader-cache.md).
 
 ## 1. Purpose & responsibilities
 
@@ -19,10 +22,12 @@ landed halves that share one persistence model:
 - **Filing ingestion (IPO-002)**: a hardened, official-SEBI-only listing source
   and a headless job that inventories DRHP / RHP / final-offer filings into the
   issue/document tables.
+- **Document cache (IPO-003)**: an explicit repository service that securely
+  downloads registered DRHP/RHP PDFs into a verified content-addressed cache.
 
 **Non-responsibilities (deliberate, current scope)**
-- No prospectus download or PDF parsing. IPO-002 inventories filing-detail URLs
-  only.
+- IPO-002 never downloads prospectuses. IPO-003 downloads only through an
+  explicit service call and still performs no PDF parsing or page counting.
 - No factor-score inference from raw financials. The scorecard consumes already
   normalized 0-100 factor scores; deriving them is a later ticket.
 - No Streamlit surface. The whole subsystem is backend-only and UI-free.
@@ -46,9 +51,17 @@ flowchart LR
       Verdict["build_recommendation"]
     end
     Storage[("ipo_* tables via backend/storage")]
+    DownloadCaller["Explicit backend caller"]
+    Download["download_document"]
+    Cache[("DATA_DIR/ipo/documents/<sha256>.pdf")]
 
     Job --> Fetch
     SEBI --> Fetch --> Build --> Ingest --> Storage
+    DownloadCaller --> Download
+    Download -->|read source, close transaction| Storage
+    Download -->|validated detail + PDF requests| SEBI
+    Download -->|atomic content-addressed write| Cache
+    Download -->|persist provenance| Storage
     Caller --> Eval --> Score --> Verdict
     Eval -->|atomically persists score + verdict| Storage
 ```
@@ -65,15 +78,16 @@ never triggers a recommendation. Both paths persist only through `backend/storag
 | `backend/ipo/models.py` | Frozen DTOs, enums, validation (URLs, money, hashes). | stdlib, `backend.security`, `backend.url_safety` |
 | `backend/ipo/scorecard.py` | Fixed PDF weights, half-up rounding, missing-data receipt. | `models` |
 | `backend/ipo/verdict.py` | Score bands, confidence, fail-closed override. | `models` |
-| `backend/ipo/sources/sebi.py` | **Only** module allowed network I/O + hostile-HTML parsing. | `requests`, `bs4`, `models` |
+| `backend/ipo/sources/sebi.py` | IPO-002 listing network I/O + hostile-HTML parsing. | `requests`, `bs4`, `models` |
+| `backend/ipo/documents/downloader.py` | IPO-003 detail/PDF I/O, SSRF controls, streamed atomic cache. | `requests`, `bs4`, `models` |
 | `backend/ipo/repository.py` | Typed transactions, ingestion identity/lifecycle, atomic evaluation. | `models`, `scorecard`, `verdict`, `scanning.result_contract`, `storage` |
 | `backend/storage/ipo_repository.py` | Every SQLAlchemy statement for the `ipo_*` tables. | `sqlalchemy`, `storage.models` |
 | `backend/jobs/scan_ipo_filings.py` | CLI boundary: windows, per-category loop, exit code, audits. | `ipo`, `audit`, `observability`, `storage.database` |
 
 These rules are enforced by the AST guard
 [`tests/test_ipo_contract_policy.py`](../../../tests/test_ipo_contract_policy.py):
-no IPO module imports Streamlit, and only `backend/ipo/sources` may import a
-network client.
+no IPO module imports Streamlit, and network clients are allowed only under
+`backend/ipo/sources` plus the exact IPO-003 downloader module.
 
 ## 4. Public interface
 
@@ -86,6 +100,7 @@ network client.
 | `build_filing_data(SebiFiling) -> IpoFilingData` | Derives display name, stable `sebi_company_key`, status, and the SHA-256 fingerprint. |
 | `ingest_filings(filings, *, session_factory)` | Atomically creates/updates issues and documents for one category; returns `IpoIngestionSummary`. |
 | `get_latest_filing_date()` | Global ingestion watermark (newest persisted `filing_date`). |
+| `download_document(issue_id, document_id)` | Download or verify one registered DRHP/RHP with no database transaction held during network I/O. |
 | CRUD: `create_/get_/list_/update_/delete_*` for issues, documents, financials, subscriptions. | Typed, detached records; never leak ORM rows. |
 
 The scorecard and verdict tables (weights, 80/65 bands, confidence rules) are the
@@ -100,6 +115,8 @@ Six additive tables share the existing `Base`; full column rationale lives in
   `sebi_company_key` and the `unknown` issue type.
 - `ipo_documents` holds registered filing URLs; IPO-002 adds nullable
   `filing_date` and a uniquely-indexed 64-char `record_hash` (length-checked).
+  IPO-003 adds nullable content digest/time/path/page fields plus a constrained
+  `parse_status`; `page_count` remains null until a later parser exists.
 - `ipo_financials`, `ipo_subscriptions` hold secret-safe normalized facts.
 - `ipo_scores` (immutable factor inputs + total) pairs one-to-one with
   `ipo_recommendations` (immutable verdict).
@@ -111,8 +128,8 @@ detection is metadata-driven, so new columns are covered automatically.
 
 ## 6. SEBI source: security posture
 
-`backend/ipo/sources/sebi.py` is the subsystem's only network boundary and treats
-every response as hostile:
+The IPO-002 source and exact IPO-003 downloader are the subsystem's two network
+boundaries and treat every response as hostile:
 
 - **Host lockdown**: fixed exact-match HTTPS allowlist (`sebi.gov.in`,
   `www.sebi.gov.in`); credentials and non-443 ports rejected.
@@ -127,6 +144,10 @@ every response as hostile:
 - **Secret-safe failures**: logs and the durable audit row store only the bounded
   date/category context and the exception **class**, never `str(exc)` or any
   response body. TLS verification is left on.
+- **Download-specific controls**: IPO-003 additionally validates public DNS,
+  accepts exactly one `/sebi_data/attachdocs/` iframe target, caps PDFs at
+  50 MiB, verifies media type and `%PDF-` magic, and uses a contained temporary
+  file plus fsync/atomic rename.
 
 ## 7. Ingestion identity & lifecycle
 
@@ -157,6 +178,9 @@ every response as hostile:
 - Recovery is a normal rerun: the default window starts 7 days before the newest
   stored `filing_date` (30 days back for an empty database) and ends today, so the
   overlap plus deterministic fingerprints make repeat ingestion idempotent.
+- A document download failure clears trusted cache metadata and stores
+  `download_failed`; retrying the explicit service call is safe and a verified
+  cache hit performs no HTTP request.
 
 ## 9. Testing
 
@@ -176,7 +200,9 @@ every response as hostile:
   [`tests/test_scan_storage_migrations.py`](../../../tests/test_scan_storage_migrations.py) -
   CRUD, constraints/uniqueness, cascades, migration upgrade/downgrade parity.
 - [`tests/test_ipo_contract_policy.py`](../../../tests/test_ipo_contract_policy.py) -
-  network-only-in-sources and UI-free import guard.
+  narrow network/UI boundaries plus the IPO teaching-docstring policy.
+- [`tests/test_ipo_document_downloader.py`](../../../tests/test_ipo_document_downloader.py) -
+  hostile URLs/HTML/PDFs, retries, caps, containment, atomic writes, and cache integrity.
 
 ## 10. Extension points
 

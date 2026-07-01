@@ -90,6 +90,21 @@ schemes, credentials, non-443 ports, and any host outside `sebi.gov.in` /
 shared `is_safe_http_url` still validates issue/document provenance at the model
 boundary, where those URLs are stored but not fetched.
 
+**IPO-003 document-specific enforcement.** A stored filing URL becomes a request
+only inside `backend/ipo/documents/downloader.py`. The downloader repeats the
+exact HTTPS host/port/credential checks, requires every DNS answer to be global,
+and manually validates each redirect. Detail HTML is capped at 2 MiB and must
+yield exactly one official `/sebi_data/attachdocs/` iframe target. PDF responses
+are capped at 50 MiB, streamed rather than buffered, and checked for an allowed
+media type plus `%PDF-` magic before publication. Stored paths are untrusted:
+they must be relative to `DATA_DIR`, remain contained after resolution, and
+cross no symlink. The cache directory is validated before any response bytes are
+written, then the final digest path is validated independently. Temporary files
+are cleaned on every failure and become visible only through same-directory
+atomic rename after hashing and fsync. Persistence compare-and-sets the detached
+source URL/type, so a concurrent provenance correction cannot inherit stale
+bytes.
+
 ### AI cache integrity — `backend/ai_cache_integrity.py`
 | Symbol | Contract |
 |---|---|
@@ -138,6 +153,7 @@ regexes (which raise the false-positive rate and block legitimate evaluations).
 | **Filter masks `getMessage()` + clears `args`** | A `LogRecord` stores template + args separately; redacting only `msg` lets a handler re-interpolate the secret later. | Redact `msg` only — leak via deferred formatting. |
 | **URL safety fails closed on resolution error** | A legitimate production fetch uses a resolvable, public host. | Allow on error — SSRF bypass. |
 | **Fixed sources narrow destinations locally** | IPO-002 knows its complete destination set, so exact HTTPS SEBI host/port checks plus manual redirects are stronger and easier to audit than accepting every otherwise-public host. | Widen the shared URL helper or trust `requests` redirects — broader SSRF and redirect surface. |
+| **Downloaded bytes are content-addressed** | IPO-003 verifies SHA-256 before persisting provenance; cache hits are rehashed and corrupt entries are replaced. | Trust a URL-derived filename or database path without verification — cache poisoning and false provenance. |
 | **One shared `is_secret_key_name`** | Same definition protects log redaction *and* persisted scan history — add a name once, both benefit. | Two vocabularies — drift. |
 | **AI verdict cache is HMAC-signed** | A disk cache is writable; an HMAC over the full envelope (constant-time verify) means a forged/edited entry is rejected and recomputed, never served as a real verdict. The signing key is in `secret_values()` so it is itself redacted. | Unsigned cache — forgeable "approved" verdicts. |
 | **Store hashed evidence, not raw text** | AI receipts persist SHA-256 hashes + sanitized URLs + labels; raw scraped pages / model responses are never written to durable history. | Persist raw evidence — durable leak, unverifiable. |

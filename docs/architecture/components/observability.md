@@ -69,6 +69,8 @@ flowchart TD
 | `ipo_filing_scan_started` / `ipo_filing_scan_completed` | INFO/ERROR | aggregate IPO inventory lifecycle and final exit status |
 | `ipo_filing_category_completed` | INFO | one DRHP/RHP/final-offer category committed |
 | `ipo_filing_category_failed` | ERROR | one category failed; also written as a durable system audit row |
+| `ipo_document_download_completed` | INFO | one DRHP/RHP was verified on disk; bounded ids, byte count, and cache-hit flag only |
+| `ipo_document_download_failed` | WARNING | one download failed; stable error code and document identifiers only, also audited |
 | `data_refresh_started` / `data_refresh_completed` | INFO/ERROR | universe/candle prefetch lifecycle |
 | `login_success` / `login_denied` | INFO/WARNING | OBS-003 audit: sign-in accepted / rejected (also persisted) |
 | `manual_scan_started` / `export_downloaded` / `admin_page_accessed` | INFO | OBS-003 audit: user actions (also persisted) |
@@ -82,6 +84,11 @@ IPO failure events follow the same sink rule but deliberately persist only
 bounded category/date context and exception class. Response bodies, exception
 messages, and fetched URLs are never included. Successful categories emit a log
 event only; they do not create durable audit noise.
+
+IPO-003 download failures follow the stricter same rule: the durable audit stores
+only issue id, document id/type, and the downloader's stable error code. It never
+stores the filing/PDF URL, query string, response body, temporary path, or raw
+exception text. Successful downloads remain structured-log events only.
 
 ## 5. Key design decisions & trade-offs
 

@@ -13,6 +13,7 @@ from backend.storage import AuditLog
 
 
 def _filing(category: SebiFilingCategory) -> SebiFiling:
+    """Build one official-looking metadata row without performing network I/O."""
     return SebiFiling(
         category=category,
         title="Example Limited - Prospectus",
@@ -26,15 +27,18 @@ def _filing(category: SebiFilingCategory) -> SebiFiling:
 
 
 def test_default_window_overlaps_watermark_by_seven_days(file_session_factory) -> None:
+    """Pin default window overlaps watermark by seven days as an executable IPO regression contract."""
     job = importlib.import_module("backend.jobs.scan_ipo_filings")
     fetch_calls: list[tuple[object, object, object]] = []
     ingested: list[tuple[object, ...]] = []
 
     def fetcher(category, from_date, to_date):
+        """Capture the computed overlap window for each fixed category."""
         fetch_calls.append((category, from_date, to_date))
         return (_filing(category),)
 
     def ingestion(filings, *, session_factory):
+        """Capture normalized rows while replacing real database persistence."""
         del session_factory
         ingested.append(tuple(filings))
         return IpoIngestionSummary(received=1, issues_created=1, documents_created=1)
@@ -56,10 +60,12 @@ def test_default_window_overlaps_watermark_by_seven_days(file_session_factory) -
 
 
 def test_empty_database_defaults_to_thirty_day_window(file_session_factory) -> None:
+    """Pin empty database defaults to thirty day window as an executable IPO regression contract."""
     job = importlib.import_module("backend.jobs.scan_ipo_filings")
     windows: list[tuple[dt.date | None, dt.date]] = []
 
     def fetcher(_category, from_date, to_date):
+        """Record the bootstrap window used when no watermark exists."""
         windows.append((from_date, to_date))
         return ()
 
@@ -77,10 +83,12 @@ def test_empty_database_defaults_to_thirty_day_window(file_session_factory) -> N
 
 
 def test_full_history_has_no_lower_bound(file_session_factory) -> None:
+    """Pin full history has no lower bound as an executable IPO regression contract."""
     job = importlib.import_module("backend.jobs.scan_ipo_filings")
     windows: list[dt.date | None] = []
 
     def fetcher(_category, from_date, _to_date):
+        """Record that full-history mode sends no lower date bound."""
         windows.append(from_date)
         return ()
 
@@ -101,21 +109,25 @@ def test_full_history_has_no_lower_bound(file_session_factory) -> None:
 def test_failed_category_is_audited_redacted_and_does_not_block_others(
     file_session_factory,
 ) -> None:
+    """Pin failed category is audited redacted and does not block others as an executable IPO regression contract."""
     job = importlib.import_module("backend.jobs.scan_ipo_filings")
     output = io.StringIO()
     persisted: list[SebiFilingCategory] = []
     audits: list[dict[str, object]] = []
 
     def fetcher(category, _from_date, _to_date):
+        """Fail only RHP with secret-shaped hostile text to test isolation."""
         if category is SebiFilingCategory.RHP:
             raise RuntimeError("access_token=do-not-leak hostile response body")
         return (_filing(category),)
 
     def ingestion(filings, **_kwargs):
+        """Record which successful sibling categories still reach persistence."""
         persisted.append(SebiFilingCategory(filings[0].document_type))
         return IpoIngestionSummary(received=1, documents_created=1)
 
     def audit_recorder(**kwargs):
+        """Capture sanitized audit metadata without touching the real table."""
         audits.append(kwargs)
         return True
 
@@ -142,10 +154,12 @@ def test_failed_category_is_audited_redacted_and_does_not_block_others(
 
 
 def test_main_parses_dates_and_full_history(monkeypatch) -> None:
+    """Pin main parses dates and full history as an executable IPO regression contract."""
     job = importlib.import_module("backend.jobs.scan_ipo_filings")
     captured: list[dict[str, object]] = []
 
     def runner(**kwargs):
+        """Capture parsed CLI arguments and return a successful typed outcome."""
         captured.append(kwargs)
         return job.IpoFilingJobOutcome(
             from_date=kwargs.get("from_date"),
@@ -165,9 +179,11 @@ def test_main_parses_dates_and_full_history(monkeypatch) -> None:
 
 
 def test_failed_category_writes_durable_secret_safe_system_audit(file_session_factory) -> None:
+    """Pin failed category writes durable secret safe system audit as an executable IPO regression contract."""
     job = importlib.import_module("backend.jobs.scan_ipo_filings")
 
     def fetcher(category, _from_date, _to_date):
+        """Inject a DRHP failure while allowing sibling categories to complete."""
         if category is SebiFilingCategory.DRHP:
             raise RuntimeError("password=never-store-this hostile html")
         return ()

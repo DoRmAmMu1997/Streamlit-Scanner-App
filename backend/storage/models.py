@@ -744,7 +744,12 @@ class UserRole(Base):
 
 
 class IpoIssue(Base):
-    """One Indian IPO and its normalized issue-level facts."""
+    """Ownership root for one Indian IPO and all of its evidence/history.
+
+    CHECK constraints mirror strict domain enums, exact Numeric columns preserve
+    INR values, and relationships cascade issue deletion to owned facts and
+    evaluations. ``sebi_company_key`` stays nullable for pre-ingestion/manual rows.
+    """
 
     __tablename__ = "ipo_issues"
     __table_args__ = (
@@ -818,7 +823,12 @@ class IpoIssue(Base):
 
 
 class IpoDocument(Base):
-    """One DRHP/RHP or supporting document for an IPO."""
+    """Store filing identity separately from verified downloaded-byte provenance.
+
+    IPO-002 owns URL/date/``record_hash`` metadata. IPO-003 owns the grouped
+    content hash, relative path, UTC download time, and parse status. Database
+    checks keep those trusted cache fields wholly present or wholly absent.
+    """
 
     __tablename__ = "ipo_documents"
     __table_args__ = (
@@ -832,6 +842,40 @@ class IpoDocument(Base):
         CheckConstraint(
             "record_hash IS NULL OR length(record_hash) = 64",
             name="ck_ipo_documents_record_hash_length",
+        ),
+        # Validate that content_sha256 is a 64-char lowercase hex digest at the DB
+        # level. SQLite has no built-in regex, so instead of a pattern match we
+        # strip every hex digit (0-9, a-f) with nested replace() calls and assert
+        # the remainder is empty -- i.e. the string contained only hex characters.
+        # This portable trick runs identically on SQLite and PostgreSQL. Keep this
+        # SQL byte-identical to migration 20260630ipo003 so the ORM/Alembic parity
+        # test passes.
+        CheckConstraint(
+            "content_sha256 IS NULL OR (length(content_sha256) = 64 "
+            "AND content_sha256 = lower(content_sha256) "
+            "AND replace(replace(replace(replace(replace(replace(replace(replace("
+            "replace(replace(replace(replace(replace(replace(replace(replace("
+            "content_sha256, '0', ''), '1', ''), '2', ''), '3', ''), '4', ''), "
+            "'5', ''), '6', ''), '7', ''), '8', ''), '9', ''), 'a', ''), "
+            "'b', ''), 'c', ''), 'd', ''), 'e', ''), 'f', '') = '')",
+            name="ck_ipo_documents_content_sha256",
+        ),
+        CheckConstraint(
+            "parse_status IN ('not_downloaded', 'pending', 'download_failed')",
+            name="ck_ipo_documents_parse_status",
+        ),
+        CheckConstraint(
+            "page_count IS NULL OR page_count > 0",
+            name="ck_ipo_documents_page_count",
+        ),
+        CheckConstraint(
+            "(parse_status = 'pending' AND content_sha256 IS NOT NULL "
+            "AND downloaded_at IS NOT NULL AND file_path IS NOT NULL "
+            "AND page_count IS NULL) OR "
+            "(parse_status IN ('not_downloaded', 'download_failed') "
+            "AND content_sha256 IS NULL AND downloaded_at IS NULL "
+            "AND file_path IS NULL AND page_count IS NULL)",
+            name="ck_ipo_documents_download_metadata",
         ),
         Index("ix_ipo_documents_filing_date", "filing_date"),
         Index("ux_ipo_documents_record_hash", "record_hash", unique=True),
@@ -847,6 +891,19 @@ class IpoDocument(Base):
     source_confidence: Mapped[str] = mapped_column(String(8), nullable=False)
     filing_date: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
     record_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # ``record_hash`` identifies SEBI listing metadata. ``content_sha256`` is
+    # deliberately separate: it proves which exact PDF bytes reached disk.
+    content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    downloaded_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Paths are stored relative to DATA_DIR, so moving a deployment volume does
+    # not invalidate database rows and an absolute host path never leaks.
+    file_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    parse_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="not_downloaded", server_default="not_downloaded"
+    )
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.UTC)
     )
@@ -856,7 +913,12 @@ class IpoDocument(Base):
 
 
 class IpoFinancial(Base):
-    """One normalized annual or quarterly financial facts snapshot."""
+    """Store one issue period with flexible, secret-safe normalized metrics.
+
+    JSON is the deliberate evolution seam until raw extraction stabilizes. An
+    optional source-document foreign key becomes NULL when that metadata row is
+    deleted, preserving the financial period without false dangling ownership.
+    """
 
     __tablename__ = "ipo_financials"
     __table_args__ = (
@@ -902,7 +964,7 @@ class IpoFinancial(Base):
 
 
 class IpoSubscription(Base):
-    """One timestamped QIB/NII/retail subscription snapshot."""
+    """Capture demand multiples at one UTC instant without overwriting history."""
 
     __tablename__ = "ipo_subscriptions"
     __table_args__ = (
@@ -939,7 +1001,12 @@ class IpoSubscription(Base):
 
 
 class IpoScore(Base):
-    """Immutable normalized factor inputs and weighted score receipt."""
+    """Persist one immutable seven-factor calculation and its audit breakdown.
+
+    Nullable factor columns preserve missing evidence, while JSON contributions,
+    reasons, and missing labels reproduce the exact deterministic score receipt.
+    Corrections append a new row instead of editing this one.
+    """
 
     __tablename__ = "ipo_scores"
     __table_args__ = (
@@ -991,7 +1058,12 @@ class IpoScore(Base):
 
 
 class IpoRecommendation(Base):
-    """Immutable binary verdict paired one-to-one with an IPO score."""
+    """Persist the fail-closed verdict paired one-to-one with a score receipt.
+
+    The unique score foreign key prevents conflicting recommendations for the
+    same calculation; deleting that score cascades to this dependent half of the
+    evaluation pair.
+    """
 
     __tablename__ = "ipo_recommendations"
     __table_args__ = (

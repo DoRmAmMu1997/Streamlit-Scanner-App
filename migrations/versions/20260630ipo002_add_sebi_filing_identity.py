@@ -16,7 +16,12 @@ depends_on = None
 
 
 def upgrade() -> None:
-    """Add nullable ingestion identities while preserving all IPO-001 rows."""
+    """Add nullable ingestion identities while preserving all IPO-001 rows.
+
+    Nullable columns keep manual/legacy records valid. Unique indexes turn the
+    normalized company key and filing hash into idempotency guards, while the
+    filing-date index supports the incremental scan watermark.
+    """
     with op.batch_alter_table("ipo_issues") as batch_op:
         batch_op.add_column(sa.Column("sebi_company_key", sa.String(length=255), nullable=True))
         batch_op.drop_constraint("ck_ipo_issues_issue_type", type_="check")
@@ -42,7 +47,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Remove IPO-002 fields without disturbing legacy IPO-001 facts."""
+    """Remove IPO-002 fields only when no identity or ``unknown`` type is lost."""
     # IPO-001 cannot represent ``unknown`` or retain SEBI identity metadata.
     # Refuse the downgrade before any DDL instead of silently reclassifying an
     # issue or dropping its ingestion receipt. Operators may explicitly export

@@ -27,6 +27,7 @@ Dependencies/all_instrument*.csv
 
 # Generated scanner data. Keep curated universe CSVs that are tracked source.
 data/cache/
+data/ipo/
 data/universes/*
 !data/universes/hemant_super_45.csv
 !data/universes/hemant_good_45.csv

@@ -138,6 +138,11 @@ class AppSettings:
         """Directory containing downloaded concall PDFs and extracted text."""
         return self.fundamentals_cache_dir / "pdfs"
 
+    @property
+    def ipo_document_dir(self) -> Path:
+        """Directory containing immutable, content-addressed IPO prospectus PDFs."""
+        return self.data_dir / "ipo" / "documents"
+
     def safe_dict(self) -> dict[str, object]:
         """Return a log/debug-safe summary that never includes secret values.
 
@@ -464,6 +469,7 @@ def ensure_project_dirs() -> None:
         settings.daily_cache_dir,
         settings.fundamentals_cache_dir,
         settings.fundamentals_pdf_dir,
+        settings.ipo_document_dir,
         SCREENERS_DIR,
     ):
         path.mkdir(parents=True, exist_ok=True)

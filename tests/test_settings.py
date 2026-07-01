@@ -66,6 +66,7 @@ def test_local_defaults_are_safe_for_development():
     assert settings.app_env == "development"
     assert settings.is_production is False
     assert settings.data_dir == PROJECT_ROOT / "data"
+    assert settings.ipo_document_dir == PROJECT_ROOT / "data" / "ipo" / "documents"
     assert settings.database_url == f"sqlite:///{(PROJECT_ROOT / 'data' / 'scanner.db').as_posix()}"
     assert settings.allowed_emails == frozenset()
     assert settings.admin_emails == frozenset()

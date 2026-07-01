@@ -21,6 +21,7 @@ def _score_result(
     *,
     missing_data: tuple[str, ...] = (),
 ) -> IpoScoreResult:
+    """Build the reusable score result fixture used by the scenarios below."""
     return IpoScoreResult(
         company_name="Example Ltd",
         score=Decimal(score),
@@ -47,6 +48,7 @@ def test_verdict_uses_the_exact_pdf_score_bands(
     recommendation: Recommendation,
     recommendation_type: str,
 ) -> None:
+    """Pin verdict uses the exact pdf score bands as an executable IPO regression contract."""
     result = build_recommendation(_score_result(score))
 
     assert result.recommendation is recommendation
@@ -64,6 +66,7 @@ def test_verdict_uses_the_exact_pdf_score_bands(
     ],
 )
 def test_missing_critical_data_forces_a_fail_closed_verdict(critical_factor: str) -> None:
+    """Pin missing critical data forces a fail closed verdict as an executable IPO regression contract."""
     result = build_recommendation(_score_result("90", missing_data=(critical_factor,)))
 
     assert result.recommendation is Recommendation.NOT_RECOMMENDED
@@ -85,12 +88,14 @@ def test_missing_critical_data_forces_a_fail_closed_verdict(critical_factor: str
 def test_confidence_reflects_factor_completeness(
     missing_data: tuple[str, ...], confidence: Confidence
 ) -> None:
+    """Pin confidence reflects factor completeness as an executable IPO regression contract."""
     assert build_recommendation(
         _score_result("78", missing_data=missing_data)
     ).confidence is confidence
 
 
 def test_json_contract_has_exact_keys_and_json_native_values() -> None:
+    """Pin json contract has exact keys and json native values as an executable IPO regression contract."""
     payload = build_recommendation(_score_result("78")).to_dict()
 
     assert payload == {
