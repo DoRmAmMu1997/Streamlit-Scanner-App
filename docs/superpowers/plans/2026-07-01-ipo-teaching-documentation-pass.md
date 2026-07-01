@@ -16,7 +16,7 @@
 - [x] Production, persistence, source, job, migration, and test teaching pass complete.
 - [x] Executable-AST comparison confirms no runtime behavior changed outside the guard.
 - [x] Focused and full local verification complete.
-- [ ] Commit, push to PR #84, and monitor the final hosted checks.
+- [x] Commit, push to PR #84, and monitor the final hosted checks.
 
 ## File map
 
