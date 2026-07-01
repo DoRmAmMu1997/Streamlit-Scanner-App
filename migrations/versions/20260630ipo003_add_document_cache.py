@@ -20,6 +20,11 @@ down_revision = "20260630ipo002"
 branch_labels = None
 depends_on = None
 
+# Validate content_sha256 as a 64-char lowercase hex digest without a regex
+# (SQLite has none built in): strip every hex digit with nested replace() calls
+# and require the remainder to be empty, so only hex characters could remain.
+# Runs identically on SQLite and PostgreSQL. Kept byte-identical to the ORM
+# CheckConstraint in backend/storage/models.py for the migration-parity test.
 _SHA256_CHECK = (
     "content_sha256 IS NULL OR (length(content_sha256) = 64 "
     "AND content_sha256 = lower(content_sha256) "

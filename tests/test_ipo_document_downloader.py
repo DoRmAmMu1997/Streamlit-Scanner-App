@@ -208,6 +208,22 @@ def test_unsafe_document_url_fails_before_http(tmp_path: Path, document_url: str
     assert document_url not in str(caught.value)
 
 
+def test_unsupported_document_type_is_rejected_with_dedicated_code(tmp_path: Path) -> None:
+    """Reject a non-DRHP/RHP document with its own code and no HTTP request."""
+    session = FakeSession([])
+
+    with pytest.raises(IpoDocumentDownloadError) as caught:
+        download_document_file(
+            _document(document_type="final_offer"),
+            data_dir=tmp_path,
+            session=session,
+            resolver=_public_resolver,
+        )
+
+    assert caught.value.code is IpoDocumentDownloadErrorCode.UNSUPPORTED_DOCUMENT_TYPE
+    assert session.calls == []
+
+
 @pytest.mark.parametrize(
     "detail",
     [

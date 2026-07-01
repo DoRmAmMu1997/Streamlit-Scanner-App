@@ -843,6 +843,13 @@ class IpoDocument(Base):
             "record_hash IS NULL OR length(record_hash) = 64",
             name="ck_ipo_documents_record_hash_length",
         ),
+        # Validate that content_sha256 is a 64-char lowercase hex digest at the DB
+        # level. SQLite has no built-in regex, so instead of a pattern match we
+        # strip every hex digit (0-9, a-f) with nested replace() calls and assert
+        # the remainder is empty -- i.e. the string contained only hex characters.
+        # This portable trick runs identically on SQLite and PostgreSQL. Keep this
+        # SQL byte-identical to migration 20260630ipo003 so the ORM/Alembic parity
+        # test passes.
         CheckConstraint(
             "content_sha256 IS NULL OR (length(content_sha256) = 64 "
             "AND content_sha256 = lower(content_sha256) "

@@ -56,6 +56,7 @@ class IpoDocumentDownloadErrorCode(enum.StrEnum):
     INVALID_PDF = "invalid_pdf"
     UNSAFE_CACHE_PATH = "unsafe_cache_path"
     SOURCE_CHANGED = "source_changed"
+    UNSUPPORTED_DOCUMENT_TYPE = "unsupported_document_type"
 
 
 class IpoDocumentDownloadError(RuntimeError):
@@ -409,8 +410,11 @@ def download_document_file(
     Raises:
         IpoDocumentDownloadError: For every safe, categorized failure condition.
     """
+    # Defense in depth behind download_document()'s own IpoValidationError: only
+    # DRHP/RHP prospectuses are downloadable. A distinct code keeps an operator
+    # reading a log or audit from mistaking this for an SSRF/URL rejection.
     if document.document_type not in {"drhp", "rhp"}:
-        _raise(IpoDocumentDownloadErrorCode.UNSAFE_URL)
+        _raise(IpoDocumentDownloadErrorCode.UNSUPPORTED_DOCUMENT_TYPE)
     cache_hit = _verified_cache_result(document, data_dir=data_dir)
     if cache_hit is not None:
         return cache_hit
