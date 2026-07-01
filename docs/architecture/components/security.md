@@ -112,6 +112,18 @@ bytes.
 | `verify_cache_envelope(envelope, *, key)` | `True` only on a length/type-checked, constant-time (`hmac.compare_digest`) match; non-dict / missing sig / non-finite JSON → `False`. |
 | `get_ai_cache_signing_key()` | Operator key from `SCANNER_AI_CACHE_SIGNING_KEY`, else a per-process random key (secure by default; a restart invalidates the disk cache). |
 
+### IPO-004 manual-entry enforcement
+
+The page is hidden behind the admin-only `MANAGE_IPO_DATA` capability and repeats
+the role check. Actor email and UTC time come from trusted server state, never
+editable widgets. Submission accepts only an issue-owned DRHP/RHP whose contained
+regular file rehashes to the stored SHA-256; no network fallback occurs. The
+service then compares document type, URL, hash, and relative path again inside
+the insertion transaction. Strict DTOs allowlist peer metrics, bound narrative
+text, require finite decimals/pages, and prevent arbitrary browser mappings from
+reaching ORM fields. Stored narratives render as ordinary Streamlit text, never
+unsafe HTML; logs/audits contain ids and counts only.
+
 ### Evidence sanitization — `backend/scanning/result_contract.py`
 | Symbol | Contract |
 |---|---|

@@ -5,7 +5,7 @@
 | **Component** | Shared ORM, engine/session, isolated query modules, and migrations |
 | **Source** | [`backend/storage/models.py`](../../../backend/storage/models.py), [`backend/storage/database.py`](../../../backend/storage/database.py), [`backend/storage/repository.py`](../../../backend/storage/repository.py), [`backend/storage/ipo_repository.py`](../../../backend/storage/ipo_repository.py), [`migrations/`](../../../migrations) |
 | **Layer** | Persistence (`backend/`) |
-| **Status** | Stable (scan history + validation + audit/config + roles · IPO-001 domain/evaluation · IPO-002 SEBI filing identity) |
+| **Status** | Stable (scan history + validation + audit/config + roles · IPO-001-004 domain, cache, and manual evidence) |
 | **Related** | **[scan-run-persistence.md](../scan-run-persistence.md)** (full SCAN-001 design) · [scan-002-handoff.md](../scan-002-handoff.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [validation.md](validation.md) · [ipo-screener.md](ipo-screener.md) · [ui-pages.md](ui-pages.md) · [HLD](../high-level-design.md) |
 
 > **This LLD summarizes the *current* persistence layer and how it is used.** The
@@ -21,7 +21,7 @@ answer *"why was this stock shortlisted on date D?"*; IPO history preserves the
 source facts and immutable score/verdict pair behind each recommendation.
 
 **Four sub-layers (strict direction):**
-1. **`models.py`** — table *shapes* only (shared `Base`, scan/audit/config/role/validation models, and six IPO models). No connections.
+1. **`models.py`** — table *shapes* only (shared `Base`, scan/audit/config/role/validation models, and nine IPO models). No connections.
 2. **`database.py`** — *where* data lives: engine, `SessionLocal`, `session_scope()`, SQLite pragmas, `ensure_database_schema()` (auto-migrate).
 3. **`repository.py`** — scan/audit/config/role/validation queries and typed helpers. Does **not** own sessions.
 4. **`ipo_repository.py`** — every IPO-specific SQLAlchemy statement. It also does **not** own sessions or decide scoring/verdict policy.
@@ -91,6 +91,15 @@ Portable CHECK constraints keep the metadata trio all-present only for pending
 rows and all-null otherwise. No hash index is added because IPO-003 performs no
 database lookup by content hash; the filesystem itself is addressed by digest.
 Full design: [ipo-003-document-downloader-cache.md](../ipo-003-document-downloader-cache.md).
+
+IPO-004 adds three normalized immutable tables. `ipo_manual_extractions` stores
+source snapshots, units, actor/time, and singleton facts;
+`ipo_manual_financial_periods` stores three annual rows; and
+`ipo_manual_peer_valuations` stores normalized peers with allowlisted
+exact-decimal JSON metrics. Foreign-key columns are indexed, latest-profile reads
+use `(issue_id, submitted_at, id)`, issue deletion cascades, and document deletion
+sets only the live foreign key to null while snapshot provenance survives.
+Full design: [ipo-004-manual-extraction-mvp.md](../ipo-004-manual-extraction-mvp.md).
 
 ## 4. Public interface (`repository.py`)
 
@@ -162,13 +171,16 @@ Type-coercion helpers (`_as_date`, `_as_decimal`, `_as_optional_str`, `_is_missi
 Revisions are chained linearly through `20260623auth003`, then
 `20260629ipo001` (six IPO domain/evaluation tables), and `20260630ipo002`
 (nullable SEBI company key, filing date, record hash, and `unknown` issue type),
-then `20260630ipo003` (document-cache provenance and constrained status).
+then `20260630ipo003` (document-cache provenance and constrained status), then
+`20260701ipo004` (three immutable manual-evidence tables).
 The IPO-002 downgrade checks for identity data and refuses before DDL when column
 removal or issue-type narrowing would be lossy. `migrations/env.py` reads the URL
 from `get_database_url()` (no hardcoded URL). A drift test guards ORM-vs-migration
 sync, constraints, and index parity.
 The IPO-003 downgrade similarly refuses before DDL when any cache metadata or
 nondefault status would be lost.
+The IPO-004 downgrade refuses while any manual revision exists because those
+user/page/document receipts cannot be represented in the older schema.
 
 ## 7. Failure modes
 

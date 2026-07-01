@@ -71,6 +71,7 @@ flowchart TD
 | `ipo_filing_category_failed` | ERROR | one category failed; also written as a durable system audit row |
 | `ipo_document_download_completed` | INFO | one DRHP/RHP was verified on disk; bounded ids, byte count, and cache-hit flag only |
 | `ipo_document_download_failed` | WARNING | one download failed; stable error code and document identifiers only, also audited |
+| `ipo_manual_extraction_submitted` | INFO | one immutable admin revision committed; issue/extraction/document ids and period/peer counts only, also audited |
 | `data_refresh_started` / `data_refresh_completed` | INFO/ERROR | universe/candle prefetch lifecycle |
 | `login_success` / `login_denied` | INFO/WARNING | OBS-003 audit: sign-in accepted / rejected (also persisted) |
 | `manual_scan_started` / `export_downloaded` / `admin_page_accessed` | INFO | OBS-003 audit: user actions (also persisted) |
@@ -89,6 +90,10 @@ IPO-003 download failures follow the stricter same rule: the durable audit store
 only issue id, document id/type, and the downloader's stable error code. It never
 stores the filing/PDF URL, query string, response body, temporary path, or raw
 exception text. Successful downloads remain structured-log events only.
+
+IPO-004 submission events similarly exclude financial values, narrative objects,
+URLs, hashes, and local paths. The extraction row itself is the authoritative
+user/time/document/page receipt if the best-effort audit sink is unavailable.
 
 ## 5. Key design decisions & trade-offs
 

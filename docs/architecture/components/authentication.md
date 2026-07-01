@@ -17,6 +17,10 @@ download renders — and, once in, so each action is gated by the user's role.
 - **Authentication (AUTH-001)** — Google SSO via Streamlit's native OIDC (`st.login`/`st.user`/`st.logout`). Validates config presence, Authlib availability, login state, and the verified email claim.
 - **Authorization (AUTH-002)** — `ALLOWED_EMAILS` decides who may use the app; `ADMIN_EMAILS` are always allowed. Dev-permits-empty / prod-fails-closed.
 - **Role model (AUTH-003)** — every authorized user resolves to one hierarchical role (`viewer < analyst < admin`). The `user_roles` table is the runtime source of truth and **also authorizes sign-in** (a row grants entry, unioned with the env lists); `ADMIN_EMAILS` is a bootstrap-admin floor. Capabilities (run scan, export, manage config/health/audit/roles, …) gate features via `require_capability`, with the UI hiding controls **and** the handler re-checking (defense in depth). Default role for an authorized user with no row is **analyst** (preserves AUTH-002 access).
+- **IPO manual evidence (IPO-004)** — `MANAGE_IPO_DATA` is admin-only. The
+  router checks the capability, `ui/ipo_manual_page.py` repeats the role guard,
+  and the authenticated email is passed server-side rather than exposed as a
+  form control.
 - **Auth-disabled development** — the app creates the explicit synthetic identity
   `local-owner@localhost` with the admin role. Admin-page authorization and audit
   attribution therefore use the same identity instead of relying on a missing user.

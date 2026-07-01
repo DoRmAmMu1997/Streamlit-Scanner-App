@@ -2,19 +2,19 @@
 
 | | |
 |---|---|
-| **Component** | Backend-only IPO ingestion, document cache, scoring, and recommendation subsystem |
+| **Component** | IPO ingestion, document cache, manual evidence, scoring, and recommendation subsystem |
 | **Source** | [`backend/ipo/`](../../../backend/ipo), [`backend/ipo/sources/sebi.py`](../../../backend/ipo/sources/sebi.py), [`backend/jobs/scan_ipo_filings.py`](../../../backend/jobs/scan_ipo_filings.py), [`backend/storage/ipo_repository.py`](../../../backend/storage/ipo_repository.py), [`backend/storage/models.py`](../../../backend/storage/models.py), [`migrations/versions/`](../../../migrations/versions) |
-| **Layer** | Standalone IPO domain (no Streamlit surface yet) |
-| **Status** | Implemented: IPO-001 scoring, IPO-002 filing ingestion, IPO-003 document cache |
-| **Related** | [HLD](../high-level-design.md) - [IPO-001 design](../ipo-001-domain-score-contract.md) - [IPO-002 design](../ipo-002-sebi-filing-ingestion.md) - [storage-persistence.md](storage-persistence.md) - [security.md](security.md) - [observability.md](observability.md) |
+| **Layer** | Framework-free backend plus one admin-only Streamlit adapter |
+| **Status** | Implemented: IPO-001 scoring, IPO-002 filing ingestion, IPO-003 document cache, IPO-004 manual entry |
+| **Related** | [HLD](../high-level-design.md) - [IPO-001 design](../ipo-001-domain-score-contract.md) - [IPO-002 design](../ipo-002-sebi-filing-ingestion.md) - [IPO-003 design](../ipo-003-document-downloader-cache.md) - [IPO-004 design](../ipo-004-manual-extraction-mvp.md) - [storage-persistence.md](storage-persistence.md) - [security.md](security.md) - [observability.md](observability.md) |
 
 IPO-003's detailed cache and failure contract is documented in
 [ipo-003-document-downloader-cache.md](../ipo-003-document-downloader-cache.md).
 
 ## 1. Purpose & responsibilities
 
-The IPO Screener evaluates Indian IPOs from official source facts. It has two
-landed halves that share one persistence model:
+The IPO Screener evaluates Indian IPOs from official source facts. Four landed
+slices share one persistence model:
 
 - **Domain & scoring (IPO-001)**: typed, framework-independent contracts, a fixed
   100-point PDF-weighted scorecard, a binary fail-closed verdict, and an immutable
@@ -24,13 +24,16 @@ landed halves that share one persistence model:
   issue/document tables.
 - **Document cache (IPO-003)**: an explicit repository service that securely
   downloads registered DRHP/RHP PDFs into a verified content-addressed cache.
+- **Manual evidence (IPO-004)**: an administrator form appends a complete,
+  page-sourced financial profile from one verified cached DRHP/RHP.
 
 **Non-responsibilities (deliberate, current scope)**
 - IPO-002 never downloads prospectuses. IPO-003 downloads only through an
   explicit service call and still performs no PDF parsing or page counting.
 - No factor-score inference from raw financials. The scorecard consumes already
   normalized 0-100 factor scores; deriving them is a later ticket.
-- No Streamlit surface. The whole subsystem is backend-only and UI-free.
+- Streamlit remains outside `backend`; `ui/ipo_manual_page.py` is the narrow
+  IPO-004 presentation adapter and repeats the admin guard.
 - No scraping outside `backend/ipo/sources`, and no source other than SEBI yet.
 
 ## 2. Position in the system
@@ -80,9 +83,11 @@ never triggers a recommendation. Both paths persist only through `backend/storag
 | `backend/ipo/verdict.py` | Score bands, confidence, fail-closed override. | `models` |
 | `backend/ipo/sources/sebi.py` | IPO-002 listing network I/O + hostile-HTML parsing. | `requests`, `bs4`, `models` |
 | `backend/ipo/documents/downloader.py` | IPO-003 detail/PDF I/O, SSRF controls, streamed atomic cache. | `requests`, `bs4`, `models` |
+| `backend/ipo/manual_extraction.py` | Frozen complete-entry DTOs, units, page validation, peers, canonical conversions. | stdlib, `models` |
 | `backend/ipo/repository.py` | Typed transactions, ingestion identity/lifecycle, atomic evaluation. | `models`, `scorecard`, `verdict`, `scanning.result_contract`, `storage` |
 | `backend/storage/ipo_repository.py` | Every SQLAlchemy statement for the `ipo_*` tables. | `sqlalchemy`, `storage.models` |
 | `backend/jobs/scan_ipo_filings.py` | CLI boundary: windows, per-category loop, exit code, audits. | `ipo`, `audit`, `observability`, `storage.database` |
+| `ui/ipo_manual_page.py` | Admin widgets, DTO conversion, prefill, latest profile, revision history. | `backend.ipo`, `backend.auth`, `streamlit` |
 
 These rules are enforced by the AST guard
 [`tests/test_ipo_contract_policy.py`](../../../tests/test_ipo_contract_policy.py):
@@ -101,6 +106,8 @@ no IPO module imports Streamlit, and network clients are allowed only under
 | `ingest_filings(filings, *, session_factory)` | Atomically creates/updates issues and documents for one category; returns `IpoIngestionSummary`. |
 | `get_latest_filing_date()` | Global ingestion watermark (newest persisted `filing_date`). |
 | `download_document(issue_id, document_id)` | Download or verify one registered DRHP/RHP with no database transaction held during network I/O. |
+| `submit_manual_extraction(issue_id, data, entered_by_email=...)` | Rehash cached bytes outside a transaction, recheck source identity, and atomically append one immutable revision. |
+| `get_manual_extraction` / `list_manual_extractions` / `get_latest_manual_profile` | Detached revision history plus the latest canonical raw-data bridge; no factor-score derivation. |
 | CRUD: `create_/get_/list_/update_/delete_*` for issues, documents, financials, subscriptions. | Typed, detached records; never leak ORM rows. |
 
 The scorecard and verdict tables (weights, 80/65 bands, confidence rules) are the
@@ -108,7 +115,7 @@ authority of [IPO-001 design](../ipo-001-domain-score-contract.md).
 
 ## 5. Persistence
 
-Six additive tables share the existing `Base`; full column rationale lives in
+Nine additive tables share the existing `Base`; full column rationale lives in
 [storage-persistence.md](storage-persistence.md).
 
 - `ipo_issues` is the cascade root. IPO-002 adds nullable, uniquely-indexed
@@ -120,11 +127,15 @@ Six additive tables share the existing `Base`; full column rationale lives in
 - `ipo_financials`, `ipo_subscriptions` hold secret-safe normalized facts.
 - `ipo_scores` (immutable factor inputs + total) pairs one-to-one with
   `ipo_recommendations` (immutable verdict).
+- `ipo_manual_extractions` owns singleton facts and immutable provenance;
+  `ipo_manual_financial_periods` owns exactly three annual rows; and
+  `ipo_manual_peer_valuations` owns one or more allowlisted peer metric maps.
 
 Migrations are additive and nullable, so manual / IPO-001 rows stay valid. The
 IPO-002 downgrade refuses to run while any SEBI identity exists rather than
 silently discarding fingerprints or reclassifying `unknown` issues. Schema-drift
 detection is metadata-driven, so new columns are covered automatically.
+The IPO-004 downgrade separately refuses while any manual revision exists.
 
 ## 6. SEBI source: security posture
 

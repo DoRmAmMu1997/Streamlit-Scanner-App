@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Component** | Scan-history page + scan comparison + validation dashboard + shared UI helpers |
+| **Component** | Scan-history, comparison, validation, IPO manual entry, and shared UI helpers |
 | **Source** | [`ui/history_page.py`](../../../ui/history_page.py), [`ui/comparison_page.py`](../../../ui/comparison_page.py), [`ui/validation_page.py`](../../../ui/validation_page.py), [`ui/common.py`](../../../ui/common.py) |
 | **Layer** | UI (`ui/`) |
 | **Status** | Stable (SCAN-004 history · JOB-003 comparison · REF-001 split · VALID-003B/004 validation dashboard · RANK-002 score display · AUTH-003 capability gating) |
@@ -16,6 +16,12 @@
 - **`comparison_page.py`** — the JOB-003 **read-only** comparison view: choose a finalized screener/universe pair, compare the latest finalized run with the immediately previous finalized run, and render New today / Repeated from yesterday / Dropped today / Improved score / Degraded score sections. Its audited formula-safe CSV is analyst/admin-only.
 - **`validation_page.py`** — the VALID-003B/004 **read-only** Validation / Signal Performance dashboard: filter stored forward-return metrics by screener / universe / horizon / signal-date and render the screener-level summary table, return distribution, win rate by horizon, benchmark-relative rows, monthly signal counts, sector concentration, and best/worst signals. Its CSV export is analyst/admin-only. It reads through `summarize_validation_dashboard()` only — no raw SQL — and never triggers a forward-return compute pass from the UI. Same pure-helper / render split as the history page.
 - **`ui/common.py`** — display helpers needed by the scanner and read-only pages (which must not import each other or `app.py`): CSV-injection escaping, secret-redaction wrapper, BUY/SELL emoji badges, decimal column config, score sorting/component extraction, and provenance/receipt-column hiding.
+
+- **`ipo_manual_page.py`** - the IPO-004 **admin-only** write view: choose an
+  issue and cached DRHP/RHP, transcribe three annual periods plus sourced
+  singleton/peer facts, append an immutable revision, and inspect latest/history.
+  Browser mappings become strict backend DTOs; SQL and cache verification remain
+  outside the UI.
 
 ## 2. Position in the system
 
@@ -84,6 +90,7 @@ flowchart TD
 - [`tests/test_app_history_page.py`](../../../tests/test_app_history_page.py) — filter mapping, signature stability, row shaping, run details, redaction/truncation order, viewer export denial, and cache-only historical charts.
 - [`tests/test_app_comparison_page.py`](../../../tests/test_app_comparison_page.py) — finalized-pair option mapping, empty states, table rendering, formula-safe CSV, export audit metadata, viewer export denial, and friendly schema-error handling.
 - [`tests/test_app_validation_page.py`](../../../tests/test_app_validation_page.py) — VALID-003B/004 percentage/signal formatting, filter mapping, summary/dashboard frame shaping, render-level `summarize_validation_dashboard` plumbing, CSV-safe export/audit, viewer export denial, friendly schema-error handling, and empty-state copy. View wiring (selector options + dispatch) is covered in [`tests/test_app_orchestration.py`](../../../tests/test_app_orchestration.py).
+- [`tests/test_app_ipo_manual_page.py`](../../../tests/test_app_ipo_manual_page.py) - admin guard, empty state, exact decimal adapters, peer-row handling, and actor-spoofing boundary.
 - `ui/common` helpers are exercised via the scanner and history page tests (`test_app_orchestration.py`, `test_ui_common.py`, golden CSV checks).
 
 ## 7. Extension points

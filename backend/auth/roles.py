@@ -72,6 +72,7 @@ MODIFY_CONFIG = "modify_config"         # the Admin settings page
 VIEW_HEALTH = "view_health"             # the Admin health page
 VIEW_AUDIT_LOG = "view_audit_log"       # the Audit log page
 MANAGE_ROLES = "manage_roles"           # the Admin roles page (assign/revoke)
+MANAGE_IPO_DATA = "manage_ipo_data"     # immutable manual IPO evidence submissions
 
 # Each capability's minimum role. The hierarchy does the rest: a role holds a
 # capability when it ranks at or above the minimum.
@@ -86,6 +87,7 @@ MIN_ROLE: dict[str, Role] = {
     VIEW_HEALTH: Role.ADMIN,
     VIEW_AUDIT_LOG: Role.ADMIN,
     MANAGE_ROLES: Role.ADMIN,
+    MANAGE_IPO_DATA: Role.ADMIN,
 }
 
 # The role an authorized user gets when the database has no row for them. Analyst
