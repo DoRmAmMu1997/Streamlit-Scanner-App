@@ -75,6 +75,7 @@ EVENT_IPO_FILING_CATEGORY_FAILED = "ipo_filing_category_failed"
 EVENT_IPO_FILING_SCAN_COMPLETED = "ipo_filing_scan_completed"
 EVENT_IPO_DOCUMENT_DOWNLOAD_COMPLETED = "ipo_document_download_completed"
 EVENT_IPO_DOCUMENT_DOWNLOAD_FAILED = "ipo_document_download_failed"
+EVENT_IPO_MANUAL_EXTRACTION_SUBMITTED = "ipo_manual_extraction_submitted"
 EVENT_EXTERNAL_API_FAILED = "external_api_failed"
 # DATA-001 candle-quality events. ``_warning`` = a usable frame with suspicious
 # data; ``_failed`` = a frame quarantined before scanning. Both log finding
@@ -138,6 +139,7 @@ __all__ = [
     "EVENT_IPO_FILING_CATEGORY_FAILED",
     "EVENT_IPO_FILING_SCAN_COMPLETED",
     "EVENT_IPO_FILING_SCAN_STARTED",
+    "EVENT_IPO_MANUAL_EXTRACTION_SUBMITTED",
     "EVENT_LOGIN_DENIED",
     "EVENT_LOGIN_SUCCESS",
     "EVENT_MANUAL_SCAN_STARTED",

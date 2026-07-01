@@ -11,12 +11,15 @@ from typing import Any, cast
 
 from sqlalchemy import func, select, update
 from sqlalchemy.engine import CursorResult
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from backend.storage.models import (
     IpoDocument,
     IpoFinancial,
     IpoIssue,
+    IpoManualExtraction,
+    IpoManualFinancialPeriod,
+    IpoManualPeerValuation,
     IpoRecommendation,
     IpoScore,
     IpoSubscription,
@@ -267,6 +270,86 @@ def delete_ipo_financial_row(session: Session, issue_id: int, financial_id: int)
     session.delete(row)
     session.flush()
     return True
+
+
+def insert_ipo_manual_extraction(
+    session: Session,
+    issue_id: int,
+    header_values: dict[str, Any],
+    period_values: list[dict[str, Any]],
+    peer_values: list[dict[str, Any]],
+) -> IpoManualExtraction:
+    """Stage one complete immutable revision and all of its owned rows.
+
+    Beginner note:
+    Header, periods, and peers are attached to one SQLAlchemy unit of work and
+    flushed together. The caller's session context therefore either commits the
+    complete revision or rolls every row back; a half-written form cannot exist.
+    """
+    row = IpoManualExtraction(issue_id=issue_id, **header_values)
+    row.periods = [
+        IpoManualFinancialPeriod(**values) for values in period_values
+    ]
+    row.peers = [IpoManualPeerValuation(**values) for values in peer_values]
+    session.add(row)
+    session.flush()
+    return row
+
+
+def _manual_extraction_options() -> tuple[Any, ...]:
+    """Return eager-load options needed before detached records are built."""
+    return (
+        selectinload(IpoManualExtraction.periods),
+        selectinload(IpoManualExtraction.peers),
+    )
+
+
+def get_ipo_manual_extraction(
+    session: Session, issue_id: int, extraction_id: int
+) -> IpoManualExtraction | None:
+    """Load one complete revision only through its parent issue ownership key."""
+    stmt = (
+        select(IpoManualExtraction)
+        .where(
+            IpoManualExtraction.id == extraction_id,
+            IpoManualExtraction.issue_id == issue_id,
+        )
+        .options(*_manual_extraction_options())
+    )
+    return session.scalar(stmt)
+
+
+def list_ipo_manual_extraction_rows(
+    session: Session, issue_id: int
+) -> list[IpoManualExtraction]:
+    """List immutable revisions newest-first with id as the deterministic tie break."""
+    stmt = (
+        select(IpoManualExtraction)
+        .where(IpoManualExtraction.issue_id == issue_id)
+        .order_by(
+            IpoManualExtraction.submitted_at.desc(),
+            IpoManualExtraction.id.desc(),
+        )
+        .options(*_manual_extraction_options())
+    )
+    return list(session.scalars(stmt))
+
+
+def get_latest_ipo_manual_extraction(
+    session: Session, issue_id: int
+) -> IpoManualExtraction | None:
+    """Load only the newest complete revision for the scoring-data bridge."""
+    stmt = (
+        select(IpoManualExtraction)
+        .where(IpoManualExtraction.issue_id == issue_id)
+        .order_by(
+            IpoManualExtraction.submitted_at.desc(),
+            IpoManualExtraction.id.desc(),
+        )
+        .options(*_manual_extraction_options())
+        .limit(1)
+    )
+    return session.scalar(stmt)
 
 
 def insert_ipo_subscription(

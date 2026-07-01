@@ -57,6 +57,7 @@ class IpoDocumentDownloadErrorCode(enum.StrEnum):
     UNSAFE_CACHE_PATH = "unsafe_cache_path"
     SOURCE_CHANGED = "source_changed"
     UNSUPPORTED_DOCUMENT_TYPE = "unsupported_document_type"
+    INVALID_CACHE = "invalid_cache"
 
 
 class IpoDocumentDownloadError(RuntimeError):
@@ -320,6 +321,28 @@ def _verified_cache_result(
         # a fresh copy instead of ever returning corrupt data.
         path.unlink()
     return None
+
+
+def verify_cached_document_file(
+    document: IpoDocumentRecord,
+    *,
+    data_dir: Path,
+) -> IpoDocumentDownloadResult:
+    """Verify an existing DRHP/RHP cache entry without performing HTTP.
+
+    Beginner note:
+    IPO-004 needs to prove that the administrator's page references point to
+    the exact bytes named by the database. It must not silently download a file
+    during form submission, so this wrapper exposes only the cache-hit half of
+    IPO-003's integrity logic and raises a stable error when bytes are absent,
+    outside the controlled directory, symlinked, oversized, or hash-mismatched.
+    """
+    if document.document_type not in {"drhp", "rhp"}:
+        _raise(IpoDocumentDownloadErrorCode.UNSUPPORTED_DOCUMENT_TYPE)
+    result = _verified_cache_result(document, data_dir=data_dir)
+    if result is None:
+        _raise(IpoDocumentDownloadErrorCode.INVALID_CACHE)
+    return result
 
 
 def _stream_pdf_to_cache(

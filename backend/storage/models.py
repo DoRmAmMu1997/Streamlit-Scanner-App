@@ -820,6 +820,9 @@ class IpoIssue(Base):
     scores: Mapped[list[IpoScore]] = relationship(
         back_populates="issue", cascade="all, delete-orphan", passive_deletes=True
     )
+    manual_extractions: Mapped[list[IpoManualExtraction]] = relationship(
+        back_populates="issue", cascade="all, delete-orphan", passive_deletes=True
+    )
 
 
 class IpoDocument(Base):
@@ -910,6 +913,9 @@ class IpoDocument(Base):
 
     issue: Mapped[IpoIssue] = relationship(back_populates="documents")
     financials: Mapped[list[IpoFinancial]] = relationship(back_populates="source_document")
+    manual_extractions: Mapped[list[IpoManualExtraction]] = relationship(
+        back_populates="source_document"
+    )
 
 
 class IpoFinancial(Base):
@@ -961,6 +967,193 @@ class IpoFinancial(Base):
 
     issue: Mapped[IpoIssue] = relationship(back_populates="financials")
     source_document: Mapped[IpoDocument | None] = relationship(back_populates="financials")
+
+
+class IpoManualExtraction(Base):
+    """Store one immutable, administrator-entered prospectus revision.
+
+    Beginner note:
+    This header stores facts that occur once per IPO rather than once per fiscal
+    year. The selected document's URL and hashes are copied into the revision so
+    provenance survives a later metadata-row deletion. Child period and peer
+    rows are deleted only when their owning issue/revision is deliberately
+    removed; no update API exists for corrections.
+    """
+
+    __tablename__ = "ipo_manual_extractions"
+    __table_args__ = (
+        CheckConstraint(
+            "financial_amount_unit IN ('inr', 'thousand_inr', 'lakh_inr', "
+            "'million_inr', 'crore_inr')",
+            name="ck_ipo_manual_extractions_financial_unit",
+        ),
+        CheckConstraint(
+            "issue_amount_unit IN ('inr', 'thousand_inr', 'lakh_inr', "
+            "'million_inr', 'crore_inr')",
+            name="ck_ipo_manual_extractions_issue_unit",
+        ),
+        CheckConstraint(
+            "equity_share_unit IN ('shares', 'thousand_shares', 'lakh_shares', "
+            "'million_shares', 'crore_shares')",
+            name="ck_ipo_manual_extractions_share_unit",
+        ),
+        CheckConstraint(
+            "length(source_content_sha256) = 64 AND "
+            "source_content_sha256 = lower(source_content_sha256) AND "
+            "replace(replace(replace(replace(replace(replace(replace(replace("
+            "replace(replace(replace(replace(replace(replace(replace(replace("
+            "source_content_sha256, '0', ''), '1', ''), '2', ''), '3', ''), '4', ''), "
+            "'5', ''), '6', ''), '7', ''), '8', ''), '9', ''), 'a', ''), "
+            "'b', ''), 'c', ''), 'd', ''), 'e', ''), 'f', '') = ''",
+            name="ck_ipo_manual_extractions_content_hash",
+        ),
+        CheckConstraint(
+            "source_record_hash IS NULL OR length(source_record_hash) = 64",
+            name="ck_ipo_manual_extractions_record_hash",
+        ),
+        CheckConstraint(
+            "total_debt >= 0 AND cash >= 0 AND equity_shares > 0 AND "
+            "fresh_issue_amount >= 0 AND ofs_amount >= 0",
+            name="ck_ipo_manual_extractions_nonnegative",
+        ),
+        CheckConstraint(
+            "promoter_holding_pre_issue >= 0 AND promoter_holding_pre_issue <= 100 AND "
+            "promoter_holding_post_issue >= 0 AND promoter_holding_post_issue <= 100",
+            name="ck_ipo_manual_extractions_promoter_range",
+        ),
+        CheckConstraint(
+            "net_worth_page > 0 AND total_debt_page > 0 AND cash_page > 0 AND "
+            "cash_flow_from_operations_page > 0 AND equity_shares_page > 0 AND "
+            "eps_page > 0 AND nav_book_value_page > 0 AND objects_of_issue_page > 0 AND "
+            "fresh_issue_amount_page > 0 AND ofs_amount_page > 0 AND "
+            "promoter_holding_pre_issue_page > 0 AND promoter_holding_post_issue_page > 0",
+            name="ck_ipo_manual_extractions_pages",
+        ),
+        Index(
+            "ix_ipo_manual_extractions_issue_submitted",
+            "issue_id",
+            "submitted_at",
+            "id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
+    issue_id: Mapped[int] = mapped_column(
+        BigIntPrimaryKey, ForeignKey("ipo_issues.id", ondelete="CASCADE"), nullable=False
+    )
+    source_document_id: Mapped[int | None] = mapped_column(
+        BigIntPrimaryKey,
+        ForeignKey("ipo_documents.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    source_document_url: Mapped[str] = mapped_column(Text, nullable=False)
+    source_record_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source_content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    financial_amount_unit: Mapped[str] = mapped_column(String(24), nullable=False)
+    issue_amount_unit: Mapped[str] = mapped_column(String(24), nullable=False)
+    equity_share_unit: Mapped[str] = mapped_column(String(24), nullable=False)
+    net_worth: Mapped[Decimal] = mapped_column(Numeric(24, 4), nullable=False)
+    net_worth_page: Mapped[int] = mapped_column(Integer, nullable=False)
+    total_debt: Mapped[Decimal] = mapped_column(Numeric(24, 4), nullable=False)
+    total_debt_page: Mapped[int] = mapped_column(Integer, nullable=False)
+    cash: Mapped[Decimal] = mapped_column(Numeric(24, 4), nullable=False)
+    cash_page: Mapped[int] = mapped_column(Integer, nullable=False)
+    cash_flow_from_operations: Mapped[Decimal] = mapped_column(Numeric(24, 4), nullable=False)
+    cash_flow_from_operations_page: Mapped[int] = mapped_column(Integer, nullable=False)
+    equity_shares: Mapped[Decimal] = mapped_column(Numeric(24, 4), nullable=False)
+    equity_shares_page: Mapped[int] = mapped_column(Integer, nullable=False)
+    eps: Mapped[Decimal] = mapped_column(Numeric(24, 4), nullable=False)
+    eps_page: Mapped[int] = mapped_column(Integer, nullable=False)
+    nav_book_value: Mapped[Decimal] = mapped_column(Numeric(24, 4), nullable=False)
+    nav_book_value_page: Mapped[int] = mapped_column(Integer, nullable=False)
+    objects_of_issue: Mapped[str] = mapped_column(Text, nullable=False)
+    objects_of_issue_page: Mapped[int] = mapped_column(Integer, nullable=False)
+    fresh_issue_amount: Mapped[Decimal] = mapped_column(Numeric(24, 4), nullable=False)
+    fresh_issue_amount_page: Mapped[int] = mapped_column(Integer, nullable=False)
+    ofs_amount: Mapped[Decimal] = mapped_column(Numeric(24, 4), nullable=False)
+    ofs_amount_page: Mapped[int] = mapped_column(Integer, nullable=False)
+    promoter_holding_pre_issue: Mapped[Decimal] = mapped_column(Numeric(7, 4), nullable=False)
+    promoter_holding_pre_issue_page: Mapped[int] = mapped_column(Integer, nullable=False)
+    promoter_holding_post_issue: Mapped[Decimal] = mapped_column(Numeric(7, 4), nullable=False)
+    promoter_holding_post_issue_page: Mapped[int] = mapped_column(Integer, nullable=False)
+    entered_by_email: Mapped[str] = mapped_column(Text, nullable=False)
+    submitted_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    issue: Mapped[IpoIssue] = relationship(back_populates="manual_extractions")
+    source_document: Mapped[IpoDocument | None] = relationship(
+        back_populates="manual_extractions"
+    )
+    periods: Mapped[list[IpoManualFinancialPeriod]] = relationship(
+        back_populates="extraction", cascade="all, delete-orphan", passive_deletes=True
+    )
+    peers: Mapped[list[IpoManualPeerValuation]] = relationship(
+        back_populates="extraction", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class IpoManualFinancialPeriod(Base):
+    """Store one of the three annual revenue/EBITDA/PAT rows in a revision."""
+
+    __tablename__ = "ipo_manual_financial_periods"
+    __table_args__ = (
+        UniqueConstraint(
+            "extraction_id", "ordinal", name="uq_ipo_manual_periods_ordinal"
+        ),
+        UniqueConstraint(
+            "extraction_id", "period_end", name="uq_ipo_manual_periods_date"
+        ),
+        CheckConstraint("ordinal >= 1 AND ordinal <= 3", name="ck_ipo_manual_periods_ordinal"),
+        CheckConstraint("revenue >= 0", name="ck_ipo_manual_periods_revenue"),
+        CheckConstraint(
+            "revenue_page > 0 AND ebitda_page > 0 AND pat_page > 0",
+            name="ck_ipo_manual_periods_pages",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
+    extraction_id: Mapped[int] = mapped_column(
+        BigIntPrimaryKey,
+        ForeignKey("ipo_manual_extractions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    period_end: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    revenue: Mapped[Decimal] = mapped_column(Numeric(24, 4), nullable=False)
+    revenue_page: Mapped[int] = mapped_column(Integer, nullable=False)
+    ebitda: Mapped[Decimal] = mapped_column(Numeric(24, 4), nullable=False)
+    ebitda_page: Mapped[int] = mapped_column(Integer, nullable=False)
+    pat: Mapped[Decimal] = mapped_column(Numeric(24, 4), nullable=False)
+    pat_page: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    extraction: Mapped[IpoManualExtraction] = relationship(back_populates="periods")
+
+
+class IpoManualPeerValuation(Base):
+    """Store one peer row and its allowlisted flexible valuation metrics."""
+
+    __tablename__ = "ipo_manual_peer_valuations"
+    __table_args__ = (
+        UniqueConstraint(
+            "extraction_id", "company_key", name="uq_ipo_manual_peers_company"
+        ),
+        CheckConstraint("source_page > 0", name="ck_ipo_manual_peers_page"),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
+    extraction_id: Mapped[int] = mapped_column(
+        BigIntPrimaryKey,
+        ForeignKey("ipo_manual_extractions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    company_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    company_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_page: Mapped[int] = mapped_column(Integer, nullable=False)
+    metrics_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+    extraction: Mapped[IpoManualExtraction] = relationship(back_populates="peers")
 
 
 class IpoSubscription(Base):
