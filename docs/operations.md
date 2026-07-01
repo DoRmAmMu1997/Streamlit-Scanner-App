@@ -119,6 +119,23 @@ requires a fresh explicit call. This is expected provenance protection rather
 than a cache failure. A secondary audit-store outage does not change the database
 status or the stable error returned to the caller.
 
+## Entering manual IPO financial evidence
+
+IPO-004 is available to administrators as **Admin IPO extraction**. Inventory
+the filing with IPO-002 and explicitly cache its DRHP/RHP with IPO-003 first.
+The form intentionally does not download a missing source.
+
+Select the IPO and cached document, confirm the units printed in the prospectus,
+then enter all three fiscal periods, every singleton value/page, objects of issue,
+and at least one peer row. Saving rehashes the local PDF, records the signed-in
+admin and server UTC time, and appends an immutable revision. Correct mistakes by
+prefilling and saving another revision; older rows remain visible in history.
+
+If the page says the cache is unavailable, call `download_document` again rather
+than editing database paths or hashes. A source URL/type/hash change during entry
+fails safely and requires reloading the page. Manual profiles expose canonical
+INR/share values to backend callers but do not create a score or recommendation.
+
 ### Scheduling on Windows (Task Scheduler)
 
 ```powershell

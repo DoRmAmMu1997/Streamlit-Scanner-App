@@ -41,6 +41,7 @@ from backend.admin import apply_config_overrides
 from backend.audit import record_audit_event, record_audit_event_once
 from backend.auth.roles import (
     EXPORT_RESULTS,
+    MANAGE_IPO_DATA,
     MANAGE_ROLES,
     MODIFY_CONFIG,
     RUN_SCAN,
@@ -157,6 +158,7 @@ from ui.history_page import (  # noqa: F401
     _render_history_page,
     _render_history_run_details,
 )
+from ui.ipo_manual_page import _render_ipo_manual_page
 from ui.roles_page import _render_roles_page
 from ui.validation_page import _render_validation_page
 
@@ -1031,10 +1033,19 @@ def main() -> None:
         "Validation / Signal Performance",
     ]
     if role_has_capability(current_role, VIEW_HEALTH):
-        # AUTH-003: the admin tier sees the operate-the-system pages — health,
-        # the runtime settings form, the audit log viewer, and role management.
+        # AUTH-003: the admin tier sees the operate-the-system pages — health, the
+        # runtime settings form, the IPO manual-extraction form, the audit log viewer,
+        # and role management. The menu is gated on VIEW_HEALTH (all admin-only), but
+        # each handler below re-checks its own specific capability as the real boundary
+        # (e.g. the IPO page requires MANAGE_IPO_DATA).
         view_options.extend(
-            ["Admin health", "Admin settings", "Audit log", "Admin roles"]
+            [
+                "Admin health",
+                "Admin settings",
+                "Admin IPO extraction",
+                "Audit log",
+                "Admin roles",
+            ]
         )
 
     view = st.radio(
@@ -1071,6 +1082,16 @@ def main() -> None:
         require_capability(st, role=current_role, capability=MODIFY_CONFIG, email=current_email)
         _record_admin_page_access(authenticated_user, "Admin settings")
         _render_config_page(authenticated_user)
+        return
+    if view == "Admin IPO extraction":
+        require_capability(
+            st,
+            role=current_role,
+            capability=MANAGE_IPO_DATA,
+            email=current_email,
+        )
+        _record_admin_page_access(authenticated_user, "Admin IPO extraction")
+        _render_ipo_manual_page(authenticated_user)
         return
     if view == "Audit log":
         require_capability(st, role=current_role, capability=VIEW_AUDIT_LOG, email=current_email)

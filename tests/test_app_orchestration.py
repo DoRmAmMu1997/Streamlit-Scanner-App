@@ -478,6 +478,7 @@ def test_admin_health_view_is_available_and_returns_before_screener_discovery(
             "Validation / Signal Performance",
             "Admin health",
             "Admin settings",
+            "Admin IPO extraction",
             "Audit log",
             "Admin roles",
         )
@@ -586,6 +587,61 @@ def test_auth_disabled_local_owner_can_open_admin_roles(monkeypatch):
         "view",
         "access:local-owner@localhost:Admin roles",
         "roles:local-owner@localhost:admin",
+    ]
+
+
+def test_auth_disabled_local_owner_can_open_admin_ipo_extraction(monkeypatch):
+    """The synthetic local admin should reach IPO entry before screener discovery."""
+    calls: list[str] = []
+
+    def choose_admin_ipo(_label, options, **_kwargs):
+        """Select the IPO admin page and prove the router exposed it."""
+        assert "Admin IPO extraction" in options
+        calls.append("view")
+        return "Admin IPO extraction"
+
+    monkeypatch.setattr(app, "get_settings", lambda: get_settings(env={"AUTH_REQUIRED": "false"}))
+    monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
+    monkeypatch.setattr(app, "_configure_logging", lambda: None)
+    monkeypatch.setattr(app, "ensure_database_schema", lambda: calls.append("schema"))
+    monkeypatch.setattr(app, "apply_config_overrides", lambda: {})
+    monkeypatch.setattr(
+        app,
+        "_record_admin_page_access",
+        lambda user, page: calls.append(f"access:{user.email}:{page}"),
+    )
+    monkeypatch.setattr(
+        app,
+        "_render_ipo_manual_page",
+        lambda user: calls.append(f"ipo:{user.email}:{user.role.name.lower()}"),
+    )
+    monkeypatch.setattr(
+        app,
+        "discover_screeners",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("IPO admin view must return before screener discovery")
+        ),
+    )
+    monkeypatch.setattr(
+        app,
+        "st",
+        SimpleNamespace(
+            set_page_config=lambda **_kwargs: None,
+            markdown=lambda *_args, **_kwargs: None,
+            title=lambda *_args, **_kwargs: None,
+            caption=lambda *_args, **_kwargs: None,
+            radio=choose_admin_ipo,
+            session_state={},
+        ),
+    )
+
+    app.main()
+
+    assert calls == [
+        "schema",
+        "view",
+        "access:local-owner@localhost:Admin IPO extraction",
+        "ipo:local-owner@localhost:admin",
     ]
 
 

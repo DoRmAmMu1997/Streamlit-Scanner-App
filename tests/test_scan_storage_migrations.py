@@ -7,6 +7,7 @@ depending on any local scan history.
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 from pathlib import Path
 
@@ -14,9 +15,10 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.orm import Session
 
 from backend.storage import database
-from backend.storage.models import Base
+from backend.storage.models import Base, IpoIssue, IpoManualExtraction
 
 
 def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Path):
@@ -48,6 +50,9 @@ def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Pa
         "ipo_documents",
         "ipo_financials",
         "ipo_issues",
+        "ipo_manual_extractions",
+        "ipo_manual_financial_periods",
+        "ipo_manual_peer_valuations",
         "ipo_recommendations",
         "ipo_scores",
         "ipo_subscriptions",
@@ -137,6 +142,22 @@ def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Pa
     recommendation_fk = inspector.get_foreign_keys("ipo_recommendations")[0]
     assert recommendation_fk["referred_table"] == "ipo_scores"
     assert recommendation_fk["options"] == {"ondelete": "CASCADE"}
+    assert {index["name"] for index in inspector.get_indexes("ipo_manual_extractions")} >= {
+        "ix_ipo_manual_extractions_issue_submitted",
+        "ix_ipo_manual_extractions_source_document_id",
+    }
+    extraction_fks = {
+        fk["referred_table"]: fk["options"]
+        for fk in inspector.get_foreign_keys("ipo_manual_extractions")
+    }
+    assert extraction_fks == {
+        "ipo_documents": {"ondelete": "SET NULL"},
+        "ipo_issues": {"ondelete": "CASCADE"},
+    }
+    for table in ("ipo_manual_financial_periods", "ipo_manual_peer_valuations"):
+        child_fk = inspector.get_foreign_keys(table)[0]
+        assert child_fk["referred_table"] == "ipo_manual_extractions"
+        assert child_fk["options"] == {"ondelete": "CASCADE"}
     engine.dispose()
 
     command.downgrade(config, "base")
@@ -248,6 +269,72 @@ def test_ipo003_downgrade_refuses_to_discard_download_provenance(
         assert connection.scalar(text("SELECT content_sha256 FROM ipo_documents")) == digest
     engine.dispose()
 
+
+def test_ipo004_downgrade_refuses_to_discard_manual_revisions(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Downgrade must stop before deleting immutable administrator evidence."""
+    db_path = tmp_path / "ipo004-downgrade.db"
+    database_url = f"sqlite:///{db_path.as_posix()}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = Config("alembic.ini")
+    command.upgrade(config, "head")
+
+    engine = create_engine(database_url, future=True)
+    with Session(engine) as session:
+        issue = IpoIssue(
+            company_name="Example Limited",
+            issue_type="mainboard",
+            status="rhp_filed",
+            source_confidence="high",
+        )
+        session.add(
+            IpoManualExtraction(
+                issue=issue,
+                source_document_url="https://www.sebi.gov.in/filings/example",
+                source_content_sha256="a" * 64,
+                financial_amount_unit="crore_inr",
+                issue_amount_unit="crore_inr",
+                equity_share_unit="lakh_shares",
+                net_worth=1,
+                net_worth_page=1,
+                total_debt=0,
+                total_debt_page=1,
+                cash=0,
+                cash_page=1,
+                cash_flow_from_operations=0,
+                cash_flow_from_operations_page=1,
+                equity_shares=1,
+                equity_shares_page=1,
+                eps=0,
+                eps_page=1,
+                nav_book_value=0,
+                nav_book_value_page=1,
+                objects_of_issue="General corporate purposes",
+                objects_of_issue_page=1,
+                fresh_issue_amount=0,
+                fresh_issue_amount_page=1,
+                ofs_amount=0,
+                ofs_amount_page=1,
+                promoter_holding_pre_issue=1,
+                promoter_holding_pre_issue_page=1,
+                promoter_holding_post_issue=1,
+                promoter_holding_post_issue_page=1,
+                entered_by_email="admin@example.com",
+                submitted_at=dt.datetime(2026, 7, 1, tzinfo=dt.UTC),
+            )
+        )
+        session.commit()
+    engine.dispose()
+
+    with pytest.raises(RuntimeError, match="discard IPO-004 manual extraction revisions"):
+        command.downgrade(config, "20260630ipo003")
+
+    engine = create_engine(database_url, future=True)
+    assert "ipo_manual_extractions" in inspect(engine).get_table_names()
+    engine.dispose()
+
+
 def test_ensure_database_schema_creates_tables_and_short_circuits(monkeypatch, tmp_path: Path):
     """The runtime bootstrap applies migrations once, then skips on later calls.
 
@@ -270,6 +357,9 @@ def test_ensure_database_schema_creates_tables_and_short_circuits(monkeypatch, t
         "ipo_documents",
         "ipo_financials",
         "ipo_issues",
+        "ipo_manual_extractions",
+        "ipo_manual_financial_periods",
+        "ipo_manual_peer_valuations",
         "ipo_recommendations",
         "ipo_scores",
         "ipo_subscriptions",

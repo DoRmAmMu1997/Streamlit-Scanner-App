@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,16 @@ from backend.ipo.documents.downloader import (
     IpoDocumentDownloadErrorCode,
     IpoDocumentDownloadResult,
     download_document_file,
+    verify_cached_document_file,
+)
+from backend.ipo.manual_extraction import (
+    IpoAmountUnit,
+    IpoManualExtractionData,
+    IpoManualExtractionRecord,
+    IpoManualPeriodData,
+    IpoPeerMetric,
+    IpoPeerValuationData,
+    IpoShareUnit,
 )
 from backend.ipo.models import (
     Confidence,
@@ -50,6 +61,7 @@ from backend.ipo.verdict import build_recommendation
 from backend.observability import (
     EVENT_IPO_DOCUMENT_DOWNLOAD_COMPLETED,
     EVENT_IPO_DOCUMENT_DOWNLOAD_FAILED,
+    EVENT_IPO_MANUAL_EXTRACTION_SUBMITTED,
     log_event,
 )
 from backend.scanning.result_contract import normalize_secret_safe_json
@@ -67,18 +79,22 @@ from backend.storage.ipo_repository import (
     get_ipo_financial,
     get_ipo_issue,
     get_ipo_issue_by_sebi_key,
+    get_ipo_manual_extraction,
     get_ipo_subscription,
     get_latest_ipo_evaluation_rows,
     get_latest_ipo_filing_date,
+    get_latest_ipo_manual_extraction,
     insert_ipo_document,
     insert_ipo_evaluation,
     insert_ipo_financial,
     insert_ipo_issue,
+    insert_ipo_manual_extraction,
     insert_ipo_subscription,
     list_ipo_document_rows,
     list_ipo_evaluation_rows,
     list_ipo_financial_rows,
     list_ipo_issue_rows,
+    list_ipo_manual_extraction_rows,
     list_ipo_subscription_rows,
     list_unclaimed_ipo_issues_by_company_name,
     update_ipo_document_cache_if_source_matches,
@@ -465,6 +481,312 @@ def download_document(
         bytes_written=result.bytes_written,
     )
     return result
+
+
+def _manual_email(value: str) -> str:
+    """Normalize the authenticated actor email without accepting UI overrides.
+
+    Beginner note:
+    This value comes from the signed-in session, never the form. We casefold it so the
+    same person is one audit identity regardless of capitalization, and apply only a
+    minimal sanity check (non-empty, within the RFC 5321 320-char limit, exactly one
+    ``@``) -- full email validation is the auth layer's job, not this adapter's.
+    """
+    email = str(value).strip().casefold()
+    if not email or len(email) > 320 or email.count("@") != 1:
+        raise IpoValidationError("entered_by_email must be a valid authenticated email.")
+    return email
+
+
+def _manual_header_values(
+    data: IpoManualExtractionData,
+    *,
+    document: IpoDocumentRecord,
+    entered_by_email: str,
+    submitted_at: dt.datetime,
+) -> dict[str, Any]:
+    """Translate one validated form payload into immutable header columns."""
+    return {
+        "source_document_id": document.id,
+        "source_document_url": document.document_url,
+        "source_record_hash": document.record_hash,
+        "source_content_sha256": document.content_sha256,
+        "financial_amount_unit": data.financial_amount_unit.value,
+        "issue_amount_unit": data.issue_amount_unit.value,
+        "equity_share_unit": data.equity_share_unit.value,
+        "net_worth": data.net_worth,
+        "net_worth_page": data.net_worth_page,
+        "total_debt": data.total_debt,
+        "total_debt_page": data.total_debt_page,
+        "cash": data.cash,
+        "cash_page": data.cash_page,
+        "cash_flow_from_operations": data.cash_flow_from_operations,
+        "cash_flow_from_operations_page": data.cash_flow_from_operations_page,
+        "equity_shares": data.equity_shares,
+        "equity_shares_page": data.equity_shares_page,
+        "eps": data.eps,
+        "eps_page": data.eps_page,
+        "nav_book_value": data.nav_book_value,
+        "nav_book_value_page": data.nav_book_value_page,
+        "objects_of_issue": data.objects_of_issue,
+        "objects_of_issue_page": data.objects_of_issue_page,
+        "fresh_issue_amount": data.fresh_issue_amount,
+        "fresh_issue_amount_page": data.fresh_issue_amount_page,
+        "ofs_amount": data.ofs_amount,
+        "ofs_amount_page": data.ofs_amount_page,
+        "promoter_holding_pre_issue": data.promoter_holding_pre_issue,
+        "promoter_holding_pre_issue_page": data.promoter_holding_pre_issue_page,
+        "promoter_holding_post_issue": data.promoter_holding_post_issue,
+        "promoter_holding_post_issue_page": data.promoter_holding_post_issue_page,
+        "entered_by_email": entered_by_email,
+        "submitted_at": submitted_at,
+    }
+
+
+def _manual_period_values(data: IpoManualExtractionData) -> list[dict[str, Any]]:
+    """Build the exactly three annual child rows in chronological order.
+
+    ``data.periods`` is already sorted oldest-to-newest by the domain contract, so
+    numbering them 1..3 with ``enumerate`` records a stable FY1/FY2/FY3 slot.
+    """
+    return [
+        {
+            "ordinal": ordinal,
+            "period_end": period.period_end,
+            "revenue": period.revenue,
+            "revenue_page": period.revenue_page,
+            "ebitda": period.ebitda,
+            "ebitda_page": period.ebitda_page,
+            "pat": period.pat,
+            "pat_page": period.pat_page,
+        }
+        for ordinal, period in enumerate(data.periods, start=1)
+    ]
+
+
+def _manual_peer_values(data: IpoManualExtractionData) -> list[dict[str, Any]]:
+    """Serialize allowlisted peer metrics as exact decimal strings for JSON.
+
+    Beginner note:
+    JSON has no decimal type, and storing a ratio as a float would reintroduce the
+    binary rounding the domain worked to avoid. ``format(value, "f")`` writes the exact
+    decimal as text (e.g. ``"21.4000"``); the detached record parses it straight back
+    into ``Decimal`` on read.
+    """
+    return [
+        {
+            "company_name": peer.company_name,
+            "company_key": peer.company_key,
+            "source_page": peer.source_page,
+            "metrics_json": {
+                IpoPeerMetric(metric).value: format(value, "f")
+                for metric, value in peer.metrics.items()
+            },
+        }
+        for peer in data.peers
+    ]
+
+
+def _manual_record(row: Any) -> IpoManualExtractionRecord:
+    """Detach an ORM revision and restore enums, decimals, periods, and peers."""
+    periods = tuple(
+        IpoManualPeriodData(
+            period_end=period.period_end,
+            revenue=period.revenue,
+            revenue_page=period.revenue_page,
+            ebitda=period.ebitda,
+            ebitda_page=period.ebitda_page,
+            pat=period.pat,
+            pat_page=period.pat_page,
+        )
+        for period in sorted(row.periods, key=lambda value: value.ordinal)
+    )
+    peers = tuple(
+        IpoPeerValuationData(
+            company_name=peer.company_name,
+            source_page=peer.source_page,
+            metrics={
+                IpoPeerMetric(metric): value
+                for metric, value in peer.metrics_json.items()
+            },
+        )
+        for peer in sorted(row.peers, key=lambda value: (value.company_key, value.id))
+    )
+    return IpoManualExtractionRecord(
+        id=row.id,
+        issue_id=row.issue_id,
+        source_document_id=row.source_document_id,
+        source_document_url=row.source_document_url,
+        source_record_hash=row.source_record_hash,
+        source_content_sha256=row.source_content_sha256,
+        financial_amount_unit=IpoAmountUnit(row.financial_amount_unit),
+        issue_amount_unit=IpoAmountUnit(row.issue_amount_unit),
+        equity_share_unit=IpoShareUnit(row.equity_share_unit),
+        periods=periods,
+        net_worth=row.net_worth,
+        net_worth_page=row.net_worth_page,
+        total_debt=row.total_debt,
+        total_debt_page=row.total_debt_page,
+        cash=row.cash,
+        cash_page=row.cash_page,
+        cash_flow_from_operations=row.cash_flow_from_operations,
+        cash_flow_from_operations_page=row.cash_flow_from_operations_page,
+        equity_shares=row.equity_shares,
+        equity_shares_page=row.equity_shares_page,
+        eps=row.eps,
+        eps_page=row.eps_page,
+        nav_book_value=row.nav_book_value,
+        nav_book_value_page=row.nav_book_value_page,
+        objects_of_issue=row.objects_of_issue,
+        objects_of_issue_page=row.objects_of_issue_page,
+        fresh_issue_amount=row.fresh_issue_amount,
+        fresh_issue_amount_page=row.fresh_issue_amount_page,
+        ofs_amount=row.ofs_amount,
+        ofs_amount_page=row.ofs_amount_page,
+        promoter_holding_pre_issue=row.promoter_holding_pre_issue,
+        promoter_holding_pre_issue_page=row.promoter_holding_pre_issue_page,
+        promoter_holding_post_issue=row.promoter_holding_post_issue,
+        promoter_holding_post_issue_page=row.promoter_holding_post_issue_page,
+        peers=peers,
+        entered_by_email=row.entered_by_email,
+        submitted_at=_utc(row.submitted_at),
+    )
+
+
+def submit_manual_extraction(
+    issue_id: int,
+    data: IpoManualExtractionData,
+    *,
+    entered_by_email: str,
+    data_dir: Path | None = None,
+    now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
+    audit_recorder: AuditRecorder = record_audit_event,
+    session_factory: SessionFactory = session_scope,
+) -> IpoManualExtractionRecord:
+    """Verify cached source bytes, then atomically append one complete revision.
+
+    Beginner note:
+    The first transaction reads and detaches source metadata. Hashing the PDF
+    happens after that transaction closes, so a large file never holds a DB
+    connection or lock. The second short transaction compares the source facts
+    again before inserting all rows, closing the time-of-check/time-of-use gap.
+    """
+    actor = _manual_email(entered_by_email)
+    submitted_at = now()
+    if not isinstance(submitted_at, dt.datetime) or submitted_at.tzinfo is None:
+        raise IpoValidationError("The manual-extraction clock must return a timezone-aware datetime.")
+    submitted_at = submitted_at.astimezone(dt.UTC)
+
+    with session_factory() as session:
+        if get_ipo_issue(session, issue_id) is None:
+            raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
+        row = get_ipo_document(session, issue_id, data.source_document_id)
+        if row is None:
+            raise IpoValidationError(
+                f"Source document {data.source_document_id} does not belong to IPO issue {issue_id}."
+            )
+        document = _document_record(row)
+
+    if document.document_type not in {"drhp", "rhp"}:
+        raise IpoValidationError("Manual extraction accepts only a cached DRHP or RHP document.")
+    cache_root = Path(data_dir) if data_dir is not None else get_settings().data_dir
+    try:
+        verified = verify_cached_document_file(document, data_dir=cache_root)
+    except IpoDocumentDownloadError as exc:
+        raise IpoValidationError("Manual extraction requires a verified cached PDF.") from exc
+
+    with session_factory() as session:
+        current = get_ipo_document(session, issue_id, data.source_document_id)
+        if current is None:
+            raise IpoValidationError("The selected IPO source document changed before submission.")
+        if (
+            current.document_type != document.document_type
+            or current.document_url != document.document_url
+            or current.content_sha256 != verified.content_sha256
+            or current.file_path != verified.file_path
+        ):
+            raise IpoValidationError("The selected IPO source document changed before submission.")
+        inserted = insert_ipo_manual_extraction(
+            session,
+            issue_id,
+            _manual_header_values(
+                data,
+                document=document,
+                entered_by_email=actor,
+                submitted_at=submitted_at,
+            ),
+            _manual_period_values(data),
+            _manual_peer_values(data),
+        )
+        record = _manual_record(inserted)
+
+    metadata = {
+        "issue_id": issue_id,
+        "extraction_id": record.id,
+        "document_id": data.source_document_id,
+        "period_count": len(record.periods),
+        "peer_count": len(record.peers),
+    }
+    log_event(
+        logger,
+        EVENT_IPO_MANUAL_EXTRACTION_SUBMITTED,
+        issue_id=issue_id,
+        extraction_id=record.id,
+        document_id=data.source_document_id,
+        period_count=len(record.periods),
+        peer_count=len(record.peers),
+    )
+    # The committed extraction row is authoritative. Audit storage is useful
+    # secondary evidence, but its outage must not make the UI report that the
+    # already-successful submission failed.
+    with suppress(Exception):
+        audit_recorder(
+            event=EVENT_IPO_MANUAL_EXTRACTION_SUBMITTED,
+            user_email=actor,
+            metadata=metadata,
+            session_factory=session_factory,
+        )
+    return record
+
+
+def get_manual_extraction(
+    issue_id: int,
+    extraction_id: int,
+    *,
+    session_factory: SessionFactory = session_scope,
+) -> IpoManualExtractionRecord | None:
+    """Return one detached immutable revision scoped to its owning issue."""
+    with session_factory() as session:
+        row = get_ipo_manual_extraction(session, issue_id, extraction_id)
+        return _manual_record(row) if row is not None else None
+
+
+def list_manual_extractions(
+    issue_id: int,
+    *,
+    session_factory: SessionFactory = session_scope,
+) -> list[IpoManualExtractionRecord]:
+    """List a known issue's revisions newest-first without exposing ORM rows."""
+    with session_factory() as session:
+        if get_ipo_issue(session, issue_id) is None:
+            raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
+        return [
+            _manual_record(row)
+            for row in list_ipo_manual_extraction_rows(session, issue_id)
+        ]
+
+
+def get_latest_manual_profile(
+    issue_id: int,
+    *,
+    session_factory: SessionFactory = session_scope,
+) -> IpoManualExtractionRecord | None:
+    """Return the latest canonical raw-data profile without deriving scores."""
+    with session_factory() as session:
+        if get_ipo_issue(session, issue_id) is None:
+            raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
+        row = get_latest_ipo_manual_extraction(session, issue_id)
+        return _manual_record(row) if row is not None else None
 
 
 _STATUS_ORDER = {
