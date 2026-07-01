@@ -21,6 +21,7 @@ from backend.storage import (
 
 
 def _issue(**overrides: object) -> IpoIssue:
+    """Provide the issue step used by the IPO workflow."""
     values: dict[str, object] = {
         "company_name": "Example Ltd",
         "issue_type": "mainboard",
@@ -40,6 +41,7 @@ def _issue(**overrides: object) -> IpoIssue:
 
 
 def test_all_six_ipo_tables_round_trip_with_exact_money(db_session: Session) -> None:
+    """Verify that all six ipo tables round trip with exact money."""
     issue = _issue()
     document = IpoDocument(
         issue=issue,
@@ -102,9 +104,70 @@ def test_all_six_ipo_tables_round_trip_with_exact_money(db_session: Session) -> 
     assert recommendation.score_id == score.id
 
 
+def test_ipo_document_defaults_to_an_empty_not_downloaded_cache(db_session: Session) -> None:
+    """Legacy and metadata-only documents must remain valid after IPO-003."""
+    issue = _issue()
+    document = IpoDocument(
+        issue=issue,
+        document_type="rhp",
+        document_url="https://www.sebi.gov.in/filings/example",
+        source_confidence="high",
+    )
+    db_session.add(document)
+    db_session.commit()
+
+    assert document.parse_status == "not_downloaded"
+    assert document.content_sha256 is None
+    assert document.downloaded_at is None
+    assert document.file_path is None
+    assert document.page_count is None
+
+
+@pytest.mark.parametrize(
+    ("overrides", "constraint_name"),
+    [
+        ({"content_sha256": "a" * 63}, "content_sha256"),
+        ({"page_count": 0}, "page_count"),
+        ({"parse_status": "parsed"}, "parse_status"),
+        (
+            {
+                "parse_status": "pending",
+                "content_sha256": None,
+                "downloaded_at": None,
+                "file_path": None,
+            },
+            "download_metadata",
+        ),
+    ],
+)
+def test_ipo_document_rejects_inconsistent_cache_metadata(
+    db_session: Session,
+    overrides: dict[str, object],
+    constraint_name: str,
+) -> None:
+    """Database checks defend cache provenance even if a caller bypasses DTOs."""
+    values: dict[str, object] = {
+        "issue": _issue(),
+        "document_type": "rhp",
+        "document_url": "https://www.sebi.gov.in/filings/example",
+        "source_confidence": "high",
+        "parse_status": "pending",
+        "content_sha256": "a" * 64,
+        "downloaded_at": dt.datetime(2026, 6, 30, tzinfo=dt.UTC),
+        "file_path": "ipo/documents/" + "a" * 64 + ".pdf",
+    }
+    values.update(overrides)
+    db_session.add(IpoDocument(**values))
+
+    with pytest.raises(IntegrityError, match=constraint_name):
+        db_session.commit()
+    db_session.rollback()
+
+
 def test_sebi_identity_columns_are_nullable_for_legacy_rows_and_unique_when_present(
     db_session: Session,
 ) -> None:
+    """Verify that sebi identity columns are nullable for legacy rows and unique when present."""
     legacy = _issue(company_name="Legacy Limited", issue_type="unknown")
     first = _issue(company_name="Example Limited", sebi_company_key="example limited")
     second = _issue(company_name="Other Limited", sebi_company_key="example limited")
@@ -128,6 +191,7 @@ def test_sebi_identity_columns_are_nullable_for_legacy_rows_and_unique_when_pres
 
 
 def test_record_hash_is_unique_and_exactly_sha256_length(db_session: Session) -> None:
+    """Verify that record hash is unique and exactly sha256 length."""
     issue = _issue(issue_type="unknown")
     db_session.add_all(
         [
@@ -152,6 +216,7 @@ def test_record_hash_is_unique_and_exactly_sha256_length(db_session: Session) ->
 def test_issue_check_constraints_reject_unknown_enum_values(
     db_session: Session, field: str, value: str
 ) -> None:
+    """Verify that issue check constraints reject unknown enum values."""
     db_session.add(_issue(**{field: value}))
 
     with pytest.raises(IntegrityError):
@@ -159,6 +224,7 @@ def test_issue_check_constraints_reject_unknown_enum_values(
 
 
 def test_one_recommendation_is_allowed_per_immutable_score(db_session: Session) -> None:
+    """Verify that one recommendation is allowed per immutable score."""
     issue = _issue()
     score = IpoScore(
         issue=issue,
@@ -196,6 +262,7 @@ def test_one_recommendation_is_allowed_per_immutable_score(db_session: Session) 
 
 
 def test_deleting_issue_cascades_to_every_ipo_child_table(db_session: Session) -> None:
+    """Verify that deleting issue cascades to every ipo child table."""
     issue = _issue()
     document = IpoDocument(
         issue=issue,

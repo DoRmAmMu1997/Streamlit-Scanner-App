@@ -1,10 +1,16 @@
 """Public IPO-001 domain, scoring, verdict, and repository API."""
 
+from backend.ipo.documents import (
+    IpoDocumentDownloadError,
+    IpoDocumentDownloadErrorCode,
+    IpoDocumentDownloadResult,
+)
 from backend.ipo.models import (
     Confidence,
     FactorAssessment,
     FinancialPeriodType,
     IpoDocumentData,
+    IpoDocumentParseStatus,
     IpoDocumentRecord,
     IpoEvaluationRecord,
     IpoFilingData,
@@ -36,6 +42,7 @@ from backend.ipo.repository import (
     delete_financial,
     delete_issue,
     delete_subscription,
+    download_document,
     evaluate_issue,
     get_document,
     get_evaluation,
@@ -64,6 +71,10 @@ __all__ = [
     "FactorAssessment",
     "FinancialPeriodType",
     "IpoDocumentData",
+    "IpoDocumentDownloadError",
+    "IpoDocumentDownloadErrorCode",
+    "IpoDocumentDownloadResult",
+    "IpoDocumentParseStatus",
     "IpoDocumentRecord",
     "IpoEvaluationRecord",
     "IpoFilingData",
@@ -94,6 +105,7 @@ __all__ = [
     "delete_financial",
     "delete_issue",
     "delete_subscription",
+    "download_document",
     "evaluate_issue",
     "fetch_sebi_filings",
     "get_document",

@@ -108,7 +108,15 @@ def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Pa
     issue_columns = {column["name"] for column in inspector.get_columns("ipo_issues")}
     assert "sebi_company_key" in issue_columns
     document_columns = {column["name"] for column in inspector.get_columns("ipo_documents")}
-    assert {"filing_date", "record_hash"} <= document_columns
+    assert {
+        "filing_date",
+        "record_hash",
+        "content_sha256",
+        "downloaded_at",
+        "file_path",
+        "page_count",
+        "parse_status",
+    } <= document_columns
     assert {index["name"] for index in inspector.get_indexes("ipo_documents")} >= {
         "ix_ipo_documents_filing_date",
         "ux_ipo_documents_record_hash",
@@ -195,6 +203,50 @@ def test_ipo002_downgrade_refuses_to_discard_ingested_identity(monkeypatch, tmp_
         )
     engine.dispose()
 
+
+def test_ipo003_downgrade_refuses_to_discard_download_provenance(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Downgrade fails before DDL when verified PDF cache metadata would be lost."""
+    db_path = tmp_path / "ipo003-downgrade.db"
+    database_url = f"sqlite:///{db_path.as_posix()}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = Config("alembic.ini")
+    command.upgrade(config, "head")
+
+    digest = "a" * 64
+    engine = create_engine(database_url, future=True)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO ipo_issues "
+                "(company_name, issue_type, status, source_confidence, created_at, updated_at) "
+                "VALUES ('Example Limited', 'mainboard', 'rhp_filed', 'high', "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO ipo_documents "
+                "(issue_id, document_type, document_url, source_confidence, "
+                "content_sha256, downloaded_at, file_path, parse_status, created_at) "
+                "VALUES (1, 'rhp', 'https://www.sebi.gov.in/filings/example', 'high', "
+                ":digest, CURRENT_TIMESTAMP, :path, 'pending', CURRENT_TIMESTAMP)"
+            ),
+            {"digest": digest, "path": f"ipo/documents/{digest}.pdf"},
+        )
+    engine.dispose()
+
+    with pytest.raises(RuntimeError, match="discard IPO-003 document-cache metadata"):
+        command.downgrade(config, "20260630ipo002")
+
+    engine = create_engine(database_url, future=True)
+    columns = {column["name"] for column in inspect(engine).get_columns("ipo_documents")}
+    assert "content_sha256" in columns
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT content_sha256 FROM ipo_documents")) == digest
+    engine.dispose()
 
 def test_ensure_database_schema_creates_tables_and_short_circuits(monkeypatch, tmp_path: Path):
     """The runtime bootstrap applies migrations once, then skips on later calls.

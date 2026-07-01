@@ -3,17 +3,26 @@
 from __future__ import annotations
 
 import datetime as dt
+from contextlib import contextmanager
 from decimal import Decimal
+from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
+from backend.ipo.documents.downloader import (
+    IpoDocumentDownloadError,
+    IpoDocumentDownloadErrorCode,
+    IpoDocumentDownloadResult,
+)
 from backend.ipo.models import (
     Confidence,
     FactorAssessment,
     FinancialPeriodType,
     IpoDocumentData,
+    IpoDocumentParseStatus,
     IpoFinancialData,
     IpoIssueData,
     IpoIssueType,
@@ -34,6 +43,7 @@ from backend.ipo.repository import (
     delete_financial,
     delete_issue,
     delete_subscription,
+    download_document,
     evaluate_issue,
     get_document,
     get_evaluation,
@@ -55,6 +65,7 @@ from backend.storage import IpoRecommendation, IpoScore
 
 
 def _issue_data(**overrides: object) -> IpoIssueData:
+    """Provide the issue data step used by the IPO workflow."""
     values: dict[str, object] = {
         "company_name": "Example Ltd",
         "issue_type": IpoIssueType.MAINBOARD,
@@ -74,6 +85,7 @@ def _issue_data(**overrides: object) -> IpoIssueData:
 
 
 def test_issue_crud_returns_detached_typed_records(file_session_factory) -> None:
+    """Verify that issue crud returns detached typed records."""
     created = create_issue(_issue_data(), session_factory=file_session_factory)
 
     assert created.id > 0
@@ -97,6 +109,7 @@ def test_issue_crud_returns_detached_typed_records(file_session_factory) -> None
 
 
 def test_list_issues_uses_stable_open_date_then_company_order(file_session_factory) -> None:
+    """Verify that list issues uses stable open date then company order."""
     later = create_issue(
         _issue_data(company_name="Zulu Ltd", open_date=dt.date(2026, 8, 1), close_date=None),
         session_factory=file_session_factory,
@@ -118,11 +131,13 @@ def test_list_issues_uses_stable_open_date_then_company_order(file_session_facto
 
 
 def test_update_missing_issue_raises_typed_not_found(file_session_factory) -> None:
+    """Verify that update missing issue raises typed not found."""
     with pytest.raises(IpoNotFoundError, match="IPO issue 999"):
         update_issue(999, _issue_data(), session_factory=file_session_factory)
 
 
 def _document_data(**overrides: object) -> IpoDocumentData:
+    """Provide the document data step used by the IPO workflow."""
     values: dict[str, object] = {
         "document_type": "rhp",
         "document_url": "https://www.sebi.gov.in/example-rhp.pdf",
@@ -134,6 +149,7 @@ def _document_data(**overrides: object) -> IpoDocumentData:
 
 
 def test_document_crud_is_scoped_to_its_parent_issue(file_session_factory) -> None:
+    """Verify that document crud is scoped to its parent issue."""
     issue = create_issue(_issue_data(), session_factory=file_session_factory)
     other = create_issue(
         _issue_data(company_name="Other Ltd"), session_factory=file_session_factory
@@ -173,13 +189,291 @@ def test_document_crud_is_scoped_to_its_parent_issue(file_session_factory) -> No
 
 
 def test_create_document_requires_an_existing_issue(file_session_factory) -> None:
+    """Verify that create document requires an existing issue."""
     with pytest.raises(IpoNotFoundError, match="IPO issue 999"):
         create_document(999, _document_data(), session_factory=file_session_factory)
+
+
+def _download_result(document_id: int) -> IpoDocumentDownloadResult:
+    """Build the frozen provenance returned by the filesystem downloader."""
+    digest = "c" * 64
+    return IpoDocumentDownloadResult(
+        document_id=document_id,
+        content_sha256=digest,
+        downloaded_at=dt.datetime(2026, 6, 30, 12, tzinfo=dt.UTC),
+        file_path=f"ipo/documents/{digest}.pdf",
+        page_count=None,
+        parse_status=IpoDocumentParseStatus.PENDING,
+        cache_hit=False,
+        bytes_written=512,
+    )
+
+
+def test_download_document_closes_read_transaction_before_downloader(
+    file_session_factory,
+    tmp_path: Path,
+) -> None:
+    """A slow PDF transfer must never retain a database transaction or lock."""
+    issue = create_issue(_issue_data(), session_factory=file_session_factory)
+    document = create_document(
+        issue.id, _document_data(), session_factory=file_session_factory
+    )
+    active_transactions = 0
+
+    @contextmanager
+    def tracked_session_factory():
+        nonlocal active_transactions
+        with file_session_factory() as session:
+            active_transactions += 1
+            try:
+                yield session
+            finally:
+                active_transactions -= 1
+
+    def fake_downloader(record, **_kwargs: object) -> IpoDocumentDownloadResult:
+        assert active_transactions == 0
+        return _download_result(record.id)
+
+    result = download_document(
+        issue.id,
+        document.id,
+        data_dir=tmp_path,
+        downloader=fake_downloader,
+        session_factory=tracked_session_factory,
+    )
+
+    stored = get_document(issue.id, document.id, session_factory=file_session_factory)
+    assert result == _download_result(document.id)
+    assert stored is not None
+    assert stored.content_sha256 == "c" * 64
+    assert stored.parse_status is IpoDocumentParseStatus.PENDING
+    assert stored.page_count is None
+
+
+def test_download_failure_clears_metadata_records_safe_audit_and_reraises(
+    file_session_factory,
+    tmp_path: Path,
+) -> None:
+    """A failed transfer leaves no trusted path/hash and emits only an error code."""
+    issue = create_issue(_issue_data(), session_factory=file_session_factory)
+    document = create_document(
+        issue.id, _document_data(), session_factory=file_session_factory
+    )
+    audits: list[dict[str, Any]] = []
+
+    def failing_downloader(*_args: object, **_kwargs: object) -> IpoDocumentDownloadResult:
+        raise IpoDocumentDownloadError(IpoDocumentDownloadErrorCode.NETWORK_ERROR)
+
+    def capture_audit(**kwargs: Any) -> bool:
+        audits.append(kwargs)
+        return True
+
+    with pytest.raises(IpoDocumentDownloadError) as caught:
+        download_document(
+            issue.id,
+            document.id,
+            data_dir=tmp_path,
+            downloader=failing_downloader,
+            audit_recorder=capture_audit,
+            session_factory=file_session_factory,
+        )
+
+    stored = get_document(issue.id, document.id, session_factory=file_session_factory)
+    assert caught.value.code is IpoDocumentDownloadErrorCode.NETWORK_ERROR
+    assert stored is not None
+    assert stored.parse_status is IpoDocumentParseStatus.DOWNLOAD_FAILED
+    assert stored.content_sha256 is None
+    assert stored.downloaded_at is None
+    assert stored.file_path is None
+    assert audits[0]["metadata"] == {
+        "issue_id": issue.id,
+        "document_id": document.id,
+        "document_type": "rhp",
+        "error_code": "network_error",
+    }
+
+
+def test_final_offer_is_rejected_without_calling_downloader(
+    file_session_factory,
+    tmp_path: Path,
+) -> None:
+    """IPO-003 downloads only DRHP/RHP records and leaves final offers metadata-only."""
+    issue = create_issue(_issue_data(), session_factory=file_session_factory)
+    document = create_document(
+        issue.id,
+        _document_data(document_type="final_offer"),
+        session_factory=file_session_factory,
+    )
+    called = False
+
+    def forbidden_downloader(*_args: object, **_kwargs: object) -> IpoDocumentDownloadResult:
+        nonlocal called
+        called = True
+        raise AssertionError("downloader must not be called")
+
+    with pytest.raises(IpoValidationError, match="DRHP or RHP"):
+        download_document(
+            issue.id,
+            document.id,
+            data_dir=tmp_path,
+            downloader=forbidden_downloader,
+            session_factory=file_session_factory,
+        )
+
+    assert called is False
+
+
+def test_changing_document_source_invalidates_download_provenance(
+    file_session_factory,
+    tmp_path: Path,
+) -> None:
+    """A cache digest for old source metadata must not survive a source edit."""
+    issue = create_issue(_issue_data(), session_factory=file_session_factory)
+    document = create_document(
+        issue.id, _document_data(), session_factory=file_session_factory
+    )
+    download_document(
+        issue.id,
+        document.id,
+        data_dir=tmp_path,
+        downloader=lambda record, **_kwargs: _download_result(record.id),
+        session_factory=file_session_factory,
+    )
+
+    updated = update_document(
+        issue.id,
+        document.id,
+        _document_data(document_url="https://www.sebi.gov.in/filings/revised-rhp.html"),
+        session_factory=file_session_factory,
+    )
+
+    assert updated.parse_status is IpoDocumentParseStatus.NOT_DOWNLOADED
+    assert updated.content_sha256 is None
+    assert updated.downloaded_at is None
+    assert updated.file_path is None
+
+
+def test_source_change_during_download_cannot_attach_stale_bytes(
+    file_session_factory,
+    tmp_path: Path,
+) -> None:
+    """Bind downloaded bytes to the same source identity read before HTTP.
+
+    Network I/O intentionally runs outside a transaction. A concurrent source
+    correction can therefore happen while bytes are in flight. The final short
+    transaction must compare-and-set against the detached URL and type instead
+    of silently attaching old bytes to the corrected filing record.
+    """
+    issue = create_issue(_issue_data(), session_factory=file_session_factory)
+    document = create_document(
+        issue.id, _document_data(), session_factory=file_session_factory
+    )
+    revised_url = "https://www.sebi.gov.in/filings/revised-rhp.html"
+
+    def racing_downloader(record, **_kwargs: object) -> IpoDocumentDownloadResult:
+        """Simulate an operator correcting provenance while HTTP is in flight."""
+        update_document(
+            issue.id,
+            document.id,
+            _document_data(document_url=revised_url),
+            session_factory=file_session_factory,
+        )
+        return _download_result(record.id)
+
+    with pytest.raises(IpoDocumentDownloadError) as caught:
+        download_document(
+            issue.id,
+            document.id,
+            data_dir=tmp_path,
+            downloader=racing_downloader,
+            session_factory=file_session_factory,
+        )
+
+    stored = get_document(issue.id, document.id, session_factory=file_session_factory)
+    assert caught.value.code is IpoDocumentDownloadErrorCode.SOURCE_CHANGED
+    assert stored is not None
+    assert stored.document_url == revised_url
+    assert stored.parse_status is IpoDocumentParseStatus.NOT_DOWNLOADED
+    assert stored.content_sha256 is None
+    assert stored.downloaded_at is None
+    assert stored.file_path is None
+
+
+def test_source_change_during_failed_download_preserves_corrected_state(
+    file_session_factory,
+    tmp_path: Path,
+) -> None:
+    """Do not mark a corrected source failed for an older request's error."""
+    issue = create_issue(_issue_data(), session_factory=file_session_factory)
+    document = create_document(
+        issue.id, _document_data(), session_factory=file_session_factory
+    )
+    revised_url = "https://www.sebi.gov.in/filings/corrected-rhp.html"
+
+    def racing_failure(*_args: object, **_kwargs: object) -> IpoDocumentDownloadResult:
+        """Correct the source, then fail the request that used its old identity."""
+        update_document(
+            issue.id,
+            document.id,
+            _document_data(document_url=revised_url),
+            session_factory=file_session_factory,
+        )
+        raise IpoDocumentDownloadError(IpoDocumentDownloadErrorCode.NETWORK_ERROR)
+
+    with pytest.raises(IpoDocumentDownloadError) as caught:
+        download_document(
+            issue.id,
+            document.id,
+            data_dir=tmp_path,
+            downloader=racing_failure,
+            session_factory=file_session_factory,
+        )
+
+    stored = get_document(issue.id, document.id, session_factory=file_session_factory)
+    assert caught.value.code is IpoDocumentDownloadErrorCode.SOURCE_CHANGED
+    assert stored is not None
+    assert stored.document_url == revised_url
+    assert stored.parse_status is IpoDocumentParseStatus.NOT_DOWNLOADED
+
+
+def test_audit_sink_failure_does_not_hide_authoritative_download_status(
+    file_session_factory,
+    tmp_path: Path,
+) -> None:
+    """Keep the database status and stable error authoritative over audit I/O."""
+    issue = create_issue(_issue_data(), session_factory=file_session_factory)
+    document = create_document(
+        issue.id, _document_data(), session_factory=file_session_factory
+    )
+
+    def failing_downloader(*_args: object, **_kwargs: object) -> IpoDocumentDownloadResult:
+        """Return the stable network category used by the repository contract."""
+        raise IpoDocumentDownloadError(IpoDocumentDownloadErrorCode.NETWORK_ERROR)
+
+    def broken_audit_sink(**_kwargs: object) -> bool:
+        """Model a secondary audit store outage without leaking its exception."""
+        raise RuntimeError("audit database unavailable")
+
+    with pytest.raises(IpoDocumentDownloadError) as caught:
+        download_document(
+            issue.id,
+            document.id,
+            data_dir=tmp_path,
+            downloader=failing_downloader,
+            audit_recorder=broken_audit_sink,
+            session_factory=file_session_factory,
+        )
+
+    stored = get_document(issue.id, document.id, session_factory=file_session_factory)
+    assert caught.value.code is IpoDocumentDownloadErrorCode.NETWORK_ERROR
+    assert stored is not None
+    assert stored.parse_status is IpoDocumentParseStatus.DOWNLOAD_FAILED
 
 
 def test_financial_crud_normalizes_secret_safe_metrics_and_source_ownership(
     file_session_factory,
 ) -> None:
+    """Verify that financial crud normalizes secret safe metrics and source ownership."""
     issue = create_issue(_issue_data(), session_factory=file_session_factory)
     other = create_issue(
         _issue_data(company_name="Other Ltd"), session_factory=file_session_factory
@@ -249,6 +543,7 @@ def test_financial_crud_normalizes_secret_safe_metrics_and_source_ownership(
 
 
 def _subscription_data(**overrides: object) -> IpoSubscriptionData:
+    """Provide the subscription data step used by the IPO workflow."""
     values: dict[str, object] = {
         "captured_at": dt.datetime(2026, 7, 2, 10, 30, tzinfo=dt.UTC),
         "qib_multiple": Decimal("25.50"),
@@ -265,6 +560,7 @@ def _subscription_data(**overrides: object) -> IpoSubscriptionData:
 def test_subscription_crud_is_timestamp_ordered_and_parent_scoped(
     file_session_factory,
 ) -> None:
+    """Verify that subscription crud is timestamp ordered and parent scoped."""
     issue = create_issue(_issue_data(), session_factory=file_session_factory)
     first = create_subscription(
         issue.id, _subscription_data(), session_factory=file_session_factory
@@ -299,6 +595,7 @@ def test_subscription_crud_is_timestamp_ordered_and_parent_scoped(
 
 
 def _score_input(company_name: str = "Example Ltd") -> IpoScoreInput:
+    """Provide the score input step used by the IPO workflow."""
     def factor(score: object | None, reason: str) -> FactorAssessment:
         return FactorAssessment(score=score, reason=reason)
 
@@ -318,6 +615,7 @@ def _score_input(company_name: str = "Example Ltd") -> IpoScoreInput:
 def test_evaluation_history_is_immutable_ordered_and_deletable_as_a_pair(
     file_session_factory,
 ) -> None:
+    """Verify that evaluation history is immutable ordered and deletable as a pair."""
     issue = create_issue(_issue_data(), session_factory=file_session_factory)
     create_document(issue.id, _document_data(), session_factory=file_session_factory)
 
@@ -349,6 +647,7 @@ def test_evaluation_history_is_immutable_ordered_and_deletable_as_a_pair(
 def test_get_latest_recommendation_handles_missing_issue_and_empty_history(
     file_session_factory,
 ) -> None:
+    """Verify that get latest recommendation handles missing issue and empty history."""
     with pytest.raises(IpoNotFoundError, match="IPO issue 999"):
         get_latest_recommendation(999, session_factory=file_session_factory)
 
@@ -372,6 +671,7 @@ def test_get_latest_recommendation_handles_missing_issue_and_empty_history(
 def test_evaluation_rejects_company_or_document_provenance_mismatch(
     file_session_factory,
 ) -> None:
+    """Verify that evaluation rejects company or document provenance mismatch."""
     issue = create_issue(_issue_data(), session_factory=file_session_factory)
 
     with pytest.raises(IpoValidationError, match="company_name"):
@@ -385,6 +685,7 @@ def test_evaluation_rejects_company_or_document_provenance_mismatch(
 def test_evaluation_score_and_verdict_rollback_together(
     file_session_factory, monkeypatch
 ) -> None:
+    """Verify that evaluation score and verdict rollback together."""
     from backend.ipo import repository as ipo_repository
 
     issue = create_issue(_issue_data(), session_factory=file_session_factory)

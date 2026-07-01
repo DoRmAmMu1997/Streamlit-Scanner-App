@@ -41,6 +41,20 @@ class SebiFilingCategory(enum.StrEnum):
     FINAL_OFFER = "final_offer"
 
 
+class IpoDocumentParseStatus(enum.StrEnum):
+    """Download/parse lifecycle recorded for an IPO source document.
+
+    Beginner note:
+    IPO-003 only downloads trusted PDF bytes; it does not inspect their pages.
+    ``pending`` therefore means "downloaded and waiting for a future parser",
+    while ``not_downloaded`` and ``download_failed`` contain no cache metadata.
+    """
+
+    NOT_DOWNLOADED = "not_downloaded"
+    PENDING = "pending"
+    DOWNLOAD_FAILED = "download_failed"
+
+
 class IpoStatus(enum.StrEnum):
     """Lifecycle states used by the IPO issue table."""
 
@@ -77,6 +91,7 @@ _EnumT = TypeVar("_EnumT", bound=enum.Enum)
 
 
 def _parse_enum(value: object, enum_type: type[_EnumT], field_name: str) -> _EnumT:
+    """Parse and validate enum into its typed representation."""
     if isinstance(value, enum_type):
         return value
     text = str(value).strip()
@@ -93,6 +108,7 @@ def _parse_enum(value: object, enum_type: type[_EnumT], field_name: str) -> _Enu
 
 
 def _optional_money(value: object | None, field_name: str) -> Decimal | None:
+    """Normalize the optional money field or return None."""
     if value is None:
         return None
     try:
@@ -105,6 +121,7 @@ def _optional_money(value: object | None, field_name: str) -> Decimal | None:
 
 
 def _optional_safe_url(value: object | None, field_name: str) -> str | None:
+    """Normalize the optional safe url field or return None."""
     if value is None:
         return None
     # Query strings and fragments are not needed for provenance identity and
@@ -127,6 +144,7 @@ def _safe_url_with_query(value: object, field_name: str) -> str:
 
 
 def _optional_company_key(value: object | None) -> str | None:
+    """Normalize the optional company key field or return None."""
     if value is None:
         return None
     key = str(value).strip()
@@ -136,6 +154,7 @@ def _optional_company_key(value: object | None) -> str | None:
 
 
 def _optional_record_hash(value: object | None) -> str | None:
+    """Normalize the optional record hash field or return None."""
     if value is None:
         return None
     fingerprint = str(value).strip().lower()
@@ -173,6 +192,7 @@ class FactorAssessment:
     reason: str | None = None
 
     def __post_init__(self) -> None:
+        """Normalize and validate fields after the frozen FactorAssessment dataclass is created."""
         if self.score is not None:
             object.__setattr__(self, "score", _score_decimal(self.score))
         cleaned_reason = (
@@ -196,6 +216,7 @@ class IpoScoreInput:
     source_documents: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        """Normalize and validate fields after the frozen IpoScoreInput dataclass is created."""
         cleaned_company = str(self.company_name).strip()
         if not cleaned_company:
             raise IpoValidationError("company_name is required.")
@@ -225,6 +246,7 @@ class IpoScoreResult:
     def __post_init__(self) -> None:
         # A frozen dataclass does not freeze a nested dict by itself. Copying into
         # a read-only proxy prevents a caller from rewriting the audit breakdown.
+        """Normalize and validate fields after the frozen IpoScoreResult dataclass is created."""
         object.__setattr__(
             self,
             "contributions",
@@ -283,6 +305,7 @@ class IpoIssueData:
     sebi_company_key: str | None = None
 
     def __post_init__(self) -> None:
+        """Normalize and validate fields after the frozen IpoIssueData dataclass is created."""
         company = str(self.company_name).strip()
         if not company:
             raise IpoValidationError("company_name is required.")
@@ -353,6 +376,7 @@ class IpoDocumentData:
     record_hash: str | None = None
 
     def __post_init__(self) -> None:
+        """Normalize and validate fields after the frozen IpoDocumentData dataclass is created."""
         document_type = str(self.document_type).strip().lower()
         if not document_type:
             raise IpoValidationError("document_type is required.")
@@ -384,6 +408,11 @@ class IpoDocumentRecord:
     source_confidence: Confidence
     filing_date: dt.date | None
     record_hash: str | None
+    content_sha256: str | None
+    downloaded_at: dt.datetime | None
+    file_path: str | None
+    page_count: int | None
+    parse_status: IpoDocumentParseStatus
     created_at: dt.datetime
 
 
@@ -398,6 +427,7 @@ class SebiFiling:
     source_url: str
 
     def __post_init__(self) -> None:
+        """Normalize and validate fields after the frozen SebiFiling dataclass is created."""
         object.__setattr__(
             self,
             "category",
@@ -431,6 +461,7 @@ class IpoFilingData:
     record_hash: str
 
     def __post_init__(self) -> None:
+        """Normalize and validate fields after the frozen IpoFilingData dataclass is created."""
         company_name = str(self.company_name).strip()
         if not company_name:
             raise IpoValidationError("company_name is required.")
@@ -486,6 +517,7 @@ class IpoFinancialData:
     source_url: str | None = None
 
     def __post_init__(self) -> None:
+        """Normalize and validate fields after the frozen IpoFinancialData dataclass is created."""
         if not isinstance(self.period_end, dt.date):
             raise IpoValidationError("period_end must be a date.")
         object.__setattr__(
@@ -522,6 +554,7 @@ class IpoFinancialRecord:
     updated_at: dt.datetime
 
     def __post_init__(self) -> None:
+        """Normalize and validate fields after the frozen IpoFinancialRecord dataclass is created."""
         object.__setattr__(self, "metrics", MappingProxyType(dict(self.metrics)))
 
 
@@ -538,6 +571,7 @@ class IpoSubscriptionData:
     source_url: str | None = None
 
     def __post_init__(self) -> None:
+        """Normalize and validate fields after the frozen IpoSubscriptionData dataclass is created."""
         if not isinstance(self.captured_at, dt.datetime) or self.captured_at.tzinfo is None:
             raise IpoValidationError("captured_at must be a timezone-aware datetime.")
         object.__setattr__(self, "captured_at", self.captured_at.astimezone(dt.UTC))

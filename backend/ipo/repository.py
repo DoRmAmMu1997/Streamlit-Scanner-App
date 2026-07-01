@@ -3,12 +3,24 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
+from backend.audit import record_audit_event
+from backend.config import get_settings
+from backend.ipo.documents.downloader import (
+    IpoDocumentDownloadError,
+    IpoDocumentDownloadErrorCode,
+    IpoDocumentDownloadResult,
+    download_document_file,
+)
 from backend.ipo.models import (
     Confidence,
     FinancialPeriodType,
     IpoDocumentData,
+    IpoDocumentParseStatus,
     IpoDocumentRecord,
     IpoEvaluationRecord,
     IpoFilingData,
@@ -28,6 +40,11 @@ from backend.ipo.models import (
 )
 from backend.ipo.scorecard import score_ipo
 from backend.ipo.verdict import build_recommendation
+from backend.observability import (
+    EVENT_IPO_DOCUMENT_DOWNLOAD_COMPLETED,
+    EVENT_IPO_DOCUMENT_DOWNLOAD_FAILED,
+    log_event,
+)
 from backend.scanning.result_contract import normalize_secret_safe_json
 from backend.storage import session_scope
 from backend.storage.ipo_repository import (
@@ -57,7 +74,7 @@ from backend.storage.ipo_repository import (
     list_ipo_issue_rows,
     list_ipo_subscription_rows,
     list_unclaimed_ipo_issues_by_company_name,
-    update_ipo_document_row,
+    update_ipo_document_cache_if_source_matches,
     update_ipo_document_values,
     update_ipo_financial_row,
     update_ipo_issue_row,
@@ -65,6 +82,10 @@ from backend.storage.ipo_repository import (
 )
 
 SessionFactory = Any
+DocumentDownloader = Callable[..., IpoDocumentDownloadResult]
+AuditRecorder = Callable[..., bool]
+
+logger = logging.getLogger(__name__)
 
 
 class IpoNotFoundError(LookupError):
@@ -72,10 +93,12 @@ class IpoNotFoundError(LookupError):
 
 
 def _utc(value: dt.datetime) -> dt.datetime:
+    """Provide the utc step used by the IPO workflow."""
     return value.replace(tzinfo=dt.UTC) if value.tzinfo is None else value.astimezone(dt.UTC)
 
 
 def _issue_values(data: IpoIssueData) -> dict[str, Any]:
+    """Provide the issue values step used by the IPO workflow."""
     return {
         "company_name": data.company_name,
         "sebi_company_key": data.sebi_company_key,
@@ -94,6 +117,7 @@ def _issue_values(data: IpoIssueData) -> dict[str, Any]:
 
 
 def _issue_record(row: Any) -> IpoIssueRecord:
+    """Provide the issue record step used by the IPO workflow."""
     return IpoIssueRecord(
         id=row.id,
         company_name=row.company_name,
@@ -160,6 +184,7 @@ def delete_issue(
 
 
 def _document_values(data: IpoDocumentData) -> dict[str, Any]:
+    """Provide the document values step used by the IPO workflow."""
     return {
         "document_type": data.document_type,
         "document_url": data.document_url,
@@ -171,6 +196,7 @@ def _document_values(data: IpoDocumentData) -> dict[str, Any]:
 
 
 def _document_record(row: Any) -> IpoDocumentRecord:
+    """Detach one ORM document row into the public immutable domain record."""
     return IpoDocumentRecord(
         id=row.id,
         issue_id=row.issue_id,
@@ -180,6 +206,11 @@ def _document_record(row: Any) -> IpoDocumentRecord:
         source_confidence=Confidence(row.source_confidence),
         filing_date=row.filing_date,
         record_hash=row.record_hash,
+        content_sha256=row.content_sha256,
+        downloaded_at=_utc(row.downloaded_at) if row.downloaded_at is not None else None,
+        file_path=row.file_path,
+        page_count=row.page_count,
+        parse_status=IpoDocumentParseStatus(row.parse_status),
         created_at=_utc(row.created_at),
     )
 
@@ -190,6 +221,7 @@ def create_document(
     *,
     session_factory: SessionFactory = session_scope,
 ) -> IpoDocumentRecord:
+    """Create document through the IPO storage boundary."""
     with session_factory() as session:
         if get_ipo_issue(session, issue_id) is None:
             raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
@@ -202,6 +234,7 @@ def get_document(
     *,
     session_factory: SessionFactory = session_scope,
 ) -> IpoDocumentRecord | None:
+    """Return document through the IPO storage boundary."""
     with session_factory() as session:
         row = get_ipo_document(session, issue_id, document_id)
         return _document_record(row) if row is not None else None
@@ -210,6 +243,7 @@ def get_document(
 def list_documents(
     issue_id: int, *, session_factory: SessionFactory = session_scope
 ) -> list[IpoDocumentRecord]:
+    """Return the ordered documents through the IPO storage boundary."""
     with session_factory() as session:
         if get_ipo_issue(session, issue_id) is None:
             raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
@@ -223,14 +257,23 @@ def update_document(
     *,
     session_factory: SessionFactory = session_scope,
 ) -> IpoDocumentRecord:
+    """Replace source facts and invalidate provenance when source identity changes."""
     with session_factory() as session:
-        row = update_ipo_document_row(
-            session, issue_id, document_id, _document_values(data)
-        )
-        if row is None:
+        existing = get_ipo_document(session, issue_id, document_id)
+        if existing is None:
             raise IpoNotFoundError(
                 f"IPO document {document_id} was not found for issue {issue_id}."
             )
+        values = _document_values(data)
+        # A digest proves the bytes fetched from one particular remote identity.
+        # Reusing it after the URL or document category changes would falsely
+        # attribute old bytes to a new source, so reset the cache as one unit.
+        if (
+            existing.document_url != data.document_url
+            or existing.document_type != data.document_type
+        ):
+            values.update(_empty_document_cache_values(IpoDocumentParseStatus.NOT_DOWNLOADED))
+        row = update_ipo_document_values(session, existing, values)
         return _document_record(row)
 
 
@@ -240,8 +283,168 @@ def delete_document(
     *,
     session_factory: SessionFactory = session_scope,
 ) -> bool:
+    """Delete document through the IPO storage boundary."""
     with session_factory() as session:
         return delete_ipo_document_row(session, issue_id, document_id)
+
+
+def _empty_document_cache_values(
+    status: IpoDocumentParseStatus,
+) -> dict[str, Any]:
+    """Return the all-null provenance tuple required by a non-pending status."""
+    return {
+        "content_sha256": None,
+        "downloaded_at": None,
+        "file_path": None,
+        "page_count": None,
+        "parse_status": status.value,
+    }
+
+
+def _record_document_download_failure(
+    *,
+    issue_id: int,
+    document: IpoDocumentRecord,
+    error: IpoDocumentDownloadError,
+    audit_recorder: AuditRecorder,
+    session_factory: SessionFactory,
+) -> None:
+    """Emit one secret-safe failure event without weakening database authority.
+
+    Audit storage is useful secondary evidence, but it must never replace the
+    already-committed document status or hide the stable downloader exception.
+    Consequently an audit sink failure is deliberately swallowed after the
+    structured lifecycle event has been emitted.
+    """
+    metadata: dict[str, Any] = {
+        "issue_id": issue_id,
+        "document_id": document.id,
+        "document_type": document.document_type,
+        "error_code": error.code.value,
+    }
+    log_event(
+        logger,
+        EVENT_IPO_DOCUMENT_DOWNLOAD_FAILED,
+        level=logging.WARNING,
+        **metadata,
+    )
+    try:
+        audit_recorder(
+            event=EVENT_IPO_DOCUMENT_DOWNLOAD_FAILED,
+            metadata=metadata,
+            level=logging.WARNING,
+            session_factory=session_factory,
+        )
+    except Exception:  # noqa: BLE001 - the optional audit sink must be best effort.
+        return
+
+
+def _source_changed_error() -> IpoDocumentDownloadError:
+    """Return the stable conflict used when source facts change during HTTP."""
+    return IpoDocumentDownloadError(IpoDocumentDownloadErrorCode.SOURCE_CHANGED)
+
+
+def download_document(
+    issue_id: int,
+    document_id: int,
+    *,
+    data_dir: Path | None = None,
+    downloader: DocumentDownloader = download_document_file,
+    audit_recorder: AuditRecorder = record_audit_event,
+    session_factory: SessionFactory = session_scope,
+) -> IpoDocumentDownloadResult:
+    """Download one DRHP/RHP with no database transaction open during HTTP.
+
+    The method intentionally uses two short transactions. The first detaches the
+    source row, then closes before potentially slow DNS/HTTP/filesystem work. A
+    second transaction records either verified provenance or a failure status.
+    The file rename and database commit cannot be one atomic operation; if the
+    second commit fails, the immutable hash-named file may remain as a harmless
+    orphan for a future cleanup job.
+    """
+    with session_factory() as session:
+        row = get_ipo_document(session, issue_id, document_id)
+        if row is None:
+            raise IpoNotFoundError(
+                f"IPO document {document_id} was not found for issue {issue_id}."
+            )
+        document = _document_record(row)
+
+    if document.document_type not in {"drhp", "rhp"}:
+        raise IpoValidationError("IPO-003 can download only a DRHP or RHP document.")
+
+    cache_root = Path(data_dir) if data_dir is not None else get_settings().data_dir
+    try:
+        result = downloader(document, data_dir=cache_root)
+    except IpoDocumentDownloadError as exc:
+        # Failure rows carry no path/hash. This prevents later callers from
+        # treating a partial or unverified file as a successful cache entry.
+        with session_factory() as session:
+            updated = update_ipo_document_cache_if_source_matches(
+                session,
+                issue_id,
+                document_id,
+                expected_document_url=document.document_url,
+                expected_document_type=document.document_type,
+                values=_empty_document_cache_values(
+                    IpoDocumentParseStatus.DOWNLOAD_FAILED
+                ),
+            )
+            if not updated and get_ipo_document(session, issue_id, document_id) is None:
+                raise IpoNotFoundError(
+                    f"IPO document {document_id} disappeared during download."
+                ) from exc
+        failure = exc if updated else _source_changed_error()
+        _record_document_download_failure(
+            issue_id=issue_id,
+            document=document,
+            error=failure,
+            audit_recorder=audit_recorder,
+            session_factory=session_factory,
+        )
+        if failure is not exc:
+            raise failure from exc
+        raise
+
+    with session_factory() as session:
+        updated = update_ipo_document_cache_if_source_matches(
+            session,
+            issue_id,
+            document_id,
+            expected_document_url=document.document_url,
+            expected_document_type=document.document_type,
+            values={
+                "content_sha256": result.content_sha256,
+                "downloaded_at": result.downloaded_at,
+                "file_path": result.file_path,
+                "page_count": result.page_count,
+                "parse_status": result.parse_status.value,
+            },
+        )
+        if not updated and get_ipo_document(session, issue_id, document_id) is None:
+            raise IpoNotFoundError(
+                f"IPO document {document_id} disappeared during download."
+            )
+    if not updated:
+        failure = _source_changed_error()
+        _record_document_download_failure(
+            issue_id=issue_id,
+            document=document,
+            error=failure,
+            audit_recorder=audit_recorder,
+            session_factory=session_factory,
+        )
+        raise failure
+    log_event(
+        logger,
+        EVENT_IPO_DOCUMENT_DOWNLOAD_COMPLETED,
+        issue_id=issue_id,
+        document_id=document_id,
+        document_type=document.document_type,
+        cache_hit=result.cache_hit,
+        bytes_written=result.bytes_written,
+    )
+    return result
 
 
 _STATUS_ORDER = {
@@ -254,6 +457,7 @@ _STATUS_ORDER = {
 
 
 def _ingestion_issue_values(data: IpoFilingData) -> dict[str, Any]:
+    """Provide the ingestion issue values step used by the IPO workflow."""
     return {
         "company_name": data.company_name,
         "sebi_company_key": data.sebi_company_key,
@@ -265,6 +469,7 @@ def _ingestion_issue_values(data: IpoFilingData) -> dict[str, Any]:
 
 
 def _ingestion_document_values(data: IpoFilingData) -> dict[str, Any]:
+    """Provide the ingestion document values step used by the IPO workflow."""
     return {
         "document_type": data.document_type,
         "document_url": data.document_url,
@@ -276,6 +481,7 @@ def _ingestion_document_values(data: IpoFilingData) -> dict[str, Any]:
 
 
 def _changed_values(row: Any, desired: dict[str, Any]) -> dict[str, Any]:
+    """Provide the changed values step used by the IPO workflow."""
     return {name: value for name, value in desired.items() if getattr(row, name) != value}
 
 
@@ -373,6 +579,7 @@ def get_latest_filing_date(
 
 
 def _financial_values(data: IpoFinancialData) -> dict[str, Any]:
+    """Provide the financial values step used by the IPO workflow."""
     normalized = normalize_secret_safe_json(dict(data.metrics))
     if not isinstance(normalized, dict):
         raise IpoValidationError("Normalized financial metrics must remain an object.")
@@ -387,6 +594,7 @@ def _financial_values(data: IpoFinancialData) -> dict[str, Any]:
 
 
 def _financial_record(row: Any) -> IpoFinancialRecord:
+    """Provide the financial record step used by the IPO workflow."""
     return IpoFinancialRecord(
         id=row.id,
         issue_id=row.issue_id,
@@ -402,6 +610,7 @@ def _financial_record(row: Any) -> IpoFinancialRecord:
 
 
 def _validate_source_document(session: Any, issue_id: int, source_document_id: int | None) -> None:
+    """Validate source document before persistence can continue."""
     if source_document_id is None:
         return
     if get_ipo_document(session, issue_id, source_document_id) is None:
@@ -416,6 +625,7 @@ def create_financial(
     *,
     session_factory: SessionFactory = session_scope,
 ) -> IpoFinancialRecord:
+    """Create financial through the IPO storage boundary."""
     with session_factory() as session:
         if get_ipo_issue(session, issue_id) is None:
             raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
@@ -429,6 +639,7 @@ def get_financial(
     *,
     session_factory: SessionFactory = session_scope,
 ) -> IpoFinancialRecord | None:
+    """Return financial through the IPO storage boundary."""
     with session_factory() as session:
         row = get_ipo_financial(session, issue_id, financial_id)
         return _financial_record(row) if row is not None else None
@@ -437,6 +648,7 @@ def get_financial(
 def list_financials(
     issue_id: int, *, session_factory: SessionFactory = session_scope
 ) -> list[IpoFinancialRecord]:
+    """Return the ordered financials through the IPO storage boundary."""
     with session_factory() as session:
         if get_ipo_issue(session, issue_id) is None:
             raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
@@ -450,6 +662,7 @@ def update_financial(
     *,
     session_factory: SessionFactory = session_scope,
 ) -> IpoFinancialRecord:
+    """Update financial through the IPO storage boundary."""
     with session_factory() as session:
         _validate_source_document(session, issue_id, data.source_document_id)
         row = update_ipo_financial_row(
@@ -468,11 +681,13 @@ def delete_financial(
     *,
     session_factory: SessionFactory = session_scope,
 ) -> bool:
+    """Delete financial through the IPO storage boundary."""
     with session_factory() as session:
         return delete_ipo_financial_row(session, issue_id, financial_id)
 
 
 def _subscription_values(data: IpoSubscriptionData) -> dict[str, Any]:
+    """Provide the subscription values step used by the IPO workflow."""
     return {
         "captured_at": data.captured_at,
         "qib_multiple": data.qib_multiple,
@@ -485,6 +700,7 @@ def _subscription_values(data: IpoSubscriptionData) -> dict[str, Any]:
 
 
 def _subscription_record(row: Any) -> IpoSubscriptionRecord:
+    """Provide the subscription record step used by the IPO workflow."""
     return IpoSubscriptionRecord(
         id=row.id,
         issue_id=row.issue_id,
@@ -505,6 +721,7 @@ def create_subscription(
     *,
     session_factory: SessionFactory = session_scope,
 ) -> IpoSubscriptionRecord:
+    """Create subscription through the IPO storage boundary."""
     with session_factory() as session:
         if get_ipo_issue(session, issue_id) is None:
             raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
@@ -519,6 +736,7 @@ def get_subscription(
     *,
     session_factory: SessionFactory = session_scope,
 ) -> IpoSubscriptionRecord | None:
+    """Return subscription through the IPO storage boundary."""
     with session_factory() as session:
         row = get_ipo_subscription(session, issue_id, subscription_id)
         return _subscription_record(row) if row is not None else None
@@ -527,6 +745,7 @@ def get_subscription(
 def list_subscriptions(
     issue_id: int, *, session_factory: SessionFactory = session_scope
 ) -> list[IpoSubscriptionRecord]:
+    """Return the ordered subscriptions through the IPO storage boundary."""
     with session_factory() as session:
         if get_ipo_issue(session, issue_id) is None:
             raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
@@ -543,6 +762,7 @@ def update_subscription(
     *,
     session_factory: SessionFactory = session_scope,
 ) -> IpoSubscriptionRecord:
+    """Update subscription through the IPO storage boundary."""
     with session_factory() as session:
         row = update_ipo_subscription_row(
             session, issue_id, subscription_id, _subscription_values(data)
@@ -560,11 +780,13 @@ def delete_subscription(
     *,
     session_factory: SessionFactory = session_scope,
 ) -> bool:
+    """Delete subscription through the IPO storage boundary."""
     with session_factory() as session:
         return delete_ipo_subscription_row(session, issue_id, subscription_id)
 
 
 def _evaluation_record(score_row: Any, recommendation_row: Any) -> IpoEvaluationRecord:
+    """Provide the evaluation record step used by the IPO workflow."""
     result = IpoRecommendationResult(
         company_name=score_row.issue.company_name,
         score=score_row.total_score,
@@ -651,6 +873,7 @@ def get_evaluation(
     *,
     session_factory: SessionFactory = session_scope,
 ) -> IpoEvaluationRecord | None:
+    """Return evaluation through the IPO storage boundary."""
     with session_factory() as session:
         rows = get_ipo_evaluation_rows(session, issue_id, score_id)
         return _evaluation_record(*rows) if rows is not None else None
@@ -659,6 +882,7 @@ def get_evaluation(
 def list_evaluations(
     issue_id: int, *, session_factory: SessionFactory = session_scope
 ) -> list[IpoEvaluationRecord]:
+    """Return the ordered evaluations through the IPO storage boundary."""
     with session_factory() as session:
         if get_ipo_issue(session, issue_id) is None:
             raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")

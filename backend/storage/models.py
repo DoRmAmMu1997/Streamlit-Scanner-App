@@ -833,6 +833,33 @@ class IpoDocument(Base):
             "record_hash IS NULL OR length(record_hash) = 64",
             name="ck_ipo_documents_record_hash_length",
         ),
+        CheckConstraint(
+            "content_sha256 IS NULL OR (length(content_sha256) = 64 "
+            "AND content_sha256 = lower(content_sha256) "
+            "AND replace(replace(replace(replace(replace(replace(replace(replace("
+            "replace(replace(replace(replace(replace(replace(replace(replace("
+            "content_sha256, '0', ''), '1', ''), '2', ''), '3', ''), '4', ''), "
+            "'5', ''), '6', ''), '7', ''), '8', ''), '9', ''), 'a', ''), "
+            "'b', ''), 'c', ''), 'd', ''), 'e', ''), 'f', '') = '')",
+            name="ck_ipo_documents_content_sha256",
+        ),
+        CheckConstraint(
+            "parse_status IN ('not_downloaded', 'pending', 'download_failed')",
+            name="ck_ipo_documents_parse_status",
+        ),
+        CheckConstraint(
+            "page_count IS NULL OR page_count > 0",
+            name="ck_ipo_documents_page_count",
+        ),
+        CheckConstraint(
+            "(parse_status = 'pending' AND content_sha256 IS NOT NULL "
+            "AND downloaded_at IS NOT NULL AND file_path IS NOT NULL "
+            "AND page_count IS NULL) OR "
+            "(parse_status IN ('not_downloaded', 'download_failed') "
+            "AND content_sha256 IS NULL AND downloaded_at IS NULL "
+            "AND file_path IS NULL AND page_count IS NULL)",
+            name="ck_ipo_documents_download_metadata",
+        ),
         Index("ix_ipo_documents_filing_date", "filing_date"),
         Index("ux_ipo_documents_record_hash", "record_hash", unique=True),
     )
@@ -847,6 +874,19 @@ class IpoDocument(Base):
     source_confidence: Mapped[str] = mapped_column(String(8), nullable=False)
     filing_date: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
     record_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # ``record_hash`` identifies SEBI listing metadata. ``content_sha256`` is
+    # deliberately separate: it proves which exact PDF bytes reached disk.
+    content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    downloaded_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Paths are stored relative to DATA_DIR, so moving a deployment volume does
+    # not invalidate database rows and an absolute host path never leaks.
+    file_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    parse_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="not_downloaded", server_default="not_downloaded"
+    )
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.UTC)
     )
