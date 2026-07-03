@@ -49,7 +49,13 @@ from backend.storage.ipo_repository import update_ipo_document_cache_if_source_m
 
 
 def _payload(*, source_document_id: int, net_worth: str = "80") -> IpoManualExtractionData:
-    """Build one complete revision suitable for repository scenarios."""
+    """Build one complete revision suitable for repository scenarios.
+
+    Beginner note:
+        Repository tests focus on transactions and provenance, so this helper keeps
+        the domain payload valid and lets each scenario vary only the source row or
+        business fact it needs to exercise.
+    """
     periods = tuple(
         IpoManualPeriodData(
             period_end=dt.date(year, 3, 31),
@@ -116,7 +122,13 @@ def _payload(*, source_document_id: int, net_worth: str = "80") -> IpoManualExtr
 
 
 def _cached_document(file_session_factory, data_dir: Path, *, document_type: str = "rhp"):
-    """Create an issue and document row backed by verified local PDF bytes."""
+    """Create an issue and document row backed by verified local PDF bytes.
+
+    Beginner note:
+        Writing real hash-addressed bytes is important here: a metadata-only fixture
+        would skip the containment and SHA-256 verification that protects a production
+        manual extraction from stale or substituted source files.
+    """
     issue = create_issue(
         IpoIssueData(
             company_name="Example Ltd",
@@ -166,7 +178,13 @@ def _cached_document(file_session_factory, data_dir: Path, *, document_type: str
 def test_submit_manual_extraction_persists_complete_detached_revision(
     file_session_factory, tmp_path: Path
 ) -> None:
-    """One submission atomically returns sourced periods, peers, and canonical values."""
+    """One submission atomically returns sourced periods, peers, and canonical values.
+
+    Beginner note:
+        This happy-path test checks the detached record, unit conversions, actor,
+        source digest, and audit metadata together so a successful insert cannot
+        silently omit one part of the immutable revision.
+    """
     issue, document, digest, _path = _cached_document(file_session_factory, tmp_path)
     events: list[dict[str, object]] = []
 
@@ -261,7 +279,13 @@ def test_latest_ratio_analysis_uses_one_detached_issue_and_revision_snapshot(
 def test_latest_ratio_analysis_distinguishes_empty_and_unknown_issues(
     file_session_factory, tmp_path: Path
 ) -> None:
-    """A known issue without evidence is empty; an unknown id is an ownership error."""
+    """A known issue without evidence is empty; an unknown id is an ownership error.
+
+    Beginner note:
+        ``None`` means a known IPO has no manual profile yet; an exception means the
+        parent IPO does not exist. A UI can therefore show an honest empty state
+        without hiding a bad or cross-issue identifier.
+    """
     issue, _document, _digest, _path = _cached_document(file_session_factory, tmp_path)
 
     assert get_latest_ipo_ratios(issue.id, session_factory=file_session_factory) is None

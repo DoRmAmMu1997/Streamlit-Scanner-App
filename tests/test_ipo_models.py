@@ -1,4 +1,10 @@
-"""IPO-001 domain-contract tests."""
+"""Exercise the public IPO domain and package-export contracts.
+
+Beginner note:
+These tests intentionally import both concrete models and the convenient
+``backend.ipo`` facade. That catches a common packaging mistake where a feature
+works internally but its supported public name was never re-exported.
+"""
 
 from __future__ import annotations
 
@@ -133,7 +139,13 @@ def test_score_input_rejects_unsafe_document_urls(url: str) -> None:
 
 
 def test_public_ipo_package_exports_the_domain_and_repository_contract() -> None:
-    """Pin public ipo package exports the domain and repository contract as an executable IPO regression contract."""
+    """Keep every supported IPO contract reachable from the stable package facade.
+
+    Beginner note:
+        A public export is part of the feature contract. Checking the IPO-005 names
+        here prevents a refactor from leaving the engine implemented but unreachable
+        through the import path used by other subsystems.
+    """
     expected = {
         "Confidence",
         "FactorAssessment",

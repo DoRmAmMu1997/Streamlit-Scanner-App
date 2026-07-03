@@ -37,7 +37,13 @@ def _period(
     profit_before_tax: str,
     finance_cost: str,
 ) -> IpoManualPeriodData:
-    """Build one fully sourced annual period in the IPO-005 shape."""
+    """Build one fully sourced annual period in the IPO-005 shape.
+
+    Beginner note:
+        Every formula test needs the same value-and-page pairing. Keeping that
+        complete shape in one helper makes a missing citation an obvious fixture
+        failure instead of unrelated noise in an accounting assertion.
+    """
     return IpoManualPeriodData(
         period_end=dt.date(year, 3, 31),
         revenue=Decimal(revenue),
@@ -136,13 +142,25 @@ def _profile() -> IpoManualExtractionRecord:
 def _replace_latest_period(
     profile: IpoManualExtractionRecord, **changes: object
 ) -> IpoManualExtractionRecord:
-    """Return a profile whose newest period contains selected test values."""
+    """Return a profile whose newest period contains selected test values.
+
+    Beginner note:
+        Ratios use the latest year for margins and returns. Replacing only that
+        immutable child lets an edge-case test change one economic condition while
+        preserving every other source fact from the baseline profile.
+    """
     periods = (*profile.periods[:-1], replace(profile.periods[-1], **changes))
     return replace(profile, periods=periods)
 
 
 def test_profitable_profile_computes_all_sixteen_ratios_exactly() -> None:
-    """A complete profitable profile should return sixteen computed receipts."""
+    """A complete profitable profile should return sixteen computed receipts.
+
+    Beginner note:
+        This hand-checkable golden scenario pins the whole formula catalog, public
+        rounding, formula version, and source hash in one place. A missing receipt is
+        therefore caught even when every remaining individual formula is correct.
+    """
     analysis = calculate_ipo_ratios(
         _profile(),
         price_band_high=Decimal("242"),
@@ -175,7 +193,13 @@ def test_profitable_profile_computes_all_sixteen_ratios_exactly() -> None:
 
 
 def test_loss_makes_growth_and_pe_unavailable_but_keeps_signed_ratios() -> None:
-    """A loss should suppress misleading metrics without hiding useful negatives."""
+    """A loss should suppress misleading metrics without hiding useful negatives.
+
+    Beginner note:
+        Negative margins and returns describe the loss and remain useful. PAT CAGR
+        and P/E rely on a positive earnings base, so the correct result for those is
+        an explanation—not a fabricated positive multiple or a raised exception.
+    """
     profile = _replace_latest_period(
         _profile(),
         pat=Decimal("-12.1"),
@@ -205,7 +229,13 @@ def test_loss_makes_growth_and_pe_unavailable_but_keeps_signed_ratios() -> None:
 
 
 def test_zero_debt_and_finance_cost_are_not_reported_as_infinite_coverage() -> None:
-    """Debt-free evidence should produce zero leverage and non-applicable coverage."""
+    """Debt-free evidence should produce zero leverage and non-applicable coverage.
+
+    Beginner note:
+        Zero debt is a real computed leverage value. Zero finance cost instead makes
+        interest coverage inapplicable; displaying infinity would imply a measured
+        denominator that the prospectus did not actually report.
+    """
     profile = replace(_profile(), total_debt=Decimal("0"))
     profile = _replace_latest_period(profile, finance_cost=Decimal("0"))
 
@@ -222,7 +252,13 @@ def test_zero_debt_and_finance_cost_are_not_reported_as_infinite_coverage() -> N
 
 
 def test_high_debt_profile_preserves_large_leverage_ratios() -> None:
-    """High leverage is valid evidence and should not be clipped to a score range."""
+    """High leverage is valid evidence and should not be clipped to a score range.
+
+    Beginner note:
+        Ratios are evidence, not 0-100 factor scores. This protects the boundary
+        between IPO-005 arithmetic and a future normalization policy that may decide
+        how a large leverage value affects an investment score.
+    """
     profile = replace(_profile(), total_debt=Decimal("302.5"))
 
     analysis = calculate_ipo_ratios(
@@ -236,7 +272,13 @@ def test_high_debt_profile_preserves_large_leverage_ratios() -> None:
 
 
 def test_legacy_revision_marks_only_new_input_dependencies_missing() -> None:
-    """An IPO-004 revision should retain computable ratios after the IPO-005 migration."""
+    """An IPO-004 revision should retain computable ratios after the IPO-005 migration.
+
+    Beginner note:
+        Old revisions genuinely lack the new fields. Graceful degradation means only
+        ROCE, coverage, and enterprise-value multiples lose values; unrelated ratios
+        must remain available from evidence that was already complete.
+    """
     profile = _profile()
     legacy_periods = tuple(
         replace(
@@ -279,7 +321,13 @@ def test_legacy_revision_marks_only_new_input_dependencies_missing() -> None:
 
 
 def test_missing_price_band_suppresses_only_price_dependent_ratios() -> None:
-    """Missing issue pricing should not erase operating and balance-sheet ratios."""
+    """Missing issue pricing should not erase operating and balance-sheet ratios.
+
+    Beginner note:
+        Price is mutable issue metadata, while margins and returns come from the
+        immutable extraction. Keeping those dependency groups separate prevents one
+        absent price field from making the entire analysis appear empty.
+    """
     analysis = calculate_ipo_ratios(
         _profile(),
         price_band_high=None,
@@ -298,7 +346,13 @@ def test_missing_price_band_suppresses_only_price_dependent_ratios() -> None:
 
 
 def test_zero_and_negative_denominators_receive_distinct_statuses() -> None:
-    """Zero is undefined, while negative equity/capital is economically misleading."""
+    """Zero is undefined, while negative equity/capital is economically misleading.
+
+    Beginner note:
+        Both cases intentionally return no number, but for different reasons. The
+        typed status lets a reader distinguish impossible division from arithmetic
+        that is possible yet unsuitable for peer comparison.
+    """
     profile = _replace_latest_period(_profile(), revenue=Decimal("0"), ebitda=Decimal("0"))
     profile = replace(
         profile,
@@ -324,7 +378,13 @@ def test_zero_and_negative_denominators_receive_distinct_statuses() -> None:
 
 
 def test_reconciliation_uses_one_percent_or_one_paisa_whichever_is_larger() -> None:
-    """Tiny prospectus rounding differences should not be mislabeled as material."""
+    """Tiny prospectus rounding differences should not be mislabeled as material.
+
+    Beginner note:
+        Prospectuses often round per-share figures. Testing values on both sides of
+        the threshold proves the engine tolerates ordinary presentation rounding but
+        still flags a difference large enough to deserve manual investigation.
+    """
     within_tolerance = replace(
         _profile(),
         eps=Decimal("24.44"),
@@ -354,7 +414,13 @@ def test_reconciliation_uses_one_percent_or_one_paisa_whichever_is_larger() -> N
 
 
 def test_legacy_nonconsecutive_years_do_not_claim_a_two_interval_cagr() -> None:
-    """Old profiles with fiscal gaps should return an explicit no-value receipt."""
+    """Old profiles with fiscal gaps should return an explicit no-value receipt.
+
+    Beginner note:
+        Three rows do not automatically mean two annual intervals. This protects
+        legacy IPO-004 evidence from a precise-looking CAGR whose time assumption is
+        false, while leaving latest-year ratios untouched.
+    """
     profile = _profile()
     profile = replace(
         profile,
@@ -377,7 +443,13 @@ def test_legacy_nonconsecutive_years_do_not_claim_a_two_interval_cagr() -> None:
 
 
 def test_dependent_valuations_use_unrounded_per_share_intermediates() -> None:
-    """Public four-place rounding must not feed back into later calculations."""
+    """Public four-place rounding must not feed back into later calculations.
+
+    Beginner note:
+        EPS is displayed at four places, but P/E must divide by the exact underlying
+        EPS. Otherwise a display choice becomes hidden accounting input and can
+        compound rounding error in every dependent multiple.
+    """
     profile = _profile()
     profile = replace(
         profile,
@@ -403,7 +475,13 @@ def test_dependent_valuations_use_unrounded_per_share_intermediates() -> None:
 
 @pytest.mark.parametrize("price", [Decimal("NaN"), Decimal("-0.01")])
 def test_public_engine_rejects_nonfinite_or_negative_issue_prices(price: Decimal) -> None:
-    """A direct caller cannot bypass issue-domain price validation."""
+    """A direct caller cannot bypass issue-domain price validation.
+
+    Beginner note:
+        The repository normally supplies a validated price, but the pure function is
+        public too. Repeating this small guard keeps ``NaN`` or a negative price from
+        contaminating every valuation receipt when the engine is called directly.
+    """
     with pytest.raises(IpoValidationError, match="price_band_high"):
         calculate_ipo_ratios(
             _profile(),
@@ -413,7 +491,13 @@ def test_public_engine_rejects_nonfinite_or_negative_issue_prices(price: Decimal
 
 
 def test_public_engine_requires_timezone_aware_issue_provenance() -> None:
-    """A ratio snapshot timestamp must identify one unambiguous UTC instant."""
+    """A ratio snapshot timestamp must identify one unambiguous UTC instant.
+
+    Beginner note:
+        A naive datetime has no timezone and cannot prove which issue-price snapshot
+        was used across machines. Requiring an offset makes the receipt replayable and
+        converts it to UTC before returning it.
+    """
     with pytest.raises(IpoValidationError, match="timezone-aware"):
         calculate_ipo_ratios(
             _profile(),
@@ -423,7 +507,13 @@ def test_public_engine_requires_timezone_aware_issue_provenance() -> None:
 
 
 def test_database_valid_extreme_values_still_round_without_decimal_overflow() -> None:
-    """Large Numeric(24,4) inputs must produce a finite receipt instead of crashing."""
+    """Large Numeric(24,4) inputs must produce a finite receipt instead of crashing.
+
+    Beginner note:
+        A very large legal numerator divided by the smallest legal denominator can
+        exceed Decimal's default significant-digit context. The engine raises its
+        local precision so valid database evidence remains calculable and exact.
+    """
     profile = _replace_latest_period(
         _profile(), pat=Decimal("99999999999999999999.9999")
     )

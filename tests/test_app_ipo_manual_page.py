@@ -123,7 +123,13 @@ def test_peer_rows_reject_partial_rows_instead_of_silently_dropping_them() -> No
 
 
 def test_period_builder_preserves_explicit_dates_values_and_pages() -> None:
-    """The UI adapter should create the same exact three-period domain contract."""
+    """The UI adapter should create the same exact three-period domain contract.
+
+    Beginner note:
+        This test checks values and citations together because preserving a number
+        while shifting its page would still produce a valid-looking but unauditable
+        extraction record.
+    """
     periods = ipo_manual_page._period_rows_to_domain(
         [
             {
@@ -150,7 +156,13 @@ def test_period_builder_preserves_explicit_dates_values_and_pages() -> None:
 
 
 def test_form_mapping_builds_complete_domain_payload_without_actor_fields() -> None:
-    """The UI adapter must not accept an entered-by identity from browser data."""
+    """The UI adapter must not accept an entered-by identity from browser data.
+
+    Beginner note:
+        The browser controls every mapping value supplied here. Proving that the
+        resulting DTO has no actor field protects the rule that identity comes only
+        from the authenticated server session in the repository call.
+    """
     values = {
         "net_worth": "80",
         "net_worth_page": 130,

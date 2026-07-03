@@ -3,6 +3,11 @@
 These tests use a temporary SQLite file instead of the real ``data/scanner.db``.
 That proves migrations are safe to run in CI and on a developer laptop without
 depending on any local scan history.
+
+Beginner note:
+A model change is not complete until an old database can reach the new shape and,
+when safe, return to the old one. These tests compare Alembic's hand-written schema
+with SQLAlchemy metadata so local SQLite and production PostgreSQL do not drift.
 """
 
 from __future__ import annotations
@@ -22,7 +27,13 @@ from backend.storage.models import Base, IpoIssue, IpoManualExtraction
 
 
 def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Path):
-    """Upgrade creates the expected schema; downgrade removes it again."""
+    """Upgrade creates the expected schema; downgrade removes it again.
+
+    Beginner note:
+        This broad smoke test is also the central table-name inventory. Adding the
+        IPO-005 columns must not accidentally add, remove, or rename a table elsewhere
+        in the shared metadata graph.
+    """
     db_path = tmp_path / "scan-history.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
@@ -432,7 +443,13 @@ def test_ipo005_upgrade_preserves_legacy_revisions_and_downgrades_losslessly(
 def test_ipo005_downgrade_refuses_to_discard_ratio_inputs(
     monkeypatch, tmp_path: Path
 ) -> None:
-    """Downgrade stops before deleting any sourced IPO-005 accounting fact."""
+    """Downgrade stops before deleting any sourced IPO-005 accounting fact.
+
+    Beginner note:
+        A reversible migration is only reversible while its new columns are empty.
+        Once an administrator enters evidence, refusing the downgrade is safer than
+        reporting success after silently deleting that immutable provenance.
+    """
     db_path = tmp_path / "ipo005-protected.db"
     database_url = f"sqlite:///{db_path.as_posix()}"
     monkeypatch.setenv("DATABASE_URL", database_url)

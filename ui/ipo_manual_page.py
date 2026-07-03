@@ -527,6 +527,11 @@ def _sourced_text_control(
     ``blank_when_missing`` is reserved for IPO-005 additions on a legacy revision.
     Showing an empty widget forces an administrator to transcribe the real value;
     defaulting those newly introduced facts to zero would fabricate evidence.
+
+    Beginner note:
+        This helper only collects browser values. The domain object validates them
+        again, and the repository later verifies the cached document, so a widget's
+        minimum or default is never treated as the security or provenance boundary.
     """
     value_column, page_column = st.columns((3, 1))
     stored_value = getattr(latest, field_name) if latest else None

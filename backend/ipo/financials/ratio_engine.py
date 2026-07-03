@@ -138,7 +138,20 @@ def _rounded(value: Decimal) -> Decimal:
 
 
 def _computed(name: IpoRatioName, value: Decimal, formula: str) -> IpoRatioReceipt:
-    """Build one successful ratio receipt with the shared rounding policy."""
+    """Build one successful ratio receipt with the shared rounding policy.
+
+    Args:
+        name: Stable identifier for the ratio being returned.
+        value: Full-precision result produced by the accounting formula.
+        formula: Human-readable, static formula shown to downstream callers.
+
+    Returns:
+        A computed receipt whose public value is rounded to four places.
+
+    Beginner note:
+        Centralising success construction makes it impossible for one formula to
+        quietly use a different rounding rule or forget its ``computed`` status.
+    """
     return IpoRatioReceipt(
         name=name,
         value=_rounded(value),
@@ -154,7 +167,23 @@ def _unavailable(
     explanation: str,
     *missing_inputs: str,
 ) -> IpoRatioReceipt:
-    """Build a deliberate no-value receipt instead of raising or inventing data."""
+    """Build a deliberate no-value receipt instead of raising or inventing data.
+
+    Args:
+        name: Stable ratio identifier.
+        status: Typed reason why no numeric value is available.
+        formula: Static formula that would have been used with complete evidence.
+        explanation: Plain-language reason suitable for a UI or audit receipt.
+        *missing_inputs: Exact source-field names that were absent, if any.
+
+    Returns:
+        A receipt with ``value=None`` and enough detail to explain that absence.
+
+    Beginner note:
+        A blank number can mean several different things. Returning a typed
+        receipt preserves the distinction between missing evidence, zero division,
+        and an economically misleading result without using exceptions as data.
+    """
     return IpoRatioReceipt(
         name=name,
         value=None,
@@ -174,7 +203,25 @@ def _ratio(
     percentage: bool = False,
     require_positive_denominator: bool = False,
 ) -> IpoRatioReceipt:
-    """Divide safely and distinguish zero from economically misleading negatives."""
+    """Divide safely and distinguish zero from economically misleading negatives.
+
+    Args:
+        name: Stable ratio identifier.
+        numerator: Canonical INR or share value above the division line.
+        denominator: Canonical value below the division line.
+        formula: Static description of the calculation.
+        percentage: Multiply the quotient by 100 when the result is a percentage.
+        require_positive_denominator: Reject negative economic bases even though
+            ordinary arithmetic could produce a number from them.
+
+    Returns:
+        A computed, undefined, or not-meaningful receipt.
+
+    Beginner note:
+        ``0`` and a negative balance-sheet base are not interchangeable. Division
+        by zero is mathematically impossible, while division by negative equity or
+        EBITDA can be numerically possible but misleading for comparison purposes.
+    """
     if denominator == 0:
         return _unavailable(
             name,
@@ -199,7 +246,22 @@ def _cagr(
     last: Decimal,
     formula: str,
 ) -> IpoRatioReceipt:
-    """Calculate a two-interval CAGR only when both endpoints are positive."""
+    """Calculate a two-interval CAGR only when both endpoints are positive.
+
+    Args:
+        name: Revenue or PAT CAGR identifier.
+        first: Canonical value from the oldest fiscal period.
+        last: Canonical value from the newest fiscal period.
+        formula: Static formula included in the returned receipt.
+
+    Returns:
+        A percentage receipt or an explicit unavailable state.
+
+    Beginner note:
+        CAGR uses a fractional power. A zero starting value cannot be divided by,
+        and a negative endpoint has no useful real-valued investment CAGR, so the
+        engine explains those cases instead of producing a surprising exception.
+    """
     if first == 0:
         return _unavailable(
             name,
@@ -223,7 +285,21 @@ def _cagr(
 
 
 def _reconciliation(computed: Decimal | None, reported: Decimal) -> IpoPerShareReconciliation:
-    """Compare computed and reported values using the approved materiality rule."""
+    """Compare computed and reported values using the approved materiality rule.
+
+    Args:
+        computed: Engine-derived EPS or book value, before public rounding.
+        reported: Prospectus value retained as independent source evidence.
+
+    Returns:
+        Both values, their signed difference, and a material-difference flag.
+
+    Beginner note:
+        Small differences can come from prospectus rounding. The tolerance is the
+        larger of one paisa or one percent of the reported value, so large values
+        receive a proportional allowance while tiny values still get a practical
+        absolute allowance.
+    """
     if computed is None:
         return IpoPerShareReconciliation(None, reported, None, None)
     rounded_computed = _rounded(computed)
@@ -262,6 +338,9 @@ def calculate_ipo_ratios(
         degradation: useful historical ratios remain visible, but the engine never
         fills absent evidence with zero or a guessed accounting proxy.
     """
+    # Treat the immutable extraction as untrusted public input even though the
+    # repository normally constructs it. This keeps direct engine callers from
+    # receiving partial calculations from a malformed three-period profile.
     periods = tuple(sorted(profile.periods, key=lambda period: period.period_end))
     if len(periods) != 3:
         raise IpoValidationError("IPO ratios require exactly three fiscal periods.")
@@ -281,6 +360,9 @@ def calculate_ipo_ratios(
         raise IpoValidationError("issue_updated_at must be timezone-aware.")
     issue_updated_at = issue_updated_at.astimezone(dt.UTC)
 
+    # Convert reported units once at the boundary. Every formula below then works
+    # with individual INR/shares, so mixing crore values with rupee prices cannot
+    # silently inflate or shrink a ratio.
     first = periods[0]
     latest = periods[-1]
     unit = profile.financial_amount_unit
@@ -297,6 +379,9 @@ def calculate_ipo_ratios(
     shares = values["equity_shares"]
 
     ratios: dict[IpoRatioName, IpoRatioReceipt] = {}
+    # Three consecutive annual observations span exactly two compounding
+    # intervals. Checking the years here protects legacy IPO-004 revisions that
+    # were allowed to contain three distinct but non-consecutive dates.
     period_years = [period.period_end.year for period in periods]
     if period_years == list(range(period_years[0], period_years[0] + 3)):
         ratios[IpoRatioName.REVENUE_CAGR] = _cagr(
@@ -331,6 +416,9 @@ def calculate_ipo_ratios(
                 formula,
                 "CAGR requires three consecutive annual fiscal years.",
             )
+    # Margins and balance-sheet ratios all use the latest reported fiscal year.
+    # Signed profit numerators remain meaningful for loss-making companies, while
+    # denominator policy is decided explicitly for each ratio below.
     ratios[IpoRatioName.EBITDA_MARGIN] = _ratio(
         IpoRatioName.EBITDA_MARGIN,
         ebitda,
@@ -477,6 +565,9 @@ def calculate_ipo_ratios(
                 require_positive_denominator=True,
             )
 
+    # Price-dependent multiples share one issue-price snapshot. When the issue has
+    # no upper band, suppress all four together instead of mixing current profile
+    # facts with a fabricated or stale market price.
     if price_band_high is None:
         for name, denominator_name in (
             (IpoRatioName.PRICE_TO_EARNINGS, "price_band_high"),
@@ -519,6 +610,8 @@ def calculate_ipo_ratios(
                 "upper price band / computed book value per share",
             )
 
+        # Enterprise value uses post-issue shares, not the historical share count
+        # used for EPS. Keeping these paths separate avoids understating dilution.
         if profile.post_issue_equity_shares is None:
             for name in (IpoRatioName.EV_TO_EBITDA, IpoRatioName.EV_TO_SALES):
                 ratios[name] = _unavailable(
@@ -548,6 +641,9 @@ def calculate_ipo_ratios(
                 require_positive_denominator=True,
             )
 
+    # Freeze the mapping at the public boundary. A caller can display or serialize
+    # receipts, but cannot mutate the analysis and make its provenance disagree
+    # with the values calculated above.
     return IpoRatioAnalysis(
         formula_version=FORMULA_VERSION,
         extraction_id=profile.id,

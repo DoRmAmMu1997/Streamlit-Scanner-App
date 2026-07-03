@@ -88,7 +88,16 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Remove IPO-005 columns only when doing so cannot discard entered facts."""
+    """Remove IPO-005 columns only when doing so cannot discard entered facts.
+
+    Beginner note:
+        Dropping a column destroys every value stored in it. The two count queries
+        make that danger explicit: an empty IPO-005 shape may be removed for a safe
+        rollback, but a populated revision stops the downgrade with a clear error.
+    """
+    # Check both the header and child-period tables before changing either one.
+    # Performing all guards first avoids a half-downgraded schema where one table
+    # lost its IPO-005 columns before evidence in the other table was discovered.
     connection = op.get_bind()
     header_rows = connection.execute(
         sa.text(

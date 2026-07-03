@@ -25,7 +25,12 @@ from backend.ipo.models import IpoValidationError
 
 
 def _period(year: int) -> IpoManualPeriodData:
-    """Build one complete fiscal period with deliberately different pages."""
+    """Build one complete fiscal period with deliberately different pages.
+
+    Beginner note:
+        Distinct page numbers make accidental field-to-page swaps visible in test
+        failures; using one page for every value would hide that class of bug.
+    """
     return IpoManualPeriodData(
         period_end=dt.date(year, 3, 31),
         revenue=Decimal("100.25"),
@@ -54,7 +59,13 @@ def _peer(name: str = "Example Peer Ltd") -> IpoPeerValuationData:
 
 
 def _payload(**overrides: object) -> IpoManualExtractionData:
-    """Return a complete valid payload, replacing only named test fields."""
+    """Return a complete valid payload, replacing only named test fields.
+
+    Beginner note:
+        Most validation tests need one intentionally bad field. Starting from a
+        known-good payload keeps each failure focused on that single rule instead
+        of repeating dozens of unrelated required values in every test.
+    """
     values: dict[str, object] = {
         "source_document_id": 7,
         "financial_amount_unit": IpoAmountUnit.CRORE_INR,
@@ -178,7 +189,13 @@ def test_peer_requires_a_supported_metric_and_positive_page() -> None:
 
 
 def test_period_rejects_partial_ipo005_value_and_page_groups() -> None:
-    """PBT and finance cost must never be detached from their source pages."""
+    """PBT and finance cost must never be detached from their source pages.
+
+    Beginner note:
+        A value without its citation cannot be independently checked in the offer
+        document. The all-or-none contract therefore rejects even a numerically
+        valid PBT when the rest of the sourced IPO-005 group is absent.
+    """
     with pytest.raises(IpoValidationError, match="require values and source pages together"):
         IpoManualPeriodData(
             period_end=dt.date(2025, 3, 31),

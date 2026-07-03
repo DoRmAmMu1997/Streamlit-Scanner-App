@@ -5,6 +5,12 @@ receive those session-bound objects: adapters convert validated DTOs into column
 values and convert ORM rows back into frozen records before the session closes.
 This is also the orchestration home for operations spanning scoring, downloads,
 auditing, or multiple tables.
+
+Beginner note:
+The caller owns a transaction through ``session_factory`` and this module owns
+the workflow around it. Keeping SQL construction in ``backend.storage`` means a
+new UI, CLI, or test can reuse the same ownership and provenance checks without
+learning SQLAlchemy or accidentally returning a session-bound ORM object.
 """
 
 from __future__ import annotations

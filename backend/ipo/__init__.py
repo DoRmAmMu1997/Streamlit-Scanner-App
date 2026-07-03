@@ -1,4 +1,11 @@
-"""Public IPO-001 domain, scoring, verdict, and repository API."""
+"""Expose the supported IPO domain, evidence, ratio, and repository API.
+
+Beginner note:
+Importing from ``backend.ipo`` gives callers one stable entry point instead of
+making them know the package's internal file layout. This module contains no
+business logic; it only re-exports reviewed public contracts. Keeping that list
+explicit also prevents an internal helper from accidentally becoming public.
+"""
 
 from backend.ipo.documents import (
     IpoDocumentDownloadError,

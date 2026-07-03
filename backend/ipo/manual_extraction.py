@@ -164,7 +164,13 @@ class IpoManualPeriodData:
     finance_cost_page: int | None = None
 
     def __post_init__(self) -> None:
-        """Normalize values and require a positive page for every supplied value."""
+        """Normalize values and require a positive page for every supplied value.
+
+        Beginner note:
+            ``__post_init__`` runs immediately after the frozen dataclass is built.
+            That makes a period valid-or-rejected at construction time, so no later
+            service can accidentally persist a value without the page that proves it.
+        """
         if not isinstance(self.period_end, dt.date):
             raise IpoValidationError("period_end must be a date.")
         object.__setattr__(self, "revenue", _decimal(self.revenue, "revenue", non_negative=True))
@@ -504,6 +510,11 @@ class IpoManualExtractionRecord:
         Monetary statement values use ``financial_amount_unit``; fresh/OFS use
         their separately reported issue unit. Per-share and percentage values
         are already canonical and therefore pass through unchanged.
+
+        Beginner note:
+            The record keeps prospectus-scale values for auditability, but formulas
+            need one common scale. This property returns a read-only view in INR and
+            individual shares without overwriting the original reported evidence.
         """
         values = {
                 "net_worth_inr": self.financial_amount_unit.to_inr(self.net_worth),
