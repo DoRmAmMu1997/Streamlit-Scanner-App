@@ -131,10 +131,20 @@ and at least one peer row. Saving rehashes the local PDF, records the signed-in
 admin and server UTC time, and appends an immutable revision. Correct mistakes by
 prefilling and saving another revision; older rows remain visible in history.
 
+IPO-005 requires PBT and finance cost for each fiscal period, plus total assets,
+current liabilities, and post-issue shares. Each value needs the prospectus page
+where it was transcribed. On a correction of an older IPO-004 revision these new
+widgets are intentionally blank: enter the real source facts rather than accepting
+a zero placeholder. `get_latest_ipo_ratios(issue_id)` then derives the sixteen
+general-company ratios on demand. A missing upper price band suppresses only P/E,
+P/B, EV/EBITDA, and EV/Sales; it does not invalidate operating ratios.
+
 If the page says the cache is unavailable, call `download_document` again rather
 than editing database paths or hashes. A source URL/type/hash change during entry
 fails safely and requires reloading the page. Manual profiles expose canonical
 INR/share values to backend callers but do not create a score or recommendation.
+The ratio analysis likewise does not call IPO-001 evaluation. Sector overrides for
+banks/NBFCs, AMCs, insurers, and loss-making technology issuers remain unsupported.
 
 ### Scheduling on Windows (Task Scheduler)
 

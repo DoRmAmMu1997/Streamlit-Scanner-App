@@ -28,6 +28,8 @@ and stores immutable IPO score/recommendation history. IPO filing ingestion and
 evaluation remain explicit operations, and ingestion does not download PDFs or
 automatically derive factor scores. IPO-004 adds an admin-only Streamlit form for
 complete manual evidence from an already-cached DRHP/RHP.
+IPO-005 derives sixteen deterministic general-company financial ratios from the
+newest immutable profile, but still does not map them into factor scores.
 The separate IPO-003 repository service may explicitly download a registered
 DRHP/RHP into a verified local cache; it does not parse or score that PDF.
 
@@ -135,7 +137,7 @@ flowchart TB
 | Screener catalog | [screener-catalog](components/screener-catalog.md) | The 10 strategies |
 | Scan service & provenance | [scan-service-and-provenance](components/scan-service-and-provenance.md) | `run_scan` lifecycle + strict result/provenance contract + AI evaluation receipts |
 | Ranking scorer | [scoring](components/scoring.md) | RANK-002 additive `final_score` scorer, score receipts, cache-only liquidity/risk, UI component breakdown |
-| IPO Screener (domain + filing ingestion + cache + manual entry) | [ipo-screener](components/ipo-screener.md) ([IPO-001](ipo-001-domain-score-contract.md), [IPO-002](ipo-002-sebi-filing-ingestion.md), [IPO-003](ipo-003-document-downloader-cache.md), [IPO-004](ipo-004-manual-extraction-mvp.md)) | Official-SEBI filing inventory, secure content-addressed DRHP/RHP cache, immutable manual evidence, fail-closed recommendations, immutable evaluation history |
+| IPO Screener (domain + ingestion + cache + manual entry + ratios) | [ipo-screener](components/ipo-screener.md) ([IPO-001](ipo-001-domain-score-contract.md), [IPO-002](ipo-002-sebi-filing-ingestion.md), [IPO-003](ipo-003-document-downloader-cache.md), [IPO-004](ipo-004-manual-extraction-mvp.md), [IPO-005](ipo-005-ratio-engine.md)) | Official-SEBI inventory, secure DRHP/RHP cache, immutable manual evidence, deterministic ratios, fail-closed recommendations, immutable evaluation history |
 | Storage & persistence | [storage-persistence](components/storage-persistence.md) | Shared ORM/engine/session/Alembic layer, scan/audit/config/role/validation tables, nine `ipo_*` tables, and isolated scan-history/IPO query modules |
 | Scan comparison | [scan-comparison](components/scan-comparison.md) | JOB-003 latest-vs-previous shortlist read model over `scan_runs`/`scan_results` + finalized-run helpers |
 | Forward-return validation | [validation](components/validation.md) | VALID-002 calculator/service, VALID-003A/004 aggregate/dashboard metrics for `signal_forward_returns` rows, the read-only Validation / Signal Performance dashboard, and the headless compute job |
@@ -222,7 +224,7 @@ sequenceDiagram
         Job->>Repo: ingest_filings(category rows)
         Repo->>DB: one atomic category transaction
     end
-    Job-->>O: exit 1 if any category failed; otherwise 0
+    Job-->>O: exit 1 if any category failed, otherwise 0
 ```
 
 The three categories commit independently, so one failed category does not erase
@@ -260,6 +262,13 @@ complete three-period profile plus singleton and peer facts, and calls
 rechecks source identity inside a short transaction, and atomically appends the
 header, periods, and peers. `get_latest_manual_profile` exposes canonical INR and
 share values but never derives IPO-001 factor scores.
+
+### 6g. Deterministic IPO ratios
+
+`get_latest_ipo_ratios` reads the issue price and newest manual revision within
+one short transaction, detaches both, and invokes the offline Decimal ratio engine.
+Every one of the sixteen outputs carries `computed` or an explicit unavailable
+status. Ratios are not stored and do not trigger IPO-001 evaluation.
 
 ## 7. Cross-cutting concerns
 
@@ -331,6 +340,7 @@ cached PDFs. Designs: [OBS-003](obs-003-audit-log.md),
 | **Strict result contract, truthful status** | Rows are validated against the provenance contract *before* the DataFrame is built; contract-rejected rows and persistence failures downgrade the run to `PARTIAL`/`FAILED` rather than reporting a false success. |
 | **IPO verdicts fail closed (IPO-001)** | The scorecard uses fixed weights without renormalizing missing factors. Missing fundamental evidence forces `Not Recommended` / `Skip`, and evaluation atomically appends an immutable score/recommendation pair rather than mutating history. |
 | **SEBI ingestion is bounded and category-atomic (IPO-002)** | Only fixed official HTTPS SEBI listings may be fetched. Redirects, retries, response bytes, and page count are bounded; malformed filing rows fail the category. DRHP/RHP/final-offer categories commit independently for recovery, while any failed category still produces a nonzero aggregate exit. |
+| **IPO ratios are replayable receipts (IPO-005)** | Exact Decimal formulas run from one immutable manual revision plus an issue-price snapshot. Missing/undefined/not-meaningful values remain explicit, derived ratios are not persisted, and no calculation automatically changes the IPO-001 verdict. |
 | **Validate within a bounded attempt budget (AI-004)** | Strict-schema parsing may retry malformed output within the configured 1–3 attempt budget (never SDK/usage-limit errors); a budget of 1 disables retries, and invalid output is rejected and counted, never persisted. |
 | **Quarantine bad candle data at the loader boundary (DATA-001)** | A pure validator screens every OHLCV frame; structurally impossible candles (high<low, NaN, dup dates) are withheld from scanners and downgrade the run (`PARTIAL`/`FAILED`), while stale/gappy data passes as a recorded warning. Each run persists a bounded, redacted quality receipt (`scan_runs.data_quality_json`) so the app does not trust raw vendor candles without an audit trail. |
 | **Forward validation uses elapsed data only (VALID-002)** | Historical signal validation enters at the next trading day's open and exits at the Nth trading day's close. Rows stay `pending` while the window has not elapsed, become `insufficient_data` only after stale missing data, and never forward-fill absent bars. |
@@ -345,5 +355,5 @@ cached PDFs. Designs: [OBS-003](obs-003-audit-log.md),
 
 - **AI/external dependency** — Dhan/screener.in/SerpAPI/CLI changes can break features; mitigated by fallbacks, caches, and untrusted-evidence handling.
 - **Single-writer SQLite locally** — WAL + short sessions mitigate; Postgres for real concurrency.
-- **Recently shipped**: PROV-002 (deterministic per-screener receipts via `build_provenance`), PROV-003 (AI verdict receipts + the `ai_evaluations` ledger + HMAC verdict-cache integrity), DATA-001 (candle data-quality quarantine + per-run receipt), DEPLOY-001 (Docker runtime packaging), DEPLOY-002 (Docker Compose local production stack), DEPLOY-003/DEPLOY-003B (Render Blueprint + DB-URL driver normalization + committed daily-scan schedule), OBS-003 (user-action audit log + admin runtime-config form/viewer), JOB-003 (latest-vs-previous scan comparison), RANK-002 (deterministic `final_score` scorer + score component UI), VALID-001/VALID-002/VALID-003A/VALID-003B/VALID-004 (forward-return schema, calculator/service, backend aggregate metrics, read-only validation dashboard, dashboard slices/export, and headless compute job), and IPO-001 through IPO-004 (fail-closed evaluation, hardened filing inventory, secure PDF cache, and immutable admin-entered evidence) are now in flight.
-- **Roadmap (backlog)**: RANK-003 (fundamental/valuation components), richer validation visualizations beyond v1 tables, AUTH-003 (role-gated features), later DEPLOY-* hosting automation, and future IPO prospectus extraction, raw-factor derivation, read-only UI, and explicit deployment scheduling. These land through existing typed/JSON seams or separately reviewed runtime contracts without flag-day migrations.
+- **Recently shipped**: PROV-002 (deterministic per-screener receipts via `build_provenance`), PROV-003 (AI verdict receipts + the `ai_evaluations` ledger + HMAC verdict-cache integrity), DATA-001 (candle data-quality quarantine + per-run receipt), DEPLOY-001 (Docker runtime packaging), DEPLOY-002 (Docker Compose local production stack), DEPLOY-003/DEPLOY-003B (Render Blueprint + DB-URL driver normalization + committed daily-scan schedule), OBS-003 (user-action audit log + admin runtime-config form/viewer), JOB-003 (latest-vs-previous scan comparison), RANK-002 (deterministic `final_score` scorer + score component UI), VALID-001/VALID-002/VALID-003A/VALID-003B/VALID-004 (forward-return schema, calculator/service, backend aggregate metrics, read-only validation dashboard, dashboard slices/export, and headless compute job), and IPO-001 through IPO-005 (fail-closed evaluation, hardened filing inventory, secure PDF cache, immutable admin evidence, and deterministic ratios) are now in flight.
+- **Roadmap (backlog)**: RANK-003 (fundamental/valuation components), richer validation visualizations beyond v1 tables, AUTH-003 (role-gated features), later DEPLOY-* hosting automation, and future IPO prospectus extraction, ratio-to-factor derivation, sector-specific ratio overrides, read-only UI, and explicit deployment scheduling. These land through existing typed/JSON seams or separately reviewed runtime contracts without flag-day migrations.

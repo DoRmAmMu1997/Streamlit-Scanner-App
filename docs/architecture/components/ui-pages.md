@@ -17,11 +17,13 @@
 - **`validation_page.py`** — the VALID-003B/004 **read-only** Validation / Signal Performance dashboard: filter stored forward-return metrics by screener / universe / horizon / signal-date and render the screener-level summary table, return distribution, win rate by horizon, benchmark-relative rows, monthly signal counts, sector concentration, and best/worst signals. Its CSV export is analyst/admin-only. It reads through `summarize_validation_dashboard()` only — no raw SQL — and never triggers a forward-return compute pass from the UI. Same pure-helper / render split as the history page.
 - **`ui/common.py`** — display helpers needed by the scanner and read-only pages (which must not import each other or `app.py`): CSV-injection escaping, secret-redaction wrapper, BUY/SELL emoji badges, decimal column config, score sorting/component extraction, and provenance/receipt-column hiding.
 
-- **`ipo_manual_page.py`** - the IPO-004 **admin-only** write view: choose an
+- **`ipo_manual_page.py`** - the IPO-004/005 **admin-only** write view: choose an
   issue and cached DRHP/RHP, transcribe three annual periods plus sourced
   singleton/peer facts, append an immutable revision, and inspect latest/history.
   Browser mappings become strict backend DTOs; SQL and cache verification remain
-  outside the UI.
+  outside the UI. IPO-005 adds PBT/finance cost to every period and total
+  assets/current liabilities/post-issue shares to the singleton evidence. Legacy
+  corrections show these additions blank rather than pretending their value is zero.
 
 ## 2. Position in the system
 

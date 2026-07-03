@@ -124,6 +124,16 @@ text, require finite decimals/pages, and prevent arbitrary browser mappings from
 reaching ORM fields. Stored narratives render as ordinary Streamlit text, never
 unsafe HTML; logs/audits contain ids and counts only.
 
+### IPO-005 deterministic ratio enforcement
+
+The ratio engine is an offline pure module: no network, Streamlit, SQLAlchemy, AI,
+or dynamic expression evaluator is imported. New numeric facts pass through the
+same authenticated immutable form and use exact bounded `Numeric(24,4)` storage.
+Grouped database checks reject partial value/page provenance. Calculations handle
+zero and negative denominators with typed no-value statuses rather than infinity,
+NaN, exceptions, or fabricated defaults. Receipt explanations are static text and
+never interpolate narrative evidence, URLs, paths, or raw financial values.
+
 ### Evidence sanitization — `backend/scanning/result_contract.py`
 | Symbol | Contract |
 |---|---|

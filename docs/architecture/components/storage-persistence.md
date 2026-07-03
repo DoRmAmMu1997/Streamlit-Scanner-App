@@ -5,7 +5,7 @@
 | **Component** | Shared ORM, engine/session, isolated query modules, and migrations |
 | **Source** | [`backend/storage/models.py`](../../../backend/storage/models.py), [`backend/storage/database.py`](../../../backend/storage/database.py), [`backend/storage/repository.py`](../../../backend/storage/repository.py), [`backend/storage/ipo_repository.py`](../../../backend/storage/ipo_repository.py), [`migrations/`](../../../migrations) |
 | **Layer** | Persistence (`backend/`) |
-| **Status** | Stable (scan history + validation + audit/config + roles · IPO-001-004 domain, cache, and manual evidence) |
+| **Status** | Stable (scan history + validation + audit/config + roles · IPO-001-005 evidence and derivation) |
 | **Related** | **[scan-run-persistence.md](../scan-run-persistence.md)** (full SCAN-001 design) · [scan-002-handoff.md](../scan-002-handoff.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [validation.md](validation.md) · [ipo-screener.md](ipo-screener.md) · [ui-pages.md](ui-pages.md) · [HLD](../high-level-design.md) |
 
 > **This LLD summarizes the *current* persistence layer and how it is used.** The
@@ -101,6 +101,14 @@ use `(issue_id, submitted_at, id)`, issue deletion cascades, and document deleti
 sets only the live foreign key to null while snapshot provenance survives.
 Full design: [ipo-004-manual-extraction-mvp.md](../ipo-004-manual-extraction-mvp.md).
 
+IPO-005 adds no table and persists no ratio. Nullable `Numeric(24,4)` value/page
+pairs extend the extraction header with total assets, current liabilities, and
+post-issue shares, while annual rows gain PBT and finance cost. Grouped CHECKs
+allow either an all-null legacy group or a complete, constrained IPO-005 group.
+The latest-ratio repository path reads issue pricing plus the newest immutable
+revision in one short transaction, detaches both, and calculates afterward.
+Full design: [ipo-005-ratio-engine.md](../ipo-005-ratio-engine.md).
+
 ## 4. Public interface (`repository.py`)
 
 | Function | Contract |
@@ -172,7 +180,8 @@ Revisions are chained linearly through `20260623auth003`, then
 `20260629ipo001` (six IPO domain/evaluation tables), and `20260630ipo002`
 (nullable SEBI company key, filing date, record hash, and `unknown` issue type),
 then `20260630ipo003` (document-cache provenance and constrained status), then
-`20260701ipo004` (three immutable manual-evidence tables).
+`20260701ipo004` (three immutable manual-evidence tables), then
+`20260703ipo005` (legacy-compatible raw ratio inputs and grouped constraints).
 The IPO-002 downgrade checks for identity data and refuses before DDL when column
 removal or issue-type narrowing would be lossy. `migrations/env.py` reads the URL
 from `get_database_url()` (no hardcoded URL). A drift test guards ORM-vs-migration
@@ -181,6 +190,8 @@ The IPO-003 downgrade similarly refuses before DDL when any cache metadata or
 nondefault status would be lost.
 The IPO-004 downgrade refuses while any manual revision exists because those
 user/page/document receipts cannot be represented in the older schema.
+The IPO-005 downgrade permits legacy-only rows but refuses when any new sourced
+ratio input would be discarded.
 
 ## 7. Failure modes
 
@@ -200,6 +211,8 @@ user/page/document receipts cannot be represented in the older schema.
   transaction rolls back both score and recommendation.
 - IPO-002 downgrade sees SEBI identity or an `unknown` issue → downgrade refuses
   before schema mutation instead of discarding data.
+- IPO-005 reads a legacy revision → only ratios that need new fields return
+  `missing_inputs`; existing evidence and calculations remain available.
 
 ## 8. Testing
 
