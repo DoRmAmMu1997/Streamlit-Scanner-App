@@ -1,4 +1,4 @@
-"""Contract tests for IPO-004's immutable manual-extraction input models.
+"""Contract tests for IPO-004/005 immutable manual-extraction input models.
 
 Beginner note:
 These tests describe the form payload before any database or Streamlit code is
@@ -34,6 +34,10 @@ def _period(year: int) -> IpoManualPeriodData:
         ebitda_page=102,
         pat=Decimal("10.75"),
         pat_page=103,
+        profit_before_tax=Decimal("14.25"),
+        profit_before_tax_page=104,
+        finance_cost=Decimal("1.25"),
+        finance_cost_page=105,
     )
 
 
@@ -81,6 +85,12 @@ def _payload(**overrides: object) -> IpoManualExtractionData:
         "promoter_holding_pre_issue_page": 120,
         "promoter_holding_post_issue": Decimal("56.44"),
         "promoter_holding_post_issue_page": 121,
+        "total_assets": Decimal("150"),
+        "total_assets_page": 122,
+        "current_liabilities": Decimal("45"),
+        "current_liabilities_page": 123,
+        "post_issue_equity_shares": Decimal("60"),
+        "post_issue_equity_shares_page": 124,
         "peers": (_peer(),),
     }
     values.update(overrides)
@@ -114,6 +124,10 @@ def test_complete_payload_normalizes_order_and_peer_metric_keys() -> None:
             {"periods": (_period(2023), _period(2023), _period(2025))},
             "distinct period_end",
         ),
+        (
+            {"periods": (_period(2022), _period(2024), _period(2025))},
+            "consecutive annual years",
+        ),
         ({"objects_of_issue": "   "}, "objects_of_issue is required"),
         ({"peers": ()}, "at least one peer"),
         ({"equity_shares": Decimal("0")}, "equity_shares must be positive"),
@@ -123,7 +137,18 @@ def test_complete_payload_normalizes_order_and_peer_metric_keys() -> None:
         ),
         ({"cash": Decimal("NaN")}, "cash must be finite"),
         ({"total_debt": Decimal("-0.01")}, "total_debt must be non-negative"),
+        ({"total_assets": Decimal("-0.01")}, "total_assets must be non-negative"),
+        (
+            {"current_liabilities": Decimal("-0.01")},
+            "current_liabilities must be non-negative",
+        ),
+        (
+            {"post_issue_equity_shares": Decimal("0")},
+            "post_issue_equity_shares must be positive",
+        ),
+        ({"total_assets": None}, "total_assets is required"),
         ({"net_worth_page": 0}, "net_worth_page must be positive"),
+        ({"total_assets_page": 0}, "total_assets_page must be positive"),
     ],
 )
 def test_complete_payload_rejects_missing_or_unsafe_values(
@@ -149,4 +174,19 @@ def test_peer_requires_a_supported_metric_and_positive_page() -> None:
             company_name="Peer Ltd",
             source_page=0,
             metrics={IpoPeerMetric.PE: Decimal("10")},
+        )
+
+
+def test_period_rejects_partial_ipo005_value_and_page_groups() -> None:
+    """PBT and finance cost must never be detached from their source pages."""
+    with pytest.raises(IpoValidationError, match="require values and source pages together"):
+        IpoManualPeriodData(
+            period_end=dt.date(2025, 3, 31),
+            revenue=Decimal("100"),
+            revenue_page=1,
+            ebitda=Decimal("20"),
+            ebitda_page=2,
+            pat=Decimal("10"),
+            pat_page=3,
+            profit_before_tax=Decimal("12"),
         )

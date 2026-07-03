@@ -1051,6 +1051,21 @@ class IpoManualExtraction(Base):
             "promoter_holding_pre_issue_page > 0 AND promoter_holding_post_issue_page > 0",
             name="ck_ipo_manual_extractions_pages",
         ),
+        # IPO-005 columns are nullable only for legacy IPO-004 revisions. The
+        # all-null/all-present check prevents a direct SQL caller from attaching a
+        # value without its page or creating a half-complete valuation snapshot.
+        CheckConstraint(
+            "(total_assets IS NULL AND total_assets_page IS NULL AND "
+            "current_liabilities IS NULL AND current_liabilities_page IS NULL AND "
+            "post_issue_equity_shares IS NULL AND post_issue_equity_shares_page IS NULL) OR "
+            "(total_assets IS NOT NULL AND total_assets_page IS NOT NULL AND "
+            "current_liabilities IS NOT NULL AND current_liabilities_page IS NOT NULL AND "
+            "post_issue_equity_shares IS NOT NULL AND post_issue_equity_shares_page IS NOT NULL AND "
+            "total_assets >= 0 AND current_liabilities >= 0 AND "
+            "post_issue_equity_shares > 0 AND total_assets_page > 0 AND "
+            "current_liabilities_page > 0 AND post_issue_equity_shares_page > 0)",
+            name="ck_ipo_manual_extractions_ratio_inputs",
+        ),
         # "Latest revision for an issue" is the hot read path (form prefill + the
         # scoring-data bridge). This composite index serves the issue_id filter plus
         # the submitted_at DESC, id DESC ordering without a separate sort step.
@@ -1117,6 +1132,18 @@ class IpoManualExtraction(Base):
     promoter_holding_pre_issue_page: Mapped[int] = mapped_column(Integer, nullable=False)
     promoter_holding_post_issue: Mapped[Decimal] = mapped_column(Numeric(7, 4), nullable=False)
     promoter_holding_post_issue_page: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Nullable additions preserve previously submitted IPO-004 revisions. New
+    # submissions always populate the whole group through the strict domain DTO.
+    total_assets: Mapped[Decimal | None] = mapped_column(Numeric(24, 4), nullable=True)
+    total_assets_page: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    current_liabilities: Mapped[Decimal | None] = mapped_column(Numeric(24, 4), nullable=True)
+    current_liabilities_page: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    post_issue_equity_shares: Mapped[Decimal | None] = mapped_column(
+        Numeric(24, 4), nullable=True
+    )
+    post_issue_equity_shares_page: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
     # Actor and time come from the authenticated server session and the server clock,
     # never from the browser form, so a revision cannot be back-dated or attributed to
     # another administrator. submitted_at is timezone-aware and stored as UTC.
@@ -1167,6 +1194,17 @@ class IpoManualFinancialPeriod(Base):
             "revenue_page > 0 AND ebitda_page > 0 AND pat_page > 0",
             name="ck_ipo_manual_periods_pages",
         ),
+        # Historical rows have all four fields NULL; IPO-005 rows have both
+        # values and both citations. Finance cost cannot be negative, while PBT
+        # may be negative for a loss-making company.
+        CheckConstraint(
+            "(profit_before_tax IS NULL AND profit_before_tax_page IS NULL AND "
+            "finance_cost IS NULL AND finance_cost_page IS NULL) OR "
+            "(profit_before_tax IS NOT NULL AND profit_before_tax_page IS NOT NULL AND "
+            "finance_cost IS NOT NULL AND finance_cost_page IS NOT NULL AND "
+            "finance_cost >= 0 AND profit_before_tax_page > 0 AND finance_cost_page > 0)",
+            name="ck_ipo_manual_periods_ratio_inputs",
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
@@ -1186,6 +1224,10 @@ class IpoManualFinancialPeriod(Base):
     ebitda_page: Mapped[int] = mapped_column(Integer, nullable=False)
     pat: Mapped[Decimal] = mapped_column(Numeric(24, 4), nullable=False)
     pat_page: Mapped[int] = mapped_column(Integer, nullable=False)
+    profit_before_tax: Mapped[Decimal | None] = mapped_column(Numeric(24, 4), nullable=True)
+    profit_before_tax_page: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    finance_cost: Mapped[Decimal | None] = mapped_column(Numeric(24, 4), nullable=True)
+    finance_cost_page: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     extraction: Mapped[IpoManualExtraction] = relationship(back_populates="periods")
 
