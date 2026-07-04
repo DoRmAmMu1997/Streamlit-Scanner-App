@@ -94,6 +94,9 @@ exception text. Successful downloads remain structured-log events only.
 IPO-004 submission events similarly exclude financial values, narrative objects,
 URLs, hashes, and local paths. The extraction row itself is the authoritative
 user/time/document/page receipt if the best-effort audit sink is unavailable.
+IPO-005 reuses that submission event for its newly sourced facts and adds no
+ratio-calculation event: ratio reads are deterministic and side-effect free, and
+logging their values would add sensitive financial noise without lifecycle value.
 
 ## 5. Key design decisions & trade-offs
 

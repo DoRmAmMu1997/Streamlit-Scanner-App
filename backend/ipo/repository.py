@@ -5,6 +5,12 @@ receive those session-bound objects: adapters convert validated DTOs into column
 values and convert ORM rows back into frozen records before the session closes.
 This is also the orchestration home for operations spanning scoring, downloads,
 auditing, or multiple tables.
+
+Beginner note:
+The caller owns a transaction through ``session_factory`` and this module owns
+the workflow around it. Keeping SQL construction in ``backend.storage`` means a
+new UI, CLI, or test can reuse the same ownership and provenance checks without
+learning SQLAlchemy or accidentally returning a session-bound ORM object.
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ from backend.ipo.documents.downloader import (
     download_document_file,
     verify_cached_document_file,
 )
+from backend.ipo.financials.ratio_engine import IpoRatioAnalysis, calculate_ipo_ratios
 from backend.ipo.manual_extraction import (
     IpoAmountUnit,
     IpoManualExtractionData,
@@ -505,7 +512,12 @@ def _manual_header_values(
     entered_by_email: str,
     submitted_at: dt.datetime,
 ) -> dict[str, Any]:
-    """Translate one validated form payload into immutable header columns."""
+    """Translate one validated form payload into immutable header columns.
+
+    Beginner note:
+    Keeping this mapping explicit prevents dataclass fields from being mass-assigned
+    into ORM rows. Only reviewed source facts cross the domain/storage boundary.
+    """
     return {
         "source_document_id": document.id,
         "source_document_url": document.document_url,
@@ -538,6 +550,12 @@ def _manual_header_values(
         "promoter_holding_pre_issue_page": data.promoter_holding_pre_issue_page,
         "promoter_holding_post_issue": data.promoter_holding_post_issue,
         "promoter_holding_post_issue_page": data.promoter_holding_post_issue_page,
+        "total_assets": data.total_assets,
+        "total_assets_page": data.total_assets_page,
+        "current_liabilities": data.current_liabilities,
+        "current_liabilities_page": data.current_liabilities_page,
+        "post_issue_equity_shares": data.post_issue_equity_shares,
+        "post_issue_equity_shares_page": data.post_issue_equity_shares_page,
         "entered_by_email": entered_by_email,
         "submitted_at": submitted_at,
     }
@@ -548,6 +566,10 @@ def _manual_period_values(data: IpoManualExtractionData) -> list[dict[str, Any]]
 
     ``data.periods`` is already sorted oldest-to-newest by the domain contract, so
     numbering them 1..3 with ``enumerate`` records a stable FY1/FY2/FY3 slot.
+
+    Beginner note:
+    IPO-005 PBT and finance cost travel with the same period row and their own
+    pages; they are raw evidence, never precomputed EBIT or coverage values.
     """
     return [
         {
@@ -559,6 +581,10 @@ def _manual_period_values(data: IpoManualExtractionData) -> list[dict[str, Any]]
             "ebitda_page": period.ebitda_page,
             "pat": period.pat,
             "pat_page": period.pat_page,
+            "profit_before_tax": period.profit_before_tax,
+            "profit_before_tax_page": period.profit_before_tax_page,
+            "finance_cost": period.finance_cost,
+            "finance_cost_page": period.finance_cost_page,
         }
         for ordinal, period in enumerate(data.periods, start=1)
     ]
@@ -588,7 +614,12 @@ def _manual_peer_values(data: IpoManualExtractionData) -> list[dict[str, Any]]:
 
 
 def _manual_record(row: Any) -> IpoManualExtractionRecord:
-    """Detach an ORM revision and restore enums, decimals, periods, and peers."""
+    """Detach an ORM revision and restore enums, decimals, periods, and peers.
+
+    Beginner note:
+    The returned frozen object is safe after the session closes. Nullable IPO-005
+    fields are retained as ``None`` for legacy revisions rather than coerced to zero.
+    """
     periods = tuple(
         IpoManualPeriodData(
             period_end=period.period_end,
@@ -598,6 +629,10 @@ def _manual_record(row: Any) -> IpoManualExtractionRecord:
             ebitda_page=period.ebitda_page,
             pat=period.pat,
             pat_page=period.pat_page,
+            profit_before_tax=period.profit_before_tax,
+            profit_before_tax_page=period.profit_before_tax_page,
+            finance_cost=period.finance_cost,
+            finance_cost_page=period.finance_cost_page,
         )
         for period in sorted(row.periods, key=lambda value: value.ordinal)
     )
@@ -650,6 +685,12 @@ def _manual_record(row: Any) -> IpoManualExtractionRecord:
         peers=peers,
         entered_by_email=row.entered_by_email,
         submitted_at=_utc(row.submitted_at),
+        total_assets=row.total_assets,
+        total_assets_page=row.total_assets_page,
+        current_liabilities=row.current_liabilities,
+        current_liabilities_page=row.current_liabilities_page,
+        post_issue_equity_shares=row.post_issue_equity_shares,
+        post_issue_equity_shares_page=row.post_issue_equity_shares_page,
     )
 
 
@@ -787,6 +828,34 @@ def get_latest_manual_profile(
             raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
         row = get_latest_ipo_manual_extraction(session, issue_id)
         return _manual_record(row) if row is not None else None
+
+
+def get_latest_ipo_ratios(
+    issue_id: int,
+    *,
+    session_factory: SessionFactory = session_scope,
+) -> IpoRatioAnalysis | None:
+    """Calculate ratios from one consistent issue/latest-revision snapshot.
+
+    Beginner note:
+    Both rows are detached inside the same short read transaction, then the pure
+    engine runs after the session closes. The database therefore stores source
+    evidence only, while this repeatable read model cannot hold locks during math.
+    """
+    with session_factory() as session:
+        issue_row = get_ipo_issue(session, issue_id)
+        if issue_row is None:
+            raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
+        profile_row = get_latest_ipo_manual_extraction(session, issue_id)
+        issue = _issue_record(issue_row)
+        profile = _manual_record(profile_row) if profile_row is not None else None
+    if profile is None:
+        return None
+    return calculate_ipo_ratios(
+        profile,
+        price_band_high=issue.price_band_high,
+        issue_updated_at=issue.updated_at,
+    )
 
 
 _STATUS_ORDER = {

@@ -3,6 +3,11 @@
 These tests use a temporary SQLite file instead of the real ``data/scanner.db``.
 That proves migrations are safe to run in CI and on a developer laptop without
 depending on any local scan history.
+
+Beginner note:
+A model change is not complete until an old database can reach the new shape and,
+when safe, return to the old one. These tests compare Alembic's hand-written schema
+with SQLAlchemy metadata so local SQLite and production PostgreSQL do not drift.
 """
 
 from __future__ import annotations
@@ -22,7 +27,13 @@ from backend.storage.models import Base, IpoIssue, IpoManualExtraction
 
 
 def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Path):
-    """Upgrade creates the expected schema; downgrade removes it again."""
+    """Upgrade creates the expected schema; downgrade removes it again.
+
+    Beginner note:
+        This broad smoke test is also the central table-name inventory. Adding the
+        IPO-005 columns must not accidentally add, remove, or rename a table elsewhere
+        in the shared metadata graph.
+    """
     db_path = tmp_path / "scan-history.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
 
@@ -146,6 +157,27 @@ def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Pa
         "ix_ipo_manual_extractions_issue_submitted",
         "ix_ipo_manual_extractions_source_document_id",
     }
+    extraction_columns = {
+        column["name"] for column in inspector.get_columns("ipo_manual_extractions")
+    }
+    assert {
+        "total_assets",
+        "total_assets_page",
+        "current_liabilities",
+        "current_liabilities_page",
+        "post_issue_equity_shares",
+        "post_issue_equity_shares_page",
+    } <= extraction_columns
+    period_columns = {
+        column["name"]
+        for column in inspector.get_columns("ipo_manual_financial_periods")
+    }
+    assert {
+        "profit_before_tax",
+        "profit_before_tax_page",
+        "finance_cost",
+        "finance_cost_page",
+    } <= period_columns
     extraction_fks = {
         fk["referred_table"]: fk["options"]
         for fk in inspector.get_foreign_keys("ipo_manual_extractions")
@@ -332,6 +364,159 @@ def test_ipo004_downgrade_refuses_to_discard_manual_revisions(
 
     engine = create_engine(database_url, future=True)
     assert "ipo_manual_extractions" in inspect(engine).get_table_names()
+    engine.dispose()
+
+
+def test_ipo005_upgrade_preserves_legacy_revisions_and_downgrades_losslessly(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """An IPO-004 row receives null additions and can return to IPO-004 safely.
+
+    Beginner note:
+    Nullable migration columns are a compatibility promise, not permission for
+    new partial submissions. This test creates the old shape before upgrading so
+    it proves real deployed history remains readable rather than only testing a
+    fresh database at the newest schema.
+    """
+    db_path = tmp_path / "ipo005-legacy.db"
+    database_url = f"sqlite:///{db_path.as_posix()}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = Config("alembic.ini")
+    command.upgrade(config, "20260701ipo004")
+
+    engine = create_engine(database_url, future=True)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO ipo_issues "
+                "(company_name, issue_type, status, source_confidence, created_at, updated_at) "
+                "VALUES ('Legacy Limited', 'mainboard', 'rhp_filed', 'high', "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            )
+        )
+        connection.execute(
+            text(
+                "INSERT INTO ipo_manual_extractions "
+                "(issue_id, source_document_url, source_content_sha256, "
+                "financial_amount_unit, issue_amount_unit, equity_share_unit, "
+                "net_worth, net_worth_page, total_debt, total_debt_page, cash, cash_page, "
+                "cash_flow_from_operations, cash_flow_from_operations_page, "
+                "equity_shares, equity_shares_page, eps, eps_page, nav_book_value, "
+                "nav_book_value_page, objects_of_issue, objects_of_issue_page, "
+                "fresh_issue_amount, fresh_issue_amount_page, ofs_amount, ofs_amount_page, "
+                "promoter_holding_pre_issue, promoter_holding_pre_issue_page, "
+                "promoter_holding_post_issue, promoter_holding_post_issue_page, "
+                "entered_by_email, submitted_at) VALUES "
+                "(1, 'https://www.sebi.gov.in/filings/legacy', :digest, "
+                "'crore_inr', 'crore_inr', 'lakh_shares', "
+                "1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 1, "
+                "'General corporate purposes', 1, 0, 1, 0, 1, 1, 1, 1, 1, "
+                "'admin@example.com', CURRENT_TIMESTAMP)"
+            ),
+            {"digest": "a" * 64},
+        )
+    engine.dispose()
+
+    command.upgrade(config, "head")
+    engine = create_engine(database_url, future=True)
+    with engine.connect() as connection:
+        row = connection.execute(
+            text(
+                "SELECT total_assets, current_liabilities, post_issue_equity_shares "
+                "FROM ipo_manual_extractions"
+            )
+        ).one()
+        assert row == (None, None, None)
+    engine.dispose()
+
+    command.downgrade(config, "20260701ipo004")
+    engine = create_engine(database_url, future=True)
+    columns = {
+        column["name"] for column in inspect(engine).get_columns("ipo_manual_extractions")
+    }
+    assert "total_assets" not in columns
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT COUNT(*) FROM ipo_manual_extractions")) == 1
+    engine.dispose()
+
+
+def test_ipo005_downgrade_refuses_to_discard_ratio_inputs(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Downgrade stops before deleting any sourced IPO-005 accounting fact.
+
+    Beginner note:
+        A reversible migration is only reversible while its new columns are empty.
+        Once an administrator enters evidence, refusing the downgrade is safer than
+        reporting success after silently deleting that immutable provenance.
+    """
+    db_path = tmp_path / "ipo005-protected.db"
+    database_url = f"sqlite:///{db_path.as_posix()}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = Config("alembic.ini")
+    command.upgrade(config, "head")
+
+    engine = create_engine(database_url, future=True)
+    with Session(engine) as session:
+        issue = IpoIssue(
+            company_name="Example Limited",
+            issue_type="mainboard",
+            status="rhp_filed",
+            source_confidence="high",
+        )
+        session.add(
+            IpoManualExtraction(
+                issue=issue,
+                source_document_url="https://www.sebi.gov.in/filings/example",
+                source_content_sha256="a" * 64,
+                financial_amount_unit="crore_inr",
+                issue_amount_unit="crore_inr",
+                equity_share_unit="lakh_shares",
+                net_worth=1,
+                net_worth_page=1,
+                total_debt=0,
+                total_debt_page=1,
+                cash=0,
+                cash_page=1,
+                cash_flow_from_operations=0,
+                cash_flow_from_operations_page=1,
+                equity_shares=1,
+                equity_shares_page=1,
+                eps=0,
+                eps_page=1,
+                nav_book_value=0,
+                nav_book_value_page=1,
+                objects_of_issue="General corporate purposes",
+                objects_of_issue_page=1,
+                fresh_issue_amount=0,
+                fresh_issue_amount_page=1,
+                ofs_amount=0,
+                ofs_amount_page=1,
+                promoter_holding_pre_issue=1,
+                promoter_holding_pre_issue_page=1,
+                promoter_holding_post_issue=1,
+                promoter_holding_post_issue_page=1,
+                total_assets=10,
+                total_assets_page=1,
+                current_liabilities=2,
+                current_liabilities_page=1,
+                post_issue_equity_shares=2,
+                post_issue_equity_shares_page=1,
+                entered_by_email="admin@example.com",
+                submitted_at=dt.datetime(2026, 7, 3, tzinfo=dt.UTC),
+            )
+        )
+        session.commit()
+    engine.dispose()
+
+    with pytest.raises(RuntimeError, match="discard IPO-005 manual ratio inputs"):
+        command.downgrade(config, "20260701ipo004")
+
+    engine = create_engine(database_url, future=True)
+    columns = {
+        column["name"] for column in inspect(engine).get_columns("ipo_manual_extractions")
+    }
+    assert "total_assets" in columns
     engine.dispose()
 
 

@@ -123,7 +123,13 @@ def test_peer_rows_reject_partial_rows_instead_of_silently_dropping_them() -> No
 
 
 def test_period_builder_preserves_explicit_dates_values_and_pages() -> None:
-    """The UI adapter should create the same exact three-period domain contract."""
+    """The UI adapter should create the same exact three-period domain contract.
+
+    Beginner note:
+        This test checks values and citations together because preserving a number
+        while shifting its page would still produce a valid-looking but unauditable
+        extraction record.
+    """
     periods = ipo_manual_page._period_rows_to_domain(
         [
             {
@@ -134,6 +140,10 @@ def test_period_builder_preserves_explicit_dates_values_and_pages() -> None:
                 "ebitda_page": 11,
                 "pat": "10.25",
                 "pat_page": 12,
+                "profit_before_tax": "13.25",
+                "profit_before_tax_page": 13,
+                "finance_cost": "1.5",
+                "finance_cost_page": 14,
             }
             for year in (2023, 2024, 2025)
         ]
@@ -141,10 +151,18 @@ def test_period_builder_preserves_explicit_dates_values_and_pages() -> None:
 
     assert periods[0].period_end == dt.date(2023, 3, 31)
     assert periods[0].revenue == Decimal("2023.0000")
+    assert periods[0].profit_before_tax == Decimal("13.2500")
+    assert periods[0].finance_cost == Decimal("1.5000")
 
 
 def test_form_mapping_builds_complete_domain_payload_without_actor_fields() -> None:
-    """The UI adapter must not accept an entered-by identity from browser data."""
+    """The UI adapter must not accept an entered-by identity from browser data.
+
+    Beginner note:
+        The browser controls every mapping value supplied here. Proving that the
+        resulting DTO has no actor field protects the rule that identity comes only
+        from the authenticated server session in the repository call.
+    """
     values = {
         "net_worth": "80",
         "net_worth_page": 130,
@@ -170,6 +188,12 @@ def test_form_mapping_builds_complete_domain_payload_without_actor_fields() -> N
         "promoter_holding_pre_issue_page": 140,
         "promoter_holding_post_issue": "56.44",
         "promoter_holding_post_issue_page": 141,
+        "total_assets": "150",
+        "total_assets_page": 142,
+        "current_liabilities": "45",
+        "current_liabilities_page": 143,
+        "post_issue_equity_shares": "60",
+        "post_issue_equity_shares_page": 144,
     }
     period_rows = [
         {
@@ -180,6 +204,10 @@ def test_form_mapping_builds_complete_domain_payload_without_actor_fields() -> N
             "ebitda_page": 101,
             "pat": "10",
             "pat_page": 102,
+            "profit_before_tax": "12",
+            "profit_before_tax_page": 103,
+            "finance_cost": "2",
+            "finance_cost_page": 104,
         }
         for year in (2023, 2024, 2025)
     ]
@@ -197,6 +225,9 @@ def test_form_mapping_builds_complete_domain_payload_without_actor_fields() -> N
     assert payload.source_document_id == 7
     assert payload.net_worth == Decimal("80.0000")
     assert payload.periods[2].period_end == dt.date(2025, 3, 31)
+    assert payload.periods[2].profit_before_tax == Decimal("12.0000")
+    assert payload.total_assets == Decimal("150.0000")
+    assert payload.post_issue_equity_shares == Decimal("60.0000")
     assert not hasattr(payload, "entered_by_email")
 
 

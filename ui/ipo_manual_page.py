@@ -78,7 +78,13 @@ def _decimal_text(value: object, field_name: str) -> Decimal:
 def _period_rows_to_domain(
     rows: Sequence[Mapping[str, object]],
 ) -> tuple[IpoManualPeriodData, ...]:
-    """Convert three UI row mappings into strict sourced annual periods."""
+    """Convert three UI row mappings into strict sourced annual periods.
+
+    Beginner note:
+    Text widgets remain untrusted strings until this adapter parses them as exact
+    Decimal values. Actor identity is not part of these mappings and cannot be
+    smuggled into the backend DTO.
+    """
     return tuple(
         IpoManualPeriodData(
             period_end=cast(dt.date, row["period_end"]),
@@ -88,6 +94,12 @@ def _period_rows_to_domain(
             ebitda_page=cast(int, row.get("ebitda_page")),
             pat=_decimal_text(row.get("pat"), "pat"),
             pat_page=cast(int, row.get("pat_page")),
+            profit_before_tax=_decimal_text(
+                row.get("profit_before_tax"), "profit_before_tax"
+            ),
+            profit_before_tax_page=cast(int, row.get("profit_before_tax_page")),
+            finance_cost=_decimal_text(row.get("finance_cost"), "finance_cost"),
+            finance_cost_page=cast(int, row.get("finance_cost_page")),
         )
         for row in rows
     )
@@ -144,7 +156,13 @@ def _build_payload(
     scalar_values: Mapping[str, object],
     peer_rows: Sequence[Mapping[str, object]],
 ) -> IpoManualExtractionData:
-    """Build the backend DTO from browser values without accepting actor data."""
+    """Build the backend DTO from browser values without accepting actor data.
+
+    Beginner note:
+    Listing every numeric field here is intentional mass-assignment protection.
+    Unexpected browser keys are ignored, while missing or malformed reviewed keys
+    fail in the same strict domain validator used by non-UI callers.
+    """
     numeric_names = (
         "net_worth",
         "total_debt",
@@ -157,6 +175,9 @@ def _build_payload(
         "ofs_amount",
         "promoter_holding_pre_issue",
         "promoter_holding_post_issue",
+        "total_assets",
+        "current_liabilities",
+        "post_issue_equity_shares",
     )
     values = dict(scalar_values)
     for name in numeric_names:
@@ -201,6 +222,16 @@ def _build_payload(
         ),
         promoter_holding_post_issue_page=cast(
             int, values["promoter_holding_post_issue_page"]
+        ),
+        total_assets=cast(Decimal, values["total_assets"]),
+        total_assets_page=cast(int, values["total_assets_page"]),
+        current_liabilities=cast(Decimal, values["current_liabilities"]),
+        current_liabilities_page=cast(int, values["current_liabilities_page"]),
+        post_issue_equity_shares=cast(
+            Decimal, values["post_issue_equity_shares"]
+        ),
+        post_issue_equity_shares_page=cast(
+            int, values["post_issue_equity_shares_page"]
         ),
     )
 
@@ -382,7 +413,13 @@ def _render_period_controls(
     issue_id: int,
     latest: IpoManualExtractionRecord | None,
 ) -> list[dict[str, object]]:
-    """Render the required three annual revenue/EBITDA/PAT rows and their pages."""
+    """Render three annual income-statement rows with value-level citations.
+
+    Beginner note:
+    PBT and finance cost are raw source facts, not ratios. Capturing them beside
+    revenue/EBITDA/PAT lets the backend derive EBIT and coverage transparently.
+    A legacy correction starts these new widgets blank so zero is never invented.
+    """
     st.markdown("#### Annual financials")
     defaults = list(latest.periods) if latest else []
     current_year = dt.date.today().year
@@ -392,6 +429,7 @@ def _render_period_controls(
         default_date = period.period_end if period else dt.date(current_year - 2 + index, 3, 31)
         st.markdown(f"**FY{index + 1}**")
         date_column, revenue_column, ebitda_column, pat_column = st.columns(4)
+        pbt_column, finance_cost_column = st.columns(2)
         rows.append(
             {
                 "period_end": date_column.date_input(
@@ -435,6 +473,42 @@ def _render_period_controls(
                     value=period.pat_page if period else 1,
                     key=_widget_key(issue_id, f"pat_page_{index}"),
                 ),
+                "profit_before_tax": pbt_column.text_input(
+                    "Profit before tax (PBT)",
+                    value=_format_decimal(
+                        period.profit_before_tax if period else None, ""
+                    ),
+                    key=_widget_key(issue_id, f"profit_before_tax_{index}"),
+                ),
+                "profit_before_tax_page": pbt_column.number_input(
+                    "PBT page",
+                    min_value=1,
+                    step=1,
+                    value=(
+                        period.profit_before_tax_page
+                        if period and period.profit_before_tax_page is not None
+                        else 1
+                    ),
+                    key=_widget_key(issue_id, f"profit_before_tax_page_{index}"),
+                ),
+                "finance_cost": finance_cost_column.text_input(
+                    "Finance cost",
+                    value=_format_decimal(
+                        period.finance_cost if period else None, ""
+                    ),
+                    key=_widget_key(issue_id, f"finance_cost_{index}"),
+                ),
+                "finance_cost_page": finance_cost_column.number_input(
+                    "Finance cost page",
+                    min_value=1,
+                    step=1,
+                    value=(
+                        period.finance_cost_page
+                        if period and period.finance_cost_page is not None
+                        else 1
+                    ),
+                    key=_widget_key(issue_id, f"finance_cost_page_{index}"),
+                ),
             }
         )
     return rows
@@ -445,21 +519,33 @@ def _sourced_text_control(
     label: str,
     field_name: str,
     latest: IpoManualExtractionRecord | None,
+    *,
+    blank_when_missing: bool = False,
 ) -> tuple[str, int]:
-    """Render one required decimal text input beside its required source page."""
+    """Render one required decimal input beside its required source page.
+
+    ``blank_when_missing`` is reserved for IPO-005 additions on a legacy revision.
+    Showing an empty widget forces an administrator to transcribe the real value;
+    defaulting those newly introduced facts to zero would fabricate evidence.
+
+    Beginner note:
+        This helper only collects browser values. The domain object validates them
+        again, and the repository later verifies the cached document, so a widget's
+        minimum or default is never treated as the security or provenance boundary.
+    """
     value_column, page_column = st.columns((3, 1))
     stored_value = getattr(latest, field_name) if latest else None
-    stored_page = getattr(latest, f"{field_name}_page") if latest else 1
+    stored_page = getattr(latest, f"{field_name}_page") if latest else None
     value = value_column.text_input(
         label,
-        value=_format_decimal(stored_value),
+        value=_format_decimal(stored_value, "" if blank_when_missing else "0"),
         key=_widget_key(issue_id, field_name),
     )
     page = page_column.number_input(
         f"{label} page",
         min_value=1,
         step=1,
-        value=stored_page,
+        value=stored_page if stored_page is not None else 1,
         key=_widget_key(issue_id, f"{field_name}_page"),
     )
     return value, page
@@ -469,24 +555,39 @@ def _render_scalar_controls(
     issue_id: int,
     latest: IpoManualExtractionRecord | None,
 ) -> dict[str, object]:
-    """Render every required singleton fact and its page-level provenance."""
+    """Render every required singleton fact and its page-level provenance.
+
+    Beginner note:
+    Historical/current shares support EPS and book value, while post-issue shares
+    support market capitalization. Keeping separate fields avoids a convenient but
+    misleading EV calculation based on the wrong share count.
+    """
     st.markdown("#### Balance sheet, issue, and ownership facts")
     labels = {
-        "net_worth": "Net worth",
-        "total_debt": "Total debt",
-        "cash": "Cash",
-        "cash_flow_from_operations": "Cash flow from operations",
-        "equity_shares": "Equity shares",
-        "eps": "EPS (INR per share)",
-        "nav_book_value": "NAV / book value (INR per share)",
-        "fresh_issue_amount": "Fresh issue amount",
-        "ofs_amount": "OFS amount",
-        "promoter_holding_pre_issue": "Promoter holding before issue (%)",
-        "promoter_holding_post_issue": "Promoter holding after issue (%)",
+        "net_worth": ("Net worth", False),
+        "total_debt": ("Total debt", False),
+        "cash": ("Cash", False),
+        "cash_flow_from_operations": ("Cash flow from operations", False),
+        "equity_shares": ("Equity shares used for EPS / book value", False),
+        "eps": ("Reported EPS (INR per share)", False),
+        "nav_book_value": ("Reported NAV / book value (INR per share)", False),
+        "fresh_issue_amount": ("Fresh issue amount", False),
+        "ofs_amount": ("OFS amount", False),
+        "promoter_holding_pre_issue": ("Promoter holding before issue (%)", False),
+        "promoter_holding_post_issue": ("Promoter holding after issue (%)", False),
+        "total_assets": ("Total assets", True),
+        "current_liabilities": ("Current liabilities", True),
+        "post_issue_equity_shares": ("Post-issue equity shares", True),
     }
     values: dict[str, object] = {}
-    for field_name, label in labels.items():
-        value, page = _sourced_text_control(issue_id, label, field_name, latest)
+    for field_name, (label, blank_when_missing) in labels.items():
+        value, page = _sourced_text_control(
+            issue_id,
+            label,
+            field_name,
+            latest,
+            blank_when_missing=blank_when_missing,
+        )
         values[field_name] = value
         values[f"{field_name}_page"] = page
 

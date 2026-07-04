@@ -142,7 +142,14 @@ def _company_key(value: str) -> str:
 
 @dataclass(frozen=True)
 class IpoManualPeriodData:
-    """Three sourced income-statement values for one annual fiscal period."""
+    """Sourced income-statement values for one annual fiscal period.
+
+    Beginner note:
+    IPO-004 revisions contain revenue, EBITDA, and PAT only. IPO-005 adds PBT
+    and finance cost so EBIT and interest coverage can be calculated without a
+    web scrape or an accounting proxy. The new fields are nullable here solely
+    so historical IPO-004 revisions remain readable after the migration.
+    """
 
     period_end: dt.date
     revenue: Decimal
@@ -151,9 +158,19 @@ class IpoManualPeriodData:
     ebitda_page: int
     pat: Decimal
     pat_page: int
+    profit_before_tax: Decimal | None = None
+    profit_before_tax_page: int | None = None
+    finance_cost: Decimal | None = None
+    finance_cost_page: int | None = None
 
     def __post_init__(self) -> None:
-        """Normalize values and require a positive page for every value."""
+        """Normalize values and require a positive page for every supplied value.
+
+        Beginner note:
+            ``__post_init__`` runs immediately after the frozen dataclass is built.
+            That makes a period valid-or-rejected at construction time, so no later
+            service can accidentally persist a value without the page that proves it.
+        """
         if not isinstance(self.period_end, dt.date):
             raise IpoValidationError("period_end must be a date.")
         object.__setattr__(self, "revenue", _decimal(self.revenue, "revenue", non_negative=True))
@@ -161,6 +178,42 @@ class IpoManualPeriodData:
         object.__setattr__(self, "pat", _decimal(self.pat, "pat"))
         for name in ("revenue_page", "ebitda_page", "pat_page"):
             object.__setattr__(self, name, _page(getattr(self, name), name))
+
+        # A legacy period has none of the four IPO-005 values. A new period has
+        # all four. Rejecting a partial group prevents a number from becoming
+        # detached from the prospectus page that proves where it came from.
+        ratio_fields = (
+            self.profit_before_tax,
+            self.profit_before_tax_page,
+            self.finance_cost,
+            self.finance_cost_page,
+        )
+        if all(value is None for value in ratio_fields):
+            return
+        if any(value is None for value in ratio_fields):
+            raise IpoValidationError(
+                "profit_before_tax and finance_cost require values and source pages together."
+            )
+        object.__setattr__(
+            self,
+            "profit_before_tax",
+            _decimal(self.profit_before_tax, "profit_before_tax"),
+        )
+        object.__setattr__(
+            self,
+            "finance_cost",
+            _decimal(self.finance_cost, "finance_cost", non_negative=True),
+        )
+        object.__setattr__(
+            self,
+            "profit_before_tax_page",
+            _page(self.profit_before_tax_page, "profit_before_tax_page"),
+        )
+        object.__setattr__(
+            self,
+            "finance_cost_page",
+            _page(self.finance_cost_page, "finance_cost_page"),
+        )
 
 
 @dataclass(frozen=True)
@@ -250,6 +303,15 @@ class IpoManualExtractionData:
     promoter_holding_pre_issue_page: int
     promoter_holding_post_issue: Decimal
     promoter_holding_post_issue_page: int
+    # IPO-005 adds the raw balance-sheet/share facts needed for ROCE and
+    # enterprise-value ratios. These belong to the immutable revision rather
+    # than to a ratio table because they are sourced evidence, not calculations.
+    total_assets: Decimal
+    total_assets_page: int
+    current_liabilities: Decimal
+    current_liabilities_page: int
+    post_issue_equity_shares: Decimal
+    post_issue_equity_shares_page: int
     # One or more prospectus peer companies with allowlisted valuation ratios.
     peers: tuple[IpoPeerValuationData, ...]
 
@@ -284,6 +346,16 @@ class IpoManualExtractionData:
         periods = tuple(sorted(periods, key=lambda period: period.period_end))
         if len({period.period_end for period in periods}) != 3:
             raise IpoValidationError("Fiscal periods require distinct period_end dates.")
+        years = [period.period_end.year for period in periods]
+        if years != list(range(years[0], years[0] + 3)):
+            raise IpoValidationError("Fiscal periods must cover three consecutive annual years.")
+        if any(
+            period.profit_before_tax is None or period.finance_cost is None
+            for period in periods
+        ):
+            raise IpoValidationError(
+                "Every fiscal period requires profit_before_tax and finance_cost with source pages."
+            )
         object.__setattr__(self, "periods", periods)
 
         # Negative profit, EBITDA, cash flow, net worth, EPS, or NAV can be
@@ -301,8 +373,13 @@ class IpoManualExtractionData:
             "ofs_amount": True,
             "promoter_holding_pre_issue": True,
             "promoter_holding_post_issue": True,
+            "total_assets": True,
+            "current_liabilities": True,
+            "post_issue_equity_shares": True,
         }
         for name, non_negative in numeric_rules.items():
+            if getattr(self, name) is None:
+                raise IpoValidationError(f"{name} is required.")
             object.__setattr__(
                 self,
                 name,
@@ -310,6 +387,8 @@ class IpoManualExtractionData:
             )
         if self.equity_shares <= 0:
             raise IpoValidationError("equity_shares must be positive.")
+        if self.post_issue_equity_shares <= 0:
+            raise IpoValidationError("post_issue_equity_shares must be positive.")
         for name in ("promoter_holding_pre_issue", "promoter_holding_post_issue"):
             if getattr(self, name) > 100:
                 raise IpoValidationError(f"{name} must be from 0 to 100.")
@@ -327,6 +406,9 @@ class IpoManualExtractionData:
             "ofs_amount_page",
             "promoter_holding_pre_issue_page",
             "promoter_holding_post_issue_page",
+            "total_assets_page",
+            "current_liabilities_page",
+            "post_issue_equity_shares_page",
         )
         for name in page_names:
             object.__setattr__(self, name, _page(getattr(self, name), name))
@@ -402,6 +484,14 @@ class IpoManualExtractionRecord:
     peers: tuple[IpoPeerValuationData, ...]
     entered_by_email: str
     submitted_at: dt.datetime
+    # IPO-005 facts are optional only for detached legacy IPO-004 revisions.
+    # Every new submission requires the complete six-value/page group.
+    total_assets: Decimal | None = None
+    total_assets_page: int | None = None
+    current_liabilities: Decimal | None = None
+    current_liabilities_page: int | None = None
+    post_issue_equity_shares: Decimal | None = None
+    post_issue_equity_shares_page: int | None = None
 
     @property
     def net_worth_inr(self) -> Decimal:
@@ -420,9 +510,13 @@ class IpoManualExtractionRecord:
         Monetary statement values use ``financial_amount_unit``; fresh/OFS use
         their separately reported issue unit. Per-share and percentage values
         are already canonical and therefore pass through unchanged.
+
+        Beginner note:
+            The record keeps prospectus-scale values for auditability, but formulas
+            need one common scale. This property returns a read-only view in INR and
+            individual shares without overwriting the original reported evidence.
         """
-        return MappingProxyType(
-            {
+        values = {
                 "net_worth_inr": self.financial_amount_unit.to_inr(self.net_worth),
                 "total_debt_inr": self.financial_amount_unit.to_inr(self.total_debt),
                 "cash_inr": self.financial_amount_unit.to_inr(self.cash),
@@ -438,17 +532,55 @@ class IpoManualExtractionRecord:
                 "ofs_amount_inr": self.issue_amount_unit.to_inr(self.ofs_amount),
                 "promoter_holding_pre_issue_pct": self.promoter_holding_pre_issue,
                 "promoter_holding_post_issue_pct": self.promoter_holding_post_issue,
-            }
-        )
+        }
+        # Legacy IPO-004 revisions do not have these values. Omitting keys is
+        # safer than exposing a fabricated zero that would look like real evidence.
+        if (
+            self.total_assets is not None
+            and self.current_liabilities is not None
+            and self.post_issue_equity_shares is not None
+        ):
+            values.update(
+                {
+                    "total_assets_inr": self.financial_amount_unit.to_inr(
+                        self.total_assets
+                    ),
+                    "current_liabilities_inr": self.financial_amount_unit.to_inr(
+                        self.current_liabilities
+                    ),
+                    "post_issue_equity_shares": self.equity_share_unit.to_shares(
+                        self.post_issue_equity_shares
+                    ),
+                }
+            )
+        return MappingProxyType(values)
 
     def period_values_inr(self) -> tuple[dict[str, Decimal | dt.date], ...]:
-        """Return all three fiscal periods in canonical INR for scoring callers."""
-        return tuple(
-            {
+        """Return every available annual fact converted to individual INR.
+
+        Beginner note:
+        Legacy IPO-004 periods omit PBT and finance cost rather than returning
+        zero. That distinction lets downstream callers tell "not entered yet"
+        from a genuine zero finance cost without inspecting database columns.
+        """
+        rows: list[dict[str, Decimal | dt.date]] = []
+        for period in self.periods:
+            row: dict[str, Decimal | dt.date] = {
                 "period_end": period.period_end,
                 "revenue_inr": self.financial_amount_unit.to_inr(period.revenue),
                 "ebitda_inr": self.financial_amount_unit.to_inr(period.ebitda),
                 "pat_inr": self.financial_amount_unit.to_inr(period.pat),
             }
-            for period in self.periods
-        )
+            if period.profit_before_tax is not None and period.finance_cost is not None:
+                row.update(
+                    {
+                        "profit_before_tax_inr": self.financial_amount_unit.to_inr(
+                            period.profit_before_tax
+                        ),
+                        "finance_cost_inr": self.financial_amount_unit.to_inr(
+                            period.finance_cost
+                        ),
+                    }
+                )
+            rows.append(row)
+        return tuple(rows)

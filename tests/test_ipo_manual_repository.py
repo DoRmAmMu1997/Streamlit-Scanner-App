@@ -1,4 +1,4 @@
-"""Persistence and service tests for IPO-004 immutable extraction revisions.
+"""Persistence and service tests for IPO-004/005 immutable extraction revisions.
 
 Beginner note:
 The repository is where database ownership, cached-byte provenance, and the
@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from backend.ipo.financials.ratio_engine import IpoRatioName
 from backend.ipo.manual_extraction import (
     IpoAmountUnit,
     IpoManualExtractionData,
@@ -34,9 +35,11 @@ from backend.ipo.models import (
     IpoValidationError,
 )
 from backend.ipo.repository import (
+    IpoNotFoundError,
     create_document,
     create_issue,
     delete_document,
+    get_latest_ipo_ratios,
     get_latest_manual_profile,
     get_manual_extraction,
     list_manual_extractions,
@@ -46,7 +49,13 @@ from backend.storage.ipo_repository import update_ipo_document_cache_if_source_m
 
 
 def _payload(*, source_document_id: int, net_worth: str = "80") -> IpoManualExtractionData:
-    """Build one complete revision suitable for repository scenarios."""
+    """Build one complete revision suitable for repository scenarios.
+
+    Beginner note:
+        Repository tests focus on transactions and provenance, so this helper keeps
+        the domain payload valid and lets each scenario vary only the source row or
+        business fact it needs to exercise.
+    """
     periods = tuple(
         IpoManualPeriodData(
             period_end=dt.date(year, 3, 31),
@@ -56,6 +65,10 @@ def _payload(*, source_document_id: int, net_worth: str = "80") -> IpoManualExtr
             ebitda_page=110 + year - 2023,
             pat=Decimal("10"),
             pat_page=120 + year - 2023,
+            profit_before_tax=Decimal("12"),
+            profit_before_tax_page=123 + year - 2023,
+            finance_cost=Decimal("2"),
+            finance_cost_page=126 + year - 2023,
         )
         for year in (2023, 2024, 2025)
     )
@@ -89,6 +102,12 @@ def _payload(*, source_document_id: int, net_worth: str = "80") -> IpoManualExtr
         promoter_holding_pre_issue_page=140,
         promoter_holding_post_issue=Decimal("56.44"),
         promoter_holding_post_issue_page=141,
+        total_assets=Decimal("150"),
+        total_assets_page=142,
+        current_liabilities=Decimal("45"),
+        current_liabilities_page=143,
+        post_issue_equity_shares=Decimal("60"),
+        post_issue_equity_shares_page=144,
         peers=(
             IpoPeerValuationData(
                 company_name="Peer One Ltd",
@@ -103,13 +122,21 @@ def _payload(*, source_document_id: int, net_worth: str = "80") -> IpoManualExtr
 
 
 def _cached_document(file_session_factory, data_dir: Path, *, document_type: str = "rhp"):
-    """Create an issue and document row backed by verified local PDF bytes."""
+    """Create an issue and document row backed by verified local PDF bytes.
+
+    Beginner note:
+        Writing real hash-addressed bytes is important here: a metadata-only fixture
+        would skip the containment and SHA-256 verification that protects a production
+        manual extraction from stale or substituted source files.
+    """
     issue = create_issue(
         IpoIssueData(
             company_name="Example Ltd",
             issue_type=IpoIssueType.MAINBOARD,
             status=IpoStatus.RHP_FILED,
             source_confidence=Confidence.HIGH,
+            price_band_low=Decimal("230"),
+            price_band_high=Decimal("242"),
         ),
         session_factory=file_session_factory,
     )
@@ -151,7 +178,13 @@ def _cached_document(file_session_factory, data_dir: Path, *, document_type: str
 def test_submit_manual_extraction_persists_complete_detached_revision(
     file_session_factory, tmp_path: Path
 ) -> None:
-    """One submission atomically returns sourced periods, peers, and canonical values."""
+    """One submission atomically returns sourced periods, peers, and canonical values.
+
+    Beginner note:
+        This happy-path test checks the detached record, unit conversions, actor,
+        source digest, and audit metadata together so a successful insert cannot
+        silently omit one part of the immutable revision.
+    """
     issue, document, digest, _path = _cached_document(file_session_factory, tmp_path)
     events: list[dict[str, object]] = []
 
@@ -174,6 +207,19 @@ def test_submit_manual_extraction_persists_complete_detached_revision(
     assert created.peers[0].metrics[IpoPeerMetric.PE] == Decimal("21.4000")
     assert created.net_worth_inr == Decimal("800000000.0000")
     assert created.equity_shares_canonical == Decimal("5000000.0000")
+    assert created.periods[-1].profit_before_tax == Decimal("12.0000")
+    assert created.periods[-1].finance_cost == Decimal("2.0000")
+    assert created.total_assets == Decimal("150.0000")
+    assert created.current_liabilities == Decimal("45.0000")
+    assert created.post_issue_equity_shares == Decimal("60.0000")
+    assert created.period_values_inr()[-1] == {
+        "period_end": dt.date(2025, 3, 31),
+        "revenue_inr": Decimal("1020000000.0000"),
+        "ebitda_inr": Decimal("200000000.0000"),
+        "pat_inr": Decimal("100000000.0000"),
+        "profit_before_tax_inr": Decimal("120000000.0000"),
+        "finance_cost_inr": Decimal("20000000.0000"),
+    }
     assert created.canonical_values == {
         "net_worth_inr": Decimal("800000000.0000"),
         "total_debt_inr": Decimal("120000000.0000"),
@@ -186,6 +232,9 @@ def test_submit_manual_extraction_persists_complete_detached_revision(
         "ofs_amount_inr": Decimal("0.0000"),
         "promoter_holding_pre_issue_pct": Decimal("75.2500"),
         "promoter_holding_post_issue_pct": Decimal("56.4400"),
+        "total_assets_inr": Decimal("1500000000.0000"),
+        "current_liabilities_inr": Decimal("450000000.0000"),
+        "post_issue_equity_shares": Decimal("6000000.0000"),
     }
     assert get_manual_extraction(
         issue.id, created.id, session_factory=file_session_factory
@@ -193,6 +242,55 @@ def test_submit_manual_extraction_persists_complete_detached_revision(
     assert events[0]["event"] == "ipo_manual_extraction_submitted"
     assert events[0]["user_email"] == "admin@example.com"
     assert "objects_of_issue" not in events[0]["metadata"]
+
+
+def test_latest_ratio_analysis_uses_one_detached_issue_and_revision_snapshot(
+    file_session_factory, tmp_path: Path
+) -> None:
+    """The public facade should calculate latest ratios without persisting them.
+
+    Beginner note:
+    The database stores source facts, not derived ratios. Re-running this service
+    is therefore deterministic and cannot create duplicate ratio-history rows.
+    """
+    issue, document, digest, _path = _cached_document(file_session_factory, tmp_path)
+    created = submit_manual_extraction(
+        issue.id,
+        _payload(source_document_id=document.id),
+        entered_by_email="admin@example.com",
+        data_dir=tmp_path,
+        now=lambda: dt.datetime(2026, 7, 3, 9, tzinfo=dt.UTC),
+        audit_recorder=lambda **_kwargs: True,
+        session_factory=file_session_factory,
+    )
+
+    first = get_latest_ipo_ratios(issue.id, session_factory=file_session_factory)
+    second = get_latest_ipo_ratios(issue.id, session_factory=file_session_factory)
+
+    assert first == second
+    assert first is not None
+    assert first.extraction_id == created.id
+    assert first.source_content_sha256 == digest
+    assert first.price_band_high == Decimal("242.0000")
+    assert first.issue_updated_at == issue.updated_at
+    assert first.ratios[IpoRatioName.REVENUE_CAGR].value == Decimal("0.9950")
+
+
+def test_latest_ratio_analysis_distinguishes_empty_and_unknown_issues(
+    file_session_factory, tmp_path: Path
+) -> None:
+    """A known issue without evidence is empty; an unknown id is an ownership error.
+
+    Beginner note:
+        ``None`` means a known IPO has no manual profile yet; an exception means the
+        parent IPO does not exist. A UI can therefore show an honest empty state
+        without hiding a bad or cross-issue identifier.
+    """
+    issue, _document, _digest, _path = _cached_document(file_session_factory, tmp_path)
+
+    assert get_latest_ipo_ratios(issue.id, session_factory=file_session_factory) is None
+    with pytest.raises(IpoNotFoundError, match="was not found"):
+        get_latest_ipo_ratios(999_999, session_factory=file_session_factory)
 
 
 def test_corrections_append_and_latest_profile_is_deterministic(

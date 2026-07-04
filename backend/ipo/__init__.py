@@ -1,9 +1,24 @@
-"""Public IPO-001 domain, scoring, verdict, and repository API."""
+"""Expose the supported IPO domain, evidence, ratio, and repository API.
+
+Beginner note:
+Importing from ``backend.ipo`` gives callers one stable entry point instead of
+making them know the package's internal file layout. This module contains no
+business logic; it only re-exports reviewed public contracts. Keeping that list
+explicit also prevents an internal helper from accidentally becoming public.
+"""
 
 from backend.ipo.documents import (
     IpoDocumentDownloadError,
     IpoDocumentDownloadErrorCode,
     IpoDocumentDownloadResult,
+)
+from backend.ipo.financials import (
+    IpoPerShareReconciliation,
+    IpoRatioAnalysis,
+    IpoRatioName,
+    IpoRatioReceipt,
+    IpoRatioStatus,
+    calculate_ipo_ratios,
 )
 from backend.ipo.manual_extraction import (
     IpoAmountUnit,
@@ -58,6 +73,7 @@ from backend.ipo.repository import (
     get_financial,
     get_issue,
     get_latest_filing_date,
+    get_latest_ipo_ratios,
     get_latest_manual_profile,
     get_latest_recommendation,
     get_manual_extraction,
@@ -104,6 +120,11 @@ __all__ = [
     "IpoNotFoundError",
     "IpoPeerMetric",
     "IpoPeerValuationData",
+    "IpoPerShareReconciliation",
+    "IpoRatioAnalysis",
+    "IpoRatioName",
+    "IpoRatioReceipt",
+    "IpoRatioStatus",
     "IpoRecommendationResult",
     "IpoScoreInput",
     "IpoScoreResult",
@@ -116,6 +137,7 @@ __all__ = [
     "SebiFiling",
     "SebiFilingCategory",
     "build_recommendation",
+    "calculate_ipo_ratios",
     "create_document",
     "create_financial",
     "create_issue",
@@ -133,6 +155,7 @@ __all__ = [
     "get_financial",
     "get_issue",
     "get_latest_filing_date",
+    "get_latest_ipo_ratios",
     "get_latest_manual_profile",
     "get_latest_recommendation",
     "get_manual_extraction",

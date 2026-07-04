@@ -35,6 +35,11 @@ Reported monetary/share units are preserved. Frozen records expose exact
 derive the seven normalized factor scores and does not call `evaluate_issue()`.
 IPO-001's weights, missing-data policy, and recommendation bands are unchanged.
 
+IPO-005 subsequently extends new submissions with sourced PBT, finance cost,
+total assets, current liabilities, and post-issue shares. Historical IPO-004
+revisions remain valid with those additions absent; see
+[IPO-005 ratio engine](ipo-005-ratio-engine.md) for compatibility and formulas.
+
 ## Authorization and audit
 
 `MANAGE_IPO_DATA` requires `Role.ADMIN`. The app hides the view from lower roles,

@@ -2,18 +2,18 @@
 
 | | |
 |---|---|
-| **Component** | IPO ingestion, document cache, manual evidence, scoring, and recommendation subsystem |
+| **Component** | IPO ingestion, document cache, manual evidence, financial ratios, scoring, and recommendation subsystem |
 | **Source** | [`backend/ipo/`](../../../backend/ipo), [`backend/ipo/sources/sebi.py`](../../../backend/ipo/sources/sebi.py), [`backend/jobs/scan_ipo_filings.py`](../../../backend/jobs/scan_ipo_filings.py), [`backend/storage/ipo_repository.py`](../../../backend/storage/ipo_repository.py), [`backend/storage/models.py`](../../../backend/storage/models.py), [`migrations/versions/`](../../../migrations/versions) |
 | **Layer** | Framework-free backend plus one admin-only Streamlit adapter |
-| **Status** | Implemented: IPO-001 scoring, IPO-002 filing ingestion, IPO-003 document cache, IPO-004 manual entry |
-| **Related** | [HLD](../high-level-design.md) - [IPO-001 design](../ipo-001-domain-score-contract.md) - [IPO-002 design](../ipo-002-sebi-filing-ingestion.md) - [IPO-003 design](../ipo-003-document-downloader-cache.md) - [IPO-004 design](../ipo-004-manual-extraction-mvp.md) - [storage-persistence.md](storage-persistence.md) - [security.md](security.md) - [observability.md](observability.md) |
+| **Status** | Implemented: IPO-001 scoring through IPO-005 deterministic ratio derivation |
+| **Related** | [HLD](../high-level-design.md) - [IPO-001](../ipo-001-domain-score-contract.md) - [IPO-002](../ipo-002-sebi-filing-ingestion.md) - [IPO-003](../ipo-003-document-downloader-cache.md) - [IPO-004](../ipo-004-manual-extraction-mvp.md) - [IPO-005](../ipo-005-ratio-engine.md) - [storage](storage-persistence.md) - [security](security.md) |
 
 IPO-003's detailed cache and failure contract is documented in
 [ipo-003-document-downloader-cache.md](../ipo-003-document-downloader-cache.md).
 
 ## 1. Purpose & responsibilities
 
-The IPO Screener evaluates Indian IPOs from official source facts. Four landed
+The IPO Screener evaluates Indian IPOs from official source facts. Five landed
 slices share one persistence model:
 
 - **Domain & scoring (IPO-001)**: typed, framework-independent contracts, a fixed
@@ -26,12 +26,15 @@ slices share one persistence model:
   downloads registered DRHP/RHP PDFs into a verified content-addressed cache.
 - **Manual evidence (IPO-004)**: an administrator form appends a complete,
   page-sourced financial profile from one verified cached DRHP/RHP.
+- **Ratio engine (IPO-005)**: a pure Decimal service derives sixteen
+  general-company ratios from the newest immutable profile and returns a typed
+  value-or-reason receipt without persisting calculations.
 
 **Non-responsibilities (deliberate, current scope)**
 - IPO-002 never downloads prospectuses. IPO-003 downloads only through an
   explicit service call and still performs no PDF parsing or page counting.
-- No factor-score inference from raw financials. The scorecard consumes already
-  normalized 0-100 factor scores; deriving them is a later ticket.
+- Ratios are not factor-score inference. The scorecard still consumes caller-supplied
+  normalized 0-100 factor scores; mapping raw ratios into them is a later ticket.
 - Streamlit remains outside `backend`; `ui/ipo_manual_page.py` is the narrow
   IPO-004 presentation adapter and repeats the admin guard.
 - No scraping outside `backend/ipo/sources`, and no source other than SEBI yet.
@@ -57,6 +60,9 @@ flowchart LR
     DownloadCaller["Explicit backend caller"]
     Download["download_document"]
     Cache[("DATA_DIR/ipo/documents/<sha256>.pdf")]
+    RatioCaller["Ratio caller"]
+    Ratios["get_latest_ipo_ratios"]
+    Engine["calculate_ipo_ratios"]
 
     Job --> Fetch
     SEBI --> Fetch --> Build --> Ingest --> Storage
@@ -67,6 +73,8 @@ flowchart LR
     Download -->|persist provenance| Storage
     Caller --> Eval --> Score --> Verdict
     Eval -->|atomically persists score + verdict| Storage
+    RatioCaller --> Ratios -->|one short snapshot read| Storage
+    Ratios -->|detached evidence| Engine
 ```
 
 The headless job orchestrates ingestion; evaluation is a separate, explicit call
@@ -84,6 +92,7 @@ never triggers a recommendation. Both paths persist only through `backend/storag
 | `backend/ipo/sources/sebi.py` | IPO-002 listing network I/O + hostile-HTML parsing. | `requests`, `bs4`, `models` |
 | `backend/ipo/documents/downloader.py` | IPO-003 detail/PDF I/O, SSRF controls, streamed atomic cache. | `requests`, `bs4`, `models` |
 | `backend/ipo/manual_extraction.py` | Frozen complete-entry DTOs, units, page validation, peers, canonical conversions. | stdlib, `models` |
+| `backend/ipo/financials/ratio_engine.py` | Pure Decimal formulas, typed status receipts, reconciliation, source/price snapshot. | stdlib, `manual_extraction` |
 | `backend/ipo/repository.py` | Typed transactions, ingestion identity/lifecycle, atomic evaluation. | `models`, `scorecard`, `verdict`, `scanning.result_contract`, `storage` |
 | `backend/storage/ipo_repository.py` | Every SQLAlchemy statement for the `ipo_*` tables. | `sqlalchemy`, `storage.models` |
 | `backend/jobs/scan_ipo_filings.py` | CLI boundary: windows, per-category loop, exit code, audits. | `ipo`, `audit`, `observability`, `storage.database` |
@@ -108,6 +117,8 @@ no IPO module imports Streamlit, and network clients are allowed only under
 | `download_document(issue_id, document_id)` | Download or verify one registered DRHP/RHP with no database transaction held during network I/O. |
 | `submit_manual_extraction(issue_id, data, entered_by_email=...)` | Rehash cached bytes outside a transaction, recheck source identity, and atomically append one immutable revision. |
 | `get_manual_extraction` / `list_manual_extractions` / `get_latest_manual_profile` | Detached revision history plus the latest canonical raw-data bridge; no factor-score derivation. |
+| `calculate_ipo_ratios(profile, price_band_high, issue_updated_at)` | Pure calculation of sixteen ratios with one explicit status receipt per metric. |
+| `get_latest_ipo_ratios(issue_id)` | Reads issue + newest revision in one short transaction, detaches them, then calculates without persisting ratios. |
 | CRUD: `create_/get_/list_/update_/delete_*` for issues, documents, financials, subscriptions. | Typed, detached records; never leak ORM rows. |
 
 The scorecard and verdict tables (weights, 80/65 bands, confidence rules) are the
@@ -130,12 +141,17 @@ Nine additive tables share the existing `Base`; full column rationale lives in
 - `ipo_manual_extractions` owns singleton facts and immutable provenance;
   `ipo_manual_financial_periods` owns exactly three annual rows; and
   `ipo_manual_peer_valuations` owns one or more allowlisted peer metric maps.
+  IPO-005 adds nullable legacy-compatible source pairs for PBT/finance cost,
+  total assets/current liabilities, and post-issue shares. New submissions
+  require the complete group; legacy rows keep all additions null.
 
 Migrations are additive and nullable, so manual / IPO-001 rows stay valid. The
 IPO-002 downgrade refuses to run while any SEBI identity exists rather than
 silently discarding fingerprints or reclassifying `unknown` issues. Schema-drift
 detection is metadata-driven, so new columns are covered automatically.
 The IPO-004 downgrade separately refuses while any manual revision exists.
+The IPO-005 downgrade is narrower: it succeeds for legacy-only revisions but
+refuses when any new ratio input would be discarded.
 
 ## 6. SEBI source: security posture
 
@@ -214,14 +230,19 @@ boundaries and treat every response as hostile:
   narrow network/UI boundaries plus the IPO teaching-docstring policy.
 - [`tests/test_ipo_document_downloader.py`](../../../tests/test_ipo_document_downloader.py) -
   hostile URLs/HTML/PDFs, retries, caps, containment, atomic writes, and cache integrity.
+- [`tests/test_ipo_ratio_engine.py`](../../../tests/test_ipo_ratio_engine.py) -
+  exact formulas, losses, leverage/net cash, invalid denominators, legacy evidence,
+  missing prices, and EPS/book-value reconciliation.
 
 ## 10. Extension points
 
 - **More sources**: add NSE/BSE subscription or GMP adapters under
   `backend/ipo/sources/`, each behind its own host allowlist; the ingestion and
   scoring contracts stay unchanged.
-- **Factor derivation**: a future ticket can turn normalized `ipo_financials` /
-  `ipo_subscriptions` facts into the scorecard's 0-100 factor inputs.
+- **Factor derivation**: a future ticket can combine IPO-005 receipts with qualitative
+  evidence and subscription facts to produce reviewed 0-100 scorecard inputs.
+- **Sector overrides**: banks/NBFCs, AMCs, insurers, and loss-making technology
+  issuers need separately reviewed definitions rather than silent v1 substitutions.
 - **Automation & UI**: `python -m backend.jobs.scan_ipo_filings` is manually
   runnable and scheduler-compatible, but IPO-002 does not add a scheduler,
   Render cron, Compose daemon, or Streamlit entrypoint. A future orchestration
