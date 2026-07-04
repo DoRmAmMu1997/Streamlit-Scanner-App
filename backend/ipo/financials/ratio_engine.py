@@ -53,6 +53,42 @@ class IpoRatioName(StrEnum):
     EV_TO_SALES = "ev_to_sales"
 
 
+# The one and only source of each ratio's human-readable formula.
+#
+# Beginner note:
+# A receipt's ``formula`` is static documentation: it must describe the same
+# calculation whether the value was computed or is unavailable, and whether the
+# revision is complete or legacy. Looking the text up here by ``IpoRatioName``
+# guarantees that stability -- a caller keying help text or an audit line off the
+# formula string will never see it change because a particular branch was taken.
+_FORMULA: Final[Mapping[IpoRatioName, str]] = MappingProxyType(
+    {
+        IpoRatioName.REVENUE_CAGR: "((FY3 revenue / FY1 revenue) ^ (1 / 2) - 1) * 100",
+        IpoRatioName.PAT_CAGR: "((FY3 PAT / FY1 PAT) ^ (1 / 2) - 1) * 100",
+        IpoRatioName.EBITDA_MARGIN: "FY3 EBITDA / FY3 revenue * 100",
+        IpoRatioName.PAT_MARGIN: "FY3 PAT / FY3 revenue * 100",
+        IpoRatioName.ROE: "FY3 PAT / closing net worth * 100",
+        IpoRatioName.ROCE: (
+            "(FY3 PBT + FY3 finance cost) / (total assets - current liabilities) * 100"
+        ),
+        IpoRatioName.DEBT_TO_EQUITY: "total debt / closing net worth",
+        IpoRatioName.NET_DEBT_TO_EBITDA: "(total debt - cash) / FY3 EBITDA",
+        IpoRatioName.INTEREST_COVERAGE: "(FY3 PBT + FY3 finance cost) / FY3 finance cost",
+        IpoRatioName.CFO_TO_PAT: "cash flow from operations / FY3 PAT",
+        IpoRatioName.EPS: "FY3 PAT / sourced equity shares",
+        IpoRatioName.BOOK_VALUE_PER_SHARE: "closing net worth / sourced equity shares",
+        IpoRatioName.PRICE_TO_EARNINGS: "upper price band / computed EPS",
+        IpoRatioName.PRICE_TO_BOOK: "upper price band / computed book value per share",
+        IpoRatioName.EV_TO_EBITDA: (
+            "(upper price band * post-issue shares + debt - cash) / FY3 EBITDA"
+        ),
+        IpoRatioName.EV_TO_SALES: (
+            "(upper price band * post-issue shares + debt - cash) / FY3 revenue"
+        ),
+    }
+)
+
+
 class IpoRatioStatus(StrEnum):
     """Explain why a ratio has a number or deliberately has no number.
 
@@ -137,13 +173,14 @@ def _rounded(value: Decimal) -> Decimal:
         return value.quantize(_FOUR_PLACES, rounding=ROUND_HALF_UP)
 
 
-def _computed(name: IpoRatioName, value: Decimal, formula: str) -> IpoRatioReceipt:
+def _computed(name: IpoRatioName, value: Decimal) -> IpoRatioReceipt:
     """Build one successful ratio receipt with the shared rounding policy.
 
     Args:
-        name: Stable identifier for the ratio being returned.
+        name: Stable identifier for the ratio being returned. Its formula text is
+            looked up from :data:`_FORMULA`, so a receipt can never carry a
+            hand-typed or state-dependent variant of the calculation.
         value: Full-precision result produced by the accounting formula.
-        formula: Human-readable, static formula shown to downstream callers.
 
     Returns:
         A computed receipt whose public value is rounded to four places.
@@ -156,23 +193,23 @@ def _computed(name: IpoRatioName, value: Decimal, formula: str) -> IpoRatioRecei
         name=name,
         value=_rounded(value),
         status=IpoRatioStatus.COMPUTED,
-        formula=formula,
+        formula=_FORMULA[name],
     )
 
 
 def _unavailable(
     name: IpoRatioName,
     status: IpoRatioStatus,
-    formula: str,
     explanation: str,
     *missing_inputs: str,
 ) -> IpoRatioReceipt:
     """Build a deliberate no-value receipt instead of raising or inventing data.
 
     Args:
-        name: Stable ratio identifier.
+        name: Stable ratio identifier; its formula text is looked up from
+            :data:`_FORMULA` so an unavailable receipt still documents the exact
+            calculation that complete evidence would have used.
         status: Typed reason why no numeric value is available.
-        formula: Static formula that would have been used with complete evidence.
         explanation: Plain-language reason suitable for a UI or audit receipt.
         *missing_inputs: Exact source-field names that were absent, if any.
 
@@ -188,7 +225,7 @@ def _unavailable(
         name=name,
         value=None,
         status=status,
-        formula=formula,
+        formula=_FORMULA[name],
         missing_inputs=tuple(missing_inputs),
         explanation=explanation,
     )
@@ -198,7 +235,6 @@ def _ratio(
     name: IpoRatioName,
     numerator: Decimal,
     denominator: Decimal,
-    formula: str,
     *,
     percentage: bool = False,
     require_positive_denominator: bool = False,
@@ -206,10 +242,10 @@ def _ratio(
     """Divide safely and distinguish zero from economically misleading negatives.
 
     Args:
-        name: Stable ratio identifier.
+        name: Stable ratio identifier (its formula text is resolved via
+            :data:`_FORMULA`).
         numerator: Canonical INR or share value above the division line.
         denominator: Canonical value below the division line.
-        formula: Static description of the calculation.
         percentage: Multiply the quotient by 100 when the result is a percentage.
         require_positive_denominator: Reject negative economic bases even though
             ordinary arithmetic could produce a number from them.
@@ -226,33 +262,29 @@ def _ratio(
         return _unavailable(
             name,
             IpoRatioStatus.UNDEFINED,
-            formula,
             "The denominator is zero, so the ratio is mathematically undefined.",
         )
     if require_positive_denominator and denominator < 0:
         return _unavailable(
             name,
             IpoRatioStatus.NOT_MEANINGFUL,
-            formula,
             "A negative denominator would produce a numeric but misleading ratio.",
         )
     value = numerator / denominator
-    return _computed(name, value * _PERCENT if percentage else value, formula)
+    return _computed(name, value * _PERCENT if percentage else value)
 
 
 def _cagr(
     name: IpoRatioName,
     first: Decimal,
     last: Decimal,
-    formula: str,
 ) -> IpoRatioReceipt:
     """Calculate a two-interval CAGR only when both endpoints are positive.
 
     Args:
-        name: Revenue or PAT CAGR identifier.
+        name: Revenue or PAT CAGR identifier (formula resolved via :data:`_FORMULA`).
         first: Canonical value from the oldest fiscal period.
         last: Canonical value from the newest fiscal period.
-        formula: Static formula included in the returned receipt.
 
     Returns:
         A percentage receipt or an explicit unavailable state.
@@ -266,14 +298,12 @@ def _cagr(
         return _unavailable(
             name,
             IpoRatioStatus.UNDEFINED,
-            formula,
             "CAGR cannot divide by a zero starting value.",
         )
     if first < 0 or last <= 0:
         return _unavailable(
             name,
             IpoRatioStatus.NOT_MEANINGFUL,
-            formula,
             "CAGR is not economically meaningful across a non-positive endpoint.",
         )
     # Exactly three annual periods create two compounding intervals. Decimal.sqrt
@@ -281,7 +311,7 @@ def _cagr(
     with localcontext() as context:
         context.prec = 40
         growth = (last / first).sqrt() - Decimal(1)
-    return _computed(name, growth * _PERCENT, formula)
+    return _computed(name, growth * _PERCENT)
 
 
 def _reconciliation(computed: Decimal | None, reported: Decimal) -> IpoPerShareReconciliation:
@@ -385,59 +415,32 @@ def calculate_ipo_ratios(
     period_years = [period.period_end.year for period in periods]
     if period_years == list(range(period_years[0], period_years[0] + 3)):
         ratios[IpoRatioName.REVENUE_CAGR] = _cagr(
-            IpoRatioName.REVENUE_CAGR,
-            revenue_first,
-            revenue,
-            "((FY3 revenue / FY1 revenue) ^ (1 / 2) - 1) * 100",
+            IpoRatioName.REVENUE_CAGR, revenue_first, revenue
         )
-        ratios[IpoRatioName.PAT_CAGR] = _cagr(
-            IpoRatioName.PAT_CAGR,
-            pat_first,
-            pat,
-            "((FY3 PAT / FY1 PAT) ^ (1 / 2) - 1) * 100",
-        )
+        ratios[IpoRatioName.PAT_CAGR] = _cagr(IpoRatioName.PAT_CAGR, pat_first, pat)
     else:
         # IPO-004 accepted any three distinct dates. A legacy revision may
         # therefore contain gaps, for which a hard-coded two-interval CAGR would
         # be precise-looking but false. Other latest-period ratios remain usable.
-        for name, formula in (
-            (
-                IpoRatioName.REVENUE_CAGR,
-                "((FY3 revenue / FY1 revenue) ^ (1 / 2) - 1) * 100",
-            ),
-            (
-                IpoRatioName.PAT_CAGR,
-                "((FY3 PAT / FY1 PAT) ^ (1 / 2) - 1) * 100",
-            ),
-        ):
+        for name in (IpoRatioName.REVENUE_CAGR, IpoRatioName.PAT_CAGR):
             ratios[name] = _unavailable(
                 name,
                 IpoRatioStatus.NOT_MEANINGFUL,
-                formula,
                 "CAGR requires three consecutive annual fiscal years.",
             )
     # Margins and balance-sheet ratios all use the latest reported fiscal year.
     # Signed profit numerators remain meaningful for loss-making companies, while
     # denominator policy is decided explicitly for each ratio below.
     ratios[IpoRatioName.EBITDA_MARGIN] = _ratio(
-        IpoRatioName.EBITDA_MARGIN,
-        ebitda,
-        revenue,
-        "FY3 EBITDA / FY3 revenue * 100",
-        percentage=True,
+        IpoRatioName.EBITDA_MARGIN, ebitda, revenue, percentage=True
     )
     ratios[IpoRatioName.PAT_MARGIN] = _ratio(
-        IpoRatioName.PAT_MARGIN,
-        pat,
-        revenue,
-        "FY3 PAT / FY3 revenue * 100",
-        percentage=True,
+        IpoRatioName.PAT_MARGIN, pat, revenue, percentage=True
     )
     ratios[IpoRatioName.ROE] = _ratio(
         IpoRatioName.ROE,
         pat,
         net_worth,
-        "FY3 PAT / closing net worth * 100",
         percentage=True,
         require_positive_denominator=True,
     )
@@ -445,34 +448,25 @@ def calculate_ipo_ratios(
         IpoRatioName.DEBT_TO_EQUITY,
         debt,
         net_worth,
-        "total debt / closing net worth",
         require_positive_denominator=True,
     )
     ratios[IpoRatioName.NET_DEBT_TO_EBITDA] = _ratio(
         IpoRatioName.NET_DEBT_TO_EBITDA,
         debt - cash,
         ebitda,
-        "(total debt - cash) / FY3 EBITDA",
         require_positive_denominator=True,
     )
-    ratios[IpoRatioName.CFO_TO_PAT] = _ratio(
-        IpoRatioName.CFO_TO_PAT,
-        cfo,
-        pat,
-        "cash flow from operations / FY3 PAT",
-    )
+    ratios[IpoRatioName.CFO_TO_PAT] = _ratio(IpoRatioName.CFO_TO_PAT, cfo, pat)
     ratios[IpoRatioName.EPS] = _ratio(
         IpoRatioName.EPS,
         pat,
         shares,
-        "FY3 PAT / sourced equity shares",
         require_positive_denominator=True,
     )
     ratios[IpoRatioName.BOOK_VALUE_PER_SHARE] = _ratio(
         IpoRatioName.BOOK_VALUE_PER_SHARE,
         net_worth,
         shares,
-        "closing net worth / sourced equity shares",
         require_positive_denominator=True,
     )
     # Keep full-precision intermediates separate from the rounded public receipts.
@@ -498,7 +492,6 @@ def calculate_ipo_ratios(
         ratios[IpoRatioName.ROCE] = _unavailable(
             IpoRatioName.ROCE,
             IpoRatioStatus.MISSING_INPUTS,
-            "(FY3 PBT + FY3 finance cost) / (total assets - current liabilities) * 100",
             "The legacy extraction does not contain all IPO-005 ROCE inputs.",
             *interest_missing,
             *(
@@ -513,11 +506,9 @@ def calculate_ipo_ratios(
         ratios[IpoRatioName.INTEREST_COVERAGE] = _unavailable(
             IpoRatioName.INTEREST_COVERAGE,
             IpoRatioStatus.MISSING_INPUTS,
-            "(FY3 PBT + FY3 finance cost) / FY3 finance cost",
             "The legacy extraction does not contain all IPO-005 coverage inputs.",
             *interest_missing,
         )
-        ebit: Decimal | None = None
     else:
         pbt_inr = unit.to_inr(pbt)
         finance_cost_inr = unit.to_inr(finance_cost)
@@ -526,14 +517,12 @@ def calculate_ipo_ratios(
             ratios[IpoRatioName.INTEREST_COVERAGE] = _unavailable(
                 IpoRatioName.INTEREST_COVERAGE,
                 IpoRatioStatus.NOT_APPLICABLE,
-                "(FY3 PBT + FY3 finance cost) / FY3 finance cost",
                 "No finance cost was reported, so coverage is not applicable rather than infinite.",
             )
         else:
             ratios[IpoRatioName.INTEREST_COVERAGE] = _computed(
                 IpoRatioName.INTEREST_COVERAGE,
                 ebit / finance_cost_inr,
-                "(FY3 PBT + FY3 finance cost) / FY3 finance cost",
             )
 
         if profile.total_assets is None or profile.current_liabilities is None:
@@ -548,7 +537,6 @@ def calculate_ipo_ratios(
             ratios[IpoRatioName.ROCE] = _unavailable(
                 IpoRatioName.ROCE,
                 IpoRatioStatus.MISSING_INPUTS,
-                "(FY3 PBT + FY3 finance cost) / (total assets - current liabilities) * 100",
                 "The legacy extraction does not contain all IPO-005 ROCE inputs.",
                 *missing,
             )
@@ -560,54 +548,64 @@ def calculate_ipo_ratios(
                 IpoRatioName.ROCE,
                 ebit,
                 capital_employed,
-                "(FY3 PBT + FY3 finance cost) / (total assets - current liabilities) * 100",
                 percentage=True,
                 require_positive_denominator=True,
             )
 
-    # Price-dependent multiples share one issue-price snapshot. When the issue has
-    # no upper band, suppress all four together instead of mixing current profile
-    # facts with a fabricated or stale market price.
+    # Price-dependent multiples share one issue-price snapshot. All four are
+    # suppressed together (rather than mixing current profile facts with a
+    # fabricated, stale, or degenerate market price) for the two whole-group
+    # boundary cases below.
+    price_dependent = (
+        IpoRatioName.PRICE_TO_EARNINGS,
+        IpoRatioName.PRICE_TO_BOOK,
+        IpoRatioName.EV_TO_EBITDA,
+        IpoRatioName.EV_TO_SALES,
+    )
     if price_band_high is None:
-        for name, denominator_name in (
-            (IpoRatioName.PRICE_TO_EARNINGS, "price_band_high"),
-            (IpoRatioName.PRICE_TO_BOOK, "price_band_high"),
-            (IpoRatioName.EV_TO_EBITDA, "price_band_high"),
-            (IpoRatioName.EV_TO_SALES, "price_band_high"),
-        ):
+        # No upper band was recorded for the issue at all: this is absent evidence.
+        for name in price_dependent:
             ratios[name] = _unavailable(
                 name,
                 IpoRatioStatus.MISSING_INPUTS,
-                "upper price-band valuation",
                 "The issue does not have an upper price band.",
-                denominator_name,
+                "price_band_high",
+            )
+    elif price_band_high == 0:
+        # A zero upper band is legal at the issue layer (price_band_high need only
+        # be non-negative), but it is a placeholder rather than a real market price.
+        # Dividing by it, or building enterprise value from a zero market
+        # capitalization, produces degenerate "valuations" (P/E and P/B of 0, an EV
+        # made only of debt). That is numerically possible yet economically
+        # misleading, so it is reported like negative equity: not meaningful.
+        for name in price_dependent:
+            ratios[name] = _unavailable(
+                name,
+                IpoRatioStatus.NOT_MEANINGFUL,
+                "A zero upper price band is a placeholder, not a market valuation.",
             )
     else:
         if eps_unrounded is None or eps_unrounded <= 0:
             ratios[IpoRatioName.PRICE_TO_EARNINGS] = _unavailable(
                 IpoRatioName.PRICE_TO_EARNINGS,
                 IpoRatioStatus.NOT_MEANINGFUL,
-                "upper price band / computed EPS",
                 "P/E is not meaningful when computed EPS is non-positive.",
             )
         else:
             ratios[IpoRatioName.PRICE_TO_EARNINGS] = _computed(
                 IpoRatioName.PRICE_TO_EARNINGS,
                 price_band_high / eps_unrounded,
-                "upper price band / computed EPS",
             )
         if book_value_unrounded is None or book_value_unrounded <= 0:
             ratios[IpoRatioName.PRICE_TO_BOOK] = _unavailable(
                 IpoRatioName.PRICE_TO_BOOK,
                 IpoRatioStatus.NOT_MEANINGFUL,
-                "upper price band / computed book value per share",
                 "P/B is not meaningful when computed book value is non-positive.",
             )
         else:
             ratios[IpoRatioName.PRICE_TO_BOOK] = _computed(
                 IpoRatioName.PRICE_TO_BOOK,
                 price_band_high / book_value_unrounded,
-                "upper price band / computed book value per share",
             )
 
         # Enterprise value uses post-issue shares, not the historical share count
@@ -617,7 +615,6 @@ def calculate_ipo_ratios(
                 ratios[name] = _unavailable(
                     name,
                     IpoRatioStatus.MISSING_INPUTS,
-                    "enterprise value multiple",
                     "The legacy extraction does not contain post-issue shares.",
                     "post_issue_equity_shares",
                 )
@@ -630,14 +627,12 @@ def calculate_ipo_ratios(
                 IpoRatioName.EV_TO_EBITDA,
                 enterprise_value,
                 ebitda,
-                "(upper price band * post-issue shares + debt - cash) / FY3 EBITDA",
                 require_positive_denominator=True,
             )
             ratios[IpoRatioName.EV_TO_SALES] = _ratio(
                 IpoRatioName.EV_TO_SALES,
                 enterprise_value,
                 revenue,
-                "(upper price band * post-issue shares + debt - cash) / FY3 revenue",
                 require_positive_denominator=True,
             )
 

@@ -64,9 +64,13 @@ Those plans are narrative evidence, not completed balance-sheet events.
 `computed` means a rounded value exists. `missing_inputs` identifies absent legacy
 facts or a missing upper price band. `undefined` covers a zero denominator.
 `not_meaningful` covers a mathematically possible but misleading presentation,
-such as negative equity, non-positive EBITDA multiples, or P/E on a loss.
-`not_applicable` currently describes zero finance cost: coverage is not reported as
-infinity.
+such as negative equity, non-positive EBITDA multiples, or P/E on a loss. A *zero*
+upper price band is treated the same way: it is legal at the issue layer (only
+non-negative is required) but is a placeholder rather than a market price, so the
+four price-dependent ratios (P/E, P/B, EV/EBITDA, EV/Sales) are `not_meaningful`
+rather than a fabricated zero valuation. A wholly *absent* upper band remains
+`missing_inputs`. `not_applicable` currently describes zero finance cost: coverage
+is not reported as infinity.
 
 Negative PAT still produces signed PAT margin, ROE, ROCE, CFO/PAT, and EPS. PAT CAGR
 and P/E are suppressed. Net cash may produce a negative net-debt/EBITDA ratio. One

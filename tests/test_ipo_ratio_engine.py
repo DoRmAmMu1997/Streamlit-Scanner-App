@@ -529,3 +529,92 @@ def test_database_valid_extreme_values_still_round_without_decimal_overflow() ->
     assert analysis.ratios[IpoRatioName.ROE].value == Decimal(
         "99999999999999999999999900.0000"
     )
+
+
+def test_formula_text_is_stable_across_computed_and_unavailable_states() -> None:
+    """A ratio's formula string must not change with the branch that produced it.
+
+    Beginner note:
+        ``IpoRatioReceipt.formula`` is static documentation, so a UI or audit line
+        keyed off it must read identically whether the value was computed, missing,
+        or suppressed. This pins that contract across three deliberately different
+        profiles: complete, legacy (missing IPO-005 inputs), and no upper price band.
+        It is the regression guard for formulas that used to degrade to a generic
+        label like "enterprise value multiple".
+    """
+    complete = _profile()
+    legacy = replace(
+        complete,
+        periods=tuple(
+            replace(
+                period,
+                profit_before_tax=None,
+                profit_before_tax_page=None,
+                finance_cost=None,
+                finance_cost_page=None,
+            )
+            for period in complete.periods
+        ),
+        total_assets=None,
+        total_assets_page=None,
+        current_liabilities=None,
+        current_liabilities_page=None,
+        post_issue_equity_shares=None,
+        post_issue_equity_shares_page=None,
+    )
+
+    computed = calculate_ipo_ratios(
+        complete,
+        price_band_high=Decimal("242"),
+        issue_updated_at=dt.datetime(2026, 7, 2, tzinfo=dt.UTC),
+    )
+    degraded = calculate_ipo_ratios(
+        legacy,
+        price_band_high=Decimal("242"),
+        issue_updated_at=dt.datetime(2026, 7, 2, tzinfo=dt.UTC),
+    )
+    no_price = calculate_ipo_ratios(
+        complete,
+        price_band_high=None,
+        issue_updated_at=dt.datetime(2026, 7, 2, tzinfo=dt.UTC),
+    )
+
+    for name in IpoRatioName:
+        formulas = {
+            computed.ratios[name].formula,
+            degraded.ratios[name].formula,
+            no_price.ratios[name].formula,
+        }
+        assert len(formulas) == 1, f"{name} reported inconsistent formula text"
+        formula = formulas.pop()
+        # A real formula always contains an operator; a generic label such as
+        # "enterprise value multiple" (the old degraded text) would not.
+        assert any(operator in formula for operator in ("/", "*", "^"))
+
+
+def test_zero_upper_price_band_is_not_meaningful_not_a_zero_valuation() -> None:
+    """A zero upper band must suppress price ratios instead of computing P/E = 0.
+
+    Beginner note:
+        The issue layer only requires a non-negative price band, so a placeholder
+        zero can reach the engine. Dividing by it would fabricate a zero valuation
+        that looks real, so the engine marks the four price-dependent ratios
+        not-meaningful while leaving every operating and balance-sheet ratio intact.
+    """
+    analysis = calculate_ipo_ratios(
+        _profile(),
+        price_band_high=Decimal("0"),
+        issue_updated_at=dt.datetime(2026, 7, 2, tzinfo=dt.UTC),
+    )
+
+    for name in (
+        IpoRatioName.PRICE_TO_EARNINGS,
+        IpoRatioName.PRICE_TO_BOOK,
+        IpoRatioName.EV_TO_EBITDA,
+        IpoRatioName.EV_TO_SALES,
+    ):
+        assert analysis.ratios[name].status is IpoRatioStatus.NOT_MEANINGFUL
+        assert analysis.ratios[name].value is None
+    # Non-price ratios must be unaffected by a missing or degenerate market price.
+    assert analysis.ratios[IpoRatioName.ROCE].status is IpoRatioStatus.COMPUTED
+    assert analysis.ratios[IpoRatioName.EBITDA_MARGIN].status is IpoRatioStatus.COMPUTED
