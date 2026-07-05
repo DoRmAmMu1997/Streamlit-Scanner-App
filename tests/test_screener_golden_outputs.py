@@ -46,6 +46,7 @@ import pytest
 
 from screeners import (
     bollinger_band_reversal,
+    cpr_yearly,
     envelope_knoxville_buy,
     heikin_ashi_supertrend,
 )
@@ -200,8 +201,44 @@ def _env_knox_params() -> dict:
     return params
 
 
+def _cpr_year_candles(year: int, high: float, low: float, close: float) -> pd.DataFrame:
+    """Three daily candles for one complete year giving the target H/L/C."""
+    midpoint = (high + low) / 2.0
+    return pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime([f"{year}-02-07", f"{year}-06-06", f"{year}-12-12"]),
+            "open": [midpoint, close, close],
+            "high": [high, close + 1.0, close + 1.0],
+            "low": [low, close - 1.0, close - 1.0],
+            "close": [midpoint, close, close],
+            "volume": [1000.0, 1000.0, 1000.0],
+        }
+    )
+
+
+def _cpr_frame(
+    yearly: dict[int, tuple[float, float, float]], weekly_closes: list[float]
+) -> pd.DataFrame:
+    """Complete prior years + 2025 weekly-spaced candles for the reclaim check."""
+    parts = [_cpr_year_candles(year, high, low, close) for year, (high, low, close) in yearly.items()]
+    fridays = pd.date_range("2025-01-10", periods=len(weekly_closes), freq="W-FRI")
+    parts.append(
+        pd.DataFrame(
+            {
+                "timestamp": fridays,
+                "open": weekly_closes,
+                "high": [value + 1.0 for value in weekly_closes],
+                "low": [value - 1.0 for value in weekly_closes],
+                "close": weekly_closes,
+                "volume": [1000.0] * len(weekly_closes),
+            }
+        )
+    )
+    return pd.concat(parts, ignore_index=True)
+
+
 def _golden_cases() -> list[GoldenCase]:
-    """Define the three P0 screener snapshots covered by TEST-001."""
+    """Define the four P0 screener snapshots covered by TEST-001."""
     # Heikin-Ashi + SuperTrend fixtures. Each symbol is engineered to a known outcome:
     #   BUY  -> flat at 10, then a 5->15 jump flips the HA close above SuperTrend (cross up).
     #   SELL -> flat at 20, then a 30->10 plunge flips the HA close below SuperTrend (cross down).
@@ -314,6 +351,41 @@ def _golden_cases() -> list[GoldenCase]:
             universe_symbols=["BUY", "NO_KD", "NO_ENV"],
             frames=envelope_frames,
             params=_env_knox_params(),
+        ),
+        # CPR Yearly Reversal fixtures. Outcomes:
+        #   HIT  -> yearly pivots step down 300>200>100 and the 2025 weekly close
+        #           reclaims 2024's high (110) -> one BUY row.
+        #   MISS -> ascending pivots 100<200<300 (uptrend) -> no row (proves
+        #           non-signals stay out of the golden snapshot).
+        GoldenCase(
+            key="cpr_yearly",
+            run=cpr_yearly.run,
+            universe_symbols=["HIT", "MISS"],
+            frames={
+                "HIT": _cpr_frame(
+                    {
+                        2022: (310.0, 290.0, 300.0),
+                        2023: (210.0, 190.0, 200.0),
+                        2024: (110.0, 90.0, 100.0),
+                    },
+                    [95.0, 98.0, 100.0, 104.0, 108.0, 120.0],
+                ),
+                "MISS": _cpr_frame(
+                    {
+                        2022: (110.0, 90.0, 100.0),
+                        2023: (210.0, 190.0, 200.0),
+                        2024: (310.0, 290.0, 300.0),
+                    },
+                    [295.0, 298.0, 300.0, 305.0, 312.0, 320.0],
+                ),
+            },
+            params={
+                "start_date": date(2022, 1, 1),
+                "end_date": date(2025, 3, 1),
+                "max_symbols": 10,
+                "force_refresh": False,
+                "recent_cross_weeks": 4,
+            },
         ),
     ]
 

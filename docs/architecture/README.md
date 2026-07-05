@@ -32,7 +32,7 @@ testing · extension points.
 
 ### Screening engine
 - [screener-framework.md](components/screener-framework.md) — `BaseScanner` ABC + plugin registry.
-- [screener-catalog.md](components/screener-catalog.md) — the 10 screeners.
+- [screener-catalog.md](components/screener-catalog.md) — the 11 screeners.
 - [indicators.md](components/indicators.md) — indicator library (TA-Lib/pandas_ta + fallbacks).
 - [scan-service-and-provenance.md](components/scan-service-and-provenance.md) — `run_scan` lifecycle + result/provenance contract.
 - [scoring.md](components/scoring.md) — RANK-002 deterministic `final_score` scorer + score-component UI/export behavior.

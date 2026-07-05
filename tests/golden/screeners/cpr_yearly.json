@@ -1,0 +1,31 @@
+[
+  {
+    "symbol": "HIT",
+    "rating": "BUY",
+    "signal_date": "2025-02-14T00:00:00",
+    "close": 120.0,
+    "reason": "Yearly CPR pivots descending (300.00 > 200.00 > 100.00); weekly close 120.00 reclaimed the previous-year high 110.00 0 week(s) ago.",
+    "pivot_2y_ago": 300.0,
+    "pivot_prev_year": 200.0,
+    "pivot_this_year": 100.0,
+    "prev_year_high": 110.0,
+    "weeks_since_cross": 0,
+    "provenance": {
+      "screener_key": "cpr_yearly",
+      "screener_version": "1.0.0",
+      "triggered_rules": [
+        "yearly_pivots_descending",
+        "weekly_close_crossed_prev_year_high"
+      ],
+      "indicator_values": {
+        "pivot_2y_ago": 300.0,
+        "pivot_prev_year": 200.0,
+        "pivot_this_year": 100.0,
+        "prev_year_high": 110.0,
+        "latest_weekly_close": 120.0,
+        "weeks_since_cross": 0
+      },
+      "source": "deterministic"
+    }
+  }
+]

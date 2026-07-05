@@ -97,7 +97,7 @@ flowchart TB
       IPOJOB["python -m backend.jobs.scan_ipo_filings"]
     end
     subgraph Strategy["screeners/ (strategy)"]
-      SCR["10 screeners : BaseScanner subclasses"]
+      SCR["11 screeners : BaseScanner subclasses"]
     end
     subgraph Backend["backend/ (plumbing)"]
       REG["screener_registry"]; BASE["scanner_base"]; IND["indicators"]
@@ -134,7 +134,7 @@ flowchart TB
 | Universe management | [universe-management](components/universe-management.md) | Build/load universe CSVs, symbol→security_id |
 | Screener framework | [screener-framework](components/screener-framework.md) | `BaseScanner` ABC + plugin registry |
 | Indicators | [indicators](components/indicators.md) | TA-Lib/pandas_ta + fallbacks, levels, weekly |
-| Screener catalog | [screener-catalog](components/screener-catalog.md) | The 10 strategies |
+| Screener catalog | [screener-catalog](components/screener-catalog.md) | The 11 strategies |
 | Scan service & provenance | [scan-service-and-provenance](components/scan-service-and-provenance.md) | `run_scan` lifecycle + strict result/provenance contract + AI evaluation receipts |
 | Ranking scorer | [scoring](components/scoring.md) | RANK-002 additive `final_score` scorer, score receipts, cache-only liquidity/risk, UI component breakdown |
 | IPO Screener (domain + ingestion + cache + manual entry + ratios) | [ipo-screener](components/ipo-screener.md) ([IPO-001](ipo-001-domain-score-contract.md), [IPO-002](ipo-002-sebi-filing-ingestion.md), [IPO-003](ipo-003-document-downloader-cache.md), [IPO-004](ipo-004-manual-extraction-mvp.md), [IPO-005](ipo-005-ratio-engine.md)) | Official-SEBI inventory, secure DRHP/RHP cache, immutable manual evidence, deterministic ratios, fail-closed recommendations, immutable evaluation history |

@@ -37,6 +37,7 @@ from backend.indicators import (
     sma,
     stochastic,
     supertrend,
+    yearly_cpr,
 )
 
 
@@ -517,3 +518,58 @@ def test_resample_to_weekly_aggregates_ohlcv_per_week():
 
 def test_resample_to_weekly_empty_frame_is_safe():
     assert resample_to_weekly(pd.DataFrame()).empty
+
+
+def _year_candles(year: int, high: float, low: float, close: float) -> pd.DataFrame:
+    """Three daily candles for one year whose max/min/last give high/low/close."""
+    midpoint = (high + low) / 2.0
+    return pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                [f"{year}-02-01", f"{year}-07-01", f"{year}-12-15"]
+            ),
+            "open": [midpoint, close, close],
+            "high": [high, close + 1.0, close + 1.0],
+            "low": [low, close - 1.0, close - 1.0],
+            # The chronologically last candle sets the year's close.
+            "close": [midpoint, close, close],
+            "volume": [1000.0, 1000.0, 1000.0],
+        }
+    )
+
+
+def test_yearly_cpr_derives_each_years_levels_from_the_previous_year():
+    # 2022 High/Low/Close = 320/280/290 (close is NOT the H/L midpoint, so TC != BC).
+    frame = pd.concat(
+        [_year_candles(2022, 320.0, 280.0, 290.0), _year_candles(2023, 210.0, 190.0, 200.0)],
+        ignore_index=True,
+    )
+
+    cpr = yearly_cpr(frame)
+
+    # Only 2023 has a preceding year in the data, so exactly one row is emitted,
+    # and its levels come from 2022's High/Low/Close.
+    assert list(cpr["year"]) == [2023]
+    row = cpr.iloc[0]
+    assert row["pivot"] == pytest.approx((320.0 + 280.0 + 290.0) / 3.0)
+    assert row["bc"] == pytest.approx((320.0 + 280.0) / 2.0)
+    assert row["tc"] == pytest.approx(2.0 * ((320.0 + 280.0 + 290.0) / 3.0) - (320.0 + 280.0) / 2.0)
+    assert row["prev_year_high"] == pytest.approx(320.0)
+    assert row["prev_year_low"] == pytest.approx(280.0)
+
+
+def test_yearly_cpr_skips_a_year_whose_predecessor_is_missing():
+    # 2021 is absent, so 2022 must NOT inherit its CPR from 2020 two years back.
+    frame = pd.concat(
+        [_year_candles(2020, 300.0, 280.0, 290.0), _year_candles(2022, 210.0, 190.0, 200.0)],
+        ignore_index=True,
+    )
+
+    assert yearly_cpr(frame).empty
+
+
+def test_yearly_cpr_short_history_returns_the_standard_empty_shape():
+    result = yearly_cpr(_year_candles(2024, 110.0, 90.0, 100.0))
+
+    assert result.empty
+    assert list(result.columns) == ["year", "pivot", "tc", "bc", "prev_year_high", "prev_year_low"]

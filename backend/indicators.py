@@ -486,6 +486,84 @@ def resample_to_weekly(frame: pd.DataFrame) -> pd.DataFrame:
     return weekly.reset_index()
 
 
+# Columns returned by ``yearly_cpr`` — kept as a constant so an empty frame has the
+# exact same shape callers expect from a populated one.
+YEARLY_CPR_COLUMNS: list[str] = ["year", "pivot", "tc", "bc", "prev_year_high", "prev_year_low"]
+
+
+def yearly_cpr(frame: pd.DataFrame) -> pd.DataFrame:
+    """Yearly Central Pivot Range (CPR) levels, each derived from the PRIOR year.
+
+    Why (beginner note)
+    -------------------
+    The Central Pivot Range is three price levels — a central Pivot ``P`` with a
+    Top and Bottom Central line (``TC``/``BC``) around it — that traders use as a
+    fair-value band. Intraday, *today's* CPR is computed from *yesterday's*
+    High/Low/Close (the classic "previous day" pivots, ``PDH``/``PDL`` = previous
+    day high/low). This helper applies the very same idea one timeframe up: the
+    CPR *in effect during a calendar year* is built from the **previous full
+    year's** High/Low/Close, and the "previous year high" is that prior year's
+    High — the ``H`` term of the current year's CPR.
+
+    For a year ``y`` whose previous year ``y-1`` had ``H``/``L``/``C``::
+
+        pivot P = (H + L + C) / 3
+        BC      = (H + L) / 2
+        TC      = 2*P - BC
+        prev_year_high = H,  prev_year_low = L
+
+    Returns one row per year that has an immediately preceding year (oldest
+    first), with columns :data:`YEARLY_CPR_COLUMNS`. A year is skipped when the
+    prior calendar year is absent from the data (a gap), so a CPR is never sourced
+    from two years back by accident. Returns an empty (correctly shaped) frame when
+    there is not enough history.
+    """
+    prepared = prepare_ohlc(frame)
+    if prepared.empty or "timestamp" not in prepared.columns:
+        # No dated candles → no year to bucket. Return the standard empty shape so
+        # callers can still chain ``.empty`` / column access safely.
+        return pd.DataFrame(columns=YEARLY_CPR_COLUMNS)
+
+    work = prepared.copy()
+    work["year"] = pd.to_datetime(work["timestamp"]).dt.year
+    # Per-calendar-year OHLC: the year's High is the max daily high, its Low the
+    # min daily low, and its Close the last (chronological) daily close. Rows are
+    # already oldest-first from ``prepare_ohlc``, so "last" is the year-end close.
+    yearly = (
+        work.groupby("year", as_index=False)
+        .agg(high=("high", "max"), low=("low", "min"), close=("close", "last"))
+        .sort_values("year")
+        .reset_index(drop=True)
+    )
+
+    rows: list[dict[str, float]] = []
+    for position in range(1, len(yearly)):
+        previous = yearly.iloc[position - 1]
+        year = int(yearly.iloc[position]["year"])
+        # Require the previous row to be the immediately preceding calendar year.
+        # Without this, a data gap (e.g. a delisted-then-relisted stock) would let
+        # a CPR inherit High/Low/Close from two years earlier and misstate levels.
+        if int(previous["year"]) != year - 1:
+            continue
+        high = float(previous["high"])
+        low = float(previous["low"])
+        close = float(previous["close"])
+        pivot = (high + low + close) / 3.0
+        bottom_central = (high + low) / 2.0
+        top_central = 2.0 * pivot - bottom_central
+        rows.append(
+            {
+                "year": year,
+                "pivot": pivot,
+                "tc": top_central,
+                "bc": bottom_central,
+                "prev_year_high": high,
+                "prev_year_low": low,
+            }
+        )
+    return pd.DataFrame(rows, columns=YEARLY_CPR_COLUMNS)
+
+
 # ---------------------------------------------------------------------------
 # Moving averages (EMA / SMA): TA-Lib primary, pandas fallback
 # ---------------------------------------------------------------------------
