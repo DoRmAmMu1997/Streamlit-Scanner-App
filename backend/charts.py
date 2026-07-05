@@ -64,6 +64,11 @@ _COLORS = {
     "neckline": "#ffb300",
     "knoxville": "#00c853",
     "knoxville_latest": "#ffd54f",
+    # Yearly CPR overlay: an amber central pivot, purple Top/Bottom Central band
+    # edges, and a green "previous year high" reclaim line.
+    "cpr_pivot": "#ffb300",
+    "cpr_edge": "#7e57c2",
+    "cpr_prev_high": "#26a69a",
 }
 
 # A price column shows two decimals (NSE prices are paisa-precision).
@@ -532,6 +537,59 @@ def add_neckline_overlay(spec: dict, price: float, title: str, *, pane: int = 0)
             "lineStyle": 2,  # dashed
         }
     )
+
+
+def add_cpr_overlay(
+    spec: dict,
+    cpr_rows: list[dict],
+    *,
+    prev_year_high: float | None = None,
+    pane: int = 0,
+) -> None:
+    """Draw yearly CPR levels (TC / Pivot / BC per year) plus the prev-year high.
+
+    Each row is one year's Central Pivot Range as produced by
+    ``backend.indicators.yearly_cpr`` (``{"year", "pivot", "tc", "bc", ...}``). The
+    central Pivot is drawn as a slightly thicker solid line and the Top/Bottom
+    Central lines as thin solid lines, each labelled with its year so a reader can
+    see the pivot band stepping up or down across years. ``prev_year_high`` (the
+    resistance the price must reclaim) is drawn once as a distinct dashed line.
+    """
+    panes = spec.get("panes", [])
+    if not (0 <= pane < len(panes)):
+        return
+    price_lines = panes[pane].setdefault("price_lines", [])
+    for row in cpr_rows:
+        year = int(row["year"])
+        pivot = float(row["pivot"])
+        top_central = float(row["tc"])
+        bottom_central = float(row["bc"])
+        # TC = 2P - BC can sit below BC when the year closed weak, so label the
+        # lines by their actual top/bottom position rather than by name.
+        top = max(top_central, bottom_central)
+        bottom = min(top_central, bottom_central)
+        price_lines.append(
+            {"price": top, "color": _COLORS["cpr_edge"], "title": f"TC {year}",
+             "lineWidth": 1, "lineStyle": 0},
+        )
+        price_lines.append(
+            {"price": pivot, "color": _COLORS["cpr_pivot"], "title": f"P {year}",
+             "lineWidth": 2, "lineStyle": 0},
+        )
+        price_lines.append(
+            {"price": bottom, "color": _COLORS["cpr_edge"], "title": f"BC {year}",
+             "lineWidth": 1, "lineStyle": 0},
+        )
+    if prev_year_high is not None:
+        price_lines.append(
+            {
+                "price": float(prev_year_high),
+                "color": _COLORS["cpr_prev_high"],
+                "title": "Prev-year high",
+                "lineWidth": 2,
+                "lineStyle": 2,  # dashed
+            }
+        )
 
 
 # ---------------------------------------------------------------------------

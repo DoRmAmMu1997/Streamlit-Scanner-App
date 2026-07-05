@@ -26,6 +26,7 @@ from backend.technical.technical_agent import (
 from screeners import (
     bollinger_band_reversal,
     bollinger_lower_band,
+    cpr_yearly,
     envelope,
     envelope_knoxville_buy,
     green_candles_20pct_up,
@@ -1632,3 +1633,134 @@ def test_sixty_seven_screener_records_safe_error_evaluation(monkeypatch):
     )
     assert len(failures) == 1
     assert failures[0]["phase"] == "ai_evaluation"
+
+
+# ---------------------------------------------------------------------------
+# CPR Yearly Reversal (cpr_yearly)
+# ---------------------------------------------------------------------------
+
+
+def _cpr_year_candles(year: int, high: float, low: float, close: float) -> pd.DataFrame:
+    """Three daily candles for one complete year giving the target H/L/C."""
+    midpoint = (high + low) / 2.0
+    return pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime([f"{year}-02-07", f"{year}-06-06", f"{year}-12-12"]),
+            "open": [midpoint, close, close],
+            "high": [high, close + 1.0, close + 1.0],
+            "low": [low, close - 1.0, close - 1.0],
+            "close": [midpoint, close, close],  # last candle sets the year close
+            "volume": [1000.0, 1000.0, 1000.0],
+        }
+    )
+
+
+def _cpr_frame(
+    yearly: dict[int, tuple[float, float, float]],
+    weekly_closes: list[float],
+    *,
+    current_year: int = 2025,
+) -> pd.DataFrame:
+    """Complete prior years + current-year weekly-spaced candles for the reclaim."""
+    parts = [_cpr_year_candles(year, high, low, close) for year, (high, low, close) in yearly.items()]
+    fridays = pd.date_range(f"{current_year}-01-10", periods=len(weekly_closes), freq="W-FRI")
+    parts.append(
+        pd.DataFrame(
+            {
+                "timestamp": fridays,
+                "open": weekly_closes,
+                "high": [value + 1.0 for value in weekly_closes],
+                "low": [value - 1.0 for value in weekly_closes],
+                "close": weekly_closes,
+                "volume": [1000.0] * len(weekly_closes),
+            }
+        )
+    )
+    return pd.concat(parts, ignore_index=True)
+
+
+def _cpr_params(**overrides) -> dict:
+    params = dict(cpr_yearly.SCREENER["default_params"])
+    params.update(
+        {
+            "start_date": date(2022, 1, 1),
+            "end_date": date(2025, 3, 1),
+            "max_symbols": 10,
+            "force_refresh": False,
+        }
+    )
+    params.update(overrides)
+    return params
+
+
+def test_cpr_yearly_buys_on_descending_pivots_and_recent_reclaim():
+    # Pivots step down 300 -> 200 -> 100 (from 2022/2023/2024), then in 2025 the
+    # weekly close climbs back above 2024's high (110) on the latest weekly candle.
+    frames = {
+        "HIT": _cpr_frame(
+            {2022: (310.0, 290.0, 300.0), 2023: (210.0, 190.0, 200.0), 2024: (110.0, 90.0, 100.0)},
+            [95.0, 98.0, 100.0, 104.0, 108.0, 120.0],
+        )
+    }
+
+    result = cpr_yearly.run(_universe_for(["HIT"]), FakeDataLoader(frames), _cpr_params())
+
+    assert result["symbol"].tolist() == ["HIT"]
+    row = result.iloc[0]
+    assert row["rating"] == "BUY"
+    assert row["pivot_2y_ago"] == pytest.approx(300.0)
+    assert row["pivot_prev_year"] == pytest.approx(200.0)
+    assert row["pivot_this_year"] == pytest.approx(100.0)
+    assert row["prev_year_high"] == pytest.approx(110.0)
+    assert row["weeks_since_cross"] == 0
+    assert row["provenance"]["triggered_rules"] == [
+        "yearly_pivots_descending",
+        "weekly_close_crossed_prev_year_high",
+    ]
+
+
+def test_cpr_yearly_skips_when_price_has_not_reclaimed_prev_year_high():
+    # Same descending pivots, but 2025 weekly closes never reclaim 2024's high (110).
+    frames = {
+        "NO_RECLAIM": _cpr_frame(
+            {2022: (310.0, 290.0, 300.0), 2023: (210.0, 190.0, 200.0), 2024: (110.0, 90.0, 100.0)},
+            [95.0, 98.0, 100.0, 102.0, 104.0, 105.0],
+        )
+    }
+
+    result = cpr_yearly.run(_universe_for(["NO_RECLAIM"]), FakeDataLoader(frames), _cpr_params())
+
+    assert result.empty
+
+
+def test_cpr_yearly_skips_when_pivots_are_not_descending():
+    # Ascending pivots (100 -> 200 -> 300) are an uptrend, not the reversal setup,
+    # even though the latest weekly close is above the previous-year high.
+    frames = {
+        "UPTREND": _cpr_frame(
+            {2022: (110.0, 90.0, 100.0), 2023: (210.0, 190.0, 200.0), 2024: (310.0, 290.0, 300.0)},
+            [295.0, 298.0, 300.0, 305.0, 312.0, 320.0],
+        )
+    }
+
+    result = cpr_yearly.run(_universe_for(["UPTREND"]), FakeDataLoader(frames), _cpr_params())
+
+    assert result.empty
+
+
+def test_cpr_yearly_chart_overlays_weekly_cpr_and_prev_year_high():
+    frame = _cpr_frame(
+        {2022: (310.0, 290.0, 300.0), 2023: (210.0, 190.0, 200.0), 2024: (110.0, 90.0, 100.0)},
+        [95.0, 98.0, 100.0, 104.0, 108.0, 120.0],
+    )
+
+    spec = cpr_yearly.build_chart(frame, {"recent_cross_weeks": 4})
+
+    price_lines = spec["panes"][0]["price_lines"]
+    titles = [line["title"] for line in price_lines]
+    # The three most recent years each contribute TC/P/BC lines...
+    assert {"P 2023", "P 2024", "P 2025"} <= set(titles)
+    # ...plus the single previous-year-high reclaim line.
+    assert titles.count("Prev-year high") == 1
+    # The price pane renders resampled weekly candles.
+    assert spec["panes"][0]["series"]

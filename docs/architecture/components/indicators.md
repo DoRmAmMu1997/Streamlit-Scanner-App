@@ -19,8 +19,9 @@ behaves identically with or without the optional accelerators — just slower.
 averages (`ema`, `sma`); oscillators (`rsi`, `momentum`, `stochastic`);
 `bollinger_bands`; `envelope`; Heikin Ashi (`build_heikin_ashi`); `supertrend`;
 pivot detection (`pivot_lows`/`pivot_highs`); support/resistance (`major_levels`)
-+ **relevance scoring** (`rank_levels`); Knoxville Divergence detectors; and
-**weekly resampling** (`resample_to_weekly`).
++ **relevance scoring** (`rank_levels`); Knoxville Divergence detectors;
+**weekly resampling** (`resample_to_weekly`); and the **yearly Central Pivot
+Range** (`yearly_cpr`).
 
 ## 2. Position in the system
 
@@ -52,6 +53,7 @@ flowchart LR
 | `rank_levels(frame, levels, band_pct=1.0, recency_halflife_bars=120, reaction_bars=5)` | Adds `relevance` (0..1 weighted: touches .25 / recency .25 / proximity .30 / volume .10 / reaction .10), `components`, `last_touch_bars_ago`, `distance_pct`, `flipped`. |
 | `bullish_knoxville_divergence(...)` / `bullish_knoxville_divergences(...)` | Latest qualifying / all qualifying bullish divergences (pivot low + RSI oversold + momentum higher-low). |
 | `resample_to_weekly(frame)` | Daily→weekly (`W-FRI`): open=first, high=max, low=min, close=last, volume=sum. No new data source. |
+| `yearly_cpr(frame)` | Per-year Central Pivot Range (`pivot`/`tc`/`bc` + `prev_year_high`/`prev_year_low`) derived from the **previous** calendar year's H/L/C — the intraday PDH/PDL pivot convention applied yearly. Skips years whose predecessor is missing. |
 
 ## 4. Key design decisions & trade-offs
 
