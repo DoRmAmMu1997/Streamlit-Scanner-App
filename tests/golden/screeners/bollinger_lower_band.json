@@ -1,0 +1,54 @@
+[
+  {
+    "symbol": "ON_BAND",
+    "rating": "BUY",
+    "signal_date": "2026-01-03T00:00:00",
+    "close": 10.0,
+    "reason": "Close 10.00 is 0.00% from the lower Bollinger Band (10.00) on the 3-period, 2 std setting.",
+    "bb_lower": 10.0,
+    "bb_middle": 10.0,
+    "bb_upper": 10.0,
+    "bb_distance_pct": 0.0,
+    "provenance": {
+      "screener_key": "bollinger_lower_band",
+      "screener_version": "1.0.0",
+      "triggered_rules": [
+        "close_within_proximity_of_lower_band"
+      ],
+      "indicator_values": {
+        "close": 10.0,
+        "bb_lower": 10.0,
+        "bb_middle": 10.0,
+        "bb_upper": 10.0,
+        "bb_distance_pct": 0.0
+      },
+      "source": "deterministic"
+    }
+  },
+  {
+    "symbol": "NEAR",
+    "rating": "BUY",
+    "signal_date": "2026-01-03T00:00:00",
+    "close": 9.9,
+    "reason": "Close 9.90 is 0.28% from the lower Bollinger Band (9.87) on the 3-period, 2 std setting.",
+    "bb_lower": 9.872386,
+    "bb_middle": 9.966667,
+    "bb_upper": 10.060948,
+    "bb_distance_pct": 0.002797,
+    "provenance": {
+      "screener_key": "bollinger_lower_band",
+      "screener_version": "1.0.0",
+      "triggered_rules": [
+        "close_within_proximity_of_lower_band"
+      ],
+      "indicator_values": {
+        "close": 9.9,
+        "bb_lower": 9.872386,
+        "bb_middle": 9.966667,
+        "bb_upper": 10.060948,
+        "bb_distance_pct": 0.002797
+      },
+      "source": "deterministic"
+    }
+  }
+]

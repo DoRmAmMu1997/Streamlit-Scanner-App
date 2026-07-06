@@ -1,0 +1,28 @@
+[
+  {
+    "symbol": "BUY",
+    "rating": "BUY",
+    "signal_date": "2026-01-04T00:00:00",
+    "close": 121.0,
+    "reason": "3 consecutive green candle(s) moved 23.23% from low 99.00 to high 122.00.",
+    "run_length": 3,
+    "run_gain_pct": 0.232323,
+    "run_low": 99.0,
+    "run_high": 122.0,
+    "provenance": {
+      "screener_key": "green_candles_20pct_up",
+      "screener_version": "1.0.0",
+      "triggered_rules": [
+        "green_run_gain_above_threshold"
+      ],
+      "indicator_values": {
+        "close": 121.0,
+        "run_length": 3,
+        "run_gain_pct": 0.232323,
+        "run_low": 99.0,
+        "run_high": 122.0
+      },
+      "source": "deterministic"
+    }
+  }
+]

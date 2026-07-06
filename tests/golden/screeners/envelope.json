@@ -1,0 +1,28 @@
+[
+  {
+    "symbol": "BUY",
+    "rating": "BUY",
+    "signal_date": "2026-01-05T00:00:00",
+    "close": 85.0,
+    "reason": "Close 85.00 is at/below the lower Envelope band (87.30); 12.37% below the 5-period basis (97.00).",
+    "env_basis": 97.0,
+    "env_lower": 87.3,
+    "env_upper": 106.7,
+    "pct_below_basis": 0.123711,
+    "provenance": {
+      "screener_key": "envelope",
+      "screener_version": "1.0.0",
+      "triggered_rules": [
+        "close_at_or_below_lower_envelope_band"
+      ],
+      "indicator_values": {
+        "close": 85.0,
+        "env_basis": 97.0,
+        "env_lower": 87.3,
+        "env_upper": 106.7,
+        "pct_below_basis": 0.123711
+      },
+      "source": "deterministic"
+    }
+  }
+]

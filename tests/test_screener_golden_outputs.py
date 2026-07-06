@@ -46,9 +46,14 @@ import pytest
 
 from screeners import (
     bollinger_band_reversal,
+    bollinger_lower_band,
     cpr_yearly,
+    envelope,
     envelope_knoxville_buy,
+    green_candles_20pct_up,
     heikin_ashi_supertrend,
+    stochastic_swing,
+    week52_low_ceyhun,
 )
 
 GOLDEN_DIR = Path(__file__).parent / "golden" / "screeners"
@@ -201,6 +206,66 @@ def _env_knox_params() -> dict:
     return params
 
 
+def _wick_candles(
+    close_values: list[float],
+    *,
+    high_offsets: list[float] | None = None,
+    low_values: list[float] | None = None,
+) -> pd.DataFrame:
+    """Create candles from a close path with optional per-bar highs/lows.
+
+    Two TEST-004 fixtures need wicks that differ from the uniform close±1
+    shape: the 52-week-low case pins exact rolling lows, and the Stochastic
+    case inflates highs so the oscillator reads "oversold" (close near the
+    bottom of the high-low range) while the close path — which feeds the
+    EMA/SMA trend filters — barely moves.
+    """
+    highs = (
+        [value + offset for value, offset in zip(close_values, high_offsets, strict=True)]
+        if high_offsets is not None
+        else [value + 1.0 for value in close_values]
+    )
+    lows = low_values if low_values is not None else [value - 1.0 for value in close_values]
+    return pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-01-01", periods=len(close_values), freq="D"),
+            "open": close_values,
+            "high": highs,
+            "low": lows,
+            "close": close_values,
+            "volume": [1000.0] * len(close_values),
+        }
+    )
+
+
+def _stochastic_buy_candles() -> pd.DataFrame:
+    """Engineer a Stochastic swing BUY: a pullback inside a fresh uptrend.
+
+    The screener wants three things to line up on the *final* bar, which pull
+    in different directions on synthetic data:
+    1. close above the SMA(10) with a fresh (<= 7 day) EMA(5)/SMA(10) bullish
+       cross — needs the close path to have recovered recently;
+    2. slow %K crossing above %D on the final bar — needs %K depressed right
+       up to the end;
+    3. both previous-bar %K/%D below the oversold line — needs several
+       consecutive low-oscillator bars while the trend stays intact.
+    The shape: a long flat prefix (which pins EMA and SMA to exactly 100.0 on
+    both the TA-Lib and pure-pandas backends), a dip to 85, a two-bar
+    recovery, then a seven-bar drift with tall upper wicks (+6). The wicks
+    push the rolling high-low range up so %K/%D drain low while the closes
+    keep the EMA above the SMA, and the final pop to 104 fires the cross.
+    """
+    prefix = [100.0] * 30
+    dip = [97.0, 94.0, 91.0, 88.0, 86.0, 85.0]
+    recovery = [90.0, 97.0]
+    plateau = [97.5, 98.0, 98.5, 99.0, 99.5, 100.0, 100.5]
+    pop = [104.0]
+    closes = prefix + dip + recovery + plateau + pop
+    offsets = [1.0] * (len(prefix) + len(dip) + len(recovery))
+    offsets += [6.0] * len(plateau) + [1.0] * len(pop)
+    return _wick_candles(closes, high_offsets=offsets)
+
+
 def _cpr_year_candles(year: int, high: float, low: float, close: float) -> pd.DataFrame:
     """Three daily candles for one complete year giving the target H/L/C."""
     midpoint = (high + low) / 2.0
@@ -238,7 +303,17 @@ def _cpr_frame(
 
 
 def _golden_cases() -> list[GoldenCase]:
-    """Define the four P0 screener snapshots covered by TEST-001."""
+    """Define the deterministic screener snapshots (TEST-001 + TEST-004).
+
+    TEST-001 pinned the four P0 screeners; TEST-004 extends coverage to every
+    remaining *deterministic* screener. The two AI-assisted screeners are
+    deliberately excluded from golden coverage: ``technical_analysis`` and
+    ``sixty_seven_ka_funda`` produce rows only after a Claude-agent verdict,
+    so their output is not a pure function of candles. Their deterministic
+    pre-gates and agent plumbing are already regression-tested by
+    ``tests/test_technical_analysis_agent.py`` and
+    ``tests/test_sixty_seven_agent.py`` with faked agents.
+    """
     # Heikin-Ashi + SuperTrend fixtures. Each symbol is engineered to a known outcome:
     #   BUY  -> flat at 10, then a 5->15 jump flips the HA close above SuperTrend (cross up).
     #   SELL -> flat at 20, then a 30->10 plunge flips the HA close below SuperTrend (cross down).
@@ -385,6 +460,160 @@ def _golden_cases() -> list[GoldenCase]:
                 "max_symbols": 10,
                 "force_refresh": False,
                 "recent_cross_weeks": 4,
+            },
+        ),
+        # Bollinger Lower Band fixtures (period=3, std=2.0, 1% proximity). Outcomes:
+        #   ON_BAND -> a perfectly flat tape collapses the bands onto the price, so
+        #              the close sits ON the lower band -> BUY at distance 0.
+        #   NEAR    -> the close eases to 9.9, within 1% of the lower band -> BUY.
+        #   ABOVE   -> the close pops to 12, far above the lower band -> no row.
+        GoldenCase(
+            key="bollinger_lower_band",
+            run=bollinger_lower_band.run,
+            universe_symbols=["ON_BAND", "NEAR", "ABOVE"],
+            frames={
+                "ON_BAND": _flat_candles([10.0, 10.0, 10.0]),
+                "NEAR": _flat_candles([10.0, 10.0, 9.9]),
+                "ABOVE": _flat_candles([10.0, 10.0, 12.0]),
+            },
+            params={
+                "start_date": date(2026, 1, 1),
+                "end_date": date(2026, 1, 3),
+                "max_symbols": 10,
+                "force_refresh": False,
+                "bb_period": 3,
+                "bb_std": 2.0,
+                "bb_proximity_pct": 0.01,
+            },
+        ),
+        # Envelope fixtures (5-period SMA basis, 10% bands — SMA instead of the
+        # default EMA so the basis math is identical on both indicator backends
+        # and auditable by hand). Outcomes:
+        #   BUY   -> SMA5 = 97, lower band = 87.3, close 85 is below it -> BUY.
+        #   HOLD  -> SMA5 = 99, lower band = 89.1, close 95 stays above -> no row.
+        #   SHORT -> fewer rows than the basis period -> warm-up skip, no row.
+        GoldenCase(
+            key="envelope",
+            run=envelope.run,
+            universe_symbols=["BUY", "HOLD", "SHORT"],
+            frames={
+                "BUY": _flat_candles([100.0, 100.0, 100.0, 100.0, 85.0]),
+                "HOLD": _flat_candles([100.0, 100.0, 100.0, 100.0, 95.0]),
+                "SHORT": _flat_candles([100.0, 100.0, 100.0]),
+            },
+            params={
+                "start_date": date(2026, 1, 1),
+                "end_date": date(2026, 1, 5),
+                "max_symbols": 10,
+                "force_refresh": False,
+                "ema_period": 5,
+                "percent": 10.0,
+                "exponential": False,
+            },
+        ),
+        # Green-candles run fixtures (pure pandas, default params). Outcomes:
+        #   BUY       -> a red candle ends the lookback, then three greens whose
+        #                low->high span (99 -> 122) is +23.2% -> BUY, run length 3.
+        #   SMALL_RUN -> three greens but only a ~4% span -> below 20% -> no row.
+        #   RED_LAST  -> a strong two-green run capped by a red candle -> no row
+        #                (the run must be alive on the latest bar).
+        # `_bollinger_candles` is a generic OHLC builder despite its name; the
+        # green/red candle colors need explicit opens, which it provides.
+        GoldenCase(
+            key="green_candles_20pct_up",
+            run=green_candles_20pct_up.run,
+            universe_symbols=["BUY", "SMALL_RUN", "RED_LAST"],
+            frames={
+                "BUY": _bollinger_candles(
+                    open_values=[101.0, 100.0, 105.0, 112.0],
+                    high_values=[102.0, 106.0, 113.0, 122.0],
+                    low_values=[99.5, 99.0, 104.0, 111.0],
+                    close_values=[100.0, 105.0, 112.0, 121.0],
+                ),
+                "SMALL_RUN": _bollinger_candles(
+                    open_values=[100.0, 101.0, 102.0],
+                    high_values=[101.5, 102.5, 104.0],
+                    low_values=[99.8, 100.8, 101.8],
+                    close_values=[101.0, 102.0, 103.5],
+                ),
+                "RED_LAST": _bollinger_candles(
+                    open_values=[100.0, 110.0, 125.0],
+                    high_values=[111.0, 126.0, 126.0],
+                    low_values=[99.0, 109.0, 118.0],
+                    close_values=[110.0, 125.0, 120.0],
+                ),
+            },
+            params={
+                "start_date": date(2026, 1, 1),
+                "end_date": date(2026, 1, 4),
+                "max_symbols": 10,
+                "force_refresh": False,
+                "max_run": 20,
+                "gain_threshold_pct": 20.0,
+            },
+        ),
+        # 52-week-low fixtures (window shrunk to 5 bars, recent window 3, 2%
+        # tolerance). Outcomes:
+        #   BUY   -> lows grind down to 96, then a recent close (97.9) comes
+        #            within 2% of the rolling low -> BUY, tightest 2 days ago.
+        #   FAR   -> same descent but the recent closes rebound >2% above the
+        #            rolling low -> no row.
+        #   SHORT -> fewer rows than the rolling window -> warm-up skip.
+        GoldenCase(
+            key="week52_low_ceyhun",
+            run=week52_low_ceyhun.run,
+            universe_symbols=["BUY", "FAR", "SHORT"],
+            frames={
+                "BUY": _wick_candles(
+                    [100.0, 99.0, 98.0, 97.0, 97.0, 97.9, 99.0, 100.0],
+                    low_values=[99.0, 98.0, 97.0, 96.0, 96.5, 97.0, 98.0, 99.0],
+                ),
+                "FAR": _wick_candles(
+                    [100.0, 99.0, 98.0, 97.0, 100.0, 101.0, 102.0, 103.0],
+                    low_values=[99.0, 98.0, 97.0, 96.0, 99.0, 100.0, 101.0, 102.0],
+                ),
+                "SHORT": _flat_candles([100.0, 99.0, 98.0]),
+            },
+            params={
+                "start_date": date(2026, 1, 1),
+                "end_date": date(2026, 1, 8),
+                "max_symbols": 10,
+                "force_refresh": False,
+                "window_bars": 5,
+                "recent_window_bars": 3,
+                "proximity_pct": 0.02,
+            },
+        ),
+        # Stochastic swing fixtures (SMA shrunk to 10 bars; oversold relaxed to
+        # 45 so the compact fixture stays readable — the fresh-cross + trend
+        # alignment is the interesting gate here, mirroring how the Envelope +
+        # Knoxville case relaxes its RSI threshold). Outcomes:
+        #   BUY      -> the engineered pullback-in-fresh-uptrend described in
+        #               `_stochastic_buy_candles` -> one BUY row.
+        #   NO_ENTRY -> the same dip but price just flatlines at the bottom: no
+        #               recovery, no fresh EMA/SMA cross -> no row.
+        GoldenCase(
+            key="stochastic_swing",
+            run=stochastic_swing.run,
+            universe_symbols=["BUY", "NO_ENTRY"],
+            frames={
+                "BUY": _stochastic_buy_candles(),
+                "NO_ENTRY": _flat_candles(
+                    [100.0] * 30 + [97.0, 94.0, 91.0, 88.0, 86.0, 85.0] + [85.0] * 9
+                ),
+            },
+            params={
+                "start_date": date(2026, 1, 1),
+                "end_date": date(2026, 2, 15),
+                "max_symbols": 10,
+                "force_refresh": False,
+                "stoch_k": 5,
+                "stoch_k_smoothing": 4,
+                "stoch_d_smoothing": 3,
+                "ema_period": 5,
+                "sma_period": 10,
+                "oversold": 45.0,
+                "overbought": 80.0,
             },
         ),
     ]
