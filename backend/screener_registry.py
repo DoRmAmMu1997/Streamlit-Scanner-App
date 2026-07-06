@@ -63,6 +63,10 @@ class ScreenerDefinition:
     module_name: str
     run: Callable
     build_chart: Callable | None = None
+    # The strategy version (``BaseScanner.SCREENER_VERSION``). The chart-HTML
+    # cache keys on it so a strategy bump invalidates cached renders (UI-001);
+    # legacy module-based screeners fall back to the BaseScanner default.
+    version: str = "1.0.0"
 
 
 def _find_scanner_class(module: ModuleType) -> type[BaseScanner] | None:
@@ -150,6 +154,9 @@ def validate_screener_module(module: ModuleType) -> ScreenerDefinition:
             build_chart_func: Callable | None = None
         else:
             build_chart_func = instance.build_chart
+        # The strategy version rides along so cache keys (UI-001) and future
+        # consumers can react to a PROV-002 version bump.
+        version = str(getattr(scanner_class, "SCREENER_VERSION", BaseScanner.SCREENER_VERSION))
     else:
         # ---- Legacy module-based screener ----
         metadata = _validate_metadata(getattr(module, "SCREENER", None), module.__name__)
@@ -165,6 +172,9 @@ def validate_screener_module(module: ModuleType) -> ScreenerDefinition:
             raise ScreenerRegistryError(
                 f"{module.__name__}.build_chart must be callable if defined"
             )
+        # Module-style screeners predate SCREENER_VERSION; give them the
+        # BaseScanner default so downstream cache keys stay well-formed.
+        version = BaseScanner.SCREENER_VERSION
 
     return ScreenerDefinition(
         key=str(metadata["key"]),
@@ -177,6 +187,7 @@ def validate_screener_module(module: ModuleType) -> ScreenerDefinition:
         module_name=module.__name__,
         run=run_func,
         build_chart=build_chart_func,
+        version=version,
     )
 
 

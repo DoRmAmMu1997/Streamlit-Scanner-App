@@ -189,3 +189,60 @@ def test_validate_screener_module_hides_default_basescanner_chart():
     definition = validate_screener_module(module)
 
     assert definition.build_chart is None
+
+
+def test_validate_screener_module_propagates_screener_version():
+    # The chart-HTML cache keys on the strategy version (UI-001) so a
+    # SCREENER_VERSION bump invalidates cached renders. The registry must
+    # therefore copy the class attribute onto the definition instead of
+    # letting every screener silently default.
+    from backend.scanner_base import BaseScanner
+
+    module = ModuleType("versioned_class_screener")
+
+    class Versioned(BaseScanner):
+        SCREENER_VERSION = "2.3.4"
+        SCREENER = {
+            "key": "versioned_demo",
+            "name": "Versioned Demo",
+            "description": "Class screener with a bumped strategy version.",
+            "universe": "nifty_500",
+            "timeframe": "daily",
+            "lookback_days": 10,
+            "default_params": {},
+        }
+
+        def compute_signal(self, symbol, candles, params):
+            return None
+
+    Versioned.__module__ = module.__name__
+    module.Versioned = Versioned
+
+    definition = validate_screener_module(module)
+
+    assert definition.version == "2.3.4"
+
+
+def test_validate_screener_module_defaults_version_for_legacy_modules():
+    # Legacy module-based screeners have no BaseScanner class and therefore no
+    # SCREENER_VERSION attribute; they get the BaseScanner default so the
+    # chart-cache key stays well-formed.
+    module = ModuleType("legacy_module_screener")
+    module.SCREENER = {
+        "key": "legacy_demo",
+        "name": "Legacy Demo",
+        "description": "Module-style screener without a scanner class.",
+        "universe": "nifty_500",
+        "timeframe": "daily",
+        "lookback_days": 10,
+        "default_params": {},
+    }
+
+    def run(universe_df, data_loader, params):
+        return pd.DataFrame()
+
+    module.run = run
+
+    definition = validate_screener_module(module)
+
+    assert definition.version == "1.0.0"
