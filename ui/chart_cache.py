@@ -3,9 +3,10 @@
 Rendering a Lightweight Charts payload is the most expensive UI step (indicator
 math plus JSON serialization plus HTML assembly). This module caches rendered
 HTML in ``st.session_state`` keyed by everything that can change the output:
-screener, symbol, security id, the candle cache file token, and a digest of the
-chart-relevant params. The cache is bounded (LRU-style eviction) and versioned
-so a deploy that changes the payload shape rebuilds instead of failing.
+screener, its strategy version, symbol, security id, the candle cache file
+token, and a digest of the chart-relevant params. The cache is bounded
+(LRU-style eviction) and versioned so a deploy that changes the payload shape
+rebuilds instead of failing.
 """
 
 from __future__ import annotations
@@ -100,6 +101,11 @@ def _chart_html_cache_key(
     raw_key = json.dumps(
         {
             "screener": selected.key,
+            # A PROV-002 strategy bump can change what build_chart draws even
+            # when candles and params are identical, so the version is part of
+            # the key (UI-001) — otherwise a session would keep serving the
+            # previous strategy's HTML until the parquet mtime moved.
+            "screener_version": selected.version,
             "symbol": chart_symbol,
             "security_id": security_id,
             "path": path_text,
