@@ -29,7 +29,7 @@ from __future__ import annotations
 # module documentation in `#` comments here.
 import logging
 import sys
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -665,6 +665,14 @@ def _render_fundamentals_panel(symbol: str | None) -> None:
             key=f"rerun_fund_btn::{symbol}::{model}::{mode}",
             help="Bypass the cache and re-fetch screener.in + re-query the LLM.",
         )
+    if cached_verdict_dict is not None and not rerun_now:
+        # UI-002: make the staleness provenance explicit up front — the verdict
+        # below is served from this browser session, and its "Data fetched"
+        # caption (bottom of the block) is the age that matters.
+        st.caption(
+            "Showing a verdict cached in this session — see \"Data fetched\" below "
+            "for its age; \"Re-run analysis\" refreshes screener.in data and the model's view."
+        )
 
     if run_now or rerun_now:
         try:
@@ -799,8 +807,32 @@ def _render_verdict_block(verdict: AgentVerdict) -> None:
     st.markdown("**Summary**")
     st.info(verdict.summary_comments)
     st.caption(
-        f"Data fetched: `{verdict.data_freshness}` · Model: `{verdict.model_used}`"
+        f"Data fetched: {_format_data_freshness(verdict.data_freshness)} · "
+        f"Model: `{verdict.model_used}`"
     )
+
+
+def _format_data_freshness(value: str) -> str:
+    """Humanize the verdict's ISO ``data_freshness`` for the caption (UI-002).
+
+    Beginner note: the raw value is a machine timestamp like
+    ``2026-07-06T08:15:23.123456+00:00`` — accurate but unreadable at a glance,
+    which defeats the caption's job of answering "how stale is this verdict?".
+    Zone-aware values are normalized to UTC so the label is honest; a naive
+    value is shown without the UTC suffix rather than mislabeled; anything
+    unparseable renders verbatim (backticked, like the old caption) so a
+    surprising upstream format degrades the caption, not the verdict block.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return "unknown"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return f"`{text}`"
+    if parsed.tzinfo is not None:
+        return parsed.astimezone(UTC).strftime("%d %b %Y, %H:%M UTC")
+    return parsed.strftime("%d %b %Y, %H:%M")
 
 
 # ---------------------------------------------------------------------------
