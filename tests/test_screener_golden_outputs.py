@@ -266,6 +266,29 @@ def _stochastic_buy_candles() -> pd.DataFrame:
     return _wick_candles(closes, high_offsets=offsets)
 
 
+def _stochastic_sell_candles() -> pd.DataFrame:
+    """Engineer the SELL mirror: a bounce inside a fresh downtrend.
+
+    Exact price mirror of `_stochastic_buy_candles` around 100 (Codex review
+    on TEST-004 asked for the short side to be pinned too — its stop/target
+    math, triggered rules, and reason text are a separate production branch).
+    The plateau candles carry tall LOWER wicks (-6) so the close sits near the
+    top of the high-low range and %K/%D drain HIGH (above the mirrored
+    overbought line at 55) while the closes keep the EMA below the SMA; the
+    final drop to 96 fires the %K-below-%D cross.
+    """
+    prefix = [100.0] * 30
+    rise = [103.0, 106.0, 109.0, 112.0, 114.0, 115.0]
+    drop = [110.0, 103.0]
+    plateau = [102.5, 102.0, 101.5, 101.0, 100.5, 100.0, 99.5]
+    final_drop = [96.0]
+    closes = prefix + rise + drop + plateau + final_drop
+    low_offsets = [1.0] * (len(prefix) + len(rise) + len(drop))
+    low_offsets += [6.0] * len(plateau) + [1.0] * len(final_drop)
+    lows = [value - offset for value, offset in zip(closes, low_offsets, strict=True)]
+    return _wick_candles(closes, low_values=lows)
+
+
 def _cpr_year_candles(year: int, high: float, low: float, close: float) -> pd.DataFrame:
     """Three daily candles for one complete year giving the target H/L/C."""
     midpoint = (high + low) / 2.0
@@ -584,20 +607,25 @@ def _golden_cases() -> list[GoldenCase]:
                 "proximity_pct": 0.02,
             },
         ),
-        # Stochastic swing fixtures (SMA shrunk to 10 bars; oversold relaxed to
-        # 45 so the compact fixture stays readable — the fresh-cross + trend
-        # alignment is the interesting gate here, mirroring how the Envelope +
-        # Knoxville case relaxes its RSI threshold). Outcomes:
+        # Stochastic swing fixtures (SMA shrunk to 10 bars; oversold/overbought
+        # relaxed to the symmetric 45/55 pair so the compact fixtures stay
+        # readable — the fresh-cross + trend alignment is the interesting gate
+        # here, mirroring how the Envelope + Knoxville case relaxes its RSI
+        # threshold). Outcomes:
         #   BUY      -> the engineered pullback-in-fresh-uptrend described in
         #               `_stochastic_buy_candles` -> one BUY row.
+        #   SELL     -> the exact price mirror (`_stochastic_sell_candles`):
+        #               a bounce in a fresh downtrend -> one SELL row, pinning
+        #               the short side's stop/target math and rule names.
         #   NO_ENTRY -> the same dip but price just flatlines at the bottom: no
         #               recovery, no fresh EMA/SMA cross -> no row.
         GoldenCase(
             key="stochastic_swing",
             run=stochastic_swing.run,
-            universe_symbols=["BUY", "NO_ENTRY"],
+            universe_symbols=["BUY", "SELL", "NO_ENTRY"],
             frames={
                 "BUY": _stochastic_buy_candles(),
+                "SELL": _stochastic_sell_candles(),
                 "NO_ENTRY": _flat_candles(
                     [100.0] * 30 + [97.0, 94.0, 91.0, 88.0, 86.0, 85.0] + [85.0] * 9
                 ),
@@ -613,7 +641,7 @@ def _golden_cases() -> list[GoldenCase]:
                 "ema_period": 5,
                 "sma_period": 10,
                 "oversold": 45.0,
-                "overbought": 80.0,
+                "overbought": 55.0,
             },
         ),
     ]
