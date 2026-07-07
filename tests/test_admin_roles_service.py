@@ -64,13 +64,42 @@ def test_assign_same_role_is_noop_without_audit(file_session_factory, monkeypatc
     assert _audit_events(file_session_factory).count("role_changed") == 1
 
 
-@pytest.mark.parametrize("bad_email", ["", "   ", "not-an-email"])
+@pytest.mark.parametrize(
+    "bad_email",
+    [
+        "",
+        "   ",
+        "not-an-email",
+        # SEC-001: shapes the old `"@" in email` check let through. A typo'd
+        # grant is silent dead weight in user_roles (the auth gate can never
+        # match it), so the admin form should reject it at entry.
+        "trailing@",
+        "@leading.com",
+        "spa ce@example.com",
+        "user@nodot",
+        "two@@example.com",
+    ],
+)
 def test_assign_rejects_invalid_email(file_session_factory, bad_email):
     with pytest.raises(RoleAssignmentError):
         assign_role(
             email=bad_email, role="viewer", assigned_by="boss@example.com",
             session_factory=file_session_factory,
         )
+
+
+def test_assign_accepts_and_normalizes_realistic_email(file_session_factory, monkeypatch):
+    # The stricter SEC-001 shape check must not reject legitimate addresses;
+    # mixed case and padding still normalize to the canonical lowercase key.
+    monkeypatch.setenv("ADMIN_EMAILS", "boss@example.com")
+    result = assign_role(
+        email="  First.Last+tag@Sub.Example.COM ",
+        role="viewer",
+        assigned_by="boss@example.com",
+        session_factory=file_session_factory,
+    )
+    assert result.changed is True
+    assert result.email == "first.last+tag@sub.example.com"
 
 
 def test_assign_rejects_unknown_role(file_session_factory):

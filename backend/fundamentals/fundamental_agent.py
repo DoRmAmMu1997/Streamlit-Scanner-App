@@ -37,12 +37,10 @@ this module does NOT require the SDK to be installed.
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import contextvars
 import json
 import logging
 import re
-import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -50,6 +48,7 @@ from typing import Any, Literal
 
 from pydantic import Field, ValidationError, ValidationInfo, field_validator
 
+from backend.ai_runtime import run_agent_coroutine
 from backend.ai_validation import StrictAIModel, parse_with_retry
 from backend.config import get_ai_max_attempts
 from backend.fundamentals.fundamentals_cache import FundamentalsCache
@@ -1070,48 +1069,16 @@ class FundamentalAgent:
 
     @staticmethod
     def _run_sync(coro: Awaitable[AgentRunResult]) -> AgentRunResult:
-        """Run an async coroutine to completion from sync (Streamlit) code.
+        """Delegate to the shared bridge in ``backend.ai_runtime`` (REFACTOR-003).
 
-        Runs in a dedicated worker thread with its OWN event loop so we never
-        collide with Streamlit/Tornado's running loop.
-
-        Context propagation (beginner note). `check()` stashes the bound symbol,
-        the force-refresh flag, and the per-check evidence collector in
-        module-level `ContextVar`s on THIS (caller) thread. A freshly-spawned
-        worker thread starts with an EMPTY context, so we snapshot the caller's
-        context with `contextvars.copy_context()` and run the worker *inside* it
-        (`ctx.run(...)`). The tools' `asyncio.to_thread(...)` calls then inherit
-        those values instead of silently reading the ContextVar defaults — which
-        would defeat symbol binding and leave the evidence collector empty (so a
-        prompt injection could never fail the check closed).
-
-        On Windows we must build a ProactorEventLoop explicitly. The Agent SDK
-        launches the Claude CLI as a subprocess, but Streamlit/Tornado installs
-        the SelectorEventLoop policy on Windows, and that loop raises
-        NotImplementedError for subprocesses. `asyncio.run()` would inherit
-        that selector policy, so we create the right loop ourselves instead.
+        Kept as a staticmethod so this agent retains its own test seam. The
+        bridge snapshots the CALLER's context, so ``check()``'s ContextVars —
+        the bound symbol, the force-refresh flag, and the per-check
+        prompt-injection evidence collector — still reach the worker thread
+        exactly as before (the TEST-003 fail-closed guarantee); the loop and
+        context subtleties are documented in ``run_agent_coroutine``.
         """
-        # Snapshot on the CALLER thread, where check() just set the ContextVars.
-        ctx = contextvars.copy_context()
-
-        def _runner() -> AgentRunResult:
-            if sys.platform == "win32":
-                # ProactorEventLoop supports subprocess transports on Windows;
-                # the default selector loop (installed by Tornado) does not.
-                loop = asyncio.ProactorEventLoop()
-            else:
-                loop = asyncio.new_event_loop()
-            try:
-                asyncio.set_event_loop(loop)
-                return loop.run_until_complete(coro)
-            finally:
-                asyncio.set_event_loop(None)
-                loop.close()
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            # Run the worker INSIDE the captured context so the ContextVars cross
-            # the thread boundary (see beginner note above).
-            return executor.submit(ctx.run, _runner).result()
+        return run_agent_coroutine(coro)
 
     # ------------------------------------------------------------------
     # Public entry point
