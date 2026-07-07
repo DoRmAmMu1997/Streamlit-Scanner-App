@@ -105,8 +105,10 @@ review → `/code-review` + `/security-review`; everything → `/using-superpowe
   a junior reader. Keep inline-comment density high on non-obvious logic. Your changes
   should read like the surrounding code.
 - Ruff: line-length **120**, rules `E,W,F,I,B,UP,C4,SIM,RUF` (config in `pyproject.toml`).
-- mypy scope is `app.py backend screeners ui Dependencies` (tests are not yet type-checked,
-  but **are** linted and compiled).
+- mypy scope is `app.py backend screeners ui Dependencies` plus a growing, module-by-module
+  slice of `tests/` (QUAL-004 — see the `files` list in `pyproject.toml`; shared fixtures and
+  the policy/guard tests went first). Test modules not yet on that list are still linted and
+  compiled.
 
 ---
 
