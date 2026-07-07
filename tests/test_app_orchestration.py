@@ -1264,3 +1264,34 @@ def test_chart_payload_cache_misses_when_screener_version_bumps(monkeypatch, tmp
     # The bumped strategy version must rebuild instead of reusing stale HTML.
     assert bumped.from_cache is False
     assert build_calls == 2
+
+
+# ---------------------------------------------------------------------------
+# UI-002: humanized data-freshness caption on the fundamentals verdict
+# ---------------------------------------------------------------------------
+
+
+def test_format_data_freshness_humanizes_utc_iso_timestamps():
+    """The verdict caption should read '06 Jul 2026, 08:15 UTC', not raw ISO."""
+    assert app._format_data_freshness("2026-07-06T08:15:23.123456+00:00") == "06 Jul 2026, 08:15 UTC"
+
+
+def test_format_data_freshness_converts_other_timezones_to_utc():
+    # 08:15 at +05:30 is 02:45 UTC; the caption must not mislabel local time
+    # as UTC.
+    assert app._format_data_freshness("2026-07-06T08:15:00+05:30") == "06 Jul 2026, 02:45 UTC"
+
+
+def test_format_data_freshness_keeps_naive_timestamps_unlabeled():
+    # A timestamp without a zone cannot honestly claim UTC.
+    assert app._format_data_freshness("2026-07-06T08:15:00") == "06 Jul 2026, 08:15"
+
+
+def test_format_data_freshness_falls_back_to_raw_text():
+    # An unparseable value renders verbatim (backticked, like the old caption)
+    # instead of crashing the verdict block.
+    assert app._format_data_freshness("last tuesday-ish") == "`last tuesday-ish`"
+
+
+def test_format_data_freshness_handles_missing_value():
+    assert app._format_data_freshness("") == "unknown"

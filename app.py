@@ -31,7 +31,7 @@ import logging
 import sys
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import pandas as pd
 import streamlit as st
@@ -61,8 +61,6 @@ from backend.config import (
     SettingsError,
     credential_status,
     ensure_project_dirs,
-    get_agent_fast_mode,
-    get_fundamentals_model,
     get_settings,
     validate_production_settings,
 )
@@ -72,16 +70,10 @@ from backend.daily_data_loader import (
     history_start_date,
 )
 from backend.dhan_client import DhanDataClient
-from backend.fundamentals import (
-    AgentVerdict,
-    FundamentalAgent,
-    FundamentalsUsageLimitError,
-)
 from backend.observability import (
     EVENT_ADMIN_PAGE_ACCESSED,
     EVENT_DATA_REFRESH_COMPLETED,
     EVENT_DATA_REFRESH_STARTED,
-    EVENT_EXPORT_DOWNLOADED,
     EVENT_LOGIN_SUCCESS,
     EVENT_MANUAL_SCAN_STARTED,
     configure_logging,
@@ -136,6 +128,15 @@ from ui.common import (  # noqa: F401
 )
 from ui.comparison_page import _render_comparison_page
 from ui.config_page import _render_config_page
+from ui.fundamentals_panel import (  # noqa: F401
+    _FUNDAMENTALS_UNIVERSES,
+    _eligible_symbols_set,
+    _format_data_freshness,
+    _get_fundamental_agent,
+    _is_eligible_for_fundamentals,
+    _render_fundamentals_panel,
+    _render_verdict_block,
+)
 from ui.health_page import (  # noqa: F401
     _cached_admin_health_snapshot,
     _format_bytes,
@@ -160,6 +161,11 @@ from ui.history_page import (  # noqa: F401
 )
 from ui.ipo_manual_page import _render_ipo_manual_page
 from ui.roles_page import _render_roles_page
+from ui.scan_view import (  # noqa: F401
+    _has_rating_column,
+    _render_results_with_chart,
+    _render_scan_output,
+)
 from ui.validation_page import _render_validation_page
 
 _LOCAL_OWNER_EMAIL = "local-owner@localhost"
@@ -525,49 +531,6 @@ def render_universe_table() -> None:
         st.dataframe(pd.DataFrame(list(statuses)), width="stretch", hide_index=True)
 
 
-def _has_rating_column(results: pd.DataFrame) -> bool:
-    """Return True when the results table carries a BUY/SELL-style column."""
-    return any(column in results.columns for column in ("rating", "signal"))
-
-
-# ---------------------------------------------------------------------------
-# Check Fundamentals — eligibility, agent caching, UI rendering
-#
-# The fundamental-analysis agent runs for ANY shortlisted symbol; eligibility
-# only selects criteria (9) vs universal (7) mode. Two helpers below build that
-# eligibility set, and a third lazily instantiates the Claude Agent SDK agent.
-# None of the agent code runs unless the user actually clicks the
-# "Check Fundamentals" button.
-# ---------------------------------------------------------------------------
-
-
-_FUNDAMENTALS_UNIVERSES: tuple[str, ...] = ("hemant_super_45", "nifty_100")
-
-
-@st.cache_data(ttl=600)
-def _eligible_symbols_set(universe_keys: tuple[str, ...]) -> frozenset[str]:
-    """Return the uppercase symbol set across the given universe keys.
-
-    Cached for 10 minutes because universe CSVs are refreshed at most once
-    per CLI prefetch run — re-reading on every Streamlit rerun is wasteful.
-    """
-    symbols: set[str] = set()
-    for key in universe_keys:
-        try:
-            df = load_universe(key)
-        except Exception:
-            # A missing universe CSV must not break the rest of the UI.
-            logger.warning("Could not load universe %s for fundamentals eligibility", key)
-            continue
-        if "symbol" not in df.columns:
-            continue
-        for symbol in df["symbol"].astype(str):
-            cleaned = symbol.strip().upper()
-            if cleaned:
-                symbols.add(cleaned)
-    return frozenset(symbols)
-
-
 def refresh_universes_and_invalidate() -> dict[str, Path]:
     """Refresh universe CSVs, then clear every cache that reads them.
 
@@ -582,225 +545,6 @@ def refresh_universes_and_invalidate() -> dict[str, Path]:
     _cached_all_universe_statuses.clear()
     _eligible_symbols_set.clear()
     return written
-
-
-def _is_eligible_for_fundamentals(symbol: str | None) -> bool:
-    """True when `symbol` belongs to Hemant Super 45 OR Nifty 100."""
-    if not symbol:
-        return False
-    return str(symbol).strip().upper() in _eligible_symbols_set(_FUNDAMENTALS_UNIVERSES)
-
-
-@st.cache_resource(show_spinner=False)
-def _get_fundamental_agent(model: str, fast_mode: bool) -> FundamentalAgent:
-    """Memoize one agent per (model, fast_mode) across reruns.
-
-    The Claude Agent SDK authenticates via your Claude subscription, so there
-    is no API key argument. `cache_resource` keys on the arguments, so switching
-    the model OR toggling fast mode rebuilds the agent (and its on-disk cache
-    handle) automatically.
-    """
-    return FundamentalAgent(model=model, fast_mode=fast_mode)
-
-
-def _render_fundamentals_panel(symbol: str | None) -> None:
-    """Render the per-stock Check Fundamentals section under the chart.
-
-    The button is now visible for ANY selected symbol — eligibility just
-    determines how many criteria the agent applies:
-      - Hemant Super 45 ∪ Nifty 100 symbols → criteria mode (all NINE criteria
-        + observations + outlook + rating).
-      - Anything else → universal mode (the SEVEN universal criteria, skipping
-        Business Age and Market Leader, + observations + outlook + rating).
-
-    Stays hidden only when no symbol is selected.
-    """
-    if not symbol:
-        return
-
-    # Mode is symbol-deterministic: HS45/N100 → criteria (9), everything else
-    # → universal (7). The button label and behavior adapt accordingly.
-    mode: Literal["criteria", "universal"] = (
-        "criteria" if _is_eligible_for_fundamentals(symbol) else "universal"
-    )
-
-    st.divider()
-    st.subheader("Fundamentals")
-    if mode == "criteria":
-        st.caption(
-            "AI agent applies all nine user-defined criteria, adds its own "
-            "expert observations, and produces a holistic 0–10 rating."
-        )
-    else:
-        st.caption(
-            f"**Universal mode** — `{symbol}` is outside Hemant Super 45 / "
-            "Nifty 100, so the two context-heavy criteria (Business Age, Market "
-            "Leader) are skipped. The agent still applies the other seven "
-            "criteria plus a holistic rating, observations, and forward outlook."
-        )
-
-    model = get_fundamentals_model()
-
-    # Session-state cache key is now mode-qualified so a criteria-mode and a
-    # universal-mode verdict for the same symbol cannot collide.
-    session_key = f"fundamentals_verdict::{symbol}::{model}::{mode}"
-    cached_verdict_dict = st.session_state.get(session_key)
-
-    button_col, rerun_col, _spacer = st.columns([2, 1, 2])
-    primary_label = (
-        f"View cached verdict: {symbol}"
-        if cached_verdict_dict is not None
-        else f"Check Fundamentals: {symbol}"
-    )
-    run_now = button_col.button(
-        primary_label,
-        type="primary",
-        key=f"check_fund_btn::{symbol}::{model}::{mode}",
-        disabled=cached_verdict_dict is not None,
-    )
-    rerun_now = False
-    if cached_verdict_dict is not None:
-        rerun_now = rerun_col.button(
-            "Re-run analysis",
-            key=f"rerun_fund_btn::{symbol}::{model}::{mode}",
-            help="Bypass the cache and re-fetch screener.in + re-query the LLM.",
-        )
-
-    if run_now or rerun_now:
-        try:
-            agent = _get_fundamental_agent(model, get_agent_fast_mode())
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Could not build FundamentalAgent")
-            st.error(f"Could not build FundamentalAgent: {_redact_secrets(str(exc))}")
-            return
-
-        with st.spinner(f"Senior analyst evaluating **{symbol}** — this can take 20–60s..."):
-            try:
-                verdict = agent.check(symbol, force_refresh=rerun_now, mode=mode)
-            except FundamentalsUsageLimitError as exc:
-                # Expected operational state (plan limit hit) — show a gentle
-                # notice, not a red error, and keep cached verdicts usable.
-                logger.warning("Fundamentals usage limit reached for %s: %s", symbol, exc)
-                st.warning(f"⏳ {exc}")
-                return
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Fundamental agent failed for %s", symbol)
-                st.error(f"Fundamental check failed: {_redact_secrets(str(exc))}")
-                return
-        # Persist verdict as plain dict so it survives reruns even after
-        # the Pydantic class changes shape.
-        st.session_state[session_key] = verdict.model_dump(mode="json")
-        cached_verdict_dict = st.session_state[session_key]
-
-    if cached_verdict_dict is None:
-        return
-
-    try:
-        verdict = AgentVerdict.model_validate(cached_verdict_dict)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Cached verdict for %s is invalid; clearing", symbol, exc_info=True)
-        st.session_state.pop(session_key, None)
-        st.error(f"Cached verdict could not be parsed: {exc}")
-        return
-
-    _render_verdict_block(verdict)
-
-
-def _render_verdict_block(verdict: AgentVerdict) -> None:
-    """Render the rating metric + criteria table + observations + summary.
-
-    Both modes now run a criteria checklist, so the rating, the
-    "criteria passed X/Y" metric, and the breakdown table appear for every
-    stock. The only difference is the count: 9 criteria in 'criteria' mode
-    (curated universe) vs 7 in 'universal' mode (Business Age and Market
-    Leader skipped).
-    """
-    # Headline numbers: rating, criteria-passed (X / Y), and the model.
-    metric_cols = st.columns([1, 1, 2])
-    metric_cols[0].metric(
-        "Fundamental rating",
-        f"{verdict.rating}/10",
-        help="Holistic expert judgment — NOT a count of passed criteria.",
-    )
-    metric_cols[1].metric(
-        "Criteria passed",
-        f"{verdict.passed_criteria_count} / {verdict.total_criteria}",
-    )
-    metric_cols[2].metric(
-        "Model",
-        verdict.model_used.split("/")[-1] if "/" in verdict.model_used else verdict.model_used,
-    )
-
-    # Criteria breakdown table (shown whenever the agent returned rows).
-    breakdown_rows = [
-        {
-            "Criterion": criterion.name,
-            "Pass": "✅" if criterion.passed else "❌",
-            "Measured": criterion.measured_value,
-            "Threshold": criterion.threshold,
-            "Reasoning": criterion.reasoning,
-        }
-        for criterion in verdict.criteria_breakdown
-    ]
-    if breakdown_rows:
-        st.markdown("**Criteria breakdown**")
-        st.dataframe(
-            pd.DataFrame(breakdown_rows),
-            width="stretch",
-            hide_index=True,
-        )
-
-    # Additional agent-chosen observations, grouped by sentiment
-    if verdict.additional_observations:
-        st.markdown("**Additional observations (beyond the criteria)**")
-        sentiment_order = {"positive": 0, "negative": 1, "neutral": 2}
-        sentiment_icon = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}
-        sorted_observations = sorted(
-            verdict.additional_observations,
-            key=lambda obs: sentiment_order.get(obs.sentiment, 3),
-        )
-        for observation in sorted_observations:
-            icon = sentiment_icon.get(observation.sentiment, "•")
-            st.markdown(
-                f"- {icon} **{observation.topic}** — {observation.finding}  \n"
-                f"  _Evidence:_ {observation.evidence}"
-            )
-
-    # Forward outlook (analyst view). Distinct from the criterion-(e) pass/fail —
-    # this is the agent's free-form view on the company's next 1–4 quarters,
-    # broken into three labelled subsections by source: announcements first,
-    # concall second, overall integrated summary third. Subsections that came
-    # back empty (e.g. no concall transcript was read) are hidden so the UI
-    # never shows an empty bullet.
-    outlook = getattr(verdict, "forward_outlook", None)
-    if outlook is not None and any(
-        section.strip()
-        for section in (
-            outlook.announcements_conclusion,
-            outlook.concall_conclusion,
-            outlook.overall_summary,
-        )
-    ):
-        st.markdown("**Forward outlook (analyst view)**")
-        if outlook.announcements_conclusion.strip():
-            st.markdown(
-                f"- **Conclusion from Announcements:** {outlook.announcements_conclusion}"
-            )
-        if outlook.concall_conclusion.strip():
-            st.markdown(
-                f"- **Conclusion from the latest Concall:** {outlook.concall_conclusion}"
-            )
-        if outlook.overall_summary.strip():
-            st.markdown(
-                f"- **Overall summary:** {outlook.overall_summary}"
-            )
-
-    # Summary callout
-    st.markdown("**Summary**")
-    st.info(verdict.summary_comments)
-    st.caption(
-        f"Data fetched: `{verdict.data_freshness}` · Model: `{verdict.model_used}`"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -1366,196 +1110,6 @@ def _execute_screener(
         "status": result.status.value,
     }
 
-
-def _render_scan_output(
-    selected: ScreenerDefinition, cache: dict[str, Any], *, can_export: bool
-) -> None:
-    """Render the cached scan: stats + ranked selectable table + chart.
-
-    The cache payload survives ordinary Streamlit reruns, so this function must
-    be deterministic: sort by ``final_score`` the same way every time, preserve
-    the selected-row contract for charts, and keep exports aligned with what the
-    user sees on screen.
-
-    ``can_export`` is the AUTH-003 ``EXPORT_RESULTS`` capability. A CSV download has
-    no separate server handler — ``st.download_button`` builds its payload at render
-    time — so a viewer (no export capability) must never reach the button or the
-    bytes build; the whole export block is skipped for them.
-    """
-    results: pd.DataFrame = _sort_results_by_final_score(cache["results"])
-    stats = cache["stats"]
-    failures: list[dict[str, Any]] = cache["failures"]
-    compute_failures: list[dict[str, Any]] = cache.get("compute_failures", [])
-
-    # A short summary line, with the per-run diagnostics tucked into a
-    # collapsed expander so they are available but never clutter the results.
-    st.markdown(f"### {len(results)} stock(s) shortlisted")
-    with st.expander("Run details", expanded=False):
-        detail_col1, detail_col2 = st.columns(2)
-        detail_col1.metric("Cache hits", stats["cache_hits"])
-        detail_col1.metric("API cache misses", stats["cache_misses"])
-        detail_col2.metric("API attempts (incl. retries)", stats["api_attempts"])
-        detail_col2.metric("Rate-limit retries", stats["rate_limit_retries"])
-        st.caption(f"Fetch failures: {len(failures)}")
-        st.caption(f"Compute failures: {len(compute_failures)}")
-
-    if results.empty:
-        st.warning("The screener returned no rows.")
-    else:
-        chart_symbol = _render_results_with_chart(selected, results, cache)
-        # Show the Check Fundamentals panel after the chart. The helper chooses
-        # criteria mode for curated symbols and universal mode for everything
-        # else, so every shortlisted stock can still get a fundamentals view.
-        _render_fundamentals_panel(chart_symbol)
-        # AUTH-003: only analysts and admins may export. Build the CSV bytes and
-        # render the download button only when the role allows it (the button has
-        # no post-click handler to re-check, so this conditional IS the boundary).
-        if can_export:
-            # CSV-safe wrapper neutralizes formula injection before download. The
-            # raw DataFrame still has full precision; only the on-screen Styler
-            # rounds to 2 decimals, so the CSV mirrors the source data.
-            results_file_name = f"{selected.key}_results.csv"
-            # st.download_button returns True on the rerun where the user clicks it,
-            # so it doubles as the OBS-003 export trigger (edge-triggered, no dedup).
-            if st.download_button(
-                "Download results CSV",
-                data=_csv_safe(_drop_provenance(results))
-                .to_csv(index=False)
-                .encode("utf-8"),
-                file_name=results_file_name,
-                mime="text/csv",
-            ):
-                record_audit_event(
-                    event=EVENT_EXPORT_DOWNLOADED,
-                    user_email=st.session_state.get("_audit_user_email"),
-                    metadata={
-                        "file_name": results_file_name,
-                        "row_count": len(results),
-                        "kind": "scan_results",
-                    },
-                )
-
-    if failures:
-        with st.expander("Fetch failures", expanded=True):
-            failures_df = pd.DataFrame(failures)
-            if "message" in failures_df.columns:
-                failures_df["message"] = failures_df["message"].map(_redact_secrets)
-            st.dataframe(failures_df, width="stretch", hide_index=True)
-
-    if compute_failures:
-        with st.expander("Compute failures", expanded=True):
-            compute_df = pd.DataFrame(compute_failures)
-            if "message" in compute_df.columns:
-                compute_df["message"] = compute_df["message"].map(_redact_secrets)
-            st.dataframe(compute_df, width="stretch", hide_index=True)
-
-
-
-def _render_results_with_chart(
-    selected: ScreenerDefinition,
-    results: pd.DataFrame,
-    cache: dict[str, Any],
-) -> str | None:
-    """Render the combined results table (row-selectable) and the chart.
-
-    Returns the symbol currently shown on the chart, or None when no chart
-    can be rendered (no symbol column, no `build_chart`, etc.).
-    """
-    table_key = f"results_table_{selected.key}"
-    # RANK-002 sorting happens here too, even though run_scan already returns a
-    # ranked frame. Keeping the UI helper as a second guard makes old cached test
-    # payloads and future history imports display consistently.
-    ranked_results = _sort_results_by_final_score(results)
-
-    # The reserved PROV-002 provenance column is machine-readable evidence for
-    # persistence, not a table column; drop it for display. Row order/indices are
-    # unchanged, so the row-selection below still maps back to `results`.
-    display = _drop_provenance(ranked_results)
-
-    # ONE plain DataFrame does both jobs: emoji BUY/SELL badges for the eye,
-    # and `selection_mode` row-selection to drive the chart. We deliberately
-    # do NOT pass a pandas Styler here — Streamlit only reliably supports row
-    # selection on plain DataFrames. 2-decimal price display is handled by
-    # `column_config`, which (unlike a Styler) composes with selection.
-    table_state = st.dataframe(
-        _emoji_rating(display),
-        width="stretch",
-        hide_index=True,
-        column_config=_decimal_column_config(display),
-        selection_mode="single-row",
-        on_select="rerun",
-        key=table_key,
-    )
-    if _has_rating_column(ranked_results):
-        st.caption("🟢 BUY / 🔴 SELL · click a row to chart that symbol.")
-
-    # Keep component details one click away instead of adding four more columns
-    # to the main shortlist. The raw `reason` column stays in the table, so the
-    # score explains usefulness without hiding the screener's original rationale.
-    components_frame = _score_components_frame(ranked_results)
-    if not components_frame.empty:
-        with st.expander("Score components", expanded=False):
-            st.dataframe(
-                components_frame,
-                width="stretch",
-                hide_index=True,
-                column_config=_decimal_column_config(components_frame),
-                key=f"score_components_{selected.key}",
-            )
-
-    if "symbol" not in ranked_results.columns or selected.build_chart is None:
-        return None
-
-    symbols = [str(symbol).upper() for symbol in ranked_results["symbol"].tolist()]
-    if not symbols:
-        return None
-
-    st.divider()
-    st.subheader("Chart")
-
-    # --- Two-widget sync: the results table AND the dropdown both pick the
-    # charted symbol. The control the user *just* used wins.
-    #
-    # Streamlit gotcha: a keyed widget ignores its `index=`/default on reruns;
-    # its value lives in `st.session_state[key]`. So the ONLY way to make a
-    # table click move the dropdown is to write the picked symbol into the
-    # selectbox's session_state key BEFORE the selectbox is instantiated.
-    selected_rows = getattr(getattr(table_state, "selection", None), "rows", []) or []
-    current_row = int(selected_rows[0]) if selected_rows else None
-
-    selectbox_key = f"chart_symbol_{selected.key}"
-    prev_row_key = f"chart_prev_table_row_{selected.key}"
-
-    # A table click counts only when the selected row CHANGED since the last
-    # rerun. Otherwise a stale-but-persistent table selection would override
-    # every fresh dropdown change.
-    table_changed = current_row is not None and current_row != st.session_state.get(prev_row_key)
-    st.session_state[prev_row_key] = current_row
-
-    # Keep the selectbox's stored value valid (a screener re-run can change the
-    # `symbols` list out from under a previously stored pick).
-    if selectbox_key not in st.session_state or st.session_state[selectbox_key] not in symbols:
-        st.session_state[selectbox_key] = symbols[0]
-    # A fresh table click wins — push it into the selectbox state pre-widget.
-    # (table_changed already implies current_row is not None; the explicit check
-    # repeats it so the type narrows here.)
-    if table_changed and current_row is not None and 0 <= current_row < len(symbols):
-        st.session_state[selectbox_key] = symbols[current_row]
-
-    chart_symbol = st.selectbox(
-        "Chart symbol",
-        symbols,
-        key=selectbox_key,
-        help="Click a table row OR use this dropdown — whichever you use last wins.",
-    )
-
-    return _render_cached_symbol_chart(
-        selected=selected,
-        chart_symbol=chart_symbol,
-        universe_df=cache["universe_df"],
-        data_loader=cache["data_loader"],
-        params_for_chart=cache["params_for_chart"],
-    )
 
 
 # ---------------------------------------------------------------------------
