@@ -1,0 +1,232 @@
+{
+  "symbol": "SNAP",
+  "company_name": "Snapshot Industries Ltd.",
+  "sector": "Chemicals",
+  "about": "Snapshot Industries Ltd. is a specialty chemicals maker incorporated in 1987,\n      supplying agrochemical intermediates across India and Europe.",
+  "source_url": "https://www.screener.in/company/SNAP/consolidated/",
+  "current_price": 2315.0,
+  "market_cap": 42500.0,
+  "pe": 31.4,
+  "p_book": 5.6,
+  "book_value": 413.0,
+  "dividend_yield": 0.6,
+  "roce_ttm": 24.3,
+  "roe_ttm": 19.8,
+  "face_value": 1.0,
+  "industry_pe": 27.9,
+  "median_pe": null,
+  "promoter_holding_latest": 52.4,
+  "latest_revenue": 4435.0,
+  "latest_net_profit": 681.0,
+  "latest_eps": 37.5,
+  "latest_debt": 145.0,
+  "latest_cash_equivalents": 1180.0,
+  "latest_investments": 760.0,
+  "latest_equity_capital": 18.0,
+  "latest_reserves": 7120.0,
+  "revenue_history": [
+    2850.0,
+    3220.0,
+    3610.0,
+    4030.0,
+    4435.0
+  ],
+  "profit_history": [
+    402.0,
+    455.0,
+    512.0,
+    580.0,
+    681.0
+  ],
+  "eps_history": [
+    22.1,
+    25.0,
+    28.2,
+    31.9,
+    37.5
+  ],
+  "quarters": [
+    {
+      "Item": "Sales",
+      "Jun 2025": "1,010",
+      "Sep 2025": "1,065",
+      "Dec 2025": "1,120",
+      "Mar 2026": "1,240"
+    },
+    {
+      "Item": "Net Profit",
+      "Jun 2025": "152",
+      "Sep 2025": "160",
+      "Dec 2025": "171",
+      "Mar 2026": "198"
+    }
+  ],
+  "profit_loss": [
+    {
+      "Item": "Sales",
+      "Mar 2022": "2,850",
+      "Mar 2023": "3,220",
+      "Mar 2024": "3,610",
+      "Mar 2025": "4,030",
+      "Mar 2026": "4,435"
+    },
+    {
+      "Item": "Net Profit",
+      "Mar 2022": "402",
+      "Mar 2023": "455",
+      "Mar 2024": "512",
+      "Mar 2025": "580",
+      "Mar 2026": "681"
+    },
+    {
+      "Item": "EPS",
+      "Mar 2022": "22.1",
+      "Mar 2023": "25.0",
+      "Mar 2024": "28.2",
+      "Mar 2025": "31.9",
+      "Mar 2026": "37.5"
+    }
+  ],
+  "balance_sheet": [
+    {
+      "Item": "Equity Capital",
+      "Mar 2025": "18",
+      "Mar 2026": "18"
+    },
+    {
+      "Item": "Reserves",
+      "Mar 2025": "6,480",
+      "Mar 2026": "7,120"
+    },
+    {
+      "Item": "Borrowings",
+      "Mar 2025": "210",
+      "Mar 2026": "145"
+    },
+    {
+      "Item": "Cash",
+      "Mar 2025": "930",
+      "Mar 2026": "1,180"
+    },
+    {
+      "Item": "Investments",
+      "Mar 2025": "640",
+      "Mar 2026": "760"
+    }
+  ],
+  "cash_flow": [
+    {
+      "Item": "Cash from Operating Activity",
+      "Mar 2025": "610",
+      "Mar 2026": "702"
+    },
+    {
+      "Item": "Cash from Investing Activity",
+      "Mar 2025": "-380",
+      "Mar 2026": "-405"
+    },
+    {
+      "Item": "Cash from Financing Activity",
+      "Mar 2025": "-160",
+      "Mar 2026": "-92"
+    }
+  ],
+  "ratios_yearly": [
+    {
+      "Item": "Debtor Days",
+      "Mar 2025": "78",
+      "Mar 2026": "74"
+    },
+    {
+      "Item": "Working Capital Days",
+      "Mar 2025": "96",
+      "Mar 2026": "91"
+    }
+  ],
+  "shareholding": [
+    {
+      "Item": "Promoters",
+      "Mar 2025": "52.6",
+      "Mar 2026": "52.4"
+    },
+    {
+      "Item": "FIIs",
+      "Mar 2025": "17.1",
+      "Mar 2026": "18.0"
+    },
+    {
+      "Item": "DIIs",
+      "Mar 2025": "14.3",
+      "Mar 2026": "14.9"
+    },
+    {
+      "Item": "Public",
+      "Mar 2025": "16.0",
+      "Mar 2026": "14.7"
+    }
+  ],
+  "peers": [
+    {
+      "Name": "Snapshot Industries",
+      "P/E": "31.4",
+      "Market Cap": "42,500",
+      "ROCE": "24.3"
+    },
+    {
+      "Name": "Rival Chem",
+      "P/E": "27.2",
+      "Market Cap": "38,900",
+      "ROCE": "21.7"
+    },
+    {
+      "Name": "Basic Organics",
+      "P/E": "19.5",
+      "Market Cap": "12,400",
+      "ROCE": "15.2"
+    }
+  ],
+  "announcements": [
+    {
+      "title": "Board Meeting Intimation - Q4 FY26 Results",
+      "posted_at_text": "6h",
+      "source_url": "https://exchange.example.com/file/board-meeting.pdf",
+      "summary_snippet": null
+    },
+    {
+      "title": "Press Release - Greenfield Capex at Dahej",
+      "posted_at_text": "2d",
+      "source_url": "https://exchange.example.com/file/capex.pdf",
+      "summary_snippet": null
+    }
+  ],
+  "concalls": [
+    {
+      "month": "May 2026",
+      "transcript_url": "https://concall.example.com/q4fy26-transcript.pdf",
+      "ai_summary_url": null,
+      "ppt_url": "https://concall.example.com/q4fy26-ppt.pdf",
+      "rec_url": null
+    },
+    {
+      "month": "Feb 2026",
+      "transcript_url": "https://concall.example.com/q3fy26-transcript.pdf",
+      "ai_summary_url": null,
+      "ppt_url": null,
+      "rec_url": null
+    }
+  ],
+  "pros_cons": {
+    "pros": [
+      "Consistent 20%+ ROCE across a decade",
+      "Nearly debt free"
+    ],
+    "cons": [
+      "Stock is trading at 5.6 times its book value"
+    ]
+  },
+  "raw_text": {
+    "about": "Snapshot Industries Ltd. is a specialty chemicals maker incorporated in 1987,\n      supplying agrochemical intermediates across India and Europe.",
+    "shareholding_notes": "Item Mar 2025 Mar 2026 Promoters 52.6 52.4 FIIs 17.1 18.0 DIIs 14.3 14.9 Public 16.0 14.7",
+    "cash_flow_notes": "Item Mar 2025 Mar 2026 Cash from Operating Activity 610 702 Cash from Investing Activity -380 -405 Cash from Financing Activity -160 -92"
+  }
+}
