@@ -31,14 +31,11 @@ your Claude plan's Agent SDK credit instead of per-token API billing.
 
 from __future__ import annotations
 
-import asyncio
-import concurrent.futures
 import dataclasses
 import hashlib
 import json
 import logging
 import re
-import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -52,6 +49,7 @@ from backend.ai_cache_integrity import (
     sign_cache_envelope,
     verify_cache_envelope,
 )
+from backend.ai_runtime import run_agent_coroutine
 from backend.ai_validation import StrictAIModel, parse_with_retry
 from backend.config import get_ai_max_attempts
 from backend.fundamentals.fundamental_agent import (
@@ -584,29 +582,14 @@ class TechnicalAnalysisAgent:
 
     @staticmethod
     def _run_sync(coro: Awaitable[AgentRunResult]) -> AgentRunResult:
-        """Run an async coroutine to completion from sync (Streamlit) code.
+        """Delegate to the shared bridge in ``backend.ai_runtime`` (REFACTOR-003).
 
-        Runs in a dedicated worker thread with its OWN event loop so we never
-        collide with Streamlit/Tornado's running loop. On Windows we build a
-        ProactorEventLoop explicitly because the Agent SDK launches the Claude
-        CLI as a subprocess, which the default selector loop cannot do.
-        (Identical to the fundamentals agent's bridge.)
+        Kept as a staticmethod so each agent retains its own test seam. The
+        worker-thread / Windows-ProactorEventLoop / context-copy subtleties
+        live in ``run_agent_coroutine``; the context copy is a no-op for this
+        agent today (no context-bound tools) and future-proofs any new tool.
         """
-
-        def _runner() -> AgentRunResult:
-            if sys.platform == "win32":
-                loop = asyncio.ProactorEventLoop()
-            else:
-                loop = asyncio.new_event_loop()
-            try:
-                asyncio.set_event_loop(loop)
-                return loop.run_until_complete(coro)
-            finally:
-                asyncio.set_event_loop(None)
-                loop.close()
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            return executor.submit(_runner).result()
+        return run_agent_coroutine(coro)
 
     # ------------------------------------------------------------------
     # Public entry point

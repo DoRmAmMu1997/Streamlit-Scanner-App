@@ -16,7 +16,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 CI_COMMANDS = (
     "python -m pre_commit validate-config .pre-commit-config.yaml",
-    "python -m pytest -q --cov=backend --cov=screeners --cov=ui --cov-fail-under=84",
+    "python -m pytest -q --cov=backend --cov=screeners --cov=ui --cov-fail-under=87",
     "python -m compileall -q app.py backend screeners ui tests",
     "python -m ruff check app.py backend screeners ui Dependencies tests",
     "python -m mypy",
@@ -40,7 +40,7 @@ def test_ci_workflow_runs_quality_and_dependency_security_checks():
     assert "python -m pre_commit validate-config .pre-commit-config.yaml" in text
     assert (
         "python -m pytest -q --cov=backend --cov=screeners --cov=ui "
-        "--cov-fail-under=84"
+        "--cov-fail-under=87"
         in text
     )
     assert "python -m compileall -q app.py backend screeners ui tests" in text
@@ -141,7 +141,7 @@ def test_readme_documents_local_quality_and_security_commands():
     assert "pip install -r requirements-dev.txt -c constraints.txt" in text
     assert (
         "python -m pytest -q --cov=backend --cov=screeners --cov=ui "
-        "--cov-fail-under=84"
+        "--cov-fail-under=87"
         in text
     )
     assert "python -m compileall -q app.py backend screeners ui tests" in text
