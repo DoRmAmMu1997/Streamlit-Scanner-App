@@ -1,0 +1,11 @@
+<html>
+  <!-- TEST-005 snapshot fixture: a page with everything missing except the
+       company name. The parser is deliberately soft-failing — every section
+       degrades to an empty/None value instead of raising — and this snapshot
+       pins that contract so a refactor cannot silently turn "missing section"
+       into a crash or, worse, into fabricated values. -->
+  <head><title>Bare</title></head>
+  <body>
+    <h1>Bare Corp Ltd.</h1>
+  </body>
+</html>

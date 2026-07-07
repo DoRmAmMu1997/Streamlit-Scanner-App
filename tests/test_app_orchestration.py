@@ -1200,6 +1200,72 @@ def test_chart_payload_cache_rejects_other_schema_versions(monkeypatch, tmp_path
     assert stored["schema"] == chart_cache._CHART_PAYLOAD_SCHEMA
 
 
+def test_chart_payload_cache_misses_when_screener_version_bumps(monkeypatch, tmp_path):
+    """A SCREENER_VERSION bump must invalidate cached chart HTML (UI-001).
+
+    A strategy change (a PROV-002 `SCREENER_VERSION` bump) can alter what
+    `build_chart` draws without touching candles or params. If the cache key
+    ignores the version, a long-lived session keeps rendering the previous
+    strategy's chart until the parquet mtime happens to move.
+    """
+    chart_file = tmp_path / "DEMO_1.parquet"
+    chart_file.write_bytes(b"candles")
+
+    class FakeLoader:
+        def cache_path(self, symbol, security_id):
+            return chart_file
+
+        def read_cached_history(self, symbol, security_id):
+            return pd.DataFrame(
+                {
+                    "timestamp": [pd.Timestamp("2026-01-01")],
+                    "open": [10.0],
+                    "high": [11.0],
+                    "low": [9.0],
+                    "close": [10.5],
+                }
+            )
+
+    build_calls = 0
+
+    def build_chart(candles, params):
+        nonlocal build_calls
+        build_calls += 1
+        return {"title": "demo", "height": 321, "panes": []}
+
+    def definition(version: str) -> ScreenerDefinition:
+        return ScreenerDefinition(
+            key="demo",
+            name="Demo",
+            description="Test-only screener",
+            universe="demo_universe",
+            timeframe="daily",
+            lookback_days=30,
+            default_params={"period": 20},
+            module_name="screeners.demo",
+            run=lambda *_args, **_kwargs: pd.DataFrame(),
+            build_chart=build_chart,
+            version=version,
+        )
+
+    monkeypatch.setattr(chart_cache, "st", SimpleNamespace(session_state={}))
+    monkeypatch.setattr(chart_cache, "render_chart_html", lambda spec: "<html>demo</html>")
+
+    first = app._get_or_build_chart_payload(definition("1.0.0"), "DEMO", "1", FakeLoader(), {"period": 20})
+    same_version = app._get_or_build_chart_payload(
+        definition("1.0.0"), "DEMO", "1", FakeLoader(), {"period": 20}
+    )
+    bumped = app._get_or_build_chart_payload(
+        definition("1.1.0"), "DEMO", "1", FakeLoader(), {"period": 20}
+    )
+
+    assert first is not None and same_version is not None and bumped is not None
+    assert same_version.from_cache is True
+    # The bumped strategy version must rebuild instead of reusing stale HTML.
+    assert bumped.from_cache is False
+    assert build_calls == 2
+
+
 # ---------------------------------------------------------------------------
 # UI-002: humanized data-freshness caption on the fundamentals verdict
 # ---------------------------------------------------------------------------

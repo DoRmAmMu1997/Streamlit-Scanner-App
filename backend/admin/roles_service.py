@@ -21,6 +21,7 @@ locked in the mutation transaction so concurrent demotions cannot race the guard
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -73,6 +74,16 @@ def _normalize_email(email: str) -> str:
     return str(email or "").strip().lower()
 
 
+# SEC-001: pragmatic address shape — one "@", a non-empty local part, and a
+# dotted domain, with no whitespace anywhere. Deliberately NOT full RFC 5322:
+# sign-in here is Google OIDC, so real assignments are always dotted-domain
+# addresses, and a stricter-than-RFC check would reject nothing legitimate.
+# The check exists because a typo'd grant ("analyst@" or "user@gmailcom") is
+# silent dead weight in ``user_roles`` — the auth gate can never match it, and
+# nobody notices until the intended user reports being locked out.
+_EMAIL_SHAPE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
 def _guard_last_admin(locked_admins: list[Any]) -> None:
     """Refuse a change that would leave zero effective admins.
 
@@ -105,7 +116,7 @@ def assign_role(
     role is a no-op that records nothing.
     """
     normalized = _normalize_email(email)
-    if not normalized or "@" not in normalized:
+    if not _EMAIL_SHAPE.match(normalized):
         raise RoleAssignmentError("A valid email address is required.")
     parsed = Role.parse(role)
     if parsed is None:

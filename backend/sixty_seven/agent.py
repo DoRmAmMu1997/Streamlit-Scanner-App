@@ -24,14 +24,12 @@ your Claude plan's Agent SDK credit instead of per-token API billing.
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import contextvars
 import dataclasses
 import hashlib
 import json
 import logging
 import re
-import sys
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -44,6 +42,7 @@ from backend.ai_cache_integrity import (
     sign_cache_envelope,
     verify_cache_envelope,
 )
+from backend.ai_runtime import run_agent_coroutine
 from backend.ai_validation import StrictAIModel, parse_with_retry
 from backend.config import get_agent_fast_mode, get_ai_max_attempts, get_fundamentals_model
 from backend.fundamentals.fundamental_agent import (
@@ -769,44 +768,16 @@ class SixtySevenAgent:
 
     @staticmethod
     def _run_sync(coro: Awaitable[AgentRunResult]) -> AgentRunResult:
-        """Run the async agent loop to completion from synchronous (Streamlit) code.
+        """Delegate to the shared bridge in ``backend.ai_runtime`` (REFACTOR-003).
 
-        Two subtleties are handled here, both easy to get wrong:
-
-        1. Context propagation (beginner note). `verify()` stashes the bound
-           symbol, the force-refresh flag, and the search-result count in
-           module-level `ContextVar`s on THIS (caller) thread. But the agent loop
-           runs on a separate `ThreadPoolExecutor` worker, and a freshly-spawned
-           thread starts with an EMPTY context — it does NOT inherit the caller's
-           ContextVars. So we snapshot the caller's context now with
-           `contextvars.copy_context()` and run the worker *inside* it
-           (`ctx.run(...)`); the tool's `asyncio.to_thread(...)` call then inherits
-           those values instead of silently reading the ContextVar defaults (which
-           would defeat the per-call symbol binding and ignore force_refresh).
-        2. Windows event loop. The Agent SDK launches the Claude CLI as a
-           subprocess, and only `ProactorEventLoop` supports subprocess transports
-           on Windows (Streamlit/Tornado install the selector loop, which raises
-           `NotImplementedError`), so we build the right loop explicitly.
+        Kept as a staticmethod so this agent retains its own test seam
+        (``tests/test_sixty_seven_agent.py`` exercises it directly). The bridge
+        snapshots the CALLER's context, so ``verify()``'s ContextVars — the
+        bound symbol, force-refresh flag, and search-result count — still reach
+        the worker thread exactly as before; the loop and context subtleties
+        are documented in ``run_agent_coroutine``.
         """
-        # Snapshot on the CALLER thread, where verify() just set the ContextVars.
-        ctx = contextvars.copy_context()
-
-        def _runner() -> AgentRunResult:
-            if sys.platform == "win32":
-                loop = asyncio.ProactorEventLoop()
-            else:
-                loop = asyncio.new_event_loop()
-            try:
-                asyncio.set_event_loop(loop)
-                return loop.run_until_complete(coro)
-            finally:
-                asyncio.set_event_loop(None)
-                loop.close()
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            # Run the worker INSIDE the captured context so the ContextVars cross
-            # the thread boundary (see beginner note #1 above).
-            return executor.submit(ctx.run, _runner).result()
+        return run_agent_coroutine(coro)
 
     def verify(
         self,
