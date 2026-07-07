@@ -1,0 +1,29 @@
+[
+  {
+    "symbol": "BUY",
+    "rating": "BUY",
+    "signal_date": "2026-01-08T00:00:00",
+    "close": 100.0,
+    "reason": "Close 97.90 came within 1.98% of the 52-week low 96.00 (2 day(s) ago).",
+    "week52_low": 96.0,
+    "week52_high": 101.0,
+    "proximity_pct_at_signal": 0.019792,
+    "days_since_signal": 2,
+    "provenance": {
+      "screener_key": "week52_low_ceyhun",
+      "screener_version": "1.0.0",
+      "triggered_rules": [
+        "close_within_proximity_of_52w_low_in_recent_window"
+      ],
+      "indicator_values": {
+        "signal_timestamp": "2026-01-06T00:00:00",
+        "signal_close": 97.9,
+        "week52_low_at_signal": 96.0,
+        "week52_high_at_signal": 100.0,
+        "proximity_pct_at_signal": 0.019792,
+        "days_since_signal": 2
+      },
+      "source": "deterministic"
+    }
+  }
+]

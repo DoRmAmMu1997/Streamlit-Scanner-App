@@ -1,0 +1,78 @@
+[
+  {
+    "symbol": "BUY",
+    "rating": "BUY",
+    "signal_date": "2026-02-15T00:00:00",
+    "close": 104.0,
+    "reason": "Stochastic %K (42.6) crossed above %D (38.8) from oversold; price 104.00 above SMA200 98.40 with a fresh 5 EMA / 200 SMA bullish crossover.",
+    "sma200": 98.4,
+    "ema5": 100.83431,
+    "stoch_k": 42.647059,
+    "stoch_d": 38.767658,
+    "previous_stoch_k": 33.333333,
+    "previous_stoch_d": 41.048387,
+    "stop": 100.88,
+    "target": 109.2,
+    "provenance": {
+      "screener_key": "stochastic_swing",
+      "screener_version": "1.0.0",
+      "triggered_rules": [
+        "close_above_sma200",
+        "stoch_k_crossed_above_d_from_oversold",
+        "fresh_ema5_sma200_bullish_cross"
+      ],
+      "indicator_values": {
+        "close": 104.0,
+        "sma200": 98.4,
+        "ema5": 100.83431,
+        "stoch_k": 42.647059,
+        "stoch_d": 38.767658,
+        "previous_stoch_k": 33.333333,
+        "previous_stoch_d": 41.048387,
+        "ema_sma_cross_timestamp": "2026-02-08T00:00:00",
+        "ema_sma_cross_age_days": 7.0,
+        "stop": 100.88,
+        "target": 109.2
+      },
+      "source": "deterministic"
+    }
+  },
+  {
+    "symbol": "SELL",
+    "rating": "SELL",
+    "signal_date": "2026-02-15T00:00:00",
+    "close": 96.0,
+    "reason": "Stochastic %K (57.4) crossed below %D (61.2) from overbought; price 96.00 below SMA200 101.60 with a fresh 5 EMA / 200 SMA bearish crossover.",
+    "sma200": 101.6,
+    "ema5": 99.16569,
+    "stoch_k": 57.352941,
+    "stoch_d": 61.232342,
+    "previous_stoch_k": 66.666667,
+    "previous_stoch_d": 58.951613,
+    "stop": 98.88,
+    "target": 91.2,
+    "provenance": {
+      "screener_key": "stochastic_swing",
+      "screener_version": "1.0.0",
+      "triggered_rules": [
+        "close_below_sma200",
+        "stoch_k_crossed_below_d_from_overbought",
+        "fresh_ema5_sma200_bearish_cross"
+      ],
+      "indicator_values": {
+        "close": 96.0,
+        "sma200": 101.6,
+        "ema5": 99.16569,
+        "stoch_k": 57.352941,
+        "stoch_d": 61.232342,
+        "previous_stoch_k": 66.666667,
+        "previous_stoch_d": 58.951613,
+        "ema_sma_cross_timestamp": "2026-02-08T00:00:00",
+        "ema_sma_cross_age_days": 7.0,
+        "stop": 98.88,
+        "target": 91.2
+      },
+      "source": "deterministic"
+    }
+  }
+]
