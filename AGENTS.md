@@ -124,7 +124,7 @@ Reproduce it locally — these are the exact commands; **all must pass**:
 python -m pip install -r requirements.txt -r requirements-dev.txt -c constraints.txt
 
 python -m pre_commit validate-config .pre-commit-config.yaml
-python -m pytest -q --cov=backend --cov=screeners --cov=ui --cov-fail-under=84
+python -m pytest -q --cov=backend --cov=screeners --cov=ui --cov-fail-under=87
 python -m compileall -q app.py backend screeners ui tests
 python -m ruff check app.py backend screeners ui Dependencies tests
 python -m mypy
@@ -138,7 +138,7 @@ docker compose up --build --wait --wait-timeout 180
 docker compose down --volumes --remove-orphans
 ```
 
-Coverage floor is **84%** (measured ~86–88%). `pre-commit` hooks are **non-rewriting**
+Coverage floor is **87%** (measured ~89%). `pre-commit` hooks are **non-rewriting**
 (check-only, no `--fix`) so commits stay author-reviewed.
 
 ---
@@ -194,7 +194,7 @@ Concurrent agents share one checkout and `main` moves fast, so:
 - **Golden/snapshot tests** (`tests/test_screener_golden_outputs.py`) catch screener output
   drift; regenerate with `UPDATE_GOLDEN=1` (see §7).
 - **UI tests monkeypatch the module that actually reads `st`** (e.g. `ui.health_page.st`).
-- Coverage floor 84%; new code needs tests or it drags the gate down.
+- Coverage floor 87%; new code needs tests or it drags the gate down.
 - Policy/guard tests are first-class here — see `tests/test_supply_chain_policy.py` and
   `tests/test_scan_storage_migrations.py` for the pattern when you need to lock in an invariant.
 

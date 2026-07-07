@@ -629,7 +629,7 @@ The "Quality and security" workflow runs the same gates you can run locally:
 
 ```bash
 python -m pre_commit validate-config .pre-commit-config.yaml
-python -m pytest -q --cov=backend --cov=screeners --cov=ui --cov-fail-under=84
+python -m pytest -q --cov=backend --cov=screeners --cov=ui --cov-fail-under=87
 python -m compileall -q app.py backend screeners ui tests
 python -m ruff check app.py backend screeners ui Dependencies tests
 python -m mypy
