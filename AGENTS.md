@@ -15,8 +15,11 @@ A **Streamlit stock-scanner app** for the Indian market. It fetches daily candle
 DhanHQ, runs pluggable **screeners** (deterministic technical strategies plus a few
 AI-assisted ones), ranks the shortlist with a deterministic score, persists every run to a
 **scan-history** database (SQLite locally, Postgres in production), and exposes history,
-comparison, validation, audit, and health pages. It is developed ticket-style (e.g.
-`SCAN-002`, `RANK-001`, `OBS-003`) by multiple AI agents, **one PR per ticket**.
+comparison, validation, audit, and health pages. A separate **IPO subsystem** inventories
+official SEBI DRHP/RHP filings, caches prospectus PDFs in a verified content-addressed
+store, captures admin-entered manual evidence, and derives deterministic financial ratios
+(IPO-001…005). It is developed ticket-style (e.g.
+`SCAN-002`, `RANK-001`, `OBS-003`, `IPO-003`) by multiple AI agents, **one PR per ticket**.
 
 Start with the **[High-Level Design](docs/architecture/high-level-design.md)** and the
 architecture index **[docs/architecture/README.md](docs/architecture/README.md)** — the HLD
@@ -71,7 +74,8 @@ review → `/code-review` + `/security-review`; everything → `/using-superpowe
 | `security/` | Secret redaction + prompt-injection quarantine. |
 | `config/` | Typed runtime settings from env (`get_settings`, `AppSettings`, `SettingsError`). |
 | `fundamentals/`, `technical/`, `sixty_seven/` | The three AI-assisted subsystems. |
-| `jobs/` | Headless CLIs (daily scan, forward-return computation). |
+| `ipo/` | IPO domain: SEBI filing ingestion, verified content-addressed document cache, manual extraction records, deterministic ratio engine, immutable score/recommendation history (IPO-001…005). |
+| `jobs/` | Headless CLIs (daily scan, forward-return computation, IPO filing ingestion). |
 | `admin/`, `auth/`, `notifications/`, `data_quality/` | Config overrides, OIDC gate, alerts, candle-quality receipts. |
 | `screener_registry.py`, `scanner_base.py`, `indicators.py`, `daily_data_loader.py`, `universe_*` | Screener framework, indicators, candle cache, universe management. |
 
@@ -228,6 +232,12 @@ allowlist gate. Full details and the **accepted residual risks**:
 - **AI subsystems:** [fundamentals-ai](docs/architecture/components/fundamentals-ai.md) ·
   [technical-analysis-ai](docs/architecture/components/technical-analysis-ai.md) ·
   [sixty-seven-ka-funda-ai](docs/architecture/components/sixty-seven-ka-funda-ai.md)
+- **IPO subsystem:** [ipo-screener LLD](docs/architecture/components/ipo-screener.md) ·
+  [ipo-001 domain + score contract](docs/architecture/ipo-001-domain-score-contract.md) ·
+  [ipo-002 SEBI ingestion](docs/architecture/ipo-002-sebi-filing-ingestion.md) ·
+  [ipo-003 document cache](docs/architecture/ipo-003-document-downloader-cache.md) ·
+  [ipo-004 manual extraction](docs/architecture/ipo-004-manual-extraction-mvp.md) ·
+  [ipo-005 ratio engine](docs/architecture/ipo-005-ratio-engine.md)
 - **Observability / audit / config:** [observability](docs/architecture/components/observability.md) ·
   [audit-log](docs/architecture/components/audit-log.md) ·
   [obs-003 design](docs/architecture/obs-003-audit-log.md) ·
@@ -255,6 +265,9 @@ python -m backend.jobs.run_daily_scan
 
 # Forward-return validation job
 python -m backend.jobs.compute_forward_returns
+
+# IPO filing ingestion (SEBI listings -> filing inventory)
+python -m backend.jobs.scan_ipo_filings
 ```
 
 See the [operations runbook](docs/operations.md) for scheduling, Docker/Compose, Render
