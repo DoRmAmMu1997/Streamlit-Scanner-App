@@ -5,7 +5,7 @@
 | **Component** | Streamlit entrypoint + CLI prefetch + UI orchestration |
 | **Source** | [`app.py`](../../../app.py), [`ui/common.py`](../../../ui/common.py) |
 | **Layer** | UI / orchestration (repo root + `ui/`) |
-| **Status** | Stable (REF-001 split: page renderers moved to `ui/`) |
+| **Status** | Stable (REF-001/REF-002/REF-003 splits: page renderers, scan view, fundamentals panel, status panel, and parameter controls moved to `ui/`; `app.py` re-exports every moved helper) |
 | **Related** | [HLD](../high-level-design.md) · [authentication.md](authentication.md) · [screener-framework.md](screener-framework.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [data-acquisition.md](data-acquisition.md) · [charts-visualization.md](charts-visualization.md) · [ui-pages.md](ui-pages.md) · [fundamentals-ai.md](fundamentals-ai.md) |
 
 ## 1. Purpose & responsibilities
@@ -56,9 +56,10 @@ flowchart TD
 | `launch_streamlit_from_plain_python()` | `configure_logging()` → prefetch → re-exec via `streamlit.web.cli`. |
 | `main()` | The per-rerun flow: validate → auth gate (records `login_success`) → migrate → `apply_config_overrides` → view router → scan state machine. Records OBS-003 audit events (`manual_scan_started`, `export_downloaded`, `admin_page_accessed`) via `backend.audit`; read-only history/comparison/validation exports reuse the same `export_downloaded` event. |
 | `_execute_screener(selected, *, triggered_by)` | Build loader + params (+ overrides, progress callback), call `run_scan`, return a `scan_cache` payload (or `None`). |
-| `_render_scan_output` / `_render_results_with_chart` | Stats expander, selectable table, table↔dropdown sync, embedded chart. |
-| `_render_fundamentals_panel` / `_render_verdict_block` | Per-row Check Fundamentals (criteria vs universal mode), verdict rendering. |
-| `_render_parameter_overrides` / `_apply_param_overrides` | Sidebar per-screener param tuning via `session_state`. |
+| `_render_scan_output` / `_render_results_with_chart` | Stats expander, selectable table, table↔dropdown sync, embedded chart (in `ui/scan_view.py`). |
+| `_render_fundamentals_panel` / `_render_verdict_block` | Per-row Check Fundamentals (criteria vs universal mode), verdict rendering (in `ui/fundamentals_panel.py`). |
+| `_render_parameter_overrides` / `_apply_param_overrides` | Sidebar per-screener param tuning via `session_state` (in `ui/parameter_controls.py`, REF-003). |
+| `show_status_panel` / `render_universe_table` | Pre-run system-status card + lazy universe-file details, with 30s `cache_data` helpers (in `ui/status_panel.py`, REF-003). `refresh_universes_and_invalidate()` in `app.py` clears those caches through the re-exported bindings (function identity preserved). |
 | `_scan_trigger(user)` | `"ui"` or `"ui:<email>"` audit label. |
 
 ## 4. Key design decisions & trade-offs
@@ -85,8 +86,9 @@ flowchart TD
 
 ## 6. Testing
 
-- [`tests/test_app_orchestration.py`](../../../tests/test_app_orchestration.py) — view routing, scan state machine, trigger label, fundamentals panel, param overrides (page renderers monkeypatched via `app._render_*`).
+- [`tests/test_app_orchestration.py`](../../../tests/test_app_orchestration.py) — view routing, scan state machine, trigger label, re-export identity checks (page renderers monkeypatched via `app._render_*`).
 - [`tests/test_app_history_page.py`](../../../tests/test_app_history_page.py), [`tests/test_app_comparison_page.py`](../../../tests/test_app_comparison_page.py), [`tests/test_app_health_page.py`](../../../tests/test_app_health_page.py) — view delegation and page-level render helpers.
+- [`tests/test_app_status_panel.py`](../../../tests/test_app_status_panel.py), [`tests/test_app_parameter_controls.py`](../../../tests/test_app_parameter_controls.py) — render paths of the REF-003 extractions (fakes patched onto the `ui` modules that read `st`, per the house pattern).
 
 ## 7. Extension points
 
