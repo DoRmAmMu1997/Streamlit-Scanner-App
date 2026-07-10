@@ -109,6 +109,8 @@ def test_constraints_pin_direct_runtime_and_developer_dependencies():
         "mypy",
         "types-requests",
         "types-PyYAML",
+        "pandas-stubs",
+        "types-pytz",
         "pytest-cov",
         "pre-commit",
     ]

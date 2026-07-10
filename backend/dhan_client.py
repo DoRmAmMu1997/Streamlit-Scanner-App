@@ -11,7 +11,7 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 
@@ -22,8 +22,13 @@ class DhanRateLimitError(RuntimeError):
     """Raised when Dhan asks the app to slow down history requests."""
 
 
-def infer_epoch_unit(values: pd.Series) -> str:
-    """Infer whether numeric timestamps are seconds, milliseconds, or microseconds."""
+def infer_epoch_unit(values: pd.Series) -> Literal["s", "ms", "us"]:
+    """Infer whether numeric timestamps are seconds, milliseconds, or microseconds.
+
+    The return type is the exact literal set ``pd.to_datetime``'s ``unit=``
+    parameter accepts (QUAL-006), so callers can pass the result straight
+    through without a cast.
+    """
     nums = pd.to_numeric(values, errors="coerce").dropna()
     if nums.empty:
         return "s"

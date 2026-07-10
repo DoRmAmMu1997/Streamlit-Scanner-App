@@ -29,7 +29,7 @@ Beginner glossary:
 from __future__ import annotations
 
 import math
-from typing import ClassVar
+from typing import ClassVar, cast
 
 import pandas as pd
 
@@ -145,7 +145,8 @@ class EnvelopeKnoxvilleBuy(BaseScanner):
         for candidate in reversed(all_divergences):
             # `candidate.name` is the row number inside `frame`. Comparing it to
             # the last row tells us how many candles ago the divergence occurred.
-            if len(frame) - 1 - int(candidate.name) <= signal_recency:
+            # (.name types as Hashable; these pivots carry the integer index.)
+            if len(frame) - 1 - int(cast(int, candidate.name)) <= signal_recency:
                 recent_divergence = candidate
                 break
 
@@ -175,7 +176,7 @@ class EnvelopeKnoxvilleBuy(BaseScanner):
             return None
 
         selected_divergence_price = float(divergence["low"])
-        selected_bars_ago = len(frame) - 1 - int(divergence.name)
+        selected_bars_ago = len(frame) - 1 - int(cast(int, divergence.name))
         rsi_value = float(divergence["rsi"])
         momentum_value = float(divergence["momentum"])
         if entry_trigger == "recent_envelope_kd":

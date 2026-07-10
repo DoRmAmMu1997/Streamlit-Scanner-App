@@ -15,6 +15,8 @@ never crashes the app at import time.
 from __future__ import annotations
 
 import logging
+from collections.abc import Hashable
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -476,7 +478,9 @@ def resample_to_weekly(frame: pd.DataFrame) -> pd.DataFrame:
     work["timestamp"] = pd.to_datetime(work["timestamp"], errors="coerce")
     work = work.dropna(subset=["timestamp"]).sort_values("timestamp").set_index("timestamp")
 
-    aggregation = {"open": "first", "high": "max", "low": "min", "close": "last"}
+    # Keyed by Hashable (not str) because pandas-stubs' ``agg`` mapping
+    # overload is invariant in its key type (QUAL-006).
+    aggregation: dict[Hashable, str] = {"open": "first", "high": "max", "low": "min", "close": "last"}
     if "volume" in work.columns:
         aggregation["volume"] = "sum"
 
@@ -902,7 +906,9 @@ def bullish_knoxville_divergence(
     if (len(enriched) - 1 - latest_index) > int(recency):
         return None
 
-    latest = enriched.loc[latest_index]
+    # ``.loc`` with a scalar label types as Series | DataFrame; the label here
+    # is always one integer row, so narrow to the Series it returns at runtime.
+    latest = cast(pd.Series, enriched.loc[latest_index])
     if float(latest["rsi"]) > float(oversold):
         return None
 
@@ -958,7 +964,8 @@ def bullish_knoxville_divergences(
     bars_back = max(1, int(bars_back))
     for latest_index in pivot_rows.index[1:]:
         latest_index = int(latest_index)
-        latest = enriched.loc[latest_index]
+        # Scalar-label .loc narrows to a Series at runtime (see above).
+        latest = cast(pd.Series, enriched.loc[latest_index])
         if float(latest["rsi"]) > float(oversold):
             continue
 

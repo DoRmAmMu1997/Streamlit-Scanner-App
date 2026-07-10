@@ -21,7 +21,7 @@ import datetime as dt
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 
@@ -95,7 +95,10 @@ def score_candidates(
     # parquet cache twice for a single symbol.
     # Materialize the row dicts once and reuse them for every component below; a
     # large shortlist would otherwise be converted to records three times.
-    records = ranked.to_dict("records")
+    # ``to_dict("records")`` types its keys as Hashable; these frames come from
+    # screeners whose columns are always strings, so narrow once for every
+    # Mapping[str, ...] consumer below (QUAL-006).
+    records = cast(list[dict[str, Any]], ranked.to_dict("records"))
     symbol_to_security_id = _security_id_lookup(context.universe_df)
     cached_candles = [
         _read_cached_candles(row, symbol_to_security_id, context.data_loader)

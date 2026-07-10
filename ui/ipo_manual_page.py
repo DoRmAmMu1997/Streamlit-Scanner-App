@@ -656,7 +656,9 @@ def _render_peer_controls(
         },
         key=_widget_key(issue_id, "peer_editor"),
     )
-    return edited.to_dict(orient="records")
+    # to_dict("records") types its keys as Hashable; the editor's columns are
+    # the string names configured above.
+    return cast(list[dict[str, object]], edited.to_dict(orient="records"))
 
 
 def _render_latest_and_history(

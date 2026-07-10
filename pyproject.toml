@@ -64,12 +64,11 @@ warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
 # Third-party packages that ship no type stubs (and optional accelerators
-# that are not installed on CI). pandas is deliberately untyped here:
-# pandas-stubs would surface hundreds of new errors in this pandas-heavy
-# codebase and is its own future migration.
+# that are not installed on CI). pandas graduated OUT of this list in
+# QUAL-006: pandas-stubs (pinned to the pandas 2.3.3 series) now types every
+# DataFrame/Series call site in the checked application code.
 module = [
     "dhanhq.*",
-    "pandas.*",
     "pandas_ta.*",
     "pyarrow.*",
     "pypdf.*",

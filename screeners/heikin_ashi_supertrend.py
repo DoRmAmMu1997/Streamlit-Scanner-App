@@ -9,7 +9,7 @@ Flow in plain English:
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import ClassVar, cast
 
 import pandas as pd
 
@@ -99,7 +99,8 @@ class HeikinAshiSupertrend(BaseScanner):
         latest = valid.iloc[-1]
         # `valid` preserves the original integer index, so this points back to the
         # matching row in the Heikin Ashi DataFrame for output fields like ha_open.
-        latest_index = int(latest.name)
+        # (.name types as Hashable; these frames use the default integer index.)
+        latest_index = int(cast(int, latest.name))
         latest_ha = ha.iloc[latest_index]
 
         previous_ha_close = float(previous["close"])
