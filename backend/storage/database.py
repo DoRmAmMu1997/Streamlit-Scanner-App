@@ -21,6 +21,7 @@ import logging
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import Any
 
 from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.engine import Engine
@@ -67,16 +68,28 @@ def _make_engine(url: str | None = None) -> Engine:
     """
     database_url = url or get_database_url()
     connect_args = {}
+    engine_kwargs: dict[str, Any] = {}
     if database_url.startswith("sqlite"):
         # Streamlit can re-run the app and use worker threads while the same
         # module-level engine stays imported. SQLite defaults to one-thread-only
         # connections, so we relax that guard and keep sessions short-lived.
         connect_args["check_same_thread"] = False
+    else:
+        # DEPLOY-004: server databases sit behind infrastructure that silently
+        # drops idle TCP connections (managed Postgres proxies, PgBouncer,
+        # cloud NAT). A pooled connection can therefore be dead by the next
+        # morning's first scan, which would fail with "server closed the
+        # connection unexpectedly". ``pool_pre_ping`` issues a lightweight
+        # liveness probe on checkout and transparently replaces dead
+        # connections. SQLite is a local file with no server to lose, so its
+        # engine arguments stay exactly as they were.
+        engine_kwargs["pool_pre_ping"] = True
 
     created_engine = create_engine(
         database_url,
         connect_args=connect_args,
         future=True,
+        **engine_kwargs,
     )
 
     if database_url.startswith("sqlite"):

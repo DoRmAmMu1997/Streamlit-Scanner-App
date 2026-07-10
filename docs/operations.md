@@ -347,6 +347,145 @@ The schema is managed by Alembic; both the app and the daily job run
 `alembic upgrade head` equivalent automatically at startup. To pre-provision
 or debug: `python -m alembic upgrade head`.
 
+### Worked example: self-hosted Postgres, end to end
+
+The steps below take a machine with nothing on it to a scanner reading and
+writing shared Postgres history. Substitute a managed instance (Render, RDS,
+Cloud SQL) from step 3 onward — the app-side steps are identical.
+
+1. **Provision Postgres** (any 15+ works; the container route is the fastest
+   self-hosted path):
+
+   ```bash
+   docker run -d --name scanner-postgres \
+     -e POSTGRES_USER=scanner \
+     -e POSTGRES_PASSWORD='<a real password>' \
+     -e POSTGRES_DB=scanner \
+     -p 5432:5432 \
+     -v scanner-pgdata:/var/lib/postgresql/data \
+     postgres:16
+   ```
+
+   For a package-managed server instead, create the role and database:
+
+   ```sql
+   CREATE ROLE scanner WITH LOGIN PASSWORD '<a real password>';
+   CREATE DATABASE scanner OWNER scanner;
+   ```
+
+   The app needs no superuser rights: Alembic creates every table as the
+   `scanner` role, so database ownership is the only privilege required.
+
+2. **Point the app at it.** In the environment (or `Dependencies/.env`):
+
+   ```env
+   DATABASE_URL=postgresql+psycopg://scanner:<password>@db-host:5432/scanner
+   ```
+
+   Production deployments (`APP_ENV=production`) must also set `DATA_DIR`
+   explicitly — startup validation refuses implicit local fallbacks.
+
+3. **Apply the schema.** Nothing to script: the Streamlit app and the headless
+   daily job both run the migration pass automatically at startup. To
+   pre-provision from a workstation instead (e.g. before first deploy):
+
+   ```bash
+   DATABASE_URL=postgresql+psycopg://scanner:<password>@db-host:5432/scanner \
+     python -m alembic upgrade head
+   ```
+
+4. **Verify.** `psql` should show the Alembic version and the scanner tables:
+
+   ```bash
+   psql "postgresql://scanner:<password>@db-host:5432/scanner" \
+     -c "SELECT version_num FROM alembic_version;" -c "\dt"
+   ```
+
+   Then run one scan and confirm it lands: the **Scan history** view lists the
+   run, and **Admin health** shows the database as reachable. From the shell:
+   `SELECT id, screener_key, status FROM scan_runs ORDER BY id DESC LIMIT 3;`.
+
+### Moving existing SQLite history into Postgres
+
+Switching `DATABASE_URL` starts you with an **empty** Postgres history; the
+old runs stay in `data/scanner.db` unless you copy them. The recipe below
+moves everything (runs, results, audit rows, IPO evidence) in dependency
+order.
+
+1. **Stop every writer** — the Streamlit app and any scheduled jobs. A copy
+   taken while a scan is writing is torn.
+2. **Build the empty schema on Postgres first** (step 3 above). The copy
+   script inserts into tables Alembic created, so both sides agree on shape,
+   and `alembic_version` is already correct on the target — do not copy that
+   table.
+3. **Copy rows in dependency order.** One-off operator script, run from the
+   repo root (it reuses the ORM metadata, so new tables are picked up
+   automatically):
+
+   ```python
+   from sqlalchemy import create_engine, select, text
+
+   from backend.storage.models import Base
+
+   source = create_engine("sqlite:///data/scanner.db")
+   target = create_engine(
+       "postgresql+psycopg://scanner:<password>@db-host:5432/scanner"
+   )
+
+   with source.connect() as read, target.begin() as write:
+       # SQLite stored these timestamps as naive UTC. Fix the session
+       # timezone so Postgres does not reinterpret them as local time.
+       write.execute(text("SET TIME ZONE 'UTC'"))
+       # sorted_tables yields parents before children, so foreign keys
+       # (scan_results -> scan_runs, IPO children -> ipo_issues) are safe.
+       for table in Base.metadata.sorted_tables:
+           rows = [dict(row._mapping) for row in read.execute(select(table))]
+           if rows:
+               write.execute(table.insert(), rows)
+
+   with target.begin() as write:
+       # The rows arrived with their original primary keys, so each serial
+       # sequence still says "next id = 1". Bump every sequence past the
+       # copied maximum or the first new scan fails with a duplicate key.
+       for table in Base.metadata.sorted_tables:
+           if "id" not in table.columns:
+               continue
+           sequence = write.execute(
+               text(f"SELECT pg_get_serial_sequence('{table.name}', 'id')")
+           ).scalar()
+           if sequence:
+               write.execute(
+                   text(
+                       f"SELECT setval('{sequence}', "
+                       f"(SELECT COALESCE(MAX(id), 1) FROM {table.name}))"
+                   )
+               )
+   ```
+
+4. **Verify counts, then flip.** Compare `SELECT COUNT(*)` for `scan_runs`,
+   `scan_results`, and `audit_log` on both sides; open the Scan history page
+   against Postgres and spot-check an old run's details. Only then make the
+   new `DATABASE_URL` permanent. Keep `data/scanner.db` (and its `-wal`/`-shm`
+   siblings) as the rollback copy until the first few Postgres-backed scans
+   look healthy.
+
+### Connection-pool behavior and guidance
+
+- The engine enables **`pool_pre_ping` automatically for any non-SQLite URL**
+  (DEPLOY-004): managed Postgres proxies, PgBouncer, and cloud NAT silently
+  drop idle TCP connections, and without the ping the first scan after a
+  quiet stretch inherits a dead pooled connection and fails with "server
+  closed the connection unexpectedly". The ping is one lightweight round-trip
+  per checkout; SQLite behavior is unchanged.
+- SQLAlchemy's defaults (pool of 5, overflow 10) are ample here: the UI holds
+  sessions only for short transactions, and the daily job is a single writer.
+  Size the *database's* `max_connections` for the number of app instances,
+  not the other way around.
+- If you front Postgres with **PgBouncer**, use *session* pooling. The app's
+  short `session_scope()` transactions are compatible with transaction
+  pooling too, but session pooling avoids surprises with any
+  connection-scoped state and is the conservative default.
+
 ---
 
 ## Docker / container deployment
