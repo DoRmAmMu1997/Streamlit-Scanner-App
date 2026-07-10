@@ -34,6 +34,7 @@ from backend.observability import (
     EVENT_EXTERNAL_API_FAILED,
     log_event,
 )
+from backend.parquet_stats import timestamp_bounds
 from backend.security import redact_text
 
 # Module-level logger. Streamlit captures stderr, so logger output appears in the
@@ -366,8 +367,18 @@ class DailyDataLoader:
             # Cache hit only when the file covers the entire requested range.
             # A partial parquet is common after interrupted prefetches; slicing
             # it would silently run long-lookback screeners on too little data.
-            cached = pd.read_parquet(path)
-            first_date, last_date = _date_bounds(cached)
+            #
+            # PERF-002: ask the Parquet footer for the bounds first. When the
+            # file does NOT cover the range, this skips decompressing a
+            # multi-year frame that would be thrown away for a Dhan refetch.
+            # A footer that cannot answer (missing statistics, odd writer)
+            # falls back to the original full read, so no file that used to
+            # count as a cache hit can become a miss.
+            cached: pd.DataFrame | None = None
+            first_date, last_date = timestamp_bounds(path)
+            if first_date is None or last_date is None:
+                cached = pd.read_parquet(path)
+                first_date, last_date = _date_bounds(cached)
             requested_start = _coerce_date(start_date)
             requested_end = _coerce_date(end_date)
             if (
@@ -376,6 +387,9 @@ class DailyDataLoader:
                 and first_date <= requested_start
                 and last_date >= requested_end
             ):
+                if cached is None:
+                    # The covered path still needs the actual candles.
+                    cached = pd.read_parquet(path)
                 return self._slice_to_range(cached, start_date, end_date), True
 
         # Cache miss (or force_refresh): fetch the requested window from Dhan
@@ -993,12 +1007,45 @@ class DailyDataLoader:
                 submit_next()
                 yield outcome
 
+    def _covers_full_window(self, row: dict, years_back: int, today: date | None) -> bool:
+        """Answer "is this symbol's cache already fresh?" from footer stats only.
+
+        PERF-002: the prefetch discards the candle frame — it only needs the
+        status — yet ``ensure_daily_history``'s "fresh" verdict used to load
+        the whole multi-year parquet just to learn its first/last dates. The
+        Parquet footer answers the same two dates in a few kilobytes. This
+        mirrors ``ensure_daily_history``'s exact fresh condition
+        (``first_date <= start and last_date >= today``); any file the footer
+        cannot vouch for returns False so the unchanged slow path decides.
+        """
+        symbol = str(row.get("symbol", "")).strip().upper()
+        security_id = str(row.get("security_id", "")).strip()
+        if not symbol or not security_id:
+            # Let ensure_daily_history raise its documented ValueError.
+            return False
+        resolved_today = today or date.today()
+        start = history_start_date(int(years_back), resolved_today)
+        path = self.cache_path(symbol, security_id)
+        if not path.exists():
+            return False
+        first_date, last_date = timestamp_bounds(path)
+        return (
+            first_date is not None
+            and last_date is not None
+            and first_date <= start
+            and last_date >= resolved_today
+        )
+
     def _ensure_one_row(
         self, row: dict, years_back: int, today: date | None
     ) -> PrefetchOutcome:
         """Run ``ensure_daily_history`` for one row, capturing a safe outcome."""
         symbol = str(row.get("symbol", "?")).strip() or "?"
         try:
+            # PERF-002 fast path: a cache the footer proves fresh skips the
+            # full-frame read entirely. Same status the slow path would return.
+            if self._covers_full_window(row, years_back, today):
+                return PrefetchOutcome(symbol=symbol, status="fresh")
             _, status = self.ensure_daily_history(row, years_back=years_back, today=today)
             return PrefetchOutcome(symbol=symbol, status=status)
         except Exception as exc:
