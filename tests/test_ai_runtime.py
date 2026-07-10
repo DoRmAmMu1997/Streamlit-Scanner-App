@@ -1,4 +1,4 @@
-"""Tests for the shared Claude-agent sync bridge (REFACTOR-003).
+"""Tests for the shared Claude-agent runtime helpers (REFACTOR-003, AI-006).
 
 ``backend.ai_runtime.run_agent_coroutine`` is the one place that bridges sync
 (Streamlit) code into the Agent SDK's async world. These tests lock the two
@@ -10,6 +10,10 @@ behaviors the three agents depend on and that were historically bug-prone:
 2. The coroutine runs on a fresh event loop that supports subprocess transports
    on Windows (the Agent SDK spawns the Claude CLI as a subprocess, which
    Tornado's selector loop cannot do).
+
+``extract_json_object`` (AI-006) is the shared tolerant verdict-JSON extractor
+all three agents import under their old private ``_extract_json_object`` name;
+its tests below lock the tolerance behaviors the agents rely on.
 """
 
 from __future__ import annotations
@@ -20,7 +24,7 @@ import sys
 
 import pytest
 
-from backend.ai_runtime import run_agent_coroutine
+from backend.ai_runtime import extract_json_object, run_agent_coroutine
 
 _PROBE: contextvars.ContextVar[str] = contextvars.ContextVar("ai_runtime_probe", default="unset")
 
@@ -75,3 +79,46 @@ def test_sequential_calls_each_get_a_working_fresh_loop():
         # Windows; Tornado installs the selector policy, so the bridge must
         # build the right loop explicitly rather than inherit the policy.
         assert first == "ProactorEventLoop"
+
+
+# ---------------------------------------------------------------------------
+# extract_json_object (AI-006) — the shared tolerant verdict extractor
+# ---------------------------------------------------------------------------
+
+
+def test_extracts_bare_json_object():
+    assert extract_json_object('{"approved": true, "confidence": 8}') == {
+        "approved": True,
+        "confidence": 8,
+    }
+
+
+def test_extracts_from_json_fence():
+    text = 'Here is my verdict:\n```json\n{"rating": "BUY"}\n```\nDone.'
+    assert extract_json_object(text) == {"rating": "BUY"}
+
+
+def test_extracts_from_fence_without_language_tag():
+    assert extract_json_object('```\n{"rating": "SELL"}\n```') == {"rating": "SELL"}
+
+
+def test_extracts_outermost_span_despite_surrounding_prose():
+    text = 'Sure! The verdict is {"rating": "HOLD", "nested": {"depth": 2}} — hope that helps.'
+    assert extract_json_object(text) == {"rating": "HOLD", "nested": {"depth": 2}}
+
+
+def test_returns_none_for_empty_text():
+    assert extract_json_object("") is None
+
+
+def test_returns_none_when_no_braces_present():
+    assert extract_json_object("The model rambled and produced no JSON at all.") is None
+
+
+def test_returns_none_when_braces_do_not_parse():
+    assert extract_json_object("{not: valid json}") is None
+
+
+def test_returns_none_for_reversed_braces():
+    # rfind("}") lands BEFORE find("{"): the span is invalid, not an exception.
+    assert extract_json_object("} stray close then open {") is None

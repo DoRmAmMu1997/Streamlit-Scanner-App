@@ -40,7 +40,6 @@ import asyncio
 import contextvars
 import json
 import logging
-import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -48,6 +47,10 @@ from typing import Any, Literal
 
 from pydantic import Field, ValidationError, ValidationInfo, field_validator
 
+# The aliased import keeps this module's call sites unchanged: the shared
+# extractor pulls the AgentVerdict JSON out of the model's final message
+# (AI-006 — one tolerant implementation for all three agents).
+from backend.ai_runtime import extract_json_object as _extract_json_object
 from backend.ai_runtime import run_agent_coroutine
 from backend.ai_validation import StrictAIModel, parse_with_retry
 from backend.config import get_ai_max_attempts
@@ -666,34 +669,6 @@ def _data_date_from_payload(data: dict[str, Any]) -> str:
         except ValueError:
             pass
     return datetime.now(UTC).date().isoformat()
-
-
-def _extract_json_object(text: str) -> dict[str, Any] | None:
-    """Pull the AgentVerdict JSON object out of the model's final message.
-
-    The model is instructed to emit ONLY a JSON object, but real models
-    occasionally wrap it in a ```json fence or add a stray sentence. This
-    helper is tolerant: it first looks for a fenced block, then falls back to
-    the outermost {...} span. Returns None when nothing parses.
-    """
-    if not text:
-        return None
-
-    fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
-    if fenced:
-        candidate = fenced.group(1)
-    else:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start == -1 or end == -1 or end < start:
-            return None
-        candidate = text[start : end + 1]
-
-    try:
-        parsed = json.loads(candidate)
-    except json.JSONDecodeError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
 
 
 def _build_user_prompt(symbol: str, mode: str, model: str) -> str:

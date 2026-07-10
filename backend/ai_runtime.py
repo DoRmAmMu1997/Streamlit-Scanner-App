@@ -1,11 +1,13 @@
-"""Shared sync→async bridge for the Claude-agent subsystems (REFACTOR-003).
+"""Shared runtime helpers for the Claude-agent subsystems (REFACTOR-003, AI-006).
 
 The fundamentals, technical, and 67-Ka-Funda agents each need to run one Agent
-SDK coroutine to completion from synchronous (Streamlit) code. All three used
-to carry a private copy of the same bridge; the copies drifted once (the
-technical agent's lost the context fix below), so the logic now lives here and
-the agents delegate. Design rationale and the options weighed are in the ADR:
-``docs/architecture/refactor-003-ai-runtime.md``.
+SDK coroutine to completion from synchronous (Streamlit) code, and to pull the
+verdict JSON object out of the model's final message. All three used to carry
+private copies of both helpers; the bridge copies drifted once (the technical
+agent's lost the context fix below), so the logic now lives here and the
+agents delegate. Design rationale and the options weighed are in the ADR:
+``docs/architecture/refactor-003-ai-runtime.md`` (the extractor was folded in
+by its AI-006 amendment).
 
 Two subtleties are handled, both easy to get wrong:
 
@@ -35,11 +37,49 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import contextvars
+import json
+import re
 import sys
 from collections.abc import Awaitable
-from typing import TypeVar
+from typing import Any, TypeVar
 
 T = TypeVar("T")
+
+
+def extract_json_object(text: str) -> dict[str, Any] | None:
+    """Pull a single JSON object out of an agent's final message text.
+
+    Each agent instructs the model to emit ONLY a JSON object (AgentVerdict,
+    TechnicalVerdict, or the 67-Ka-Funda verdict), but real models
+    occasionally wrap it in a ```json fence or add a stray sentence. This
+    helper is tolerant: it first looks for a fenced block, then falls back to
+    the outermost {...} span. Returns None when nothing parses.
+
+    Beginner note:
+    All three agents used to carry a logic-identical private copy of this
+    function — the same drift-prone shape as the sync bridge below, which DID
+    drift once. AI-006 moved the single implementation here; each agent
+    imports it under its old private name (``_extract_json_object``) so call
+    sites and per-agent parse-fallback behavior stay exactly as they were.
+    """
+    if not text:
+        return None
+
+    fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
+    if fenced:
+        candidate = fenced.group(1)
+    else:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end < start:
+            return None
+        candidate = text[start : end + 1]
+
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def run_agent_coroutine(coro: Awaitable[T]) -> T:
