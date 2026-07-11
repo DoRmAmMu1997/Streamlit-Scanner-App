@@ -124,6 +124,32 @@ def test_make_engine_applies_sqlite_concurrency_pragmas(tmp_path: Path):
         engine.dispose()
 
 
+def test_make_engine_enables_pool_pre_ping_only_for_server_databases(tmp_path: Path):
+    """DEPLOY-004: dead pooled Postgres connections must be replaced on checkout.
+
+    Managed Postgres proxies and PgBouncer idle-kill TCP connections, so the
+    first scan after a quiet stretch used to inherit a dead pooled connection.
+    ``pool_pre_ping`` probes on checkout and reconnects transparently. SQLite
+    is a local file with no server to lose, so its engine must stay exactly as
+    before (no pre-ping). Building the Postgres engine is safe without a
+    server: SQLAlchemy connects lazily, and the pinned psycopg driver only has
+    to import.
+    """
+    from backend.storage.database import _make_engine
+
+    sqlite_engine = _make_engine(f"sqlite:///{(tmp_path / 'pre-ping.db').as_posix()}")
+    try:
+        assert sqlite_engine.pool._pre_ping is False
+    finally:
+        sqlite_engine.dispose()
+
+    postgres_engine = _make_engine("postgresql+psycopg://scanner:secret@localhost:5432/scanner")
+    try:
+        assert postgres_engine.pool._pre_ping is True
+    finally:
+        postgres_engine.dispose()
+
+
 def test_missing_expected_tables_empty_when_schema_complete(tmp_path: Path):
     """A fully built database reports no missing tables (the healthy path)."""
     from backend.storage.database import _make_engine, _missing_expected_tables

@@ -125,7 +125,9 @@ def test_readme_and_operations_document_docker_runtime() -> None:
     assert "AUTH_REQUIRED=false" in readme
     assert "APP_ENV=production" in readme
     assert "DATA_DIR=/data" in readme
-    assert "DATABASE_URL=postgresql+psycopg://" in readme
+    assert "--env-file Dependencies/.env" in readme
+    assert "-e DATABASE_URL=" not in readme
+    assert "-e DHAN_ACCESS_TOKEN=" not in readme
     assert ".streamlit/secrets.toml" in readme
 
     assert "Docker / container deployment" in operations

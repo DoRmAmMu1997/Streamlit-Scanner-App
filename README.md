@@ -470,19 +470,19 @@ local prefetch/relaunch wrapper at container boot.
 Production containers default to fail-closed settings (`APP_ENV=production`,
 `AUTH_REQUIRED=true`, `DATA_DIR=/data`). Supply the same runtime environment the
 non-container app expects, mount a persistent `/data` volume, and provide
-Streamlit's Google OIDC secrets file. The inline `-e` values below are
-placeholders for a manual run; prefer your host's managed secret/environment
-injection for real deployments:
+Streamlit's Google OIDC secrets file. Put `DATABASE_URL`, `DHAN_CLIENT_ID`, and
+`DHAN_ACCESS_TOKEN` in the already-ignored `Dependencies/.env`, run
+`chmod 600 Dependencies/.env`, and load it with `--env-file` so credentials do
+not enter shell history or process arguments. Prefer your host's managed secret
+injection for long-lived deployments:
 
 ```bash
 docker run -d --name streamlit-scanner-app \
   -p 8501:8501 \
+  --env-file Dependencies/.env \
   -e APP_ENV=production \
   -e AUTH_REQUIRED=true \
   -e DATA_DIR=/data \
-  -e DATABASE_URL=postgresql+psycopg://scanner:<password>@db-host:5432/scanner \
-  -e DHAN_CLIENT_ID=your-dhan-client-id \
-  -e DHAN_ACCESS_TOKEN=your-dhan-access-token \
   -e ALLOWED_EMAILS=you@gmail.com \
   -e ADMIN_EMAILS=you@gmail.com \
   -e LOG_FORMAT=json \
