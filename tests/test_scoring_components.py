@@ -9,6 +9,7 @@ the model layer can drop that component and renormalize the remaining weights.
 from __future__ import annotations
 
 import math
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -85,7 +86,11 @@ def test_risk_score_absolute_uses_trailing_log_return_volatility():
             "close": [100, 102, 101, 103],
         }
     )
-    returns = np.log(pd.Series([100, 102, 101, 103]) / pd.Series([100, 102, 101, 103]).shift(1)).dropna()
+    # Same narrowing as the production component: np.log(Series) is a Series
+    # at runtime even though numpy's stubs say ndarray (QUAL-007).
+    returns = cast(
+        pd.Series, np.log(pd.Series([100, 102, 101, 103]) / pd.Series([100, 102, 101, 103]).shift(1))
+    ).dropna()
     sigma = float(returns.std(ddof=0))
     expected = 100.0 * max(0.0, min(1.0, 1.0 - sigma / 0.05))
 

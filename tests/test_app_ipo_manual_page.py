@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime as dt
 from decimal import Decimal
 
+import pandas as pd
 import pytest
 
 from backend.auth.roles import Role
@@ -252,7 +253,7 @@ class _PeerEditorFakeStreamlit:
 
     def __init__(self) -> None:
         """Prepare the capture slot and the column-config factory."""
-        self.captured_frame: object | None = None
+        self.captured_frame: pd.DataFrame | None = None
         self.column_config = self._ColumnConfig()
 
     def markdown(self, *_args, **_kwargs) -> None:

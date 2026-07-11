@@ -10,6 +10,7 @@ from __future__ import annotations
 import inspect
 import os
 import time
+from collections.abc import Callable
 from datetime import date as real_date
 from pathlib import Path
 from types import SimpleNamespace
@@ -80,7 +81,7 @@ class _FakeDataLoader:
 
 def test_capability_flags_are_required_at_every_render_boundary():
     """A forgotten call-site argument must fail closed instead of enabling actions."""
-    boundaries = [
+    boundaries: list[tuple[Callable[..., object], str]] = [
         (app._render_sidebar, "can_run"),
         (app._render_scan_output, "can_export"),
         (app._render_history_page, "can_export"),
@@ -114,10 +115,14 @@ def test_shared_cached_chart_renderer_uses_mapped_security_id(monkeypatch):
     payload = SimpleNamespace(html="<div>chart</div>", height=640)
     monkeypatch.setattr(chart_cache, "st", fake_st)
     monkeypatch.setattr(chart_cache, "components", fake_components, raising=False)
+    def _record_and_return_payload(*args: object) -> SimpleNamespace:
+        calls.append(args)
+        return payload
+
     monkeypatch.setattr(
         chart_cache,
         "_get_or_build_chart_payload",
-        lambda *args: calls.append(args) or payload,
+        _record_and_return_payload,
     )
     selected = SimpleNamespace(key="demo", universe="nifty_500")
     universe = pd.DataFrame([{"symbol": "TCS", "security_id": "11536"}])
@@ -316,10 +321,12 @@ def test_prefetch_bootstraps_schema_before_data_refresh_audit(monkeypatch):
         calls.append("audit")
         raise StopAfterAudit()
 
+    def _record_schema_ready() -> bool:
+        calls.append("schema")
+        return True
+
     monkeypatch.setattr(app, "ensure_project_dirs", lambda: calls.append("dirs"))
-    monkeypatch.setattr(
-        app, "ensure_database_schema", lambda: calls.append("schema") or True
-    )
+    monkeypatch.setattr(app, "ensure_database_schema", _record_schema_ready)
     monkeypatch.setattr(app, "record_audit_event", record_audit)
 
     with pytest.raises(StopAfterAudit):

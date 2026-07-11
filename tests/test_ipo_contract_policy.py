@@ -136,10 +136,14 @@ def test_ipo_networking_is_isolated_to_sources_and_all_ipo_code_is_ui_free() -> 
     for path in files:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
+            # Skipping non-import nodes up front also narrows the type so
+            # ``node.lineno`` below is known to exist (QUAL-007).
+            if not isinstance(node, (ast.Import, ast.ImportFrom)):
+                continue
             modules: list[str] = []
             if isinstance(node, ast.Import):
                 modules.extend(alias.name for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module:
+            elif node.module:
                 modules.append(node.module)
             for module in modules:
                 is_network = any(

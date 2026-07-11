@@ -458,10 +458,14 @@ def test_viewer_history_details_render_selected_symbol_from_cached_candles(monke
         lambda *, client: loader if client is None else None,
         raising=False,
     )
+    def _record_chart_render(**kwargs: object) -> object:
+        rendered.append(kwargs)
+        return kwargs["chart_symbol"]
+
     monkeypatch.setattr(
         history_page,
         "_render_cached_symbol_chart",
-        lambda **kwargs: rendered.append(kwargs) or kwargs["chart_symbol"],
+        _record_chart_render,
         raising=False,
     )
 

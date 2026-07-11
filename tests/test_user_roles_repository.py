@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import IntegrityError
@@ -81,7 +83,9 @@ def test_count_user_role_admins(db_session: Session):
 
 def test_admin_lock_query_uses_for_update():
     """Postgres role mutations must serialize against the same admin rows."""
-    statements: list[object] = []
+    # Any (not object) so the captured SQLAlchemy statement's .compile() stays
+    # callable in the assertion below (QUAL-007).
+    statements: list[Any] = []
 
     class RecordingSession:
         def scalars(self, statement):

@@ -119,7 +119,8 @@ def test_make_engine_applies_sqlite_concurrency_pragmas(tmp_path: Path):
         with engine.connect() as connection:
             assert connection.exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
             assert connection.exec_driver_sql("PRAGMA busy_timeout").scalar() == 5000
-            assert connection.exec_driver_sql("PRAGMA journal_mode").scalar().lower() == "wal"
+            # str() narrows scalar()'s Optional return; PRAGMA always answers.
+            assert str(connection.exec_driver_sql("PRAGMA journal_mode").scalar()).lower() == "wal"
     finally:
         engine.dispose()
 

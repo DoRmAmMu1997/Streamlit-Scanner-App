@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import importlib
 import io
+from typing import Any
 
 from sqlalchemy import select
 
@@ -113,7 +114,9 @@ def test_failed_category_is_audited_redacted_and_does_not_block_others(
     job = importlib.import_module("backend.jobs.scan_ipo_filings")
     output = io.StringIO()
     persisted: list[SebiFilingCategory] = []
-    audits: list[dict[str, object]] = []
+    # dict[str, Any] so the nested metadata payload stays inspectable in the
+    # assertions below without per-field casts (QUAL-007).
+    audits: list[dict[str, Any]] = []
 
     def fetcher(category, _from_date, _to_date):
         """Fail only RHP with secret-shaped hostile text to test isolation."""

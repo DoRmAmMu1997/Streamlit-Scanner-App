@@ -54,8 +54,11 @@ def test_record_audit_event_redacts_metadata_before_storage(file_session_factory
 
     with file_session_factory() as session:
         rows = get_recent_audit_logs(session)
-        assert rows[0].metadata_json["access_token"] == MASK
-        assert rows[0].metadata_json["setting"] == "LOG_LEVEL"
+        # The column is Optional in the ORM; this row just wrote metadata.
+        metadata = rows[0].metadata_json
+        assert metadata is not None
+        assert metadata["access_token"] == MASK
+        assert metadata["setting"] == "LOG_LEVEL"
 
 
 def test_record_audit_event_records_system_event_without_user(file_session_factory):

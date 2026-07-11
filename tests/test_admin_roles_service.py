@@ -22,9 +22,11 @@ def _audit_events(file_session_factory) -> list[str]:
 def _role_changed_rows(file_session_factory) -> list[dict]:
     with file_session_factory() as session:
         return [
+            # The None filter narrows the Optional ORM column; role_changed
+            # rows always carry metadata, so it filters nothing at runtime.
             row.metadata_json
             for row in get_recent_audit_logs(session)
-            if row.event == "role_changed"
+            if row.event == "role_changed" and row.metadata_json is not None
         ]
 
 
