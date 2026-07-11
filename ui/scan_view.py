@@ -200,22 +200,37 @@ def _render_results_with_chart(
 
     selectbox_key = f"chart_symbol_{selected.key}"
     prev_row_key = f"chart_prev_table_row_{selected.key}"
+    prev_row_symbol_key = f"chart_prev_table_symbol_{selected.key}"
 
-    # A table click counts only when the selected row CHANGED since the last
-    # rerun. Otherwise a stale-but-persistent table selection would override
-    # every fresh dropdown change.
-    table_changed = current_row is not None and current_row != st.session_state.get(prev_row_key)
+    # A row number alone is not a stable identity: a fresh scan can reorder the
+    # shortlist while Streamlit keeps (for example) row 2 selected. Capture the
+    # symbol occupying that row as well, so a reordered table moves the dropdown
+    # and chart to the company the user can currently see highlighted.
+    current_row_symbol = (
+        symbols[current_row]
+        if current_row is not None and 0 <= current_row < len(symbols)
+        else None
+    )
+
+    # A table click counts only when its row OR its symbol changed since the last
+    # rerun. Otherwise a stale-but-persistent selection would override every
+    # fresh dropdown change.
+    table_changed = current_row_symbol is not None and (
+        current_row != st.session_state.get(prev_row_key)
+        or current_row_symbol != st.session_state.get(prev_row_symbol_key)
+    )
     st.session_state[prev_row_key] = current_row
+    st.session_state[prev_row_symbol_key] = current_row_symbol
 
     # Keep the selectbox's stored value valid (a screener re-run can change the
     # `symbols` list out from under a previously stored pick).
     if selectbox_key not in st.session_state or st.session_state[selectbox_key] not in symbols:
         st.session_state[selectbox_key] = symbols[0]
     # A fresh table click wins — push it into the selectbox state pre-widget.
-    # (table_changed already implies current_row is not None; the explicit check
-    # repeats it so the type narrows here.)
-    if table_changed and current_row is not None and 0 <= current_row < len(symbols):
-        st.session_state[selectbox_key] = symbols[current_row]
+    # ``table_changed`` implies the symbol is present, but the explicit check
+    # lets the type checker narrow ``str | None`` to ``str`` here.
+    if table_changed and current_row_symbol is not None:
+        st.session_state[selectbox_key] = current_row_symbol
 
     chart_symbol = st.selectbox(
         "Chart symbol",
