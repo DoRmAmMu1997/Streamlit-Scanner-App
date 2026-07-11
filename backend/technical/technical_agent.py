@@ -35,7 +35,6 @@ import dataclasses
 import hashlib
 import json
 import logging
-import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -49,6 +48,11 @@ from backend.ai_cache_integrity import (
     sign_cache_envelope,
     verify_cache_envelope,
 )
+
+# The aliased import keeps this module's call sites unchanged: the shared
+# extractor pulls the TechnicalVerdict JSON out of the model's final message
+# (AI-006 — one tolerant implementation for all three agents).
+from backend.ai_runtime import extract_json_object as _extract_json_object
 from backend.ai_runtime import run_agent_coroutine
 from backend.ai_validation import StrictAIModel, parse_with_retry
 from backend.config import get_ai_max_attempts
@@ -331,39 +335,6 @@ class TechnicalEvaluationResult:
 # this module (and its tests) are unchanged.
 SYSTEM_PROMPT = build_system_prompt()
 _FINAL_OUTPUT_INSTRUCTION = FINAL_OUTPUT_INSTRUCTION
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _extract_json_object(text: str) -> dict[str, Any] | None:
-    """Pull the TechnicalVerdict JSON object out of the model's final message.
-
-    Tolerant of a stray ```json fence or a leading sentence: it looks for a
-    fenced block first, then falls back to the outermost {...} span. Returns
-    None when nothing parses. (Mirrors the fundamentals agent's extractor; kept
-    local so the two agents stay independent.)
-    """
-    if not text:
-        return None
-
-    fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.DOTALL)
-    if fenced:
-        candidate = fenced.group(1)
-    else:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start == -1 or end == -1 or end < start:
-            return None
-        candidate = text[start : end + 1]
-
-    try:
-        parsed = json.loads(candidate)
-    except json.JSONDecodeError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
 
 
 # ---------------------------------------------------------------------------
