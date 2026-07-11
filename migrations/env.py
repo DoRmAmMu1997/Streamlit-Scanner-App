@@ -54,7 +54,13 @@ def run_migrations_online() -> None:
     command time so tests can point migrations at a temporary SQLite file and
     deployments can point them at Postgres.
     """
-    config.set_main_option("sqlalchemy.url", get_database_url())
+    # Alembic stores option values through ConfigParser, where ``%`` starts an
+    # interpolation expression. Database passwords commonly contain URL escapes
+    # such as ``%40`` for ``@``; doubling the percent sign protects that literal
+    # value inside ConfigParser. Reading the option gives SQLAlchemy the original
+    # URL again, while malformed interpolation can no longer echo the full secret
+    # URL in an early traceback.
+    config.set_main_option("sqlalchemy.url", get_database_url().replace("%", "%%"))
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",

@@ -336,7 +336,7 @@ Move to Postgres when the daily job and the UI run on different machines, or
 when more than one person reads scan history:
 
 ```env
-DATABASE_URL=postgresql+psycopg://scanner:<password>@db-host:5432/scanner
+DATABASE_URL=postgresql+psycopg://scanner:<percent-encoded-password>@db-host:5432/scanner
 ```
 
 The normal pinned setup installs `psycopg[binary]`, which supplies the psycopg 3
@@ -354,32 +354,72 @@ writing shared Postgres history. Substitute a managed instance (Render, RDS,
 Cloud SQL) from step 3 onward — the app-side steps are identical.
 
 1. **Provision Postgres** (any 15+ works; the container route is the fastest
-   self-hosted path):
+   self-hosted path). Create the container environment file outside the
+   repository, restrict it to your account, and edit it with your normal
+   secret-aware editor:
+
+   ```bash
+   touch postgres.env
+   chmod 600 postgres.env
+   ${EDITOR:-vi} postgres.env
+   ```
+
+   Put the values below in that protected file. Generate a real strong
+   password; do not paste it into a command line.
+
+   ```env
+   POSTGRES_USER=scanner
+   POSTGRES_PASSWORD=<generate and paste a strong password here>
+   POSTGRES_DB=scanner
+   ```
+
+   Docker reads the values from the file, so the password does not enter shell
+   history or the process argument list:
 
    ```bash
    docker run -d --name scanner-postgres \
-     -e POSTGRES_USER=scanner \
-     -e POSTGRES_PASSWORD='<a real password>' \
-     -e POSTGRES_DB=scanner \
+     --env-file postgres.env \
      -p 5432:5432 \
      -v scanner-pgdata:/var/lib/postgresql/data \
      postgres:16
    ```
 
-   For a package-managed server instead, create the role and database:
+   Never commit `postgres.env`; use the host's secret manager when one is
+   available. For a package-managed server, create the role/database as an
+   administrator and use psql's hidden password prompt instead of embedding a
+   password in SQL history:
 
    ```sql
-   CREATE ROLE scanner WITH LOGIN PASSWORD '<a real password>';
+   CREATE ROLE scanner WITH LOGIN;
    CREATE DATABASE scanner OWNER scanner;
+   \password scanner
    ```
 
    The app needs no superuser rights: Alembic creates every table as the
    `scanner` role, so database ownership is the only privilege required.
 
-2. **Point the app at it.** In the environment (or `Dependencies/.env`):
+2. **Point the app at it.** Keep the URL in the already-ignored
+   `Dependencies/.env`, protect that file before editing it, and use a
+   deployment secret manager in production:
+
+   ```bash
+   touch Dependencies/.env
+   chmod 600 Dependencies/.env
+   ${EDITOR:-vi} Dependencies/.env
+   ```
 
    ```env
-   DATABASE_URL=postgresql+psycopg://scanner:<password>@db-host:5432/scanner
+   DATABASE_URL=postgresql+psycopg://scanner:<percent-encoded-password>@db-host:5432/scanner
+   ```
+
+   A URL password is not plain text with delimiters: percent-encode reserved
+   characters such as `@`, `:`, `/`, `?`, `#`, and `%` (`@` becomes `%40`).
+   This prompt reads the password without echoing it or placing it in command
+   history/process arguments; paste the encoded result into the protected env
+   file, not into a shell command:
+
+   ```bash
+   python -c "from getpass import getpass; from urllib.parse import quote; print(quote(getpass('Database password: '), safe=''))"
    ```
 
    Production deployments (`APP_ENV=production`) must also set `DATA_DIR`
@@ -390,16 +430,21 @@ Cloud SQL) from step 3 onward — the app-side steps are identical.
    pre-provision from a workstation instead (e.g. before first deploy):
 
    ```bash
-   DATABASE_URL=postgresql+psycopg://scanner:<password>@db-host:5432/scanner \
-     python -m alembic upgrade head
+   python -m alembic upgrade head
    ```
+
+   The settings loader reads `Dependencies/.env`, so no credential needs to
+   be repeated on the command line.
 
 4. **Verify.** `psql` should show the Alembic version and the scanner tables:
 
    ```bash
-   psql "postgresql://scanner:<password>@db-host:5432/scanner" \
+   psql -h db-host -U scanner -d scanner -W \
      -c "SELECT version_num FROM alembic_version;" -c "\dt"
    ```
+
+   `-W` asks for the password interactively rather than exposing it in process
+   arguments.
 
    Then run one scan and confirm it lands: the **Scan history** view lists the
    run, and **Admin health** shows the database as reachable. From the shell:
@@ -423,14 +468,14 @@ order.
    automatically):
 
    ```python
+   import os
+
    from sqlalchemy import create_engine, select, text
 
    from backend.storage.models import Base
 
    source = create_engine("sqlite:///data/scanner.db")
-   target = create_engine(
-       "postgresql+psycopg://scanner:<password>@db-host:5432/scanner"
-   )
+   target = create_engine(os.environ["DATABASE_URL"])
 
    with source.connect() as read, target.begin() as write:
        # SQLite stored these timestamps as naive UTC. Fix the session
@@ -463,7 +508,7 @@ order.
    ```
 
 4. **Verify counts, then flip.** Compare `SELECT COUNT(*)` for `scan_runs`,
-   `scan_results`, and `audit_log` on both sides; open the Scan history page
+   `scan_results`, and `audit_logs` on both sides; open the Scan history page
    against Postgres and spot-check an old run's details. Only then make the
    new `DATABASE_URL` permanent. Keep `data/scanner.db` (and its `-wal`/`-shm`
    siblings) as the rollback copy until the first few Postgres-backed scans
@@ -590,18 +635,19 @@ docker run --rm \
 ```
 
 For production, keep `/data` on persistent storage and point `DATABASE_URL` at
-Postgres. The inline `-e` values are placeholders for a manual run; prefer the
-host platform's managed secret/environment injection for long-lived deployments:
+Postgres. Put `DATABASE_URL`, `DHAN_CLIENT_ID`, and `DHAN_ACCESS_TOKEN` in the
+already-ignored `Dependencies/.env` file described above, then protect it with
+`chmod 600 Dependencies/.env`. Docker's `--env-file` option keeps those values
+out of shell history and the process arguments. Prefer the host platform's
+managed secret/environment injection for long-lived deployments:
 
 ```bash
 docker run -d --name streamlit-scanner-app \
   -p 8501:8501 \
+  --env-file Dependencies/.env \
   -e APP_ENV=production \
   -e AUTH_REQUIRED=true \
   -e DATA_DIR=/data \
-  -e DATABASE_URL=postgresql+psycopg://scanner:<password>@db-host:5432/scanner \
-  -e DHAN_CLIENT_ID=<client-id> \
-  -e DHAN_ACCESS_TOKEN=<access-token> \
   -e ALLOWED_EMAILS=you@gmail.com \
   -e ADMIN_EMAILS=you@gmail.com \
   -e LOG_FORMAT=json \
@@ -626,12 +672,10 @@ Run the headless daily job with the same image and runtime configuration:
 ```bash
 docker run --rm \
   --entrypoint python \
+  --env-file Dependencies/.env \
   -e APP_ENV=production \
   -e AUTH_REQUIRED=true \
   -e DATA_DIR=/data \
-  -e DATABASE_URL=postgresql+psycopg://scanner:<password>@db-host:5432/scanner \
-  -e DHAN_CLIENT_ID=<client-id> \
-  -e DHAN_ACCESS_TOKEN=<access-token> \
   -v streamlit-scanner-data:/data \
   -v /absolute/path/secrets.toml:/app/.streamlit/secrets.toml:ro \
   streamlit-scanner-app \
