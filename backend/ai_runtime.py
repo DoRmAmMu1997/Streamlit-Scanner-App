@@ -41,9 +41,21 @@ import json
 import re
 import sys
 from collections.abc import Awaitable
-from typing import Any, TypeVar
+from typing import Any, NoReturn, TypeVar
 
 T = TypeVar("T")
+
+
+def _reject_non_json_constant(value: str) -> NoReturn:
+    """Reject Python's optional NaN/Infinity JSON decoder extensions.
+
+    Beginner note:
+    The JSON standard only permits finite numbers, but ``json.loads`` accepts
+    ``NaN`` and infinities unless a ``parse_constant`` callback rejects them.
+    Agent output is persisted and signed as strict JSON, so accepting those
+    values here would merely move the failure to the later cache boundary.
+    """
+    raise ValueError(f"Non-standard JSON numeric constant: {value}")
 
 
 def extract_json_object(text: str) -> dict[str, Any] | None:
@@ -76,8 +88,11 @@ def extract_json_object(text: str) -> dict[str, Any] | None:
         candidate = text[start : end + 1]
 
     try:
-        parsed = json.loads(candidate)
-    except json.JSONDecodeError:
+        parsed = json.loads(candidate, parse_constant=_reject_non_json_constant)
+    except (ValueError, RecursionError):
+        # JSONDecodeError subclasses ValueError.  RecursionError is also a
+        # model-controlled parse failure when the response is deeply nested;
+        # both should enter the agents' normal retry path instead of escaping.
         return None
     return parsed if isinstance(parsed, dict) else None
 

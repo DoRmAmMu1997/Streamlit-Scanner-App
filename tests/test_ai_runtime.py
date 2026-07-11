@@ -119,6 +119,25 @@ def test_returns_none_when_braces_do_not_parse():
     assert extract_json_object("{not: valid json}") is None
 
 
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_returns_none_for_non_finite_json_numbers(constant):
+    """Model-only numeric extensions must not enter strict cache payloads.
+
+    Beginner note:
+    Python's JSON decoder accepts these JavaScript-style constants by default,
+    even though the JSON standard does not.  Returning ``None`` here makes the
+    normal agent retry path handle them like any other malformed response.
+    """
+    assert extract_json_object(f'{{"confidence": {constant}}}') is None
+
+
+def test_returns_none_when_json_nesting_exceeds_decoder_limit():
+    """An excessively nested model response is a parse miss, not an app crash."""
+    deeply_nested = '{"value":' + "[" * 5_000 + "0" + "]" * 5_000 + "}"
+
+    assert extract_json_object(deeply_nested) is None
+
+
 def test_returns_none_for_reversed_braces():
     # rfind("}") lands BEFORE find("{"): the span is invalid, not an exception.
     assert extract_json_object("} stray close then open {") is None
