@@ -295,6 +295,39 @@ def test_fresh_table_click_moves_the_dropdown(fake_st, monkeypatch):
     assert shown == "WIPRO"
     assert fake_st.session_state["chart_symbol_demo"] == "WIPRO"
     assert fake_st.session_state["chart_prev_table_row_demo"] == 2
+    assert fake_st.session_state["chart_prev_table_symbol_demo"] == "WIPRO"
+
+
+def test_reordered_results_keep_table_highlight_dropdown_and_chart_in_sync(
+    fake_st, monkeypatch
+):
+    """A persistent row number must be re-evaluated when its symbol changes.
+
+    Beginner note: Streamlit remembers a selected *row number* across reruns.
+    If a fresh scan sorts the symbols differently, row 2 can now represent a
+    different company. The chart and dropdown must follow the symbol currently
+    highlighted in the table, not the symbol that used to occupy row 2.
+    """
+    rendered: list[str] = []
+    _chart_stub(monkeypatch, rendered)
+    fake_st.table_selection_rows = [2]
+
+    first_results = _results(["INFY", "TCS", "WIPRO"])
+    first_shown = scan_view._render_results_with_chart(
+        _definition(), first_results, _cache(first_results)
+    )
+
+    reordered_results = _results(["WIPRO", "TCS", "INFY"])
+    second_shown = scan_view._render_results_with_chart(
+        _definition(), reordered_results, _cache(reordered_results)
+    )
+
+    assert first_shown == "WIPRO"
+    assert second_shown == "INFY"
+    assert rendered == ["WIPRO", "INFY"]
+    assert fake_st.session_state["chart_symbol_demo"] == "INFY"
+    assert fake_st.session_state["chart_prev_table_row_demo"] == 2
+    assert fake_st.session_state["chart_prev_table_symbol_demo"] == "INFY"
 
 
 def test_stale_table_selection_does_not_override_dropdown(fake_st, monkeypatch):
@@ -303,9 +336,10 @@ def test_stale_table_selection_does_not_override_dropdown(fake_st, monkeypatch):
     rendered: list[str] = []
     _chart_stub(monkeypatch, rendered)
     results = _results(["INFY", "TCS", "WIPRO"])
-    fake_st.session_state["chart_symbol_demo"] = "TCS"     # fresh dropdown pick
+    fake_st.session_state["chart_symbol_demo"] = "TCS"  # fresh dropdown pick
     fake_st.session_state["chart_prev_table_row_demo"] = 2  # same row as last rerun
-    fake_st.table_selection_rows = [2]                      # persistent selection
+    fake_st.session_state["chart_prev_table_symbol_demo"] = "WIPRO"
+    fake_st.table_selection_rows = [2]  # persistent selection
 
     shown = scan_view._render_results_with_chart(_definition(), results, _cache(results))
 

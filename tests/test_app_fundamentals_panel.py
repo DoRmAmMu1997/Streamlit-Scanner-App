@@ -222,6 +222,41 @@ def test_click_runs_agent_in_mode_and_caches_verdict(fake_st, monkeypatch):
     assert ("Criteria passed", "7 / 7") in fake_st.metrics
 
 
+def test_rerun_button_forces_refresh_replaces_cache_and_renders_new_verdict(
+    fake_st, monkeypatch
+):
+    """The secondary button must bypass and replace a session-cached verdict.
+
+    Beginner note: the first programmed response belongs to the disabled
+    primary button and the second belongs to ``Re-run analysis``. This drives
+    the same two-button order Streamlit uses on a real rerun.
+    """
+    monkeypatch.setattr(fundamentals_panel, "_is_eligible_for_fundamentals", lambda s: True)
+    key = "fundamentals_verdict::INFY::test-model::criteria"
+    fake_st.session_state[key] = _verdict().model_dump(mode="json")
+    refreshed = _verdict().model_copy(
+        update={"rating": 9, "summary_comments": "Fresh provider and model verdict."}
+    )
+    calls: list[tuple[str, bool, str]] = []
+
+    class _RefreshingAgent:
+        def check(self, symbol, *, force_refresh, mode):
+            calls.append((symbol, force_refresh, mode))
+            return refreshed
+
+    monkeypatch.setattr(
+        fundamentals_panel, "_get_fundamental_agent", lambda model, fast: _RefreshingAgent()
+    )
+    fake_st.button_responses = [False, True]
+
+    fundamentals_panel._render_fundamentals_panel("INFY")
+
+    assert calls == [("INFY", True, "criteria")]
+    assert fake_st.session_state[key]["rating"] == 9
+    assert ("Fundamental rating", "9/10") in fake_st.metrics
+    assert fake_st.infos == ["Fresh provider and model verdict."]
+
+
 def test_usage_limit_shows_gentle_warning_not_error(fake_st, monkeypatch):
     """Plan-limit exhaustion is an expected state: warning, no error, no cache."""
     monkeypatch.setattr(fundamentals_panel, "_is_eligible_for_fundamentals", lambda s: True)
@@ -249,7 +284,7 @@ def test_agent_failure_shows_error_and_keeps_session_clean(fake_st, monkeypatch)
 
     class _BrokenAgent:
         def check(self, symbol, *, force_refresh, mode):
-            raise RuntimeError("screener.in fetch exploded")
+            raise RuntimeError("screener.in fetch exploded api_key=supersecret123456")
 
     monkeypatch.setattr(
         fundamentals_panel, "_get_fundamental_agent", lambda model, fast: _BrokenAgent()
@@ -259,19 +294,23 @@ def test_agent_failure_shows_error_and_keeps_session_clean(fake_st, monkeypatch)
     fundamentals_panel._render_fundamentals_panel("INFY")
 
     assert fake_st.errors and "Fundamental check failed" in fake_st.errors[0]
+    assert "supersecret123456" not in fake_st.errors[0]
+    assert "***REDACTED***" in fake_st.errors[0]
     assert "fundamentals_verdict::INFY::test-model::criteria" not in fake_st.session_state
 
 
 def test_invalid_cached_verdict_is_cleared_with_error(fake_st, monkeypatch):
-    """A cached dict that no longer validates is dropped, not rendered."""
+    """An invalid cached dict is dropped without echoing its secret-like input."""
     monkeypatch.setattr(fundamentals_panel, "_is_eligible_for_fundamentals", lambda s: True)
     key = "fundamentals_verdict::INFY::test-model::criteria"
-    fake_st.session_state[key] = {"rating": "not-a-verdict"}
+    fake_st.session_state[key] = {"rating": "api_key=supersecret123456"}
 
     fundamentals_panel._render_fundamentals_panel("INFY")
 
     assert key not in fake_st.session_state
     assert fake_st.errors and "could not be parsed" in fake_st.errors[0]
+    assert "supersecret123456" not in fake_st.errors[0]
+    assert "***REDACTED***" in fake_st.errors[0]
 
 
 # ---------------------------------------------------------------------------
