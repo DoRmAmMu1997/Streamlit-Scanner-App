@@ -24,9 +24,17 @@ from backend.observability import EVENT_DATA_REFRESH_COMPLETED
 from backend.scanning import ScanRunResult, ScanStatus
 from backend.screener_registry import ScreenerDefinition
 
-# Helpers that moved to ui/ (REF-001) read Streamlit and the chart renderer
-# from their own modules; fakes must be patched there, not onto app.
-from ui import chart_cache, common, health_page, history_page, validation_page
+# Helpers that moved to ui/ (REF-001..REF-003) read Streamlit and the chart
+# renderer from their own modules; fakes must be patched there, not onto app.
+from ui import (
+    chart_cache,
+    common,
+    health_page,
+    history_page,
+    parameter_controls,
+    status_panel,
+    validation_page,
+)
 
 
 class _FixedDate(real_date):
@@ -984,9 +992,11 @@ def test_universe_table_defers_status_loading_until_user_opts_in(monkeypatch):
     def fail_if_loaded():
         raise AssertionError("universe statuses should load only after opt-in")
 
-    monkeypatch.setattr(app, "all_universe_statuses", fail_if_loaded)
+    # REF-003 moved render_universe_table to ui/status_panel.py; the seam is the
+    # module that actually reads `st` and the status loader, not `app`.
+    monkeypatch.setattr(status_panel, "all_universe_statuses", fail_if_loaded)
     monkeypatch.setattr(
-        app,
+        status_panel,
         "st",
         SimpleNamespace(
             expander=lambda *_args, **_kwargs: _FakeExpander(),
@@ -1015,6 +1025,18 @@ def test_app_reexports_helpers_from_extracted_ui_modules():
     assert app._render_history_page is history_page._render_history_page
     assert app._render_admin_health_page is health_page._render_admin_health_page
     assert app._render_validation_page is validation_page._render_validation_page
+    # REF-003: status panel + parameter controls. Identity matters doubly here —
+    # refresh_universes_and_invalidate() calls .clear() through the app bindings,
+    # which only empties the real caches if they are the SAME function objects.
+    assert app.show_status_panel is status_panel.show_status_panel
+    assert app.render_universe_table is status_panel.render_universe_table
+    assert app.cache_summary is status_panel.cache_summary
+    assert app._universe_mtime is status_panel._universe_mtime
+    assert app._cached_universe_status is status_panel._cached_universe_status
+    assert app._cached_all_universe_statuses is status_panel._cached_all_universe_statuses
+    assert app._param_state_key is parameter_controls._param_state_key
+    assert app._render_parameter_overrides is parameter_controls._render_parameter_overrides
+    assert app._apply_param_overrides is parameter_controls._apply_param_overrides
 
 
 def test_refresh_universes_clears_every_derived_cache_after_success(monkeypatch):
