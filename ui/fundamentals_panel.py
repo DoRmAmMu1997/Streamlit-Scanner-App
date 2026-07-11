@@ -185,7 +185,10 @@ def _render_fundamentals_panel(symbol: str | None) -> None:
     except Exception as exc:  # noqa: BLE001
         logger.warning("Cached verdict for %s is invalid; clearing", symbol, exc_info=True)
         st.session_state.pop(session_key, None)
-        st.error(f"Cached verdict could not be parsed: {exc}")
+        # Pydantic includes rejected input values in validation messages. Since
+        # session state can contain stale or tampered data, redact that message
+        # before it crosses the UI boundary just like live agent exceptions.
+        st.error(f"Cached verdict could not be parsed: {_redact_secrets(str(exc))}")
         return
 
     _render_verdict_block(verdict)

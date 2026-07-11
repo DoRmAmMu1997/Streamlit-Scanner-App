@@ -34,6 +34,7 @@ from backend.observability import (
     EVENT_EXTERNAL_API_FAILED,
     log_event,
 )
+from backend.parquet_stats import timestamp_bounds
 from backend.security import redact_text
 
 # Module-level logger. Streamlit captures stderr, so logger output appears in the
@@ -366,8 +367,18 @@ class DailyDataLoader:
             # Cache hit only when the file covers the entire requested range.
             # A partial parquet is common after interrupted prefetches; slicing
             # it would silently run long-lookback screeners on too little data.
-            cached = pd.read_parquet(path)
-            first_date, last_date = _date_bounds(cached)
+            #
+            # PERF-002: ask the Parquet footer for the bounds first. When the
+            # file does NOT cover the range, this skips decompressing a
+            # multi-year frame that would be thrown away for a Dhan refetch.
+            # A footer that cannot answer (missing statistics, odd writer)
+            # falls back to the original full read, so no file that used to
+            # count as a cache hit can become a miss.
+            cached: pd.DataFrame | None = None
+            first_date, last_date = timestamp_bounds(path)
+            if first_date is None or last_date is None:
+                cached = pd.read_parquet(path)
+                first_date, last_date = _date_bounds(cached)
             requested_start = _coerce_date(start_date)
             requested_end = _coerce_date(end_date)
             if (
@@ -376,7 +387,19 @@ class DailyDataLoader:
                 and first_date <= requested_start
                 and last_date >= requested_end
             ):
-                return self._slice_to_range(cached, start_date, end_date), True
+                if cached is None:
+                    # The footer is only an advisory index. The file can be
+                    # replaced after the metadata read, and a valid footer
+                    # does not prove every data page is readable.
+                    cached = pd.read_parquet(path)
+                actual_first, actual_last = _date_bounds(cached)
+                if (
+                    actual_first is not None
+                    and actual_last is not None
+                    and actual_first <= requested_start
+                    and actual_last >= requested_end
+                ):
+                    return self._slice_to_range(cached, start_date, end_date), True
 
         # Cache miss (or force_refresh): fetch the requested window from Dhan
         # and save under the stable filename for future calls.
@@ -999,6 +1022,9 @@ class DailyDataLoader:
         """Run ``ensure_daily_history`` for one row, capturing a safe outcome."""
         symbol = str(row.get("symbol", "?")).strip() or "?"
         try:
+            # A prefetch freshness verdict must come from the frame itself.
+            # Footer statistics can survive damaged data pages, so using them
+            # here would let an unreadable cache masquerade as healthy.
             _, status = self.ensure_daily_history(row, years_back=years_back, today=today)
             return PrefetchOutcome(symbol=symbol, status=status)
         except Exception as exc:

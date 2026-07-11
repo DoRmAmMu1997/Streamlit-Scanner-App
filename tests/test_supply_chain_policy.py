@@ -175,6 +175,64 @@ def test_operations_guide_matches_scheduler_database_and_ci_contracts():
     assert "python -m pip_audit -r requirements.txt -r requirements-dev.txt" not in text
 
 
+def test_postgres_guide_keeps_credentials_out_of_shell_arguments():
+    """DEPLOY-004 examples should teach a secret-safe operator workflow.
+
+    Beginner note: placeholders in a command are often replaced in-place by an
+    operator. That puts the real password into shell history and, while the
+    command runs, into the process argument list. A protected env file and an
+    interactive ``psql`` prompt avoid both leaks.
+    """
+    text = (ROOT / "docs" / "operations.md").read_text(encoding="utf-8")
+    worked_example = text.split(
+        "### Worked example: self-hosted Postgres, end to end", maxsplit=1
+    )[1].split("### Connection-pool behavior and guidance", maxsplit=1)[0]
+
+    assert "chmod 600 postgres.env" in worked_example
+    assert "--env-file postgres.env" in worked_example
+    assert "chmod 600 Dependencies/.env" in worked_example
+    assert "percent-encode" in worked_example.lower()
+    assert "psql -h db-host -U scanner -d scanner -W" in worked_example
+    assert "audit_logs" in worked_example
+
+    assert "-e POSTGRES_PASSWORD=" not in worked_example
+    assert "DATABASE_URL=postgresql+psycopg://scanner:<password>" not in worked_example
+    assert 'psql "postgresql://scanner:<password>' not in worked_example
+    assert "`audit_log`" not in worked_example
+
+
+def test_container_examples_keep_runtime_secrets_out_of_process_arguments():
+    """Production Docker examples should load secrets from a protected env file.
+
+    Beginner note: ``docker run -e NAME=value`` makes the value part of the
+    command line. A real password or provider token can then remain in shell
+    history and may be visible to local process-inspection tools. ``--env-file``
+    keeps those values out of the command arguments while preserving the same
+    container environment.
+    """
+    text = (ROOT / "docs" / "operations.md").read_text(encoding="utf-8")
+    container_examples = text.split("For production,", maxsplit=1)[1].split(
+        "### Backing up scan history", maxsplit=1
+    )[0]
+
+    assert container_examples.count("--env-file Dependencies/.env") == 2
+    assert "-e DATABASE_URL=" not in container_examples
+    assert "-e DHAN_ACCESS_TOKEN=" not in container_examples
+
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme_production = readme.split(
+        "Production containers default to fail-closed settings", maxsplit=1
+    )[1].split("## Running the daily scan job", maxsplit=1)[0]
+    assert "--env-file Dependencies/.env" in readme_production
+    assert "-e DATABASE_URL=" not in readme_production
+    assert "-e DHAN_ACCESS_TOKEN=" not in readme_production
+
+    # The quick URL example should agree with the worked guidance: reserved
+    # password characters are encoded before the URL enters the protected file.
+    assert "scanner:<password>@db-host" not in text
+    assert "scanner:<percent-encoded-password>@db-host" in text
+
+
 def test_ai_architecture_docs_describe_validation_fallback_and_safe_errors():
     scan_service = (
         ROOT

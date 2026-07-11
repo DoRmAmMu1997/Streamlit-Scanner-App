@@ -1,6 +1,6 @@
 # ADR — REFACTOR-003: one shared sync bridge for the Claude-agent subsystems
 
-**Status:** Accepted
+**Status:** Accepted — amended by AI-006 (2026-07-10, see the Amendment section)
 **Date:** 2026-07-07
 **Deciders:** repo maintainer (PR review); authored by Claude (Fable) during the July 2026 whole-app review
 **Relates to:** [audit-2026-06.md](audit-2026-06.md) "Deferred follow-ups" (Agent SDK boilerplate dedup) · TEST-003 (context-propagation bug class)
@@ -91,3 +91,27 @@ safety gain. Option A takes exactly the shared-and-dangerous part and nothing el
 2. [x] `tests/test_ai_runtime.py`: contextvar propagation, result/exception passthrough, sequential reuse.
 3. [x] Migrate agents one commit each (technical → sixty_seven → fundamental), keeping delegating `_run_sync` staticmethods.
 4. [x] Full gate suite + the three agent test suites green.
+
+## Amendment — AI-006 (2026-07-10): the JSON extractor joins the shared runtime
+
+Option A's accepted con was that everything outside the bridge "stays per-agent".
+For the options-construction blocks that remains the right call (they differ for real
+domain reasons — see the trade-off analysis above). But one of the leftover blocks,
+`_extract_json_object`, failed the same three-part test that justified moving the
+bridge: it was (a) **logic-identical** across all three agents (verified line-by-line
+before the move — only docstrings differed), (b) **relied on for correctness** of every
+verdict parse, and (c) **drift-prone in exactly the bridge's way** — two of the three
+copies carried a "kept local so the agents stay independent" comment while being
+character-for-character the same logic, which is copy-paste drift waiting for its
+first inconsistent fix.
+
+AI-006 therefore moved the single implementation into `backend/ai_runtime.py` as
+`extract_json_object(text)`. Each agent imports it under its old private name
+(`from backend.ai_runtime import extract_json_object as _extract_json_object`), so
+call sites, per-agent parse-fallback behavior, and the agent test suites are all
+unchanged. Extractor unit tests (fenced block, missing language tag, surrounding
+prose, no-JSON/invalid-JSON/reversed-brace edges) live in `tests/test_ai_runtime.py`.
+
+This does **not** reopen Option B: the extractor, like the bridge, is shared-and-
+identical; the options-construction/retry/error-taxonomy blocks remain genuinely
+different per agent and stay where they are.
