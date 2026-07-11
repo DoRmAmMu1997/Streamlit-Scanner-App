@@ -16,10 +16,15 @@ unchanged.
 from __future__ import annotations
 
 import ipaddress
+import posixpath
+import re
 import socket
 from collections.abc import Callable
 from typing import Any, Never
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
+
+_ENCODED_PATH_SEPARATOR = re.compile(r"%(?:2f|5c)", re.IGNORECASE)
+_MAX_PERCENT_DECODING_PASSES = 4
 
 
 def _reject(error: Callable[[], Exception]) -> Never:
@@ -30,6 +35,45 @@ def _reject(error: Callable[[], Exception]) -> Never:
     way both pre-IPO-006 copies did with their own raiser helpers.
     """
     raise error()
+
+
+def _validate_pdf_path(path: str, error: Callable[[], Exception]) -> None:
+    """Require one unambiguous path inside SEBI's attachment directory.
+
+    Beginner note:
+    ``urlsplit`` intentionally leaves percent escapes untouched. A downstream
+    HTTP client, proxy, or web server may decode them later, so a raw prefix
+    check is not enough: ``%2e%2e`` becomes ``..`` and ``%2f`` becomes ``/``.
+    We decode repeatedly to expose single- and double-encoded traversal, reject
+    encoded separators at every layer, and then compare normalized segments.
+    """
+    decoded = path
+    for _pass in range(_MAX_PERCENT_DECODING_PASSES):
+        # Backslashes are separators on some servers. Percent-encoded slashes
+        # and backslashes are rejected rather than decoded because otherwise
+        # different network layers could disagree about the segment boundary.
+        if "\\" in decoded or _ENCODED_PATH_SEPARATOR.search(decoded):
+            raise error()
+        try:
+            next_value = unquote(decoded, errors="strict")
+        except (UnicodeDecodeError, ValueError):
+            _reject(error)
+        if next_value == decoded:
+            break
+        decoded = next_value
+    else:
+        # Excessively nested encodings are ambiguous and have no legitimate
+        # use in an official attachment path, so fail closed.
+        raise error()
+
+    segments = decoded.split("/")
+    if (
+        len(segments) < 4
+        or segments[:3] != ["", "sebi_data", "attachdocs"]
+        or any(segment in {".", ".."} for segment in segments)
+        or posixpath.normpath(decoded) != decoded
+    ):
+        raise error()
 
 
 def canonical_sebi_url(
@@ -66,12 +110,15 @@ def canonical_sebi_url(
     record fingerprint identifies a server resource rather than browser-only
     navigation state.
     """
-    candidate = urljoin(base_url, str(value).strip())
-    parsed = urlsplit(candidate)
-    host = (parsed.hostname or "").casefold()
     try:
+        # Keep every stdlib parsing accessor inside this boundary. ``urljoin``
+        # and ``urlsplit`` can reject malformed bracketed hosts or Unicode
+        # netlocs, while ``hostname`` and ``port`` perform additional checks.
+        candidate = urljoin(base_url, str(value).strip())
+        parsed = urlsplit(candidate)
+        host = (parsed.hostname or "").casefold()
         port = parsed.port
-    except ValueError:
+    except (TypeError, UnicodeError, ValueError):
         _reject(error)
     if (
         parsed.scheme.casefold() != "https"
@@ -81,8 +128,8 @@ def canonical_sebi_url(
         or port not in (None, 443)
     ):
         raise error()
-    if require_pdf_path and not parsed.path.startswith("/sebi_data/attachdocs/"):
-        raise error()
+    if require_pdf_path:
+        _validate_pdf_path(parsed.path, error)
 
     if resolver is not None:
         try:
@@ -98,4 +145,7 @@ def canonical_sebi_url(
             _reject(error)
         if unsafe:
             raise error()
-    return urlunsplit(("https", host, parsed.path or "/", parsed.query, ""))
+    try:
+        return urlunsplit(("https", host, parsed.path or "/", parsed.query, ""))
+    except (TypeError, UnicodeError, ValueError):
+        _reject(error)

@@ -90,6 +90,8 @@ def test_host_casefolds_and_explicit_443_is_dropped():
         "https://user:pass@www.sebi.gov.in/doc.pdf",  # embedded credentials
         "https://www.sebi.gov.in:8443/doc.pdf",  # non-443 port
         "https://www.sebi.gov.in:abc/doc.pdf",  # malformed port
+        "https://[www.sebi.gov.in/doc.pdf",  # malformed bracketed host
+        "https://www.sebi.gov.in\uff0fevil/doc.pdf",  # invalid NFKC netloc character
     ],
 )
 def test_unsafe_urls_raise_the_callers_error(url):
@@ -112,6 +114,39 @@ def test_require_pdf_path_restricts_to_attachdocs():
     # The same URL passes when the caller (the listing scraper) does not
     # request the restriction.
     assert _canonical("https://www.sebi.gov.in/other/demo.pdf")
+
+
+@pytest.mark.parametrize(
+    "unsafe_path",
+    [
+        "/sebi_data/attachdocs/../secret.pdf",
+        "/sebi_data/attachdocs/%2e%2e/secret.pdf",
+        "/sebi_data/attachdocs/%252e%252e/secret.pdf",
+        "/sebi_data/attachdocs/demo%2f..%2fsecret.pdf",
+        "/sebi_data/attachdocs/demo%252f..%252fsecret.pdf",
+        "/sebi_data/attachdocs/demo%5c..%5csecret.pdf",
+        r"/sebi_data/attachdocs/demo\..\secret.pdf",
+    ],
+)
+def test_pdf_path_rejects_traversal_and_encoded_separators(unsafe_path):
+    """Decode path segments before accepting SEBI's attachment directory.
+
+    Beginner note:
+    HTTP clients and reverse proxies can decode percent escapes at different
+    times. Checking only the raw string therefore lets ``%2e%2e`` (``..``) or
+    an encoded slash acquire a different meaning after this guard has run.
+    """
+    with pytest.raises(_Rejected):
+        _canonical(
+            f"https://www.sebi.gov.in{unsafe_path}",
+            require_pdf_path=True,
+        )
+
+
+def test_malformed_base_url_raises_the_callers_error():
+    """A bad join base is categorized instead of leaking ``ValueError``."""
+    with pytest.raises(_Rejected):
+        _canonical("relative.pdf", base_url="https://[")
 
 
 # ---------------------------------------------------------------------------
