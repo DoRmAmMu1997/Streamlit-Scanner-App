@@ -2,10 +2,10 @@
 
 Two behaviors changed and two must NOT have changed:
 
-1. NEW: the prefetch fresh check and ``get_daily_history``'s coverage check
-   answer from the Parquet footer, so those paths no longer decompress a
-   multi-year frame just to learn two dates (proven here by making
-   ``pd.read_parquet`` explode).
+1. NEW: ``get_daily_history`` can use the footer to skip a frame that would be
+   discarded on a definite cache miss. Prefetch still reads the frame before
+   declaring it fresh because footer metadata cannot prove data pages remain
+   readable.
 2. UNCHANGED: any file the footer cannot vouch for (``write_statistics=False``
    is the canonical case) behaves exactly as before via the full-read
    fallback — a covered range is still a cache hit, a fresh cache is still
@@ -70,15 +70,23 @@ def _forbid_full_reads(monkeypatch) -> None:
     monkeypatch.setattr(daily_data_loader.pd, "read_parquet", _explode)
 
 
-def test_prefetch_fresh_verdict_reads_no_frame(monkeypatch, tmp_path):
-    """A footer-provably-fresh cache yields 'fresh' without pandas I/O.
+def test_prefetch_validates_frame_before_fresh_verdict(monkeypatch, tmp_path):
+    """A fresh prefetch verdict must validate the actual Parquet data pages.
 
-    client=None doubles as a second proof: cache-only loaders raise on any
-    fetch attempt, so reaching Dhan would fail the test too.
+    Beginner note: footer statistics are a quick index, not an integrity
+    check. A file may keep a readable footer even when a data page is damaged,
+    so this path deliberately pays for one full read before saying "fresh".
     """
     loader = DailyDataLoader(client=None, cache_dir=tmp_path, request_delay_seconds=0.0)
     _write_cache(loader, _covering_frame(), statistics=True)
-    _forbid_full_reads(monkeypatch)
+    real_read_parquet = pd.read_parquet
+    read_paths = []
+
+    def _record_read(path, *args, **kwargs):
+        read_paths.append(path)
+        return real_read_parquet(path, *args, **kwargs)
+
+    monkeypatch.setattr(daily_data_loader.pd, "read_parquet", _record_read)
 
     outcomes = list(
         loader.iter_ensure_universe_history(
@@ -87,6 +95,32 @@ def test_prefetch_fresh_verdict_reads_no_frame(monkeypatch, tmp_path):
     )
 
     assert [(outcome.symbol, outcome.status) for outcome in outcomes] == [("DEMO", "fresh")]
+    assert read_paths == [loader.cache_path("DEMO", "1")]
+
+
+def test_prefetch_does_not_call_unreadable_data_pages_fresh(monkeypatch, tmp_path):
+    """A footer-only success must not hide a corrupt Parquet data page."""
+    loader = DailyDataLoader(client=None, cache_dir=tmp_path, request_delay_seconds=0.0)
+    _write_cache(loader, _covering_frame(), statistics=True)
+    monkeypatch.setattr(
+        daily_data_loader,
+        "timestamp_bounds",
+        lambda _path: (history_start_date(YEARS_BACK, TODAY), TODAY),
+    )
+
+    def _unreadable(*_args, **_kwargs):
+        raise OSError("parquet data page is corrupt")
+
+    monkeypatch.setattr(daily_data_loader.pd, "read_parquet", _unreadable)
+
+    outcomes = list(
+        loader.iter_ensure_universe_history(
+            [_instrument()], years_back=YEARS_BACK, today=TODAY
+        )
+    )
+
+    assert outcomes[0].status == "failed"
+    assert "parquet data page is corrupt" in (outcomes[0].message or "")
 
 
 def test_prefetch_falls_back_to_full_read_without_footer_statistics(tmp_path):
@@ -190,11 +224,58 @@ def test_get_daily_history_covered_range_without_statistics_is_still_a_hit(tmp_p
     assert frame["timestamp"].min() >= pd.Timestamp(TODAY - timedelta(days=30))
 
 
-def test_covers_full_window_requires_symbol_and_security_id(tmp_path):
-    """Malformed rows decline the fast path so the slow path raises as before."""
+def test_get_daily_history_rechecks_frame_after_footer_claim(monkeypatch, tmp_path):
+    """A file replaced after its footer is read must not become a false hit.
+
+    This simulates a concurrent writer replacing the cache between the cheap
+    footer check and the full read. The frame actually returned by pandas is
+    authoritative, so an insufficient replacement must trigger a refetch.
+    """
+    requested_start = date(2026, 6, 1)
+    requested_end = TODAY
+    replacement = _covering_frame().loc[
+        lambda frame: frame["timestamp"] >= pd.Timestamp(date(2026, 7, 1))
+    ]
+    fetched = _covering_frame().loc[
+        lambda frame: frame["timestamp"] >= pd.Timestamp(requested_start)
+    ]
+
+    class OneShotClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def fetch_daily_candles(self, **_kwargs) -> pd.DataFrame:
+            self.calls += 1
+            return fetched.copy(deep=True)
+
+    client = OneShotClient()
+    loader = DailyDataLoader(client, cache_dir=tmp_path, request_delay_seconds=0.0)
+    _write_cache(loader, _covering_frame(), statistics=True)
+    monkeypatch.setattr(
+        daily_data_loader,
+        "timestamp_bounds",
+        lambda _path: (requested_start, requested_end),
+    )
+    monkeypatch.setattr(
+        daily_data_loader.pd,
+        "read_parquet",
+        lambda *_args, **_kwargs: replacement.copy(deep=True),
+    )
+
+    frame, from_cache = loader.get_daily_history(
+        _instrument(), requested_start, requested_end
+    )
+
+    assert from_cache is False
+    assert client.calls == 1
+    assert frame["timestamp"].min() <= pd.Timestamp(requested_start)
+
+
+def test_prefetch_requires_symbol_and_security_id(tmp_path):
+    """Malformed rows still fail through the documented validation path."""
     loader = DailyDataLoader(client=None, cache_dir=tmp_path, request_delay_seconds=0.0)
 
-    assert loader._covers_full_window({"symbol": "", "security_id": "1"}, YEARS_BACK, TODAY) is False
-    assert loader._covers_full_window({"symbol": "DEMO", "security_id": ""}, YEARS_BACK, TODAY) is False
     with pytest.raises(ValueError, match="missing symbol"):
         loader.ensure_daily_history({"symbol": "", "security_id": "1"}, today=TODAY)
+    with pytest.raises(ValueError, match="missing security_id"):
+        loader.ensure_daily_history({"symbol": "DEMO", "security_id": ""}, today=TODAY)

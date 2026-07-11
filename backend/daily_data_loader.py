@@ -388,9 +388,18 @@ class DailyDataLoader:
                 and last_date >= requested_end
             ):
                 if cached is None:
-                    # The covered path still needs the actual candles.
+                    # The footer is only an advisory index. The file can be
+                    # replaced after the metadata read, and a valid footer
+                    # does not prove every data page is readable.
                     cached = pd.read_parquet(path)
-                return self._slice_to_range(cached, start_date, end_date), True
+                actual_first, actual_last = _date_bounds(cached)
+                if (
+                    actual_first is not None
+                    and actual_last is not None
+                    and actual_first <= requested_start
+                    and actual_last >= requested_end
+                ):
+                    return self._slice_to_range(cached, start_date, end_date), True
 
         # Cache miss (or force_refresh): fetch the requested window from Dhan
         # and save under the stable filename for future calls.
@@ -1007,45 +1016,15 @@ class DailyDataLoader:
                 submit_next()
                 yield outcome
 
-    def _covers_full_window(self, row: dict, years_back: int, today: date | None) -> bool:
-        """Answer "is this symbol's cache already fresh?" from footer stats only.
-
-        PERF-002: the prefetch discards the candle frame — it only needs the
-        status — yet ``ensure_daily_history``'s "fresh" verdict used to load
-        the whole multi-year parquet just to learn its first/last dates. The
-        Parquet footer answers the same two dates in a few kilobytes. This
-        mirrors ``ensure_daily_history``'s exact fresh condition
-        (``first_date <= start and last_date >= today``); any file the footer
-        cannot vouch for returns False so the unchanged slow path decides.
-        """
-        symbol = str(row.get("symbol", "")).strip().upper()
-        security_id = str(row.get("security_id", "")).strip()
-        if not symbol or not security_id:
-            # Let ensure_daily_history raise its documented ValueError.
-            return False
-        resolved_today = today or date.today()
-        start = history_start_date(int(years_back), resolved_today)
-        path = self.cache_path(symbol, security_id)
-        if not path.exists():
-            return False
-        first_date, last_date = timestamp_bounds(path)
-        return (
-            first_date is not None
-            and last_date is not None
-            and first_date <= start
-            and last_date >= resolved_today
-        )
-
     def _ensure_one_row(
         self, row: dict, years_back: int, today: date | None
     ) -> PrefetchOutcome:
         """Run ``ensure_daily_history`` for one row, capturing a safe outcome."""
         symbol = str(row.get("symbol", "?")).strip() or "?"
         try:
-            # PERF-002 fast path: a cache the footer proves fresh skips the
-            # full-frame read entirely. Same status the slow path would return.
-            if self._covers_full_window(row, years_back, today):
-                return PrefetchOutcome(symbol=symbol, status="fresh")
+            # A prefetch freshness verdict must come from the frame itself.
+            # Footer statistics can survive damaged data pages, so using them
+            # here would let an unreadable cache masquerade as healthy.
             _, status = self.ensure_daily_history(row, years_back=years_back, today=today)
             return PrefetchOutcome(symbol=symbol, status=status)
         except Exception as exc:
