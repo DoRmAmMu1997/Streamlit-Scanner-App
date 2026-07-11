@@ -59,6 +59,16 @@ class FakeResponse:
         self.closed = True
 
 
+class FailingStreamResponse(FakeResponse):
+    """Response double whose body fails after headers have been accepted."""
+
+    def iter_content(self, chunk_size: int) -> Iterator[bytes]:
+        """Raise lazily, matching failures surfaced by requests while streaming."""
+        self.iterated = True
+        raise requests.ConnectionError("upstream token=supersecret123456")
+        yield b""  # pragma: no cover - keeps this method an iterator.
+
+
 class FakeSession:
     """FIFO request double used to prove redirects and retries deterministically."""
 
@@ -156,6 +166,48 @@ def test_direct_official_pdf_response_skips_html_resolution(tmp_path: Path) -> N
     assert len(session.calls) == 1
 
 
+def test_direct_pdf_response_must_use_the_official_attachment_path(
+    tmp_path: Path,
+) -> None:
+    """A PDF media type must not turn an unrelated SEBI path into evidence."""
+    session = FakeSession([FakeResponse(PDF_BYTES)])
+
+    with pytest.raises(IpoDocumentDownloadError) as caught:
+        download_document_file(
+            _document(document_url=DETAIL_URL),
+            data_dir=tmp_path,
+            session=session,
+            resolver=_public_resolver,
+        )
+
+    assert caught.value.code is IpoDocumentDownloadErrorCode.UNSAFE_URL
+    assert session.calls[0][0] == DETAIL_URL
+
+
+@pytest.mark.parametrize("content_type", ["text/html", "application/pdf"])
+def test_stream_failure_uses_secret_safe_network_error_taxonomy(
+    tmp_path: Path,
+    content_type: str,
+) -> None:
+    """Lazy body failures should look like every other safe network failure."""
+    response = FailingStreamResponse(PDF_BYTES, content_type=content_type)
+    session = FakeSession([response])
+
+    with pytest.raises(IpoDocumentDownloadError) as caught:
+        download_document_file(
+            _document(document_url=PDF_URL),
+            data_dir=tmp_path,
+            session=session,
+            resolver=_public_resolver,
+        )
+
+    assert caught.value.code is IpoDocumentDownloadErrorCode.NETWORK_ERROR
+    assert "supersecret123456" not in str(caught.value)
+    assert response.closed
+    cache_dir = tmp_path / "ipo" / "documents"
+    assert not cache_dir.exists() or not list(cache_dir.iterdir())
+
+
 def test_verified_cache_hit_performs_no_http_request(tmp_path: Path) -> None:
     """Rehash the stored file before declaring a zero-network cache hit."""
     digest = hashlib.sha256(PDF_BYTES).hexdigest()
@@ -188,6 +240,8 @@ def test_verified_cache_hit_performs_no_http_request(tmp_path: Path) -> None:
         "http://www.sebi.gov.in/filings/example.html",
         "https://user:password@www.sebi.gov.in/filings/example.html",
         "https://www.sebi.gov.in:444/filings/example.html",
+        "https://www.sebi.gov.in:invalid/filings/example.html",
+        "https://[www.sebi.gov.in/filings/example.html",
         "https://sebi.gov.in.evil.example/filings/example.html",
     ],
 )
@@ -338,6 +392,191 @@ def test_cross_host_redirect_is_rejected_and_response_is_closed(tmp_path: Path) 
 
     assert caught.value.code is IpoDocumentDownloadErrorCode.UNSAFE_URL
     assert redirect.closed
+
+
+def test_pdf_redirect_cannot_escape_the_attachment_tree(tmp_path: Path) -> None:
+    """Keep the stricter PDF-path policy active on every redirect hop.
+
+    The detail page may point at a valid attachment URL which then redirects.
+    Dropping ``require_pdf_path`` while following that redirect would let the
+    trusted host move the fetch to an unrelated path after validation.
+    """
+    detail = FakeResponse(
+        f'<iframe src="/web/?file={PDF_URL}"></iframe>'.encode(),
+        content_type="text/html",
+    )
+    redirect = FakeResponse(
+        b"",
+        status_code=302,
+        headers={"Location": "/sebi_data/private/secret.pdf"},
+    )
+    session = FakeSession([detail, redirect])
+
+    with pytest.raises(IpoDocumentDownloadError) as caught:
+        download_document_file(
+            _document(),
+            data_dir=tmp_path,
+            session=session,
+            resolver=_public_resolver,
+        )
+
+    assert caught.value.code is IpoDocumentDownloadErrorCode.UNSAFE_URL
+    assert [call[0] for call in session.calls] == [DETAIL_URL, PDF_URL]
+    assert detail.closed and redirect.closed
+
+
+def test_pdf_redirect_within_attachment_tree_remains_allowed(tmp_path: Path) -> None:
+    """The redirect hardening must not block a normal in-tree PDF move."""
+    redirected_pdf = "https://www.sebi.gov.in/sebi_data/attachdocs/final.pdf"
+    detail = FakeResponse(
+        f'<iframe src="/web/?file={PDF_URL}"></iframe>'.encode(),
+        content_type="text/html",
+    )
+    redirect = FakeResponse(
+        b"",
+        status_code=302,
+        headers={"Location": redirected_pdf},
+    )
+    session = FakeSession([detail, redirect, FakeResponse(PDF_BYTES)])
+
+    result = download_document_file(
+        _document(),
+        data_dir=tmp_path,
+        session=session,
+        resolver=_public_resolver,
+    )
+
+    assert result.bytes_written == len(PDF_BYTES)
+    assert [call[0] for call in session.calls] == [DETAIL_URL, PDF_URL, redirected_pdf]
+
+
+def test_redirected_detail_page_resolves_relative_iframe_from_final_url(
+    tmp_path: Path,
+) -> None:
+    """Relative iframe paths belong to the page that actually returned HTML.
+
+    Beginner note: a redirect can move a detail page into another directory.
+    Resolving its relative links against the original pre-redirect URL invents
+    a different resource and can reject a legitimate prospectus.
+    """
+    redirected_detail = (
+        "https://www.sebi.gov.in/sebi_data/attachdocs/2026/detail.html"
+    )
+    relative_pdf = (
+        "https://www.sebi.gov.in/sebi_data/attachdocs/2026/prospectus.pdf"
+    )
+    redirect = FakeResponse(
+        b"",
+        status_code=302,
+        headers={"Location": redirected_detail},
+    )
+    detail = FakeResponse(
+        b'<iframe src="viewer.html?file=prospectus.pdf"></iframe>',
+        content_type="text/html",
+    )
+    session = FakeSession([redirect, detail, FakeResponse(PDF_BYTES)])
+
+    result = download_document_file(
+        _document(),
+        data_dir=tmp_path,
+        session=session,
+        resolver=_public_resolver,
+    )
+
+    assert result.bytes_written == len(PDF_BYTES)
+    assert [call[0] for call in session.calls] == [
+        DETAIL_URL,
+        redirected_detail,
+        relative_pdf,
+    ]
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "https://[www.sebi.gov.in/file.pdf",
+        "https://www.sebi.gov.in:invalid/file.pdf",
+    ],
+)
+def test_malformed_redirect_has_safe_url_error_and_closes_response(
+    tmp_path: Path,
+    location: str,
+) -> None:
+    """Malformed redirect syntax stays inside the downloader error taxonomy."""
+    redirect = FakeResponse(b"", status_code=302, headers={"Location": location})
+
+    with pytest.raises(IpoDocumentDownloadError) as caught:
+        download_document_file(
+            _document(),
+            data_dir=tmp_path,
+            session=FakeSession([redirect]),
+            resolver=_public_resolver,
+        )
+
+    assert caught.value.code is IpoDocumentDownloadErrorCode.UNSAFE_URL
+    assert redirect.closed
+
+
+@pytest.mark.parametrize(
+    "iframe_source",
+    [
+        "https://[www.sebi.gov.in/web/?file=/sebi_data/attachdocs/demo.pdf",
+        "https://www.sebi.gov.in:invalid/web/?file=/sebi_data/attachdocs/demo.pdf",
+    ],
+)
+def test_malformed_iframe_wrapper_has_invalid_detail_page_error(
+    tmp_path: Path,
+    iframe_source: str,
+) -> None:
+    """Broken wrapper syntax is a bad detail page, not a raw parser exception."""
+    detail = FakeResponse(
+        f'<iframe src="{iframe_source}"></iframe>'.encode(),
+        content_type="text/html",
+    )
+
+    with pytest.raises(IpoDocumentDownloadError) as caught:
+        download_document_file(
+            _document(),
+            data_dir=tmp_path,
+            session=FakeSession([detail]),
+            resolver=_public_resolver,
+        )
+
+    assert caught.value.code is IpoDocumentDownloadErrorCode.INVALID_DETAIL_PAGE
+    assert detail.closed
+
+
+@pytest.mark.parametrize(
+    "iframe_file",
+    [
+        "/sebi_data/attachdocs/../secret.pdf",
+        "/sebi_data/attachdocs/%2e%2e/secret.pdf",
+        "/sebi_data/attachdocs/%252e%252e/secret.pdf",
+        "/sebi_data/attachdocs/demo%252f..%252fsecret.pdf",
+    ],
+)
+def test_iframe_pdf_target_rejects_encoded_path_confusion_before_http(
+    tmp_path: Path,
+    iframe_file: str,
+) -> None:
+    """A hostile iframe target must never become the download request."""
+    detail = FakeResponse(
+        f'<iframe src="/web/?file={iframe_file}"></iframe>'.encode(),
+        content_type="text/html",
+    )
+    session = FakeSession([detail])
+
+    with pytest.raises(IpoDocumentDownloadError) as caught:
+        download_document_file(
+            _document(),
+            data_dir=tmp_path,
+            session=session,
+            resolver=_public_resolver,
+        )
+
+    assert caught.value.code is IpoDocumentDownloadErrorCode.UNSAFE_URL
+    assert [call[0] for call in session.calls] == [DETAIL_URL]
+    assert detail.closed
 
 
 def test_terminal_http_error_closes_response(tmp_path: Path) -> None:

@@ -17,7 +17,6 @@ from __future__ import annotations
 import datetime as dt
 import enum
 import hashlib
-import ipaddress
 import os
 import socket
 import tempfile
@@ -26,12 +25,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Never
-from urllib.parse import parse_qs, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qs, urlsplit
 
 import requests
 from bs4 import BeautifulSoup
 
 from backend.ipo.models import IpoDocumentParseStatus, IpoDocumentRecord
+from backend.ipo.url_canonical import canonical_sebi_url
 
 ALLOWED_HOSTS = frozenset({"sebi.gov.in", "www.sebi.gov.in"})
 ALLOWED_PDF_CONTENT_TYPES = frozenset({"application/pdf", "application/octet-stream"})
@@ -100,35 +100,20 @@ def _canonical_sebi_url(
     Host allowlisting blocks ordinary SSRF, while resolving the allowlisted host
     and rejecting non-public answers also catches a poisoned hosts file or DNS
     response that points SEBI's name at loopback/private infrastructure.
-    """
-    candidate = urljoin(base_url or "", str(value).strip())
-    parsed = urlsplit(candidate)
-    host = (parsed.hostname or "").casefold()
-    try:
-        port = parsed.port
-    except ValueError:
-        _raise(IpoDocumentDownloadErrorCode.UNSAFE_URL)
-    if (
-        parsed.scheme.casefold() != "https"
-        or host not in ALLOWED_HOSTS
-        or parsed.username is not None
-        or parsed.password is not None
-        or port not in (None, 443)
-    ):
-        _raise(IpoDocumentDownloadErrorCode.UNSAFE_URL)
-    if require_pdf_path and not parsed.path.startswith("/sebi_data/attachdocs/"):
-        _raise(IpoDocumentDownloadErrorCode.UNSAFE_URL)
 
-    try:
-        answers = resolver(host, 443, type=socket.SOCK_STREAM)
-        addresses = {str(answer[4][0]) for answer in answers}
-        if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
-            _raise(IpoDocumentDownloadErrorCode.UNSAFE_URL)
-    except IpoDocumentDownloadError:
-        raise
-    except (OSError, TypeError, ValueError, IndexError):
-        _raise(IpoDocumentDownloadErrorCode.UNSAFE_URL)
-    return urlunsplit(("https", host, parsed.path or "/", parsed.query, ""))
+    The implementation is shared with the listing scraper
+    (``backend/ipo/url_canonical.py``, IPO-006); this wrapper binds the
+    downloader's secret-safe ``unsafe_url`` error code, its always-on DNS
+    answer check, and the optional PDF-path restriction.
+    """
+    return canonical_sebi_url(
+        value,
+        base_url=base_url or "",
+        allowed_hosts=ALLOWED_HOSTS,
+        error=lambda: IpoDocumentDownloadError(IpoDocumentDownloadErrorCode.UNSAFE_URL),
+        resolver=resolver,
+        require_pdf_path=require_pdf_path,
+    )
 
 
 def _content_type(response: Any) -> str:
@@ -154,9 +139,19 @@ def _request_with_redirects(
     url: str,
     *,
     resolver: Callable[..., Any],
+    require_pdf_path: bool = False,
 ) -> Any:
-    """GET one URL while validating and closing every manual redirect hop."""
-    current_url = _canonical_sebi_url(url, resolver=resolver)
+    """GET one URL while validating and closing every manual redirect hop.
+
+    ``require_pdf_path`` is deliberately carried through the whole redirect
+    chain. Validating only the iframe's first PDF URL would let a later 302
+    leave SEBI's attachment directory after the stricter check had passed.
+    """
+    current_url = _canonical_sebi_url(
+        url,
+        resolver=resolver,
+        require_pdf_path=require_pdf_path,
+    )
     for redirect_count in range(MAX_REDIRECTS + 1):
         response = session.get(
             current_url,
@@ -166,13 +161,22 @@ def _request_with_redirects(
             headers={"User-Agent": "Streamlit-Scanner-App/IPO-003"},
         )
         if response.status_code not in {301, 302, 303, 307, 308}:
+            # ``requests.Response.url`` normally carries this value, but test
+            # doubles and other requests-compatible sessions are not required
+            # to expose it. Preserve the exact URL that passed our redirect
+            # policy so the caller can apply the stricter PDF-path rule after
+            # it learns the response media type.
+            response._scanner_canonical_url = current_url
             return response
         try:
             location = response.headers.get("Location")
             if not location or redirect_count >= MAX_REDIRECTS:
                 _raise(IpoDocumentDownloadErrorCode.UNSAFE_URL)
             current_url = _canonical_sebi_url(
-                str(location), base_url=current_url, resolver=resolver
+                str(location),
+                base_url=current_url,
+                resolver=resolver,
+                require_pdf_path=require_pdf_path,
             )
         finally:
             response.close()
@@ -185,12 +189,18 @@ def _fetch(
     *,
     resolver: Callable[..., Any],
     sleeper: Callable[[float], None],
+    require_pdf_path: bool = False,
 ) -> Any:
     """Return an open successful response after bounded transient retries."""
     for attempt in range(len(RETRY_DELAYS_SECONDS) + 1):
         response = None
         try:
-            response = _request_with_redirects(session, url, resolver=resolver)
+            response = _request_with_redirects(
+                session,
+                url,
+                resolver=resolver,
+                require_pdf_path=require_pdf_path,
+            )
             if response.status_code == 429 or 500 <= response.status_code <= 599:
                 if attempt == len(RETRY_DELAYS_SECONDS):
                     response.close()
@@ -242,7 +252,19 @@ def _extract_pdf_url(
         source = iframe.get("src")
         if not source:
             continue
-        wrapper = urlsplit(urljoin(detail_url, str(source)))
+        try:
+            # The wrapper itself is untrusted page syntax even though we never
+            # fetch it. Canonicalizing it first catches a malformed host/port
+            # instead of extracting a valid-looking ``file`` parameter from an
+            # invalid URL.
+            wrapper_url = _canonical_sebi_url(
+                str(source),
+                base_url=detail_url,
+                resolver=resolver,
+            )
+            wrapper = urlsplit(wrapper_url)
+        except (IpoDocumentDownloadError, TypeError, UnicodeError, ValueError):
+            _raise(IpoDocumentDownloadErrorCode.INVALID_DETAIL_PAGE)
         values = parse_qs(wrapper.query, keep_blank_values=True).get("file", [])
         if len(values) != 1 or not values[0].strip():
             continue
@@ -383,6 +405,13 @@ def _stream_pdf_to_cache(
                     prefix.extend(chunk[: 5 - len(prefix)])
                 digest.update(chunk)
                 handle.write(chunk)
+            # Header-only PDF validation is deliberate (IPO-006 review note):
+            # the magic-byte check rejects HTML error pages served with a PDF
+            # content type, while deep structural validation is delegated to
+            # the parse stage. The SHA-256 digest cannot prove that the source
+            # server sent a complete PDF; it detects only later alteration of
+            # the exact bytes stored here. Structural truncation is therefore
+            # the parser's responsibility.
             if not bytes(prefix).startswith(b"%PDF-"):
                 _raise(IpoDocumentDownloadErrorCode.INVALID_PDF)
             handle.flush()
@@ -391,6 +420,12 @@ def _stream_pdf_to_cache(
         content_sha256 = digest.hexdigest()
         relative = PurePosixPath("ipo", "documents", f"{content_sha256}.pdf")
         final_path = _contained_cache_path(data_dir, relative.as_posix())
+        # The atomic publish keeps no explicit file permissions (IPO-006 review
+        # note): the cached PDF inherits the temp file's mode, and
+        # confidentiality relies on the runtime data_dir itself being
+        # protected. That is the deployment model documented in
+        # docs/operations.md — these are public SEBI filings, so the threat is
+        # tampering (covered by the digest re-verification), not disclosure.
         os.replace(temporary_path, final_path)
         temporary_path = None
         return IpoDocumentDownloadResult(
@@ -452,15 +487,38 @@ def download_document_file(
         )
         media_type = _content_type(response)
         if media_type == "text/html":
+            # Redirects can move a detail page to another directory. Resolve
+            # relative iframe and ``file`` values against the final URL that
+            # produced this HTML, not the stale URL requested before redirects.
+            final_detail_url = str(
+                getattr(response, "_scanner_canonical_url", detail_url)
+            )
             try:
                 pdf_url = _extract_pdf_url(
-                    _read_html(response), detail_url=detail_url, resolver=resolver
+                    _read_html(response),
+                    detail_url=final_detail_url,
+                    resolver=resolver,
                 )
             finally:
                 response.close()
                 response = None
             response = _fetch(
-                active_session, pdf_url, resolver=resolver, sleeper=sleeper
+                active_session,
+                pdf_url,
+                resolver=resolver,
+                sleeper=sleeper,
+                require_pdf_path=True,
+            )
+        else:
+            # A listing URL may already return the prospectus PDF, but the PDF
+            # still has to live in SEBI's attachment tree. Media type alone must
+            # not promote an unrelated same-host resource into trusted filing
+            # evidence. The private attribute is set by our redirect loop to the
+            # final URL that was actually requested.
+            _canonical_sebi_url(
+                str(getattr(response, "_scanner_canonical_url", detail_url)),
+                resolver=resolver,
+                require_pdf_path=True,
             )
         return _stream_pdf_to_cache(
             response,
@@ -468,6 +526,11 @@ def download_document_file(
             data_dir=data_dir,
             downloaded_at=now().astimezone(dt.UTC),
         )
+    except requests.RequestException:
+        # requests can raise lazily while ``iter_content`` reads an otherwise
+        # successful response. Convert those late failures to the same stable,
+        # secret-free taxonomy as connection failures raised by ``session.get``.
+        _raise(IpoDocumentDownloadErrorCode.NETWORK_ERROR)
     finally:
         if response is not None:
             response.close()
