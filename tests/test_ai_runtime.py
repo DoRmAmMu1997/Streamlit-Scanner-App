@@ -24,6 +24,7 @@ import sys
 
 import pytest
 
+import backend.ai_runtime as ai_runtime
 from backend.ai_runtime import extract_json_object, run_agent_coroutine
 
 _PROBE: contextvars.ContextVar[str] = contextvars.ContextVar("ai_runtime_probe", default="unset")
@@ -131,11 +132,21 @@ def test_returns_none_for_non_finite_json_numbers(constant):
     assert extract_json_object(f'{{"confidence": {constant}}}') is None
 
 
-def test_returns_none_when_json_nesting_exceeds_decoder_limit():
-    """An excessively nested model response is a parse miss, not an app crash."""
-    deeply_nested = '{"value":' + "[" * 5_000 + "0" + "]" * 5_000 + "}"
+def test_returns_none_when_json_decoder_hits_recursion_limit(monkeypatch):
+    """A decoder recursion failure is a parse miss on every Python version.
 
-    assert extract_json_object(deeply_nested) is None
+    Beginner note: the nesting depth that triggers ``RecursionError`` differs
+    between Python's JSON decoder implementations. Raising at the decoder
+    boundary tests our behavior directly instead of assuming a magic depth that
+    happens to fail on one interpreter but succeeds on another.
+    """
+
+    def _raise_recursion(*_args, **_kwargs):
+        raise RecursionError("decoder nesting limit")
+
+    monkeypatch.setattr(ai_runtime.json, "loads", _raise_recursion)
+
+    assert extract_json_object('{"value": 1}') is None
 
 
 def test_returns_none_for_reversed_braces():
