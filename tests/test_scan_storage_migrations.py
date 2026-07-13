@@ -14,6 +14,9 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -24,6 +27,38 @@ from sqlalchemy.orm import Session
 
 from backend.storage import database
 from backend.storage.models import Base, IpoIssue, IpoManualExtraction
+
+
+def test_alembic_cli_does_not_echo_percent_encoded_database_password():
+    """Alembic errors must not print credentials from a URL-encoded password.
+
+    Beginner note: Alembic stores configuration with ConfigParser, where a
+    percent sign has special interpolation syntax. A normal URL escape such as
+    ``%40`` must be escaped for that configuration layer. Otherwise Alembic
+    raises before connecting and its traceback includes the complete database
+    URL, including the password.
+    """
+    secret = "dummy%40secret"
+    env = os.environ.copy()
+    env["DATABASE_URL"] = (
+        f"postgresql+psycopg://scanner:{secret}@127.0.0.1:1/scanner"
+        "?connect_timeout=1"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    output = completed.stdout + completed.stderr
+
+    assert completed.returncode != 0
+    assert secret not in output
+    assert "dummy@secret" not in output
 
 
 def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Path):

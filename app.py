@@ -29,11 +29,10 @@ from __future__ import annotations
 # module documentation in `#` comments here.
 import logging
 import sys
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
 import streamlit as st
 from streamlit.runtime.scriptrunner import get_script_run_ctx
 
@@ -57,7 +56,6 @@ from backend.auth.session import (
     require_capability,
 )
 from backend.config import (
-    DAILY_CACHE_DIR,
     SettingsError,
     credential_status,
     ensure_project_dirs,
@@ -90,11 +88,8 @@ from backend.universe_builder import (
     refresh_universe_files,
 )
 from backend.universe_loader import (
-    all_universe_statuses,
     load_universe,
     union_of_mapped_universes,
-    universe_file_path,
-    universe_status,
 )
 
 # UI page modules (REF-001). app.py re-exports the moved helpers because the
@@ -160,11 +155,24 @@ from ui.history_page import (  # noqa: F401
     _render_history_run_details,
 )
 from ui.ipo_manual_page import _render_ipo_manual_page
+from ui.parameter_controls import (  # noqa: F401
+    _apply_param_overrides,
+    _param_state_key,
+    _render_parameter_overrides,
+)
 from ui.roles_page import _render_roles_page
 from ui.scan_view import (  # noqa: F401
     _has_rating_column,
     _render_results_with_chart,
     _render_scan_output,
+)
+from ui.status_panel import (  # noqa: F401
+    _cached_all_universe_statuses,
+    _cached_universe_status,
+    _universe_mtime,
+    cache_summary,
+    render_universe_table,
+    show_status_panel,
 )
 from ui.validation_page import _render_validation_page
 
@@ -407,130 +415,6 @@ def _inject_css() -> None:
     st.markdown(_CUSTOM_CSS, unsafe_allow_html=True)
 
 
-@st.cache_data(ttl=30, show_spinner=False)
-def cache_summary(cache_dir: Path = DAILY_CACHE_DIR) -> dict[str, Any]:
-    """Count cached candle files so the UI can show whether caching is active.
-
-    The cache directory can contain hundreds of Parquet files. Streamlit reruns
-    the script for ordinary widget interactions, so caching this small summary
-    for 30 seconds keeps row clicks and dropdown changes from repeatedly
-    walking the filesystem.
-    """
-    if not cache_dir.exists():
-        return {"files": 0, "size_mb": 0.0}
-
-    # Each cached daily-history fetch is stored as one Parquet file. Parquet is
-    # compact and preserves pandas dtypes better than plain CSV.
-    files = list(cache_dir.glob("*.parquet"))
-    size = sum(path.stat().st_size for path in files if path.exists())
-    return {"files": len(files), "size_mb": round(size / (1024 * 1024), 2)}
-
-
-@st.cache_data(ttl=30, show_spinner=False)
-def _universe_mtime(universe_key: str) -> str:
-    """Return a human-readable last-modified timestamp for a universe CSV.
-
-    This is cached briefly for the same reason as `cache_summary`: the value is
-    display-only, and a 30-second delay is a good trade-off for a smoother app
-    while a user is interacting with scan results.
-    """
-    path = universe_file_path(universe_key)
-    if not path.exists():
-        return "never"
-    modified = datetime.fromtimestamp(path.stat().st_mtime)
-    return modified.strftime("%Y-%m-%d %H:%M")
-
-
-@st.cache_data(ttl=30, show_spinner=False)
-def _cached_universe_status(universe_key: str) -> dict[str, Any]:
-    """Return one universe status with a short rerun-friendly cache.
-
-    `universe_status(...)` touches the CSV on disk. Caching the result keeps the
-    status strip responsive when a table selection or chart dropdown causes a
-    Streamlit rerun.
-    """
-    return universe_status(universe_key)
-
-
-@st.cache_data(ttl=30, show_spinner=False)
-def _cached_all_universe_statuses() -> tuple[dict[str, object], ...]:
-    """Return all universe statuses only when the details table is requested."""
-    return tuple(all_universe_statuses())
-
-
-def show_status_panel(selected: ScreenerDefinition) -> None:
-    """Render the health checks a user needs before pressing Run."""
-    creds = credential_status()
-    universe = _cached_universe_status(selected.universe)
-    cache = cache_summary()
-
-    universe_display = UNIVERSE_CONFIG.get(selected.universe, {}).get(
-        "display_name", selected.universe
-    )
-    mapped_rows = int(universe.get("mapped_rows") or 0)
-
-    # Four metrics: credentials, universe identity + count, last refresh time,
-    # local cache size. They live inside a bordered container so they read as a
-    # quiet "system status" card rather than the loudest thing on the page.
-    # Each metric uses Streamlit's delta slot as a short contextual line.
-    with st.container(border=True):
-        st.caption("System status")
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric(
-            label="Dhan credentials",
-            value="Ready" if creds["ready"] else "Missing",
-            delta="signed in" if creds["ready"] else "set Dependencies/.env",
-            delta_color="normal" if creds["ready"] else "inverse",
-        )
-        col2.metric(
-            label=f"{universe_display} symbols",
-            value=mapped_rows,
-            delta=f"{int(universe.get('rows') or 0)} total rows",
-            delta_color="off",
-        )
-        col3.metric(
-            label="Universe refreshed",
-            value=_universe_mtime(selected.universe),
-            delta="local CSV mtime",
-            delta_color="off",
-        )
-        col4.metric(
-            label="Daily cache",
-            value=int(cache["files"]),
-            delta=f"{cache['size_mb']} MB on disk",
-            delta_color="off",
-        )
-
-    if not creds["ready"]:
-        st.warning(
-            f"Credentials are not ready. Create `{creds['env_path']}` from "
-            "`Dependencies/.env.example`, then run `python Dependencies/dhan_token_setup.py`."
-        )
-
-    if not universe["exists"]:
-        st.info(
-            "Universe CSV is missing. Re-run the app via `python app.py` so the prefetch "
-            "step downloads it before opening Streamlit."
-        )
-
-
-def render_universe_table() -> None:
-    """Show detailed universe-file status without taking over the main screen."""
-    with st.expander("Universe file status", expanded=False):
-        show_details = st.toggle(
-            "Show details",
-            value=False,
-            key="show_universe_file_status",
-        )
-        if not show_details:
-            # A collapsed expander still executes in Streamlit. This toggle
-            # keeps the expensive "read every universe CSV" step lazy until the
-            # user asks for the detailed table.
-            return
-        statuses = _cached_all_universe_statuses()
-        st.dataframe(pd.DataFrame(list(statuses)), width="stretch", hide_index=True)
-
-
 def refresh_universes_and_invalidate() -> dict[str, Path]:
     """Refresh universe CSVs, then clear every cache that reads them.
 
@@ -538,6 +422,11 @@ def refresh_universes_and_invalidate() -> dict[str, Path]:
     so the clears are defensive). Routing refreshes through this wrapper means
     any future in-UI "refresh" action inherits correct cache invalidation
     instead of serving stale universe data for up to a TTL window.
+
+    The cached helpers themselves live in ``ui.status_panel`` and
+    ``ui.fundamentals_panel`` (REF-003/REF-002); the imports above preserve
+    function identity, so ``.clear()`` here empties the same cache objects
+    those modules read.
     """
     written = refresh_universe_files()
     _universe_mtime.clear()
@@ -545,93 +434,6 @@ def refresh_universes_and_invalidate() -> dict[str, Path]:
     _cached_all_universe_statuses.clear()
     _eligible_symbols_set.clear()
     return written
-
-
-# ---------------------------------------------------------------------------
-# Parameter override helpers
-#
-# Every screener declares `default_params` in its SCREENER dict. The sidebar
-# renders one editable widget per default so the user can A/B test parameter
-# tweaks (e.g. "what if discount_pct were 5% instead of 14%?") without
-# editing source code. Overrides live in `st.session_state` keyed by
-# screener+param, so switching screeners does not cross-contaminate values.
-# ---------------------------------------------------------------------------
-
-
-def _param_state_key(screener_key: str, param_key: str) -> str:
-    """Stable session_state key for one (screener, parameter) override widget.
-
-    Including both pieces ensures `discount_pct` on screener A does not
-    overwrite `discount_pct` on screener B if both define one.
-    """
-    return f"param_override::{screener_key}::{param_key}"
-
-
-def _render_parameter_overrides(selected: ScreenerDefinition) -> None:
-    """Render an expandable sidebar block to tune the selected screener's params.
-
-    Number-input widgets are bound to `st.session_state` directly via `key=`,
-    so reading them back later (in `_apply_param_overrides`) does not need
-    any extra plumbing.
-    """
-    defaults = dict(selected.default_params or {})
-    if not defaults:
-        # A screener without tunable params (rare) skips the expander entirely.
-        return
-
-    with st.expander("Tune parameters", expanded=False):
-        st.caption(
-            "Values override the screener's defaults for the **next** run. "
-            "Click 'Reset to defaults' to discard your edits."
-        )
-
-        # The reset button removes any user-set keys so the next widget
-        # render falls back to the screener's declared defaults. `st.rerun()`
-        # gives the widgets a chance to repaint with the default values
-        # immediately rather than waiting for the user's next interaction.
-        if st.button(
-            "Reset to defaults",
-            key=f"reset_params_{selected.key}",
-            help="Discard any parameter tweaks and use the screener's declared defaults.",
-        ):
-            for param_key in defaults:
-                state_key = _param_state_key(selected.key, param_key)
-                st.session_state.pop(state_key, None)
-            st.rerun()
-
-        for param_key, default_value in defaults.items():
-            state_key = _param_state_key(selected.key, param_key)
-            # Seed the session_state on the first render. Without this seed,
-            # the number_input would use `value=default_value` only once and
-            # then store its own state, which gets messy on screener switch.
-            if state_key not in st.session_state:
-                st.session_state[state_key] = default_value
-
-            if isinstance(default_value, bool):
-                st.checkbox(param_key, key=state_key)
-            elif isinstance(default_value, int):
-                # Integer parameters: step=1 keeps the widget arrows
-                # incrementing cleanly. The default value (already in state)
-                # tells Streamlit it is an int widget.
-                st.number_input(param_key, step=1, key=state_key)
-            else:
-                # Float parameters: 4-decimal format covers percentages like
-                # 0.0150 cleanly. The user can still type a wider value.
-                st.number_input(param_key, key=state_key, format="%.4f")
-
-
-def _apply_param_overrides(selected: ScreenerDefinition, params: dict[str, Any]) -> dict[str, Any]:
-    """Merge any sidebar-edited values from `st.session_state` into `params`.
-
-    `params` is mutated in place (and also returned) so the caller can chain
-    if desired. Only keys declared in the screener's `default_params` are
-    pulled — that keeps random session_state values from leaking through.
-    """
-    for param_key in selected.default_params or {}:
-        state_key = _param_state_key(selected.key, param_key)
-        if state_key in st.session_state:
-            params[param_key] = st.session_state[state_key]
-    return params
 
 
 def _configure_logging() -> None:

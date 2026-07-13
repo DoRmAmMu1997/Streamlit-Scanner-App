@@ -149,6 +149,15 @@ def test_technical_verdict_rejects_coercion_and_unknown_fields():
         TechnicalVerdict.model_validate(nested)
 
 
+def test_technical_verdict_rejects_non_finite_numbers():
+    """The shared strict model rejects NaN even when built outside JSON parsing."""
+    payload = _sample_verdict().model_dump(mode="json")
+    payload["key_levels"] = [float("nan")]
+
+    with pytest.raises(Exception):
+        TechnicalVerdict.model_validate(payload)
+
+
 # ---------------------------------------------------------------------------
 # Agent behaviour (driven by the fake runner)
 # ---------------------------------------------------------------------------
@@ -514,6 +523,82 @@ def test_agent_retries_then_succeeds_on_transient_malformed_output(
     assert result.error_type is None
     assert result.verdict is not None
     assert result.verdict.pattern == "at_support"
+
+
+def test_agent_retries_non_finite_json_before_cache_signing(tmp_path, monkeypatch):
+    """A model-controlled NaN must be retried before the signing boundary.
+
+    The first response uses Python's historically accepted non-standard JSON
+    constant.  The second response is valid.  If NaN escapes parsing, strict
+    cache canonicalization raises instead of returning a normal evaluation.
+    """
+    monkeypatch.setenv("SCANNER_AI_MAX_ATTEMPTS", "2")
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    valid_json = json.dumps(_sample_verdict().model_dump(mode="json"))
+
+    class _NonFiniteThenValidRunner(_FakeRunner):
+        async def __call__(
+            self, prompt, *, system_prompt, model, max_turns, tool_context=None
+        ):
+            self.calls += 1
+            if self.calls == 1:
+                return AgentRunResult(
+                    text=valid_json.replace('"key_levels": [95.0]', '"key_levels": [NaN]')
+                )
+            return AgentRunResult(text=valid_json)
+
+    runner = _NonFiniteThenValidRunner(_sample_verdict())
+    agent = TechnicalAnalysisAgent(model="test-model", cache=cache, runner=runner)
+
+    result = agent.evaluate("DEMO", _sample_candles(), _sample_levels())
+
+    assert runner.calls == 2
+    assert result.error_type is None
+    assert result.verdict is not None
+    assert result.verdict.key_levels == [95.0]
+    data_date = str(_sample_candles().iloc[-1]["timestamp"])[:10]
+    assert cache.get_verdict(
+        "DEMO",
+        agent._cache_model_key("DEMO", _sample_candles(), _sample_levels(), None),
+        data_date,
+    ) is not None
+
+
+def test_agent_turns_persistent_non_finite_json_into_error_without_cache(
+    tmp_path, monkeypatch
+):
+    """Exhausted unsafe-number retries produce a receipt and skip signing."""
+    monkeypatch.setenv("SCANNER_AI_MAX_ATTEMPTS", "2")
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    unsafe_json = json.dumps(_sample_verdict().model_dump(mode="json")).replace(
+        '"key_levels": [95.0]', '"key_levels": [Infinity]'
+    )
+
+    class _PersistentNonFiniteRunner(_FakeRunner):
+        async def __call__(
+            self, prompt, *, system_prompt, model, max_turns, tool_context=None
+        ):
+            self.calls += 1
+            return AgentRunResult(text=unsafe_json)
+
+    signing_calls = []
+    monkeypatch.setattr(
+        technical_agent_module,
+        "sign_cache_envelope",
+        lambda *args, **kwargs: signing_calls.append((args, kwargs)),
+    )
+    runner = _PersistentNonFiniteRunner(_sample_verdict())
+    agent = TechnicalAnalysisAgent(model="test-model", cache=cache, runner=runner)
+
+    result = agent.evaluate("DEMO", _sample_candles(), _sample_levels())
+
+    assert runner.calls == 2
+    assert result.verdict is None
+    assert result.error_type == "AIValidationError"
+    assert result.provenance.verdict == "error"
+    assert result.validated_verdict_json == {}
+    assert signing_calls == []
+    assert list(tmp_path.glob("*_verdict_*.json")) == []
 
 
 def test_agent_rejects_verdict_missing_required_fields(tmp_path, monkeypatch):

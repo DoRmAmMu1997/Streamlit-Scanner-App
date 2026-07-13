@@ -8,12 +8,48 @@ suite will call that out before a PR lands.
 
 from __future__ import annotations
 
+import copy
 import re
+import tomllib
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+QUAL_007_IGNORE_ERRORS_BASELINE = frozenset(
+    {
+        "test_app_comparison_page",
+        "test_app_validation_page",
+        "test_auth_session",
+        "test_daily_data_loader",
+        "test_daily_scan_job",
+        "test_dhan_client",
+        "test_forward_return_service",
+        "test_indicators",
+        "test_ipo_document_downloader",
+        "test_ipo_models",
+        "test_ipo_ratio_engine",
+        "test_ipo_repository",
+        "test_ipo_scorecard",
+        "test_notifications_channels",
+        "test_notifications_report",
+        "test_notifications_service",
+        "test_pdf_reader",
+        "test_real_screeners",
+        "test_result_contract",
+        "test_scan_run_integration",
+        "test_scan_service",
+        "test_scan_storage_repository",
+        "test_scanner_base",
+        "test_scoring_model",
+        "test_screener_in_client",
+        "test_screener_registry",
+        "test_sixty_seven_agent",
+        "test_sixty_seven_search_client",
+        "test_technical_analysis_agent",
+    }
+)
 CI_COMMANDS = (
     "python -m pre_commit validate-config .pre-commit-config.yaml",
     "python -m pytest -q --cov=backend --cov=screeners --cov=ui --cov-fail-under=87",
@@ -27,6 +63,55 @@ CI_COMMANDS = (
     "docker compose up --build --wait --wait-timeout 180",
     "docker compose down --volumes --remove-orphans",
 )
+
+
+def _assert_qual_007_ignore_errors_only_shrinks(config: dict) -> None:
+    """Keep QUAL-007's temporary mypy debt list from silently growing.
+
+    Beginner note: the override is a migration aid, not a permanent escape
+    hatch. Existing entries may be removed as tests gain types, but adding a
+    new test module would hide fresh errors from CI and must fail this policy
+    test.
+    """
+    mypy = config["tool"]["mypy"]
+    assert "tests" in mypy["files"]
+
+    ignored_overrides = [
+        override
+        for override in mypy.get("overrides", [])
+        if override.get("ignore_errors") is True
+    ]
+    assert len(ignored_overrides) == 1
+
+    modules = ignored_overrides[0]["module"]
+    assert len(modules) == len(set(modules)), "ignore_errors modules must be unique"
+    assert set(modules) <= QUAL_007_IGNORE_ERRORS_BASELINE
+    for module in modules:
+        assert (ROOT / "tests" / f"{module}.py").is_file(), module
+
+
+def test_qual_007_mypy_ignore_errors_debt_can_only_shrink():
+    """The checked-in mypy override must stay within its reviewed baseline."""
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        config = tomllib.load(handle)
+
+    _assert_qual_007_ignore_errors_only_shrinks(config)
+
+
+def test_qual_007_mypy_ignore_errors_guard_rejects_new_modules():
+    """Prove the policy guard fails if a future edit expands the debt list."""
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        config = tomllib.load(handle)
+    expanded = copy.deepcopy(config)
+    ignored_override = next(
+        override
+        for override in expanded["tool"]["mypy"]["overrides"]
+        if override.get("ignore_errors") is True
+    )
+    ignored_override["module"].append("test_new_untyped_debt")
+
+    with pytest.raises(AssertionError):
+        _assert_qual_007_ignore_errors_only_shrinks(expanded)
 
 
 def test_ci_workflow_runs_quality_and_dependency_security_checks():
@@ -173,6 +258,64 @@ def test_operations_guide_matches_scheduler_database_and_ci_contracts():
     for command in CI_COMMANDS:
         assert command in text
     assert "python -m pip_audit -r requirements.txt -r requirements-dev.txt" not in text
+
+
+def test_postgres_guide_keeps_credentials_out_of_shell_arguments():
+    """DEPLOY-004 examples should teach a secret-safe operator workflow.
+
+    Beginner note: placeholders in a command are often replaced in-place by an
+    operator. That puts the real password into shell history and, while the
+    command runs, into the process argument list. A protected env file and an
+    interactive ``psql`` prompt avoid both leaks.
+    """
+    text = (ROOT / "docs" / "operations.md").read_text(encoding="utf-8")
+    worked_example = text.split(
+        "### Worked example: self-hosted Postgres, end to end", maxsplit=1
+    )[1].split("### Connection-pool behavior and guidance", maxsplit=1)[0]
+
+    assert "chmod 600 postgres.env" in worked_example
+    assert "--env-file postgres.env" in worked_example
+    assert "chmod 600 Dependencies/.env" in worked_example
+    assert "percent-encode" in worked_example.lower()
+    assert "psql -h db-host -U scanner -d scanner -W" in worked_example
+    assert "audit_logs" in worked_example
+
+    assert "-e POSTGRES_PASSWORD=" not in worked_example
+    assert "DATABASE_URL=postgresql+psycopg://scanner:<password>" not in worked_example
+    assert 'psql "postgresql://scanner:<password>' not in worked_example
+    assert "`audit_log`" not in worked_example
+
+
+def test_container_examples_keep_runtime_secrets_out_of_process_arguments():
+    """Production Docker examples should load secrets from a protected env file.
+
+    Beginner note: ``docker run -e NAME=value`` makes the value part of the
+    command line. A real password or provider token can then remain in shell
+    history and may be visible to local process-inspection tools. ``--env-file``
+    keeps those values out of the command arguments while preserving the same
+    container environment.
+    """
+    text = (ROOT / "docs" / "operations.md").read_text(encoding="utf-8")
+    container_examples = text.split("For production,", maxsplit=1)[1].split(
+        "### Backing up scan history", maxsplit=1
+    )[0]
+
+    assert container_examples.count("--env-file Dependencies/.env") == 2
+    assert "-e DATABASE_URL=" not in container_examples
+    assert "-e DHAN_ACCESS_TOKEN=" not in container_examples
+
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme_production = readme.split(
+        "Production containers default to fail-closed settings", maxsplit=1
+    )[1].split("## Running the daily scan job", maxsplit=1)[0]
+    assert "--env-file Dependencies/.env" in readme_production
+    assert "-e DATABASE_URL=" not in readme_production
+    assert "-e DHAN_ACCESS_TOKEN=" not in readme_production
+
+    # The quick URL example should agree with the worked guidance: reserved
+    # password characters are encoded before the URL enters the protected file.
+    assert "scanner:<password>@db-host" not in text
+    assert "scanner:<percent-encoded-password>@db-host" in text
 
 
 def test_ai_architecture_docs_describe_validation_fallback_and_safe_errors():

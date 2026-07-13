@@ -16,7 +16,6 @@ import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import requests
 from bs4 import BeautifulSoup
@@ -29,6 +28,7 @@ from backend.ipo.models import (
     SebiFiling,
     SebiFilingCategory,
 )
+from backend.ipo.url_canonical import canonical_sebi_url
 
 AJAX_URL = "https://www.sebi.gov.in/sebiweb/ajax/home/getnewslistinfo.jsp"
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -80,19 +80,22 @@ def _canonical_sebi_url(value: str, *, base_url: str | None = None) -> str:
     The exact host, credential, scheme, and port checks are repeated for listing
     links and redirects. Removing fragments also ensures the record fingerprint
     identifies a server resource rather than browser-only navigation state.
+
+    The implementation is shared with the prospectus downloader
+    (``backend/ipo/url_canonical.py``, IPO-006); this wrapper binds the listing
+    module's AJAX base URL, host allowlist, and error type. One deliberate
+    tightening rides along: a malformed port (``https://host:abc/``) now raises
+    ``SebiSourceError`` instead of leaking a bare ``ValueError`` — rejected
+    either way, but now within this module's error taxonomy.
     """
-    candidate = urljoin(base_url or AJAX_URL, value.strip())
-    parsed = urlsplit(candidate)
-    host = (parsed.hostname or "").casefold()
-    if (
-        parsed.scheme.casefold() != "https"
-        or host not in ALLOWED_HOSTS
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.port not in (None, 443)
-    ):
-        raise SebiSourceError("SEBI URL or redirect did not match the HTTPS host allowlist.")
-    return urlunsplit(("https", host, parsed.path or "/", parsed.query, ""))
+    return canonical_sebi_url(
+        value,
+        base_url=base_url or AJAX_URL,
+        allowed_hosts=ALLOWED_HOSTS,
+        error=lambda: SebiSourceError(
+            "SEBI URL or redirect did not match the HTTPS host allowlist."
+        ),
+    )
 
 
 _SME_TOKEN = re.compile(r"(?:^|[\s(\[/{_-])SME(?:$|[\s)\]/}_-])", re.IGNORECASE)

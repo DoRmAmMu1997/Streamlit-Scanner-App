@@ -42,9 +42,14 @@ T = TypeVar("T")
 
 
 class StrictAIModel(BaseModel):
-    """Strict base class for model-produced JSON."""
+    """Strict base class for finite, model-produced JSON values.
 
-    model_config = ConfigDict(strict=True, extra="forbid")
+    ``allow_inf_nan=False`` repeats the runtime decoder's finite-number rule at
+    the schema boundary.  This defense in depth also protects callers that
+    validate an already-built Python mapping instead of parsing JSON text.
+    """
+
+    model_config = ConfigDict(strict=True, extra="forbid", allow_inf_nan=False)
 
 
 class AIValidationError(RuntimeError):
