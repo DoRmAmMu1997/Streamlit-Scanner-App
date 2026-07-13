@@ -41,6 +41,8 @@ SHARED_DOCUMENTATION_TARGETS: dict[Path, frozenset[str]] = {
         {
             "IpoIssue",
             "IpoDocument",
+            "IpoEnrichmentSignal",
+            "IpoExtractionProposal",
             "IpoFinancial",
             "IpoManualExtraction",
             "IpoManualFinancialPeriod",
@@ -55,6 +57,7 @@ SHARED_DOCUMENTATION_TARGETS: dict[Path, frozenset[str]] = {
             "test_ipo002_downgrade_refuses_to_discard_ingested_identity",
             "test_ipo003_downgrade_refuses_to_discard_download_provenance",
             "test_ipo004_downgrade_refuses_to_discard_manual_revisions",
+            "test_ipo006_downgrade_refuses_to_discard_screener_artifacts",
         }
     ),
     ROOT / "tests" / "test_app_orchestration.py": frozenset(
