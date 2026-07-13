@@ -38,18 +38,17 @@ external = ["BLE"]
 # CI runs 3.11; local development may run newer. Pinning the target version
 # keeps local runs honest about what CI will accept.
 python_version = "3.11"
-# tests/ adopts mypy module-by-module (QUAL-004): the shared fixtures and the
-# two policy/guard tests go first because they encode repo invariants. Extend
-# this list as further test modules come clean; do not remove entries.
+# QUAL-004 started tests/ adoption module-by-module (conftest + the two
+# policy/guard tests); QUAL-007 finished it — the whole test tree is checked,
+# so a fixture or fake that drifts from the typed application API fails here
+# before it fails at runtime.
 files = [
     "app.py",
     "backend",
     "screeners",
     "ui",
     "Dependencies",
-    "tests/conftest.py",
-    "tests/test_supply_chain_policy.py",
-    "tests/test_repository_layer_boundary.py",
+    "tests",
 ]
 # First-adoption strictness: check function bodies everywhere (including
 # untyped ones) without yet *requiring* annotations on every def. Stricter
@@ -61,6 +60,49 @@ warn_redundant_casts = true
 # Optional packages differ between local machines and CI, so only those exact
 # import/assignment lines also suppress the environment-dependent unused-ignore.
 warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+# QUAL-007's remaining debt: these test modules still carry pre-typing idioms
+# (fake clients passed where the real client class is annotated, records-dict
+# rows, unannotated accumulators) — ~385 mechanical errors at adoption time.
+# Every OTHER test module is fully checked, and a NEW test file is checked by
+# default. Shrink this list as modules come clean; NEVER add to it — a new
+# entry means new untyped debt, which is exactly what this gate exists to
+# prevent.
+# NOTE: tests/ is not a package (no __init__.py), so mypy sees these as
+# top-level modules — no "tests." prefix.
+module = [
+    "test_app_comparison_page",
+    "test_app_validation_page",
+    "test_auth_session",
+    "test_daily_data_loader",
+    "test_daily_scan_job",
+    "test_dhan_client",
+    "test_forward_return_service",
+    "test_indicators",
+    "test_ipo_document_downloader",
+    "test_ipo_models",
+    "test_ipo_ratio_engine",
+    "test_ipo_repository",
+    "test_ipo_scorecard",
+    "test_notifications_channels",
+    "test_notifications_report",
+    "test_notifications_service",
+    "test_pdf_reader",
+    "test_real_screeners",
+    "test_result_contract",
+    "test_scan_run_integration",
+    "test_scan_service",
+    "test_scan_storage_repository",
+    "test_scanner_base",
+    "test_scoring_model",
+    "test_screener_in_client",
+    "test_screener_registry",
+    "test_sixty_seven_agent",
+    "test_sixty_seven_search_client",
+    "test_technical_analysis_agent",
+]
+ignore_errors = true
 
 [[tool.mypy.overrides]]
 # Third-party packages that ship no type stubs (and optional accelerators

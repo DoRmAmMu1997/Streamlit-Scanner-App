@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import datetime as dt
 
+import pandas as pd
+
 import app
 from backend.auth.roles import Role
 from backend.auth.session import AuthenticatedUser
@@ -41,7 +43,8 @@ class _FakeStreamlit:
         self.warnings: list[str] = []
         self.captions: list[str] = []
         self.metrics: list[tuple[str, object]] = []
-        self.dataframes: list[object] = []
+        # DataFrame-typed so assertions may call .to_dict on captured tables.
+        self.dataframes: list[pd.DataFrame] = []
 
     def subheader(self, *_args, **_kwargs):
         pass

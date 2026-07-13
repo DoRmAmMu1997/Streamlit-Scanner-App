@@ -75,7 +75,10 @@ def test_all_null_timestamps_return_none_pair(tmp_path):
     """A column of NaT has no min/max statistics — must fall back, not guess."""
     path = tmp_path / "DEMO_1.parquet"
     pd.DataFrame(
-        {"timestamp": pd.to_datetime([None, None]), "close": [1.0, 2.0]}
+        {
+            "timestamp": pd.Series([pd.NaT, pd.NaT], dtype="datetime64[ns]"),
+            "close": [1.0, 2.0],
+        }
     ).to_parquet(path, index=False)
     assert timestamp_bounds(path) == (None, None)
 

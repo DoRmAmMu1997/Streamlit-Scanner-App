@@ -16,6 +16,7 @@ Two behaviors changed and two must NOT have changed:
 from __future__ import annotations
 
 from datetime import date, timedelta
+from typing import cast
 
 import pandas as pd
 import pyarrow as pa
@@ -24,6 +25,7 @@ import pytest
 
 from backend import daily_data_loader
 from backend.daily_data_loader import DailyDataLoader, history_start_date
+from backend.dhan_client import DhanDataClient
 
 TODAY = date(2026, 7, 10)
 YEARS_BACK = 10
@@ -36,9 +38,9 @@ def _instrument() -> dict:
 def _covering_frame() -> pd.DataFrame:
     """Business-day candles spanning the full prefetch window ending today."""
     start = history_start_date(YEARS_BACK, TODAY) - timedelta(days=5)
-    stamps = pd.date_range(start, TODAY, freq="B")
+    stamps = pd.DatetimeIndex(pd.date_range(start, TODAY, freq="B"))
     if stamps[-1].date() != TODAY:
-        stamps = stamps.append(pd.DatetimeIndex([pd.Timestamp(TODAY)]))
+        stamps = pd.DatetimeIndex(stamps.append(pd.DatetimeIndex([pd.Timestamp(TODAY)])))
     return pd.DataFrame(
         {
             "timestamp": stamps,
@@ -188,7 +190,11 @@ def test_get_daily_history_miss_decision_reads_no_frame(monkeypatch, tmp_path):
             return fetched.copy(deep=True)
 
     client = OneShotClient()
-    loader = DailyDataLoader(client, cache_dir=tmp_path, request_delay_seconds=0.0)
+    loader = DailyDataLoader(
+        cast(DhanDataClient, client),
+        cache_dir=tmp_path,
+        request_delay_seconds=0.0,
+    )
     short = fetched.loc[fetched["timestamp"] >= pd.Timestamp(date(2026, 7, 1))]
     _write_cache(loader, short, statistics=True)
     # Forbid reads AFTER writing the cache; to_parquet is unaffected.
@@ -212,7 +218,11 @@ def test_get_daily_history_covered_range_without_statistics_is_still_a_hit(tmp_p
         def fetch_daily_candles(self, **_kwargs) -> pd.DataFrame:
             raise AssertionError("a covered cache must not reach Dhan")
 
-    loader = DailyDataLoader(ForbiddenClient(), cache_dir=tmp_path, request_delay_seconds=0.0)
+    loader = DailyDataLoader(
+        cast(DhanDataClient, ForbiddenClient()),
+        cache_dir=tmp_path,
+        request_delay_seconds=0.0,
+    )
     _write_cache(loader, _covering_frame(), statistics=False)
 
     frame, from_cache = loader.get_daily_history(
@@ -249,7 +259,11 @@ def test_get_daily_history_rechecks_frame_after_footer_claim(monkeypatch, tmp_pa
             return fetched.copy(deep=True)
 
     client = OneShotClient()
-    loader = DailyDataLoader(client, cache_dir=tmp_path, request_delay_seconds=0.0)
+    loader = DailyDataLoader(
+        cast(DhanDataClient, client),
+        cache_dir=tmp_path,
+        request_delay_seconds=0.0,
+    )
     _write_cache(loader, _covering_frame(), statistics=True)
     monkeypatch.setattr(
         daily_data_loader,
