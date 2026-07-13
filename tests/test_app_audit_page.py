@@ -9,12 +9,14 @@ from __future__ import annotations
 import datetime as dt
 from contextlib import contextmanager
 from types import SimpleNamespace
+from typing import cast
 
 from sqlalchemy.exc import OperationalError
 
 from backend.auth.roles import Role
 from backend.auth.session import AuthenticatedUser
 from backend.security import MASK
+from backend.storage import AuditLog
 from ui import audit_page
 
 
@@ -84,7 +86,9 @@ def test_audit_row_renders_system_for_missing_user():
         user_email=None,
         metadata_json=None,
     )
-    row = audit_page._audit_row(entry)
+    # The formatter only reads the four attributes the namespace fakes, so the
+    # cast documents an intentional duck-typed AuditLog stand-in.
+    row = audit_page._audit_row(cast(AuditLog, entry))
     assert row["Event"] == "data_refresh_started"
     assert row["User"] == "system"
     assert row["Details"] == ""

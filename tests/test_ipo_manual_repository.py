@@ -13,6 +13,7 @@ import datetime as dt
 import hashlib
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -186,7 +187,14 @@ def test_submit_manual_extraction_persists_complete_detached_revision(
         silently omit one part of the immutable revision.
     """
     issue, document, digest, _path = _cached_document(file_session_factory, tmp_path)
-    events: list[dict[str, object]] = []
+    # dict[str, Any] so nested payload fields (e.g. metadata) stay inspectable
+    # in the assertions below without per-field casts (QUAL-007).
+    events: list[dict[str, Any]] = []
+
+    def _record_audit(**kwargs: Any) -> bool:
+        """Capture the audit payload and report success like the real sink."""
+        events.append(kwargs)
+        return True
 
     created = submit_manual_extraction(
         issue.id,
@@ -194,7 +202,7 @@ def test_submit_manual_extraction_persists_complete_detached_revision(
         entered_by_email=" ADMIN@Example.com ",
         data_dir=tmp_path,
         now=lambda: dt.datetime(2026, 7, 1, 9, tzinfo=dt.UTC),
-        audit_recorder=lambda **kwargs: events.append(kwargs) or True,
+        audit_recorder=_record_audit,
         session_factory=file_session_factory,
     )
 

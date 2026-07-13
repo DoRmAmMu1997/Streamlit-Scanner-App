@@ -69,7 +69,7 @@ class FakeDataLoader:
 
     def __init__(self, frames: dict[str, pd.DataFrame]):
         self.frames = frames
-        self.last_failures = []
+        self.last_failures: list[dict[str, object]] = []
         self.last_cache_hits = 0
         self.last_cache_misses = len(frames)
 

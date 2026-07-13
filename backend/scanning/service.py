@@ -750,7 +750,9 @@ def _result_rows(
     # persistence records, never the DataFrame owned by the caller.
     rows: list[dict[str, Any]] = []
     skipped = 0
-    for index, row in enumerate(results.to_dict("records")):
+    # to_dict("records") types its keys as Hashable; screener columns are
+    # strings (the contract normalizer enforces exactly that downstream).
+    for index, row in enumerate(cast(list[dict[str, Any]], results.to_dict("records"))):
         try:
             rows.append(
                 normalize_screener_row(

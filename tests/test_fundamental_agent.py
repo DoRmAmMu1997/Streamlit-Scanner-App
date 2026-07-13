@@ -14,7 +14,7 @@ import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -206,7 +206,9 @@ def test_observation_sentiment_must_be_valid():
         Observation(
             topic="Anything",
             finding="x",
-            sentiment="bullish",  # invalid; only positive/negative/neutral
+            # Deliberately invalid (only positive/negative/neutral exist); the
+            # cast lets the type checker allow what the validator must reject.
+            sentiment=cast(Any, "bullish"),
             evidence="x",
         )
 

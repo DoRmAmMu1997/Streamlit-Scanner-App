@@ -374,7 +374,10 @@ def _is_finite(value: object) -> bool:
     letting the exception escape.
     """
     try:
-        return bool(pd.notna(value) and math.isfinite(float(cast(Any, value))))
+        # cast(Any, ...) both times: pandas-stubs' notna overloads take concrete
+        # scalar/array types, but this boundary helper deliberately accepts any
+        # cell value and treats "cannot even check" as not-finite.
+        return bool(pd.notna(cast(Any, value)) and math.isfinite(float(cast(Any, value))))
     except (TypeError, ValueError):
         return False
 

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+import numpy as np
 import pandas as pd
 
 from backend.charts import add_cpr_overlay, candlestick_with_volume
@@ -101,7 +102,11 @@ class CprYearlyReversal(BaseScanner):
         # Rule 2: a weekly close recently up-crossed the previous-year high, and the
         # latest weekly close is still at/above it (the reclaim is holding).
         weekly = resample_to_weekly(daily)
-        weekly_closes = weekly["close"].astype(float).to_numpy() if not weekly.empty else []
+        # Annotated because the empty branch would otherwise leave mypy with an
+        # untyped union of ndarray and list[Never] (QUAL-006).
+        weekly_closes: np.ndarray | list[float] = (
+            weekly["close"].astype(float).to_numpy() if not weekly.empty else []
+        )
         if len(weekly_closes) < 2 or float(weekly_closes[-1]) < prev_year_high:
             return None
 

@@ -199,7 +199,7 @@ def _score_input(*, source_document_url: str) -> IpoScoreInput:
 
     def factor(score: int, reason: str) -> FactorAssessment:
         """Wrap one factor score with a short evidence-style reason."""
-        return FactorAssessment(score=score, reason=reason)
+        return FactorAssessment(score=Decimal(score), reason=reason)
 
     return IpoScoreInput(
         company_name="Example Limited",

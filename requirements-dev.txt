@@ -11,6 +11,10 @@ pip-audit
 mypy
 types-requests
 types-PyYAML
+# pandas typing (QUAL-006). pandas-stubs tracks the pinned pandas minor
+# series; types-pytz is its declared dependency and is pinned alongside it.
+pandas-stubs
+types-pytz
 # Coverage measurement for the CI gate (QUAL-003).
 pytest-cov
 # Local commit-time checks mirroring CI's non-rewriting hooks.

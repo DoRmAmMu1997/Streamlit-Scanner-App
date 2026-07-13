@@ -9,6 +9,9 @@ weaken one caller's hardening without a failure here.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
 import pytest
 
 from backend.ipo.url_canonical import canonical_sebi_url
@@ -21,20 +24,29 @@ class _Rejected(Exception):
     """Caller-supplied error type; the canonicalizer must raise exactly this."""
 
 
-def _canonical(value: str, **overrides):
+def _canonical(
+    value: str,
+    *,
+    base_url: str = _BASE,
+    allowed_hosts: frozenset[str] = _ALLOWED,
+    error: Callable[[], Exception] = _Rejected,
+    resolver: Callable[..., Any] | None = None,
+    require_pdf_path: bool = False,
+) -> str:
     """Call the canonicalizer with this suite's defaults, overriding per test.
 
     Bundling ``base_url``/``allowed_hosts``/``error`` here keeps each test
     focused on the one knob it varies, the way the two production wrappers
     bind their own fixed configuration.
     """
-    kwargs = {
-        "base_url": _BASE,
-        "allowed_hosts": _ALLOWED,
-        "error": _Rejected,
-    }
-    kwargs.update(overrides)
-    return canonical_sebi_url(value, **kwargs)
+    return canonical_sebi_url(
+        value,
+        base_url=base_url,
+        allowed_hosts=allowed_hosts,
+        error=error,
+        resolver=resolver,
+        require_pdf_path=require_pdf_path,
+    )
 
 
 def _resolver_answers(*addresses: str):

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -181,7 +181,9 @@ def risk_score_absolute(
     if len(close) < window_size or (close <= 0).any():
         return None
 
-    returns = np.log(close / close.shift(1)).dropna()
+    # numpy's stubs type np.log(Series) as an ndarray, but a ufunc on a Series
+    # returns a Series at runtime — narrow so .dropna() stays typed (QUAL-006).
+    returns = cast(pd.Series, np.log(close / close.shift(1))).dropna()
     if returns.empty:
         return None
     sigma = float(returns.std(ddof=0))

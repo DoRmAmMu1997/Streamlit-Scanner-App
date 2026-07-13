@@ -8,12 +8,48 @@ suite will call that out before a PR lands.
 
 from __future__ import annotations
 
+import copy
 import re
+import tomllib
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+QUAL_007_IGNORE_ERRORS_BASELINE = frozenset(
+    {
+        "test_app_comparison_page",
+        "test_app_validation_page",
+        "test_auth_session",
+        "test_daily_data_loader",
+        "test_daily_scan_job",
+        "test_dhan_client",
+        "test_forward_return_service",
+        "test_indicators",
+        "test_ipo_document_downloader",
+        "test_ipo_models",
+        "test_ipo_ratio_engine",
+        "test_ipo_repository",
+        "test_ipo_scorecard",
+        "test_notifications_channels",
+        "test_notifications_report",
+        "test_notifications_service",
+        "test_pdf_reader",
+        "test_real_screeners",
+        "test_result_contract",
+        "test_scan_run_integration",
+        "test_scan_service",
+        "test_scan_storage_repository",
+        "test_scanner_base",
+        "test_scoring_model",
+        "test_screener_in_client",
+        "test_screener_registry",
+        "test_sixty_seven_agent",
+        "test_sixty_seven_search_client",
+        "test_technical_analysis_agent",
+    }
+)
 CI_COMMANDS = (
     "python -m pre_commit validate-config .pre-commit-config.yaml",
     "python -m pytest -q --cov=backend --cov=screeners --cov=ui --cov-fail-under=87",
@@ -27,6 +63,55 @@ CI_COMMANDS = (
     "docker compose up --build --wait --wait-timeout 180",
     "docker compose down --volumes --remove-orphans",
 )
+
+
+def _assert_qual_007_ignore_errors_only_shrinks(config: dict) -> None:
+    """Keep QUAL-007's temporary mypy debt list from silently growing.
+
+    Beginner note: the override is a migration aid, not a permanent escape
+    hatch. Existing entries may be removed as tests gain types, but adding a
+    new test module would hide fresh errors from CI and must fail this policy
+    test.
+    """
+    mypy = config["tool"]["mypy"]
+    assert "tests" in mypy["files"]
+
+    ignored_overrides = [
+        override
+        for override in mypy.get("overrides", [])
+        if override.get("ignore_errors") is True
+    ]
+    assert len(ignored_overrides) == 1
+
+    modules = ignored_overrides[0]["module"]
+    assert len(modules) == len(set(modules)), "ignore_errors modules must be unique"
+    assert set(modules) <= QUAL_007_IGNORE_ERRORS_BASELINE
+    for module in modules:
+        assert (ROOT / "tests" / f"{module}.py").is_file(), module
+
+
+def test_qual_007_mypy_ignore_errors_debt_can_only_shrink():
+    """The checked-in mypy override must stay within its reviewed baseline."""
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        config = tomllib.load(handle)
+
+    _assert_qual_007_ignore_errors_only_shrinks(config)
+
+
+def test_qual_007_mypy_ignore_errors_guard_rejects_new_modules():
+    """Prove the policy guard fails if a future edit expands the debt list."""
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        config = tomllib.load(handle)
+    expanded = copy.deepcopy(config)
+    ignored_override = next(
+        override
+        for override in expanded["tool"]["mypy"]["overrides"]
+        if override.get("ignore_errors") is True
+    )
+    ignored_override["module"].append("test_new_untyped_debt")
+
+    with pytest.raises(AssertionError):
+        _assert_qual_007_ignore_errors_only_shrinks(expanded)
 
 
 def test_ci_workflow_runs_quality_and_dependency_security_checks():
@@ -109,6 +194,8 @@ def test_constraints_pin_direct_runtime_and_developer_dependencies():
         "mypy",
         "types-requests",
         "types-PyYAML",
+        "pandas-stubs",
+        "types-pytz",
         "pytest-cov",
         "pre-commit",
     ]

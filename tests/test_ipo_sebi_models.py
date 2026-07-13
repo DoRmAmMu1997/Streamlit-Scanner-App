@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import FrozenInstanceError
+from typing import cast
 
 import pytest
 
@@ -24,7 +25,9 @@ def test_unknown_issue_type_is_supported_by_the_domain() -> None:
     """Pin unknown issue type is supported by the domain as an executable IPO regression contract."""
     issue = IpoIssueData(
         company_name="Example Limited",
-        issue_type="UNKNOWN",
+        # Deliberately a STRING: the point of this test is that __post_init__
+        # coerces raw enum values, so the cast only quiets the type checker.
+        issue_type=cast(IpoIssueType, "UNKNOWN"),
         status=IpoStatus.DRHP_FILED,
         source_confidence=Confidence.HIGH,
     )

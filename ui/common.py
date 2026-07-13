@@ -8,7 +8,7 @@ each other (or app.py) without creating cycles.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -71,7 +71,8 @@ def _score_components_frame(results: pd.DataFrame) -> pd.DataFrame:
       real scanner persistence.
     """
     rows: list[dict[str, Any]] = []
-    for row in results.to_dict("records"):
+    # to_dict("records") types its keys as Hashable; result columns are strings.
+    for row in cast(list[dict[str, Any]], results.to_dict("records")):
         breakdown = _extract_score_breakdown(row)
         if breakdown is None:
             continue

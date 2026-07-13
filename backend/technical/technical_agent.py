@@ -38,7 +38,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import pandas as pd
 from pydantic import Field, ValidationError, field_validator
@@ -115,7 +115,8 @@ def _technical_context_hash(
     """
     window = candles.tail(_OHLC_WINDOW_BARS).copy() if not candles.empty else candles
     candle_records: list[dict[str, Any]] = []
-    for row in window.to_dict("records"):
+    # to_dict("records") types its keys as Hashable; candle columns are strings.
+    for row in cast(list[dict[str, Any]], window.to_dict("records")):
         candle_records.append(
             {
                 key: (value.isoformat() if hasattr(value, "isoformat") else value)
@@ -143,9 +144,11 @@ def _technical_ohlc_csv(
     for row in recent.itertuples(index=False):
         timestamp = getattr(row, "timestamp", "")
         date_str = str(timestamp)[:10] if timestamp is not None else ""
+        # itertuples() fields type as a broad scalar union; OHLC columns are
+        # numeric by the loader's boundary coercion, so narrow for float().
         lines.append(
-            f"{date_str},{float(row.open):.2f},{float(row.high):.2f},"
-            f"{float(row.low):.2f},{float(row.close):.2f}"
+            f"{date_str},{float(cast(float, row.open)):.2f},{float(cast(float, row.high)):.2f},"
+            f"{float(cast(float, row.low)):.2f},{float(cast(float, row.close)):.2f}"
         )
     return "\n".join(lines)
 
