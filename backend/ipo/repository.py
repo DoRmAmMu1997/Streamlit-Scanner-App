@@ -44,6 +44,9 @@ from backend.ipo.manual_extraction import (
 from backend.ipo.models import (
     Confidence,
     FinancialPeriodType,
+    IpoCautionFlag,
+    IpoCautionFlagReport,
+    IpoCautionFlagStatus,
     IpoDocumentData,
     IpoDocumentParseStatus,
     IpoDocumentRecord,
@@ -1216,6 +1219,16 @@ def _evaluation_record(score_row: Any, recommendation_row: Any) -> IpoEvaluation
         reasons=tuple(recommendation_row.reasons_json),
         missing_data=tuple(recommendation_row.missing_data_json),
         source_documents=tuple(recommendation_row.source_documents_json),
+        # Legacy ipo-001-v1 rows carry the server-default empty list here, so
+        # this rebuild works identically for pre- and post-IPO-006 history.
+        caution_flags=tuple(
+            IpoCautionFlag(
+                name=entry["name"],
+                status=IpoCautionFlagStatus(entry["status"]),
+                evidence=entry["evidence"],
+            )
+            for entry in recommendation_row.caution_flags_json
+        ),
     )
     return IpoEvaluationRecord(
         issue_id=score_row.issue_id,
@@ -1231,11 +1244,23 @@ def evaluate_issue(
     issue_id: int,
     score_input: IpoScoreInput,
     *,
+    caution_flags: IpoCautionFlagReport | None = None,
+    inputs_fingerprint: str | None = None,
+    model_version: str = "ipo-001-v1",
     session_factory: SessionFactory = session_scope,
 ) -> IpoEvaluationRecord:
-    """Compute and atomically persist one immutable score/verdict pair."""
+    """Compute and atomically persist one immutable score/verdict pair.
+
+    Beginner note:
+        The three IPO-006 keyword arguments are optional so IPO-001 callers
+        keep their exact behavior. The scoring service passes a caution-flag
+        report (enforced inside ``build_recommendation``), the SHA-256
+        fingerprint of the evidence it consumed (the screener's idempotency
+        anchor), and its own model version; all three are persisted with the
+        immutable pair.
+    """
     score_result = score_ipo(score_input)
-    recommendation = build_recommendation(score_result)
+    recommendation = build_recommendation(score_result, caution_flags=caution_flags)
 
     with session_factory() as session:
         issue = get_ipo_issue(session, issue_id)
@@ -1271,7 +1296,8 @@ def evaluate_issue(
             ),
             "missing_data_json": list(score_result.missing_data),
             "reasons_json": list(score_result.reasons),
-            "model_version": "ipo-001-v1",
+            "model_version": model_version,
+            "inputs_fingerprint": inputs_fingerprint,
         }
         recommendation_values = {
             "recommendation": recommendation.recommendation.value,
@@ -1280,6 +1306,10 @@ def evaluate_issue(
             "reasons_json": list(recommendation.reasons),
             "missing_data_json": list(recommendation.missing_data),
             "source_documents_json": list(recommendation.source_documents),
+            "caution_flags_json": [
+                {"name": flag.name, "status": flag.status.value, "evidence": flag.evidence}
+                for flag in recommendation.caution_flags
+            ],
         }
         score_row, recommendation_row = insert_ipo_evaluation(
             session, issue_id, score_values, recommendation_values

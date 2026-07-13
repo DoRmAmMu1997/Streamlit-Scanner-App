@@ -87,6 +87,81 @@ class Recommendation(enum.StrEnum):
     NOT_RECOMMENDED = "Not Recommended"
 
 
+class IpoEnrichmentSignalType(enum.StrEnum):
+    """Topics the IPO-009 web-enrichment collector may observe.
+
+    Beginner note:
+    These are sentiment and red-flag topics only. There is deliberately no
+    member for revenue, profit, or any other financial-statement figure: web
+    search results must never be able to masquerade as document evidence.
+    """
+
+    GMP = "gmp"
+    NEWS = "news"
+    PROMOTER_REPUTATION = "promoter_reputation"
+    LITIGATION_RED_FLAG = "litigation_red_flag"
+    ANCHOR_COMMENTARY = "anchor_commentary"
+    BROKERAGE_REVIEW = "brokerage_review"
+    PEER_DISCOVERY = "peer_discovery"
+
+
+class IpoCautionFlagStatus(enum.StrEnum):
+    """Outcome of evaluating one hard caution flag against the evidence.
+
+    Beginner note:
+    Three states matter because two kinds of "not triggered" exist. A rule that
+    ran and found nothing is ``not_triggered``; a rule whose required evidence
+    was absent is ``not_evaluable`` and must never silently pass as clean.
+    """
+
+    TRIGGERED = "triggered"
+    NOT_TRIGGERED = "not_triggered"
+    NOT_EVALUABLE = "not_evaluable"
+
+
+@dataclass(frozen=True)
+class IpoCautionFlag:
+    """One hard caution flag's outcome with its deterministic evidence line."""
+
+    name: str
+    status: IpoCautionFlagStatus
+    evidence: str
+
+    def __post_init__(self) -> None:
+        """Normalize the flag identity, parse the status, and redact evidence."""
+        name = str(self.name).strip()
+        if not name:
+            raise IpoValidationError("caution flag name is required.")
+        object.__setattr__(self, "name", name)
+        object.__setattr__(
+            self,
+            "status",
+            _parse_enum(self.status, IpoCautionFlagStatus, "caution flag status"),
+        )
+        object.__setattr__(self, "evidence", str(redact_text(str(self.evidence).strip())))
+
+
+@dataclass(frozen=True)
+class IpoCautionFlagReport:
+    """The complete, fixed-order outcome of every hard caution flag.
+
+    Beginner note:
+    The report always contains all flags — including the ones that did not
+    fire and the ones that could not be evaluated — so a stored verdict can be
+    audited for what was checked, not merely for what triggered.
+    """
+
+    version: str
+    flags: tuple[IpoCautionFlag, ...]
+
+    @property
+    def triggered(self) -> tuple[IpoCautionFlag, ...]:
+        """Return only the flags that actually fired, preserving catalog order."""
+        return tuple(
+            flag for flag in self.flags if flag.status is IpoCautionFlagStatus.TRIGGERED
+        )
+
+
 _EnumT = TypeVar("_EnumT", bound=enum.Enum)
 
 
@@ -266,7 +341,12 @@ class IpoScoreResult:
 
 @dataclass(frozen=True)
 class IpoRecommendationResult:
-    """Final IPO-001 output contract, including a JSON-native serializer."""
+    """Final IPO-001 output contract, including a JSON-native serializer.
+
+    IPO-006 appends the caution-flag report to the same contract. The field
+    defaults to an empty tuple so legacy ipo-001-v1 evaluations, which predate
+    hard caution flags, deserialize unchanged.
+    """
 
     company_name: str
     score: Decimal
@@ -276,9 +356,10 @@ class IpoRecommendationResult:
     reasons: tuple[str, ...]
     missing_data: tuple[str, ...]
     source_documents: tuple[str, ...]
+    caution_flags: tuple[IpoCautionFlag, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the exact public JSON shape promised by IPO-001."""
+        """Return the exact public JSON shape promised by IPO-001 and IPO-006."""
         numeric_score: int | float = (
             int(self.score)
             if self.score == self.score.to_integral_value()
@@ -293,6 +374,14 @@ class IpoRecommendationResult:
             "reasons": list(self.reasons),
             "missing_data": list(self.missing_data),
             "source_documents": list(self.source_documents),
+            "caution_flags": [
+                {
+                    "name": flag.name,
+                    "status": flag.status.value,
+                    "evidence": flag.evidence,
+                }
+                for flag in self.caution_flags
+            ],
         }
 
 
@@ -640,6 +729,38 @@ class IpoSubscriptionRecord:
     source_url: str | None
     source_confidence: Confidence
     created_at: dt.datetime
+
+
+@dataclass(frozen=True)
+class IpoEnrichmentSignalRecord:
+    """Detached low-confidence web enrichment observation (IPO-009).
+
+    Beginner note:
+    ``payload`` entries carry search-result metadata (title, link, source,
+    snippet, matched keywords). A quarantined signal had its untrusted text
+    replaced by the blocked-evidence marker before storage, so this record can
+    circulate safely; the raw hostile text is never reachable from here.
+    """
+
+    id: int
+    issue_id: int
+    signal_type: IpoEnrichmentSignalType
+    captured_at: dt.datetime
+    query_text: str
+    payload: tuple[Mapping[str, Any], ...]
+    parsed_value: Decimal | None
+    quarantined: bool
+    confidence: Confidence
+    source_policy: str
+    created_at: dt.datetime
+
+    def __post_init__(self) -> None:
+        """Freeze payload entries so a detached record stays read-only."""
+        object.__setattr__(
+            self,
+            "payload",
+            tuple(MappingProxyType(dict(entry)) for entry in self.payload),
+        )
 
 
 @dataclass(frozen=True)

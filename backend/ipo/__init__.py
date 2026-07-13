@@ -33,9 +33,14 @@ from backend.ipo.models import (
     Confidence,
     FactorAssessment,
     FinancialPeriodType,
+    IpoCautionFlag,
+    IpoCautionFlagReport,
+    IpoCautionFlagStatus,
     IpoDocumentData,
     IpoDocumentParseStatus,
     IpoDocumentRecord,
+    IpoEnrichmentSignalRecord,
+    IpoEnrichmentSignalType,
     IpoEvaluationRecord,
     IpoFilingData,
     IpoFinancialData,
@@ -91,22 +96,45 @@ from backend.ipo.repository import (
     update_issue,
     update_subscription,
 )
-from backend.ipo.scoring.recommendation import build_recommendation
+from backend.ipo.scoring.caution_flags import (
+    CAUTION_FLAG_ORDER,
+    CAUTION_FLAGS_VERSION,
+    evaluate_caution_flags,
+)
+from backend.ipo.scoring.factor_derivation import (
+    FACTOR_MODEL_VERSION,
+    IpoFactorInputs,
+    derive_score_input,
+)
+from backend.ipo.scoring.recommendation import (
+    INSUFFICIENT_VERIFIED_DATA,
+    build_recommendation,
+)
 from backend.ipo.scoring.score_model import score_ipo
 from backend.ipo.sources.sebi import fetch_sebi_filings
 
 __all__ = [
+    "CAUTION_FLAGS_VERSION",
+    "CAUTION_FLAG_ORDER",
+    "FACTOR_MODEL_VERSION",
+    "INSUFFICIENT_VERIFIED_DATA",
     "Confidence",
     "FactorAssessment",
     "FinancialPeriodType",
     "IpoAmountUnit",
+    "IpoCautionFlag",
+    "IpoCautionFlagReport",
+    "IpoCautionFlagStatus",
     "IpoDocumentData",
     "IpoDocumentDownloadError",
     "IpoDocumentDownloadErrorCode",
     "IpoDocumentDownloadResult",
     "IpoDocumentParseStatus",
     "IpoDocumentRecord",
+    "IpoEnrichmentSignalRecord",
+    "IpoEnrichmentSignalType",
     "IpoEvaluationRecord",
+    "IpoFactorInputs",
     "IpoFilingData",
     "IpoFinancialData",
     "IpoFinancialRecord",
@@ -147,7 +175,9 @@ __all__ = [
     "delete_financial",
     "delete_issue",
     "delete_subscription",
+    "derive_score_input",
     "download_document",
+    "evaluate_caution_flags",
     "evaluate_issue",
     "fetch_sebi_filings",
     "get_document",

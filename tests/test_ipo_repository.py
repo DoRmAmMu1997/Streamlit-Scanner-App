@@ -21,6 +21,9 @@ from backend.ipo.models import (
     Confidence,
     FactorAssessment,
     FinancialPeriodType,
+    IpoCautionFlag,
+    IpoCautionFlagReport,
+    IpoCautionFlagStatus,
     IpoDocumentData,
     IpoDocumentParseStatus,
     IpoFinancialData,
@@ -650,6 +653,62 @@ def test_evaluation_history_is_immutable_ordered_and_deletable_as_a_pair(
     ) is False
 
 
+def test_evaluation_round_trips_caution_flags_fingerprint_and_model_version(
+    file_session_factory,
+) -> None:
+    """IPO-006 additions persist with the pair and read back losslessly.
+
+    Beginner note:
+        The caution-flag report and inputs fingerprint are part of the audit
+        receipt: a stored verdict must reproduce exactly which red lines were
+        checked and which evidence snapshot was scored. This test proves the
+        JSON round trip preserves both, and that the model version travels
+        with the score row.
+    """
+    issue = create_issue(_issue_data(), session_factory=file_session_factory)
+    create_document(issue.id, _document_data(), session_factory=file_session_factory)
+
+    report = IpoCautionFlagReport(
+        version="ipo-006-flags-v1",
+        flags=(
+            IpoCautionFlag(
+                name="very_expensive_valuation",
+                status=IpoCautionFlagStatus.TRIGGERED,
+                evidence="P/E 40.00 is 1.60x the peer median 25.00 (limit 1.5x).",
+            ),
+            IpoCautionFlag(
+                name="litigation_or_auditor_red_flag",
+                status=IpoCautionFlagStatus.NOT_EVALUABLE,
+                evidence="No litigation web signals collected (enrichment absent).",
+            ),
+        ),
+    )
+    fingerprint = "f" * 64
+
+    stored = evaluate_issue(
+        issue.id,
+        _score_input(),
+        caution_flags=report,
+        inputs_fingerprint=fingerprint,
+        model_version="ipo-006-v1",
+        session_factory=file_session_factory,
+    )
+
+    assert stored.model_version == "ipo-006-v1"
+    assert stored.result.recommendation.value == "Not Recommended"
+    assert stored.result.caution_flags == report.flags
+    assert stored.result.reasons[0].startswith("Hard caution flag:")
+
+    reloaded = get_evaluation(
+        issue.id, stored.score_id, session_factory=file_session_factory
+    )
+    assert reloaded == stored
+
+    with file_session_factory() as session:
+        row = session.get(IpoScore, stored.score_id)
+        assert row is not None and row.inputs_fingerprint == fingerprint
+
+
 def test_get_latest_recommendation_handles_missing_issue_and_empty_history(
     file_session_factory,
 ) -> None:
@@ -698,9 +757,9 @@ def test_evaluation_score_and_verdict_rollback_together(
     create_document(issue.id, _document_data(), session_factory=file_session_factory)
     real_builder = ipo_repository.build_recommendation
 
-    def invalid_builder(score_result) -> IpoRecommendationResult:
+    def invalid_builder(score_result, **kwargs) -> IpoRecommendationResult:
         """Create a verdict that violates the recommendation-type CHECK."""
-        valid = real_builder(score_result)
+        valid = real_builder(score_result, **kwargs)
         return IpoRecommendationResult(
             company_name=valid.company_name,
             score=valid.score,
