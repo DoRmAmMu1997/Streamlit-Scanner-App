@@ -128,9 +128,9 @@ def test_ipo_networking_is_isolated_to_sources_and_all_ipo_code_is_ui_free() -> 
     files = sorted(IPO_PACKAGE.rglob("*.py"))
     assert {path.name for path in files} >= {
         "models.py",
+        "recommendation.py",
         "repository.py",
-        "scorecard.py",
-        "verdict.py",
+        "score_model.py",
     }
 
     for path in files:

@@ -8,7 +8,7 @@ from decimal import Decimal
 import pytest
 
 from backend.ipo.models import Confidence, IpoScoreResult, Recommendation
-from backend.ipo.verdict import (
+from backend.ipo.scoring.recommendation import (
     APPLY_AND_HOLD,
     APPLY_FOR_LISTING_GAINS,
     SKIP,

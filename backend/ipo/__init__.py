@@ -91,9 +91,9 @@ from backend.ipo.repository import (
     update_issue,
     update_subscription,
 )
-from backend.ipo.scorecard import score_ipo
+from backend.ipo.scoring.recommendation import build_recommendation
+from backend.ipo.scoring.score_model import score_ipo
 from backend.ipo.sources.sebi import fetch_sebi_filings
-from backend.ipo.verdict import build_recommendation
 
 __all__ = [
     "Confidence",

@@ -63,8 +63,8 @@ from backend.ipo.models import (
     IpoValidationError,
     Recommendation,
 )
-from backend.ipo.scorecard import score_ipo
-from backend.ipo.verdict import build_recommendation
+from backend.ipo.scoring.recommendation import build_recommendation
+from backend.ipo.scoring.score_model import score_ipo
 from backend.observability import (
     EVENT_IPO_DOCUMENT_DOWNLOAD_COMPLETED,
     EVENT_IPO_DOCUMENT_DOWNLOAD_FAILED,

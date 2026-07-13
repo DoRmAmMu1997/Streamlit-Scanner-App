@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from backend.ipo.models import FactorAssessment, IpoScoreInput
-from backend.ipo.scorecard import PDF_WEIGHTS, score_ipo
+from backend.ipo.scoring.score_model import PDF_WEIGHTS, score_ipo
 
 
 def _factor(score: object | None, reason: str | None = None) -> FactorAssessment:
