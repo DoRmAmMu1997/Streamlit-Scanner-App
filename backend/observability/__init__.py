@@ -82,6 +82,11 @@ EVENT_IPO_MANUAL_EXTRACTION_SUBMITTED = "ipo_manual_extraction_submitted"
 EVENT_IPO_ENRICHMENT_COMPLETED = "ipo_enrichment_completed"
 EVENT_IPO_ENRICHMENT_FAILED = "ipo_enrichment_failed"
 EVENT_IPO_ENRICHMENT_SKIPPED = "ipo_enrichment_skipped"
+# IPO-010 AI extraction-proposal lifecycle. Events carry ids, counts, codes,
+# and exception type names only — never proposed values or prospectus text.
+EVENT_IPO_EXTRACTION_PROPOSED = "ipo_extraction_proposed"
+EVENT_IPO_EXTRACTION_PROPOSAL_FAILED = "ipo_extraction_proposal_failed"
+EVENT_IPO_EXTRACTION_PROPOSAL_REVIEWED = "ipo_extraction_proposal_reviewed"
 EVENT_EXTERNAL_API_FAILED = "external_api_failed"
 # DATA-001 candle-quality events. ``_warning`` = a usable frame with suspicious
 # data; ``_failed`` = a frame quarantined before scanning. Both log finding
@@ -144,6 +149,9 @@ __all__ = [
     "EVENT_IPO_ENRICHMENT_COMPLETED",
     "EVENT_IPO_ENRICHMENT_FAILED",
     "EVENT_IPO_ENRICHMENT_SKIPPED",
+    "EVENT_IPO_EXTRACTION_PROPOSAL_FAILED",
+    "EVENT_IPO_EXTRACTION_PROPOSAL_REVIEWED",
+    "EVENT_IPO_EXTRACTION_PROPOSED",
     "EVENT_IPO_FILING_CATEGORY_COMPLETED",
     "EVENT_IPO_FILING_CATEGORY_FAILED",
     "EVENT_IPO_FILING_SCAN_COMPLETED",

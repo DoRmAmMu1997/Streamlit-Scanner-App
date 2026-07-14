@@ -9,8 +9,11 @@ or writing to the real application database.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 from decimal import Decimal
+from types import SimpleNamespace
+from typing import Any
 
 import pandas as pd
 import pytest
@@ -18,7 +21,12 @@ import pytest
 from backend.auth.roles import Role
 from backend.auth.session import AuthenticatedUser
 from backend.ipo.manual_extraction import IpoAmountUnit, IpoPeerMetric, IpoShareUnit
-from backend.ipo.models import IpoValidationError
+from backend.ipo.models import (
+    Confidence,
+    IpoExtractionProposalRecord,
+    IpoExtractionProposalStatus,
+    IpoValidationError,
+)
 from ui import ipo_manual_page
 
 ADMIN = AuthenticatedUser("admin@example.com", "Admin", role=Role.ADMIN)
@@ -45,12 +53,17 @@ class _FakeStreamlit:
         """Prepare message lists that assertions can inspect."""
         self.errors: list[str] = []
         self.infos: list[str] = []
+        self.captions: list[str] = []
 
     def subheader(self, *_args, **_kwargs) -> None:
         """Accept the page heading without rendering a real browser widget."""
 
-    def caption(self, *_args, **_kwargs) -> None:
-        """Accept explanatory copy without rendering a real browser widget."""
+    def markdown(self, *_args, **_kwargs) -> None:
+        """Accept section headings without rendering a real browser widget."""
+
+    def caption(self, text, **_kwargs) -> None:
+        """Record explanatory copy so review-queue states are assertable."""
+        self.captions.append(str(text))
 
     def error(self, text, **_kwargs) -> None:
         """Record one user-facing error."""
@@ -83,11 +96,15 @@ def test_manual_page_explains_when_no_ipo_issue_exists(monkeypatch) -> None:
     fake_st = _FakeStreamlit()
     monkeypatch.setattr(ipo_manual_page, "st", fake_st)
     monkeypatch.setattr(ipo_manual_page, "list_issues", list)
+    monkeypatch.setattr(
+        ipo_manual_page, "list_extraction_proposals", lambda **_kwargs: []
+    )
 
     ipo_manual_page._render_ipo_manual_page(ADMIN)
 
     assert fake_st.errors == []
     assert any("ingestion" in message.lower() for message in fake_st.infos)
+    assert any("no pending" in caption.lower() for caption in fake_st.captions)
 
 
 def test_peer_rows_convert_only_complete_dynamic_editor_rows() -> None:
@@ -312,3 +329,154 @@ def test_peer_rows_reject_named_row_even_with_nan_source_page() -> None:
         ipo_manual_page._peer_rows_to_domain(
             [{"company_name": "Peer One Ltd", "source_page": float("nan"), "pe": "20"}]
         )
+
+
+def _proposal_record(**overrides: Any) -> IpoExtractionProposalRecord:
+    """Build one detached pending proposal for review-section smoke tests."""
+    values: dict[str, Any] = {
+        "id": 9,
+        "issue_id": 1,
+        "document_id": 3,
+        "company_name": "Example Ltd",
+        "document_url": "https://www.sebi.gov.in/filings/example-rhp.html",
+        "status": IpoExtractionProposalStatus.PENDING,
+        "payload": {"net_worth": "90", "net_worth_page": 2},
+        "confidence": Confidence.MEDIUM,
+        "needs_review_reasons": ("Could not independently verify total_debt (page 2).",),
+        "model_version": "ipo-010-extractor-v1",
+        "agent_model": "claude-sonnet-4-6",
+        "source_content_sha256": "a" * 64,
+        "page_count": 3,
+        "created_at": dt.datetime(2026, 7, 13, 9, 0, tzinfo=dt.UTC),
+        "reviewed_by_email": None,
+        "reviewed_at": None,
+        "review_note": None,
+        "manual_extraction_id": None,
+    }
+    values.update(overrides)
+    return IpoExtractionProposalRecord(**values)
+
+
+class _ReviewFakeStreamlit(_FakeStreamlit):
+    """Extend the message-capturing fake with the review-queue widget surface."""
+
+    def __init__(self, *, button_clicks: dict[str, bool] | None = None) -> None:
+        """Record which keyed buttons the scenario pretends were clicked."""
+        super().__init__()
+        self.button_clicks = button_clicks or {}
+        self.warnings: list[str] = []
+        self.successes: list[str] = []
+        self.json_payloads: list[Any] = []
+        self.text_inputs: dict[str, str] = {}
+
+    def selectbox(self, _label, options, **_kwargs):
+        """Return the first option like a freshly rendered selectbox."""
+        return next(iter(options))
+
+    def warning(self, text, **_kwargs) -> None:
+        """Record verifier notes shown to the reviewer."""
+        self.warnings.append(str(text))
+
+    def success(self, text, **_kwargs) -> None:
+        """Record one success confirmation."""
+        self.successes.append(str(text))
+
+    def json(self, payload, **_kwargs) -> None:
+        """Record the payload the reviewer inspected."""
+        self.json_payloads.append(payload)
+
+    def expander(self, *_args, **_kwargs):
+        """Provide the context manager shape of a real expander."""
+        return contextlib.nullcontext()
+
+    def columns(self, count: int):
+        """Provide context-manager columns like the real layout helper."""
+        return [contextlib.nullcontext() for _ in range(count)]
+
+    def button(self, _label, *, key: str, **_kwargs) -> bool:
+        """Report a click only for keys the scenario armed."""
+        return self.button_clicks.get(key, False)
+
+    def text_input(self, _label, *, key: str, **_kwargs) -> str:
+        """Return the canned rejection reason for this widget key."""
+        return self.text_inputs.get(key, "")
+
+
+def test_review_section_approves_with_the_reviewer_identity(monkeypatch) -> None:
+    """Approve must call the repository with the signed-in admin as attestor."""
+    proposal = _proposal_record()
+    fake_st = _ReviewFakeStreamlit(
+        button_clicks={f"ipo_proposal_approve_{proposal.id}": True}
+    )
+    approvals: list[dict[str, Any]] = []
+
+    def _approve(proposal_id: int, **kwargs: Any) -> SimpleNamespace:
+        """Record the approval call and hand back a revision-like object."""
+        approvals.append({"proposal_id": proposal_id, **kwargs})
+        return SimpleNamespace(id=42)
+
+    monkeypatch.setattr(ipo_manual_page, "st", fake_st)
+    monkeypatch.setattr(
+        ipo_manual_page, "list_extraction_proposals", lambda **_kwargs: [proposal]
+    )
+    monkeypatch.setattr(ipo_manual_page, "approve_extraction_proposal", _approve)
+
+    ipo_manual_page._render_proposal_review(ADMIN)
+
+    assert approvals[0]["proposal_id"] == proposal.id
+    assert approvals[0]["reviewed_by_email"] == "admin@example.com"
+    assert any("revision #42" in message for message in fake_st.successes)
+    assert any("total_debt" in warning for warning in fake_st.warnings)
+    assert fake_st.json_payloads == [dict(proposal.payload)]
+
+
+def test_review_section_rejects_with_the_typed_reason(monkeypatch) -> None:
+    """Reject must pass the typed reason through to the repository."""
+    proposal = _proposal_record()
+    fake_st = _ReviewFakeStreamlit(
+        button_clicks={f"ipo_proposal_reject_{proposal.id}": True}
+    )
+    fake_st.text_inputs[f"ipo_proposal_reject_reason_{proposal.id}"] = (
+        "Totals do not match the cited pages."
+    )
+    rejections: list[dict[str, Any]] = []
+
+    def _reject(proposal_id: int, **kwargs: Any) -> SimpleNamespace:
+        """Record the rejection call like the real repository function."""
+        rejections.append({"proposal_id": proposal_id, **kwargs})
+        return SimpleNamespace(id=proposal_id)
+
+    monkeypatch.setattr(ipo_manual_page, "st", fake_st)
+    monkeypatch.setattr(
+        ipo_manual_page, "list_extraction_proposals", lambda **_kwargs: [proposal]
+    )
+    monkeypatch.setattr(ipo_manual_page, "reject_extraction_proposal", _reject)
+
+    ipo_manual_page._render_proposal_review(ADMIN)
+
+    assert rejections[0]["proposal_id"] == proposal.id
+    assert rejections[0]["reason"] == "Totals do not match the cited pages."
+    assert any("Rejected proposal" in message for message in fake_st.successes)
+
+
+def test_review_section_surfaces_validation_errors_safely(monkeypatch) -> None:
+    """A backend rejection (e.g. empty reason) renders as a redacted error."""
+    proposal = _proposal_record()
+    fake_st = _ReviewFakeStreamlit(
+        button_clicks={f"ipo_proposal_reject_{proposal.id}": True}
+    )
+
+    def _reject(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+        """Refuse like the real repository does for an empty reason."""
+        raise IpoValidationError("A rejection requires a non-empty reason.")
+
+    monkeypatch.setattr(ipo_manual_page, "st", fake_st)
+    monkeypatch.setattr(
+        ipo_manual_page, "list_extraction_proposals", lambda **_kwargs: [proposal]
+    )
+    monkeypatch.setattr(ipo_manual_page, "reject_extraction_proposal", _reject)
+
+    ipo_manual_page._render_proposal_review(ADMIN)
+
+    assert fake_st.successes == []
+    assert any("non-empty reason" in message for message in fake_st.errors)

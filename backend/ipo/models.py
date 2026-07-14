@@ -105,6 +105,21 @@ class IpoEnrichmentSignalType(enum.StrEnum):
     PEER_DISCOVERY = "peer_discovery"
 
 
+class IpoExtractionProposalStatus(enum.StrEnum):
+    """Review lifecycle of one AI-proposed prospectus extraction (IPO-010).
+
+    Beginner note:
+    ``pending`` proposals are invisible to scoring. Only an administrator's
+    approval — which replays the manual-extraction validation path — turns a
+    proposal into evidence; ``rejected`` keeps the record for audit without
+    ever exposing its numbers downstream.
+    """
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
 class IpoCautionFlagStatus(enum.StrEnum):
     """Outcome of evaluating one hard caution flag against the evidence.
 
@@ -816,6 +831,41 @@ class IpoEnrichmentSignalRecord:
             "payload",
             tuple(MappingProxyType(dict(entry)) for entry in self.payload),
         )
+
+
+@dataclass(frozen=True)
+class IpoExtractionProposalRecord:
+    """Detached AI extraction proposal awaiting or past human review (IPO-010).
+
+    Beginner note:
+    ``payload`` is the exact manual-extraction-shaped dict the agent proposed
+    (every value paired with its prospectus page citation). It is data under
+    review, never evidence: approval reconstructs and re-validates it through
+    the same strict domain types a hand-entered submission uses.
+    """
+
+    id: int
+    issue_id: int
+    document_id: int
+    company_name: str
+    document_url: str
+    status: IpoExtractionProposalStatus
+    payload: Mapping[str, Any]
+    confidence: Confidence
+    needs_review_reasons: tuple[str, ...]
+    model_version: str
+    agent_model: str
+    source_content_sha256: str
+    page_count: int
+    created_at: dt.datetime
+    reviewed_by_email: str | None
+    reviewed_at: dt.datetime | None
+    review_note: str | None
+    manual_extraction_id: int | None
+
+    def __post_init__(self) -> None:
+        """Freeze the proposed payload so a detached record stays read-only."""
+        object.__setattr__(self, "payload", MappingProxyType(dict(self.payload)))
 
 
 @dataclass(frozen=True)

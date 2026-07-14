@@ -29,13 +29,21 @@ from backend.ipo.manual_extraction import (
     IpoPeerValuationData,
     IpoShareUnit,
 )
-from backend.ipo.models import IpoDocumentParseStatus, IpoValidationError
+from backend.ipo.models import (
+    IpoDocumentParseStatus,
+    IpoExtractionProposalRecord,
+    IpoExtractionProposalStatus,
+    IpoValidationError,
+)
 from backend.ipo.repository import (
     IpoNotFoundError,
+    approve_extraction_proposal,
     get_latest_manual_profile,
     list_documents,
+    list_extraction_proposals,
     list_issues,
     list_manual_extractions,
+    reject_extraction_proposal,
     submit_manual_extraction,
 )
 from ui.common import _redact_secrets
@@ -256,6 +264,7 @@ def _render_ipo_manual_page(authenticated_user: AuthenticatedUser | None) -> Non
         "Transcribe a complete DRHP/RHP profile with page-level provenance. "
         "Each save creates a new immutable revision."
     )
+    _render_proposal_review(authenticated_user)
     issues = list_issues()
     if not issues:
         st.info(
@@ -265,6 +274,97 @@ def _render_ipo_manual_page(authenticated_user: AuthenticatedUser | None) -> Non
         return
 
     _render_entry_workflow(authenticated_user, issues)
+
+
+def _proposal_label(proposal: IpoExtractionProposalRecord) -> str:
+    """Build one stable, human-scannable review-queue entry label."""
+    return (
+        f"{proposal.company_name} - proposal #{proposal.id} "
+        f"({proposal.confidence.value} confidence)"
+    )
+
+
+def _render_proposal_review(authenticated_user: AuthenticatedUser) -> None:
+    """Render the IPO-010 review queue for pending AI extraction proposals.
+
+    Beginner note:
+    This section is the human half of the fail-closed trust model: the agent
+    only ever queues *proposals*, and the buttons below are the sole path that
+    turns one into scoring evidence. Approval re-runs the full manual
+    validation (including re-hashing the cached PDF), so a reviewer's click is
+    an attestation, not a rubber stamp.
+    """
+    pending = list_extraction_proposals(status=IpoExtractionProposalStatus.PENDING)
+    st.markdown("**Review AI extraction proposals**")
+    if not pending:
+        st.caption("No pending AI extraction proposals.")
+        return
+
+    labels = {_proposal_label(proposal): proposal for proposal in pending}
+    selected_label = st.selectbox(
+        "Pending proposal", tuple(labels), key="ipo_proposal_review_select"
+    )
+    proposal = labels[selected_label]
+    st.caption(
+        f"Document: {proposal.document_url} | pages seen: {proposal.page_count} | "
+        f"agent model: {proposal.agent_model} | extractor: {proposal.model_version} | "
+        f"source SHA-256: {proposal.source_content_sha256}"
+    )
+    if proposal.needs_review_reasons:
+        st.warning(
+            "Verifier notes:\n"
+            + "\n".join(f"- {reason}" for reason in proposal.needs_review_reasons)
+        )
+    with st.expander("Proposed values (with page citations)", expanded=False):
+        st.json(dict(proposal.payload))
+
+    approve_column, reject_column = st.columns(2)
+    with approve_column:
+        approve_clicked = st.button(
+            "Approve as immutable revision",
+            key=f"ipo_proposal_approve_{proposal.id}",
+            type="primary",
+        )
+    with reject_column:
+        reject_reason = st.text_input(
+            "Rejection reason", key=f"ipo_proposal_reject_reason_{proposal.id}"
+        )
+        reject_clicked = st.button(
+            "Reject proposal", key=f"ipo_proposal_reject_{proposal.id}"
+        )
+
+    if approve_clicked:
+        try:
+            revision = approve_extraction_proposal(
+                proposal.id,
+                reviewed_by_email=authenticated_user.email,
+                data_dir=get_settings().data_dir,
+            )
+        except (IpoValidationError, IpoNotFoundError) as exc:
+            st.error(_redact_secrets(str(exc)))
+        except Exception:  # noqa: BLE001 - UI must fail safely without raw exception text.
+            st.error(
+                "The proposal could not be approved. Check logs for the safe error code."
+            )
+        else:
+            st.success(
+                f"Approved proposal #{proposal.id} as immutable revision #{revision.id}."
+            )
+    if reject_clicked:
+        try:
+            reject_extraction_proposal(
+                proposal.id,
+                reviewed_by_email=authenticated_user.email,
+                reason=reject_reason,
+            )
+        except (IpoValidationError, IpoNotFoundError) as exc:
+            st.error(_redact_secrets(str(exc)))
+        except Exception:  # noqa: BLE001 - UI must fail safely without raw exception text.
+            st.error(
+                "The proposal could not be rejected. Check logs for the safe error code."
+            )
+        else:
+            st.success(f"Rejected proposal #{proposal.id}.")
 
 
 def _render_entry_workflow(
