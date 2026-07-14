@@ -1648,6 +1648,10 @@ def _evaluation_record(score_row: Any, recommendation_row: Any) -> IpoEvaluation
         scored_at=_utc(score_row.scored_at),
         result=result,
         inputs_fingerprint=score_row.inputs_fingerprint,
+        contributions={
+            name: Decimal(str(value))
+            for name, value in score_row.contributions_json.items()
+        },
     )
 
 

@@ -92,6 +92,9 @@ EVENT_IPO_EXTRACTION_PROPOSAL_REVIEWED = "ipo_extraction_proposal_reviewed"
 EVENT_IPO_SCREENER_STARTED = "ipo_screener_started"
 EVENT_IPO_SCREENER_COMPLETED = "ipo_screener_completed"
 EVENT_IPO_ISSUE_SCORED = "ipo_issue_scored"
+# IPO-007: an administrator pressed the dashboard's re-score control. The
+# metadata carries outcome counts only.
+EVENT_IPO_RESCORE_TRIGGERED = "ipo_rescore_triggered"
 EVENT_EXTERNAL_API_FAILED = "external_api_failed"
 # DATA-001 candle-quality events. ``_warning`` = a usable frame with suspicious
 # data; ``_failed`` = a frame quarantined before scanning. Both log finding
@@ -163,6 +166,7 @@ __all__ = [
     "EVENT_IPO_FILING_SCAN_STARTED",
     "EVENT_IPO_ISSUE_SCORED",
     "EVENT_IPO_MANUAL_EXTRACTION_SUBMITTED",
+    "EVENT_IPO_RESCORE_TRIGGERED",
     "EVENT_IPO_SCREENER_COMPLETED",
     "EVENT_IPO_SCREENER_STARTED",
     "EVENT_LOGIN_DENIED",

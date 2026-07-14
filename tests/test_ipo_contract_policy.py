@@ -35,7 +35,9 @@ FULL_DOCUMENTATION_TARGETS = (
     ROOT / "tests" / "test_scan_ipo_filings_job.py",
     ROOT / "tests" / "test_run_ipo_screener_job.py",
     ROOT / "tests" / "test_app_ipo_manual_page.py",
+    ROOT / "tests" / "test_app_ipo_page.py",
     ROOT / "ui" / "ipo_manual_page.py",
+    ROOT / "ui" / "ipo_page.py",
 )
 SHARED_DOCUMENTATION_TARGETS: dict[Path, frozenset[str]] = {
     ROOT / "backend" / "config" / "settings.py": frozenset({"ipo_document_dir"}),

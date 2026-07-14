@@ -8,6 +8,7 @@ future UI, while database table shapes stay inside ``backend.storage``.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import enum
 from collections.abc import Mapping
@@ -874,6 +875,8 @@ class IpoEvaluationRecord:
 
     ``inputs_fingerprint`` (IPO-006) is the SHA-256 of exactly the evidence the
     scoring service consumed; legacy ipo-001-v1 rows carry ``None``.
+    ``contributions`` restores the per-factor weighted points from the stored
+    receipt so the dashboard can rank strengths and risks without re-scoring.
     """
 
     issue_id: int
@@ -883,3 +886,10 @@ class IpoEvaluationRecord:
     scored_at: dt.datetime
     result: IpoRecommendationResult
     inputs_fingerprint: str | None = None
+    contributions: Mapping[str, Decimal] = dataclasses.field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Freeze the contribution mapping so a detached record stays read-only."""
+        object.__setattr__(
+            self, "contributions", MappingProxyType(dict(self.contributions))
+        )
