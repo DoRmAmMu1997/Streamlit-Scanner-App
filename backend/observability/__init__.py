@@ -76,6 +76,12 @@ EVENT_IPO_FILING_SCAN_COMPLETED = "ipo_filing_scan_completed"
 EVENT_IPO_DOCUMENT_DOWNLOAD_COMPLETED = "ipo_document_download_completed"
 EVENT_IPO_DOCUMENT_DOWNLOAD_FAILED = "ipo_document_download_failed"
 EVENT_IPO_MANUAL_EXTRACTION_SUBMITTED = "ipo_manual_extraction_submitted"
+# IPO-009 web-enrichment lifecycle. ``_skipped`` = SERPAPI_API_KEY absent (the
+# screener stays fully functional); ``_failed`` carries only exception type
+# names and counts, never snippet text.
+EVENT_IPO_ENRICHMENT_COMPLETED = "ipo_enrichment_completed"
+EVENT_IPO_ENRICHMENT_FAILED = "ipo_enrichment_failed"
+EVENT_IPO_ENRICHMENT_SKIPPED = "ipo_enrichment_skipped"
 EVENT_EXTERNAL_API_FAILED = "external_api_failed"
 # DATA-001 candle-quality events. ``_warning`` = a usable frame with suspicious
 # data; ``_failed`` = a frame quarantined before scanning. Both log finding
@@ -135,6 +141,9 @@ __all__ = [
     "EVENT_FORWARD_RETURNS_JOB_STARTED",
     "EVENT_IPO_DOCUMENT_DOWNLOAD_COMPLETED",
     "EVENT_IPO_DOCUMENT_DOWNLOAD_FAILED",
+    "EVENT_IPO_ENRICHMENT_COMPLETED",
+    "EVENT_IPO_ENRICHMENT_FAILED",
+    "EVENT_IPO_ENRICHMENT_SKIPPED",
     "EVENT_IPO_FILING_CATEGORY_COMPLETED",
     "EVENT_IPO_FILING_CATEGORY_FAILED",
     "EVENT_IPO_FILING_SCAN_COMPLETED",

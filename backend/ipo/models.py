@@ -732,6 +732,61 @@ class IpoSubscriptionRecord:
 
 
 @dataclass(frozen=True)
+class IpoEnrichmentSignalData:
+    """Validated insert payload for one low-confidence web observation.
+
+    Beginner note:
+    The collector builds this after quarantine scanning and GMP parsing, so a
+    row can only reach storage in the shape the schema promises: bounded text,
+    a parsed enum type, an explicit low/medium/high confidence, and a stamped
+    source policy that marks the row as web-sourced forever.
+    """
+
+    signal_type: IpoEnrichmentSignalType
+    captured_at: dt.datetime
+    query_text: str
+    payload: tuple[Mapping[str, Any], ...]
+    parsed_value: Decimal | None
+    quarantined: bool
+    confidence: Confidence
+    source_policy: str
+
+    def __post_init__(self) -> None:
+        """Normalize enums, bound text fields, and quantize the parsed value."""
+        object.__setattr__(
+            self,
+            "signal_type",
+            _parse_enum(self.signal_type, IpoEnrichmentSignalType, "signal_type"),
+        )
+        if not isinstance(self.captured_at, dt.datetime) or self.captured_at.tzinfo is None:
+            raise IpoValidationError("captured_at must be a timezone-aware datetime.")
+        query_text = str(self.query_text).strip()
+        if not query_text or len(query_text) > 255:
+            raise IpoValidationError("query_text must contain 1 to 255 characters.")
+        object.__setattr__(self, "query_text", query_text)
+        object.__setattr__(
+            self,
+            "payload",
+            tuple(MappingProxyType(dict(entry)) for entry in self.payload),
+        )
+        if self.parsed_value is not None:
+            parsed = Decimal(str(self.parsed_value))
+            if not parsed.is_finite():
+                raise IpoValidationError("parsed_value must be finite when provided.")
+            object.__setattr__(
+                self, "parsed_value", parsed.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            )
+        object.__setattr__(self, "quarantined", bool(self.quarantined))
+        object.__setattr__(
+            self, "confidence", _parse_enum(self.confidence, Confidence, "confidence")
+        )
+        source_policy = str(self.source_policy).strip()
+        if not source_policy or len(source_policy) > 40:
+            raise IpoValidationError("source_policy must contain 1 to 40 characters.")
+        object.__setattr__(self, "source_policy", source_policy)
+
+
+@dataclass(frozen=True)
 class IpoEnrichmentSignalRecord:
     """Detached low-confidence web enrichment observation (IPO-009).
 

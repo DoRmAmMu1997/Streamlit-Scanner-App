@@ -50,6 +50,9 @@ from backend.ipo.models import (
     IpoDocumentData,
     IpoDocumentParseStatus,
     IpoDocumentRecord,
+    IpoEnrichmentSignalData,
+    IpoEnrichmentSignalRecord,
+    IpoEnrichmentSignalType,
     IpoEvaluationRecord,
     IpoFilingData,
     IpoFinancialData,
@@ -95,12 +98,14 @@ from backend.storage.ipo_repository import (
     get_latest_ipo_filing_date,
     get_latest_ipo_manual_extraction,
     insert_ipo_document,
+    insert_ipo_enrichment_signals,
     insert_ipo_evaluation,
     insert_ipo_financial,
     insert_ipo_issue,
     insert_ipo_manual_extraction,
     insert_ipo_subscription,
     list_ipo_document_rows,
+    list_ipo_enrichment_signal_rows,
     list_ipo_evaluation_rows,
     list_ipo_financial_rows,
     list_ipo_issue_rows,
@@ -1206,6 +1211,84 @@ def delete_subscription(
     """Delete one issue-owned snapshot and remain idempotent when absent."""
     with session_factory() as session:
         return delete_ipo_subscription_row(session, issue_id, subscription_id)
+
+
+def _enrichment_signal_record(row: Any) -> IpoEnrichmentSignalRecord:
+    """Reassemble one enrichment ORM row into a detached typed record."""
+    return IpoEnrichmentSignalRecord(
+        id=row.id,
+        issue_id=row.issue_id,
+        signal_type=IpoEnrichmentSignalType(row.signal_type),
+        captured_at=_utc(row.captured_at),
+        query_text=row.query_text,
+        payload=tuple(dict(entry) for entry in row.payload_json),
+        parsed_value=row.parsed_value,
+        quarantined=bool(row.quarantined),
+        confidence=Confidence(row.confidence),
+        source_policy=row.source_policy,
+        created_at=_utc(row.created_at),
+    )
+
+
+def record_enrichment_signals(
+    issue_id: int,
+    signals: list[IpoEnrichmentSignalData],
+    *,
+    session_factory: SessionFactory = session_scope,
+) -> list[IpoEnrichmentSignalRecord]:
+    """Persist one already-quarantined enrichment batch for a known issue.
+
+    Beginner note:
+        The collector validates and quarantine-scans everything before this
+        function runs, so persistence is a plain typed hand-off: verify the
+        parent issue exists, stage the batch in one transaction, and return
+        detached records. Payloads still pass through the secret-safe JSON
+        normalizer as a last line of defense for every stored sink.
+    """
+    with session_factory() as session:
+        if get_ipo_issue(session, issue_id) is None:
+            raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
+        values_list = [
+            {
+                "signal_type": signal.signal_type.value,
+                "captured_at": signal.captured_at,
+                "query_text": signal.query_text,
+                "payload_json": normalize_secret_safe_json(
+                    [dict(entry) for entry in signal.payload]
+                ),
+                "parsed_value": signal.parsed_value,
+                "quarantined": signal.quarantined,
+                "confidence": signal.confidence.value,
+                "source_policy": signal.source_policy,
+            }
+            for signal in signals
+        ]
+        rows = insert_ipo_enrichment_signals(session, issue_id, values_list)
+        return [_enrichment_signal_record(row) for row in rows]
+
+
+def list_enrichment_signals(
+    issue_id: int,
+    *,
+    signal_type: IpoEnrichmentSignalType | None = None,
+    since: dt.datetime | None = None,
+    session_factory: SessionFactory = session_scope,
+) -> list[IpoEnrichmentSignalRecord]:
+    """List one issue's enrichment signals newest-first with optional filters.
+
+    ``since`` bounds staleness in SQL (the GMP factor only trusts recent
+    observations) instead of loading dead history into memory.
+    """
+    with session_factory() as session:
+        if get_ipo_issue(session, issue_id) is None:
+            raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
+        rows = list_ipo_enrichment_signal_rows(
+            session,
+            issue_id,
+            signal_type=signal_type.value if signal_type is not None else None,
+            since=since,
+        )
+        return [_enrichment_signal_record(row) for row in rows]
 
 
 def _evaluation_record(score_row: Any, recommendation_row: Any) -> IpoEvaluationRecord:
