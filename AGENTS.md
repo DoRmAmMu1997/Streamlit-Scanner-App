@@ -74,7 +74,7 @@ review → `/code-review` + `/security-review`; everything → `/using-superpowe
 | `security/` | Secret redaction + prompt-injection quarantine. |
 | `config/` | Typed runtime settings from env (`get_settings`, `AppSettings`, `SettingsError`). |
 | `fundamentals/`, `technical/`, `sixty_seven/` | The three AI-assisted subsystems. |
-| `ipo/` | IPO domain: SEBI filing ingestion, verified content-addressed document cache, manual extraction records, deterministic ratio engine, immutable score/recommendation history (IPO-001…005). |
+| `ipo/` | IPO domain: SEBI filing ingestion, verified content-addressed document cache, manual extraction records, deterministic ratio engine, immutable score/recommendation history, factor derivation + hard caution flags (`scoring/`), read-only dashboard builder, quarantined SerpAPI enrichment (`sources/enrichment.py`), and the fail-closed AI extraction agent (`agents/`, `documents/table_extractor.py`, `documents/section_classifier.py`) (IPO-001…010). |
 | `jobs/` | Headless CLIs (daily scan, forward-return computation, IPO filing ingestion). |
 | `admin/`, `auth/`, `notifications/`, `data_quality/` | Config overrides, OIDC gate, alerts, candle-quality receipts. |
 | `screener_registry.py`, `scanner_base.py`, `indicators.py`, `daily_data_loader.py`, `universe_*` | Screener framework, indicators, candle cache, universe management. |
@@ -235,11 +235,17 @@ allowlist gate. Full details and the **accepted residual risks**:
   [technical-analysis-ai](docs/architecture/components/technical-analysis-ai.md) ·
   [sixty-seven-ka-funda-ai](docs/architecture/components/sixty-seven-ka-funda-ai.md)
 - **IPO subsystem:** [ipo-screener LLD](docs/architecture/components/ipo-screener.md) ·
+  [ipo-extraction-ai LLD](docs/architecture/components/ipo-extraction-ai.md) ·
   [ipo-001 domain + score contract](docs/architecture/ipo-001-domain-score-contract.md) ·
   [ipo-002 SEBI ingestion](docs/architecture/ipo-002-sebi-filing-ingestion.md) ·
   [ipo-003 document cache](docs/architecture/ipo-003-document-downloader-cache.md) ·
   [ipo-004 manual extraction](docs/architecture/ipo-004-manual-extraction-mvp.md) ·
-  [ipo-005 ratio engine](docs/architecture/ipo-005-ratio-engine.md)
+  [ipo-005 ratio engine](docs/architecture/ipo-005-ratio-engine.md) ·
+  [ipo-006 factors + flags](docs/architecture/ipo-006-factor-derivation-and-verdict.md) ·
+  [ipo-007 dashboard](docs/architecture/ipo-007-dashboard.md) ·
+  [ipo-008 orchestration](docs/architecture/ipo-008-screener-orchestration.md) ·
+  [ipo-009 enrichment](docs/architecture/ipo-009-serpapi-enrichment.md) ·
+  [ipo-010 AI extraction](docs/architecture/ipo-010-ai-extraction-proposals.md)
 - **Observability / audit / config:** [observability](docs/architecture/components/observability.md) ·
   [audit-log](docs/architecture/components/audit-log.md) ·
   [obs-003 design](docs/architecture/obs-003-audit-log.md) ·
@@ -270,6 +276,10 @@ python -m backend.jobs.compute_forward_returns
 
 # IPO filing ingestion (SEBI listings -> filing inventory)
 python -m backend.jobs.scan_ipo_filings
+
+# Full IPO screener: scan -> download -> enrich -> score (idempotent re-runs;
+# add --extract to also draft AI extraction proposals for admin review)
+python -m backend.jobs.run_ipo_screener
 ```
 
 See the [operations runbook](docs/operations.md) for scheduling, Docker/Compose, Render
