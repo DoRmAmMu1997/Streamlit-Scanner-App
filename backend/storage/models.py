@@ -46,6 +46,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     CheckConstraint,
     Date,
     DateTime,
@@ -823,6 +824,12 @@ class IpoIssue(Base):
     manual_extractions: Mapped[list[IpoManualExtraction]] = relationship(
         back_populates="issue", cascade="all, delete-orphan", passive_deletes=True
     )
+    extraction_proposals: Mapped[list[IpoExtractionProposal]] = relationship(
+        back_populates="issue", cascade="all, delete-orphan", passive_deletes=True
+    )
+    enrichment_signals: Mapped[list[IpoEnrichmentSignal]] = relationship(
+        back_populates="issue", cascade="all, delete-orphan", passive_deletes=True
+    )
 
 
 class IpoDocument(Base):
@@ -915,6 +922,9 @@ class IpoDocument(Base):
     financials: Mapped[list[IpoFinancial]] = relationship(back_populates="source_document")
     manual_extractions: Mapped[list[IpoManualExtraction]] = relationship(
         back_populates="source_document"
+    )
+    extraction_proposals: Mapped[list[IpoExtractionProposal]] = relationship(
+        back_populates="document", cascade="all, delete-orphan", passive_deletes=True
     )
 
 
@@ -1336,6 +1346,10 @@ class IpoScore(Base):
         CheckConstraint(
             "total_score >= 0 AND total_score <= 100", name="ck_ipo_scores_total_range"
         ),
+        CheckConstraint(
+            "inputs_fingerprint IS NULL OR length(inputs_fingerprint) = 64",
+            name="ck_ipo_scores_inputs_fingerprint_length",
+        ),
         Index("ix_ipo_scores_issue_scored_at", "issue_id", "scored_at"),
     )
 
@@ -1355,6 +1369,12 @@ class IpoScore(Base):
     missing_data_json: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     reasons_json: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     model_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    # IPO-006: SHA-256 over exactly the evidence the scoring service consumed
+    # (extraction revision, price band, subscription snapshot, enrichment ids,
+    # model versions). A matching fingerprint on the latest evaluation lets the
+    # screener job skip an identical re-score, which is what makes re-running
+    # ``run_ipo_screener`` idempotent. Legacy ipo-001-v1 rows keep NULL.
+    inputs_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     scored_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.UTC)
     )
@@ -1381,7 +1401,7 @@ class IpoRecommendation(Base):
         ),
         CheckConstraint(
             "recommendation_type IN ('Apply confidently and consider holding if allotted', "
-            "'Apply primarily for listing gains', 'Skip')",
+            "'Apply primarily for listing gains', 'Skip', 'Insufficient verified data')",
             name="ck_ipo_recommendations_type",
         ),
         CheckConstraint(
@@ -1404,11 +1424,182 @@ class IpoRecommendation(Base):
     reasons_json: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     missing_data_json: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     source_documents_json: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    # IPO-006: the full seven-flag caution report as [{name, status, evidence}]
+    # dicts, in the fixed catalog order. The list is complete on every new row
+    # (including never-triggered and not-evaluable flags) so a reader can audit
+    # what was checked, not only what fired. Legacy ipo-001-v1 rows keep the
+    # server-default empty list because flags did not exist when they were scored.
+    caution_flags_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, nullable=False, default=list, server_default="[]"
+    )
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.UTC)
     )
 
     score: Mapped[IpoScore] = relationship(back_populates="recommendation")
+
+
+class IpoExtractionProposal(Base):
+    """Hold one AI-proposed prospectus extraction awaiting human review (IPO-010).
+
+    The payload mirrors the manual-extraction submission shape — every value
+    paired with a prospectus page citation — but it is only a *proposal*.
+    Scoring never reads this table: an administrator must approve the proposal,
+    which replays the exact manual-extraction validation path and records the
+    resulting immutable revision in ``manual_extraction_id``.
+
+    Beginner note: the review-metadata CHECK encodes the fail-closed lifecycle
+    directly in the database. A pending row cannot carry reviewer fields, and a
+    reviewed row must say who reviewed it and when, so no code path can quietly
+    mark AI output as trusted without leaving an attributable audit trail.
+    """
+
+    __tablename__ = "ipo_extraction_proposals"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'rejected')",
+            name="ck_ipo_extraction_proposals_status",
+        ),
+        CheckConstraint(
+            "confidence IN ('low', 'medium', 'high')",
+            name="ck_ipo_extraction_proposals_confidence",
+        ),
+        CheckConstraint(
+            "(status = 'pending' AND reviewed_by_email IS NULL AND reviewed_at IS NULL "
+            "AND review_note IS NULL AND manual_extraction_id IS NULL) OR "
+            "(status IN ('approved', 'rejected') AND reviewed_by_email IS NOT NULL "
+            "AND reviewed_at IS NOT NULL)",
+            name="ck_ipo_extraction_proposals_review_metadata",
+        ),
+        CheckConstraint(
+            "status != 'approved' OR manual_extraction_id IS NOT NULL",
+            name="ck_ipo_extraction_proposals_approval_link",
+        ),
+        CheckConstraint(
+            "page_count > 0", name="ck_ipo_extraction_proposals_page_count"
+        ),
+        # Same hex-digest validation pattern as the IPO-003/IPO-004 hash columns:
+        # SQLite has no regex, so nested replace() strips every hex digit and the
+        # remainder must be empty. Keep this SQL byte-identical to migration
+        # 20260713ipo006 so the ORM/Alembic parity test passes.
+        CheckConstraint(
+            "length(source_content_sha256) = 64 AND "
+            "source_content_sha256 = lower(source_content_sha256) AND "
+            "replace(replace(replace(replace(replace(replace(replace(replace("
+            "replace(replace(replace(replace(replace(replace(replace(replace("
+            "source_content_sha256, '0', ''), '1', ''), '2', ''), '3', ''), '4', ''), "
+            "'5', ''), '6', ''), '7', ''), '8', ''), '9', ''), 'a', ''), "
+            "'b', ''), 'c', ''), 'd', ''), 'e', ''), 'f', '') = ''",
+            name="ck_ipo_extraction_proposals_content_hash",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
+    issue_id: Mapped[int] = mapped_column(
+        BigIntPrimaryKey, ForeignKey("ipo_issues.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    document_id: Mapped[int] = mapped_column(
+        BigIntPrimaryKey,
+        ForeignKey("ipo_documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", server_default="pending"
+    )
+    # The IpoManualExtractionData-shaped dict the agent proposed. Approval
+    # re-runs the strict domain validation on this payload, so a corrupted or
+    # tampered proposal can never become an immutable revision.
+    payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    confidence: Mapped[str] = mapped_column(String(8), nullable=False)
+    # Reviewer-facing notes from the deterministic verifier: which cited values
+    # could not be string-matched on their cited pages, and why confidence was
+    # lowered. Empty list means every value was independently verified.
+    needs_review_reasons_json: Mapped[list[str]] = mapped_column(JSON, nullable=False)
+    model_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    agent_model: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Copied from the verified content-addressed cache entry the agent read, so
+    # the proposal stays traceable to exact PDF bytes even if the document row
+    # is later refreshed.
+    source_content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    page_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.UTC)
+    )
+    reviewed_by_email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    manual_extraction_id: Mapped[int | None] = mapped_column(
+        BigIntPrimaryKey,
+        ForeignKey("ipo_manual_extractions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    issue: Mapped[IpoIssue] = relationship(back_populates="extraction_proposals")
+    document: Mapped[IpoDocument] = relationship(back_populates="extraction_proposals")
+
+
+class IpoEnrichmentSignal(Base):
+    """Persist one low-confidence web enrichment observation (IPO-009).
+
+    Rows come from SerpAPI discovery queries (GMP, news, promoter reputation,
+    litigation red flags, and similar sentiment-only topics). They are stored
+    with their query, capture instant, and a stamped ``source_policy`` so every
+    consumer can see this is web-sourced, low-confidence evidence.
+
+    Beginner note: this table deliberately has no path into financial
+    statements. Signals may only feed the optional GMP/sentiment factor and the
+    litigation caution flag; official document evidence always wins. A snippet
+    that tripped the prompt-injection scanner is stored with ``quarantined``
+    true and its text replaced by the blocked-evidence marker, never verbatim.
+    """
+
+    __tablename__ = "ipo_enrichment_signals"
+    __table_args__ = (
+        UniqueConstraint(
+            "issue_id",
+            "signal_type",
+            "captured_at",
+            name="uq_ipo_enrichment_signals_issue_type_capture",
+        ),
+        CheckConstraint(
+            "signal_type IN ('gmp', 'news', 'promoter_reputation', 'litigation_red_flag', "
+            "'anchor_commentary', 'brokerage_review', 'peer_discovery')",
+            name="ck_ipo_enrichment_signals_signal_type",
+        ),
+        CheckConstraint(
+            "confidence IN ('low', 'medium', 'high')",
+            name="ck_ipo_enrichment_signals_confidence",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
+    issue_id: Mapped[int] = mapped_column(
+        BigIntPrimaryKey, ForeignKey("ipo_issues.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    signal_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    captured_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    query_text: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Normalized search results (title/link/source/snippet/matched keywords).
+    # Links are provenance data only — nothing in the app ever fetches them.
+    payload_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    # Conservatively parsed numeric value when the signal type defines one
+    # (GMP as a percent of the issue price). NULL means "not parseable", which
+    # downstream factor derivation treats as missing rather than guessing.
+    parsed_value: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    quarantined: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    confidence: Mapped[str] = mapped_column(String(8), nullable=False)
+    source_policy: Mapped[str] = mapped_column(String(40), nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.UTC)
+    )
+
+    issue: Mapped[IpoIssue] = relationship(back_populates="enrichment_signals")
 
 
 # ============================================================================

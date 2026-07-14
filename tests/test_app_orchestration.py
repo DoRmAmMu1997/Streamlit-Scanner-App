@@ -32,6 +32,7 @@ from ui import (
     common,
     health_page,
     history_page,
+    ipo_page,
     parameter_controls,
     status_panel,
     validation_page,
@@ -95,6 +96,7 @@ def test_capability_flags_are_required_at_every_render_boundary():
         (app._render_history_page, "can_export"),
         (app._render_comparison_page, "can_export"),
         (app._render_validation_page, "can_export"),
+        (app._render_ipo_page, "can_rescore"),
     ]
 
     for renderer, parameter_name in boundaries:
@@ -491,6 +493,7 @@ def test_admin_health_view_is_available_and_returns_before_screener_discovery(
             "Scan history",
             "Scan comparison",
             "Validation / Signal Performance",
+            "IPO screener",
             "Admin health",
             "Admin settings",
             "Admin IPO extraction",
@@ -786,6 +789,7 @@ def test_non_admin_cannot_select_admin_health(monkeypatch):
             "Scan history",
             "Scan comparison",
             "Validation / Signal Performance",
+            "IPO screener",
         )
         return "Scanner"
 
@@ -1032,6 +1036,7 @@ def test_app_reexports_helpers_from_extracted_ui_modules():
     assert app._render_history_page is history_page._render_history_page
     assert app._render_admin_health_page is health_page._render_admin_health_page
     assert app._render_validation_page is validation_page._render_validation_page
+    assert app._render_ipo_page is ipo_page._render_ipo_page
     # REF-003: status panel + parameter controls. Identity matters doubly here —
     # refresh_universes_and_invalidate() calls .clear() through the app bindings,
     # which only empties the real caches if they are the SAME function objects.

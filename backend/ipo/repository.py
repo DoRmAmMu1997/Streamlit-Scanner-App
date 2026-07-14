@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -44,10 +45,18 @@ from backend.ipo.manual_extraction import (
 from backend.ipo.models import (
     Confidence,
     FinancialPeriodType,
+    IpoCautionFlag,
+    IpoCautionFlagReport,
+    IpoCautionFlagStatus,
     IpoDocumentData,
     IpoDocumentParseStatus,
     IpoDocumentRecord,
+    IpoEnrichmentSignalData,
+    IpoEnrichmentSignalRecord,
+    IpoEnrichmentSignalType,
     IpoEvaluationRecord,
+    IpoExtractionProposalRecord,
+    IpoExtractionProposalStatus,
     IpoFilingData,
     IpoFinancialData,
     IpoFinancialRecord,
@@ -63,15 +72,17 @@ from backend.ipo.models import (
     IpoValidationError,
     Recommendation,
 )
-from backend.ipo.scorecard import score_ipo
-from backend.ipo.verdict import build_recommendation
+from backend.ipo.scoring.recommendation import build_recommendation
+from backend.ipo.scoring.score_model import score_ipo
 from backend.observability import (
     EVENT_IPO_DOCUMENT_DOWNLOAD_COMPLETED,
     EVENT_IPO_DOCUMENT_DOWNLOAD_FAILED,
+    EVENT_IPO_EXTRACTION_PROPOSAL_REVIEWED,
     EVENT_IPO_MANUAL_EXTRACTION_SUBMITTED,
     log_event,
 )
 from backend.scanning.result_contract import normalize_secret_safe_json
+from backend.security import redact_text
 from backend.storage import session_scope
 from backend.storage.ipo_repository import (
     delete_ipo_document_row,
@@ -83,6 +94,7 @@ from backend.storage.ipo_repository import (
     get_ipo_document_by_record_hash,
     get_ipo_document_by_url,
     get_ipo_evaluation_rows,
+    get_ipo_extraction_proposal,
     get_ipo_financial,
     get_ipo_issue,
     get_ipo_issue_by_sebi_key,
@@ -91,19 +103,26 @@ from backend.storage.ipo_repository import (
     get_latest_ipo_evaluation_rows,
     get_latest_ipo_filing_date,
     get_latest_ipo_manual_extraction,
+    get_latest_ipo_subscription,
+    get_pending_ipo_extraction_proposal_for_document,
     insert_ipo_document,
+    insert_ipo_enrichment_signals,
     insert_ipo_evaluation,
+    insert_ipo_extraction_proposal,
     insert_ipo_financial,
     insert_ipo_issue,
     insert_ipo_manual_extraction,
     insert_ipo_subscription,
     list_ipo_document_rows,
+    list_ipo_enrichment_signal_rows,
     list_ipo_evaluation_rows,
+    list_ipo_extraction_proposal_rows,
     list_ipo_financial_rows,
     list_ipo_issue_rows,
     list_ipo_manual_extraction_rows,
     list_ipo_subscription_rows,
     list_unclaimed_ipo_issues_by_company_name,
+    mark_ipo_extraction_proposal_reviewed,
     update_ipo_document_cache_if_source_matches,
     update_ipo_document_values,
     update_ipo_financial_row,
@@ -1205,6 +1224,400 @@ def delete_subscription(
         return delete_ipo_subscription_row(session, issue_id, subscription_id)
 
 
+def _enrichment_signal_record(row: Any) -> IpoEnrichmentSignalRecord:
+    """Reassemble one enrichment ORM row into a detached typed record."""
+    return IpoEnrichmentSignalRecord(
+        id=row.id,
+        issue_id=row.issue_id,
+        signal_type=IpoEnrichmentSignalType(row.signal_type),
+        captured_at=_utc(row.captured_at),
+        query_text=row.query_text,
+        payload=tuple(dict(entry) for entry in row.payload_json),
+        parsed_value=row.parsed_value,
+        quarantined=bool(row.quarantined),
+        confidence=Confidence(row.confidence),
+        source_policy=row.source_policy,
+        created_at=_utc(row.created_at),
+    )
+
+
+def record_enrichment_signals(
+    issue_id: int,
+    signals: list[IpoEnrichmentSignalData],
+    *,
+    session_factory: SessionFactory = session_scope,
+) -> list[IpoEnrichmentSignalRecord]:
+    """Persist one already-quarantined enrichment batch for a known issue.
+
+    Beginner note:
+        The collector validates and quarantine-scans everything before this
+        function runs, so persistence is a plain typed hand-off: verify the
+        parent issue exists, stage the batch in one transaction, and return
+        detached records. Payloads still pass through the secret-safe JSON
+        normalizer as a last line of defense for every stored sink.
+    """
+    with session_factory() as session:
+        if get_ipo_issue(session, issue_id) is None:
+            raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
+        values_list = [
+            {
+                "signal_type": signal.signal_type.value,
+                "captured_at": signal.captured_at,
+                "query_text": signal.query_text,
+                "payload_json": normalize_secret_safe_json(
+                    [dict(entry) for entry in signal.payload]
+                ),
+                "parsed_value": signal.parsed_value,
+                "quarantined": signal.quarantined,
+                "confidence": signal.confidence.value,
+                "source_policy": signal.source_policy,
+            }
+            for signal in signals
+        ]
+        rows = insert_ipo_enrichment_signals(session, issue_id, values_list)
+        return [_enrichment_signal_record(row) for row in rows]
+
+
+def list_enrichment_signals(
+    issue_id: int,
+    *,
+    signal_type: IpoEnrichmentSignalType | None = None,
+    since: dt.datetime | None = None,
+    session_factory: SessionFactory = session_scope,
+) -> list[IpoEnrichmentSignalRecord]:
+    """List one issue's enrichment signals newest-first with optional filters.
+
+    ``since`` bounds staleness in SQL (the GMP factor only trusts recent
+    observations) instead of loading dead history into memory.
+    """
+    with session_factory() as session:
+        if get_ipo_issue(session, issue_id) is None:
+            raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
+        rows = list_ipo_enrichment_signal_rows(
+            session,
+            issue_id,
+            signal_type=signal_type.value if signal_type is not None else None,
+            since=since,
+        )
+        return [_enrichment_signal_record(row) for row in rows]
+
+
+# Singleton value fields shared by the proposal payload and the manual data
+# contract. Every name below appears in the payload with a paired
+# ``<name>_page`` citation, exactly like a hand-entered submission.
+_PROPOSAL_VALUE_FIELDS = (
+    "net_worth",
+    "total_debt",
+    "cash",
+    "cash_flow_from_operations",
+    "equity_shares",
+    "eps",
+    "nav_book_value",
+    "fresh_issue_amount",
+    "ofs_amount",
+    "promoter_holding_pre_issue",
+    "promoter_holding_post_issue",
+    "total_assets",
+    "current_liabilities",
+    "post_issue_equity_shares",
+)
+
+
+def _proposal_payload_to_manual_data(
+    payload: Mapping[str, Any], source_document_id: int
+) -> IpoManualExtractionData:
+    """Reconstruct the strict manual-extraction contract from a proposal payload.
+
+    Beginner note:
+        This is the fail-closed heart of the review flow. The payload is data
+        under review, so nothing in it is trusted: every value is re-parsed
+        into ``Decimal``/``date`` and the resulting ``IpoManualExtractionData``
+        runs the exact ``__post_init__`` validation a hand-entered submission
+        runs. A corrupted or tampered payload therefore raises here and can
+        never become an immutable revision.
+    """
+    try:
+        periods = tuple(
+            IpoManualPeriodData(
+                period_end=dt.date.fromisoformat(str(entry["period_end"])),
+                revenue=Decimal(str(entry["revenue"])),
+                revenue_page=int(entry["revenue_page"]),
+                ebitda=Decimal(str(entry["ebitda"])),
+                ebitda_page=int(entry["ebitda_page"]),
+                pat=Decimal(str(entry["pat"])),
+                pat_page=int(entry["pat_page"]),
+                profit_before_tax=Decimal(str(entry["profit_before_tax"])),
+                profit_before_tax_page=int(entry["profit_before_tax_page"]),
+                finance_cost=Decimal(str(entry["finance_cost"])),
+                finance_cost_page=int(entry["finance_cost_page"]),
+            )
+            for entry in payload["periods"]
+        )
+        peers = tuple(
+            IpoPeerValuationData(
+                company_name=str(entry["company_name"]),
+                source_page=int(entry["source_page"]),
+                metrics={
+                    str(metric): Decimal(str(value))
+                    for metric, value in dict(entry["metrics"]).items()
+                },
+            )
+            for entry in payload["peers"]
+        )
+        values: dict[str, Any] = {}
+        for name in _PROPOSAL_VALUE_FIELDS:
+            values[name] = Decimal(str(payload[name]))
+            values[f"{name}_page"] = int(payload[f"{name}_page"])
+        return IpoManualExtractionData(
+            source_document_id=source_document_id,
+            financial_amount_unit=IpoAmountUnit(str(payload["financial_amount_unit"])),
+            issue_amount_unit=IpoAmountUnit(str(payload["issue_amount_unit"])),
+            equity_share_unit=IpoShareUnit(str(payload["equity_share_unit"])),
+            periods=periods,
+            objects_of_issue=str(payload["objects_of_issue"]),
+            objects_of_issue_page=int(payload["objects_of_issue_page"]),
+            peers=peers,
+            **values,
+        )
+    except IpoValidationError:
+        raise
+    except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
+        # Only the exception class name survives: a malformed payload could
+        # contain arbitrary text and must not leak into errors or logs.
+        raise IpoValidationError(
+            f"Proposal payload is malformed ({type(exc).__name__}); it cannot "
+            "become a manual-extraction revision."
+        ) from exc
+
+
+def _extraction_proposal_record(row: Any) -> IpoExtractionProposalRecord:
+    """Reassemble one proposal ORM row into a detached typed record."""
+    return IpoExtractionProposalRecord(
+        id=row.id,
+        issue_id=row.issue_id,
+        document_id=row.document_id,
+        company_name=row.issue.company_name,
+        document_url=row.document.document_url,
+        status=IpoExtractionProposalStatus(row.status),
+        payload=dict(row.payload_json),
+        confidence=Confidence(row.confidence),
+        needs_review_reasons=tuple(row.needs_review_reasons_json),
+        model_version=row.model_version,
+        agent_model=row.agent_model,
+        source_content_sha256=row.source_content_sha256,
+        page_count=row.page_count,
+        created_at=_utc(row.created_at),
+        reviewed_by_email=row.reviewed_by_email,
+        reviewed_at=_utc(row.reviewed_at) if row.reviewed_at is not None else None,
+        review_note=row.review_note,
+        manual_extraction_id=row.manual_extraction_id,
+    )
+
+
+def submit_extraction_proposal(
+    issue_id: int,
+    document_id: int,
+    *,
+    payload: Mapping[str, Any],
+    confidence: Confidence,
+    needs_review_reasons: tuple[str, ...],
+    model_version: str,
+    agent_model: str,
+    source_content_sha256: str,
+    page_count: int,
+    session_factory: SessionFactory = session_scope,
+) -> IpoExtractionProposalRecord:
+    """Queue one AI-proposed extraction for human review.
+
+    Beginner note:
+        The payload is validated for *shape* here (it must reconstruct into
+        the strict manual contract) before anything is stored, so the review
+        queue can never hold a proposal that would be impossible to approve.
+        One pending proposal per document keeps the queue free of duplicates.
+    """
+    _proposal_payload_to_manual_data(payload, document_id)
+    with session_factory() as session:
+        if get_ipo_issue(session, issue_id) is None:
+            raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
+        if get_ipo_document(session, issue_id, document_id) is None:
+            raise IpoValidationError(
+                f"Source document {document_id} does not belong to IPO issue {issue_id}."
+            )
+        if get_pending_ipo_extraction_proposal_for_document(session, document_id) is not None:
+            raise IpoValidationError(
+                f"Document {document_id} already has a pending extraction proposal."
+            )
+        row = insert_ipo_extraction_proposal(
+            session,
+            issue_id,
+            document_id,
+            {
+                "status": IpoExtractionProposalStatus.PENDING.value,
+                "payload_json": normalize_secret_safe_json(dict(payload)),
+                "confidence": _parse_confidence(confidence).value,
+                "needs_review_reasons_json": [str(reason) for reason in needs_review_reasons],
+                "model_version": str(model_version),
+                "agent_model": str(agent_model),
+                "source_content_sha256": str(source_content_sha256),
+                "page_count": int(page_count),
+            },
+        )
+        return _extraction_proposal_record(row)
+
+
+def _parse_confidence(value: Confidence | str) -> Confidence:
+    """Accept an enum or its string value and return one strict member."""
+    return value if isinstance(value, Confidence) else Confidence(str(value))
+
+
+def list_extraction_proposals(
+    *,
+    issue_id: int | None = None,
+    status: IpoExtractionProposalStatus | None = None,
+    session_factory: SessionFactory = session_scope,
+) -> list[IpoExtractionProposalRecord]:
+    """List proposals newest-first, optionally narrowed by issue or status."""
+    with session_factory() as session:
+        rows = list_ipo_extraction_proposal_rows(
+            session,
+            issue_id=issue_id,
+            status=status.value if status is not None else None,
+        )
+        return [_extraction_proposal_record(row) for row in rows]
+
+
+def approve_extraction_proposal(
+    proposal_id: int,
+    *,
+    reviewed_by_email: str,
+    data_dir: Path | None = None,
+    now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
+    audit_recorder: AuditRecorder = record_audit_event,
+    session_factory: SessionFactory = session_scope,
+) -> IpoManualExtractionRecord:
+    """Convert one pending proposal into an immutable manual-extraction revision.
+
+    Beginner note:
+        Approval is an attestation: the reviewer becomes ``entered_by_email``
+        on the resulting revision, exactly as if they had typed the values
+        themselves. The conversion replays the full manual-submission path —
+        strict payload validation plus re-verification of the cached PDF bytes
+        — so scoring can never tell (and never needs to know) that an agent
+        drafted the numbers. If another reviewer decided the same proposal
+        concurrently, the marking step fails loudly; the freshly appended
+        revision remains as append-only history and is reported in the error.
+    """
+    reviewer = _manual_email(reviewed_by_email)
+    with session_factory() as session:
+        row = get_ipo_extraction_proposal(session, proposal_id)
+        if row is None:
+            raise IpoNotFoundError(f"Extraction proposal {proposal_id} was not found.")
+        record = _extraction_proposal_record(row)
+    if record.status is not IpoExtractionProposalStatus.PENDING:
+        raise IpoValidationError(
+            f"Extraction proposal {proposal_id} was already {record.status.value}."
+        )
+
+    data = _proposal_payload_to_manual_data(record.payload, record.document_id)
+    revision = submit_manual_extraction(
+        record.issue_id,
+        data,
+        entered_by_email=reviewer,
+        data_dir=data_dir,
+        now=now,
+        audit_recorder=audit_recorder,
+        session_factory=session_factory,
+    )
+
+    with session_factory() as session:
+        marked = mark_ipo_extraction_proposal_reviewed(
+            session,
+            proposal_id,
+            {
+                "status": IpoExtractionProposalStatus.APPROVED.value,
+                "reviewed_by_email": reviewer,
+                "reviewed_at": now().astimezone(dt.UTC),
+                "manual_extraction_id": revision.id,
+            },
+        )
+        if marked is None:
+            raise IpoValidationError(
+                f"Extraction proposal {proposal_id} was reviewed concurrently; "
+                f"manual revision {revision.id} was still appended and remains "
+                "in the immutable history."
+            )
+    log_event(
+        logger,
+        EVENT_IPO_EXTRACTION_PROPOSAL_REVIEWED,
+        proposal_id=proposal_id,
+        issue_id=record.issue_id,
+        decision=IpoExtractionProposalStatus.APPROVED.value,
+        manual_extraction_id=revision.id,
+    )
+    audit_recorder(
+        event=EVENT_IPO_EXTRACTION_PROPOSAL_REVIEWED,
+        user_email=reviewer,
+        metadata={
+            "proposal_id": proposal_id,
+            "issue_id": record.issue_id,
+            "decision": IpoExtractionProposalStatus.APPROVED.value,
+            "manual_extraction_id": revision.id,
+        },
+        session_factory=session_factory,
+    )
+    return revision
+
+
+def reject_extraction_proposal(
+    proposal_id: int,
+    *,
+    reviewed_by_email: str,
+    reason: str,
+    now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
+    audit_recorder: AuditRecorder = record_audit_event,
+    session_factory: SessionFactory = session_scope,
+) -> IpoExtractionProposalRecord:
+    """Reject one pending proposal, keeping it as attributable audit history."""
+    reviewer = _manual_email(reviewed_by_email)
+    note = str(reason).strip()
+    if not note:
+        raise IpoValidationError("A rejection requires a non-empty reason.")
+    with session_factory() as session:
+        marked = mark_ipo_extraction_proposal_reviewed(
+            session,
+            proposal_id,
+            {
+                "status": IpoExtractionProposalStatus.REJECTED.value,
+                "reviewed_by_email": reviewer,
+                "reviewed_at": now().astimezone(dt.UTC),
+                "review_note": str(redact_text(note)),
+            },
+        )
+        if marked is None:
+            raise IpoValidationError(
+                f"Extraction proposal {proposal_id} is not pending review."
+            )
+        record = _extraction_proposal_record(marked)
+    log_event(
+        logger,
+        EVENT_IPO_EXTRACTION_PROPOSAL_REVIEWED,
+        proposal_id=proposal_id,
+        issue_id=record.issue_id,
+        decision=IpoExtractionProposalStatus.REJECTED.value,
+    )
+    audit_recorder(
+        event=EVENT_IPO_EXTRACTION_PROPOSAL_REVIEWED,
+        user_email=reviewer,
+        metadata={
+            "proposal_id": proposal_id,
+            "issue_id": record.issue_id,
+            "decision": IpoExtractionProposalStatus.REJECTED.value,
+        },
+        session_factory=session_factory,
+    )
+    return record
+
+
 def _evaluation_record(score_row: Any, recommendation_row: Any) -> IpoEvaluationRecord:
     """Reassemble two immutable ORM rows into one detached public evaluation."""
     result = IpoRecommendationResult(
@@ -1216,6 +1629,16 @@ def _evaluation_record(score_row: Any, recommendation_row: Any) -> IpoEvaluation
         reasons=tuple(recommendation_row.reasons_json),
         missing_data=tuple(recommendation_row.missing_data_json),
         source_documents=tuple(recommendation_row.source_documents_json),
+        # Legacy ipo-001-v1 rows carry the server-default empty list here, so
+        # this rebuild works identically for pre- and post-IPO-006 history.
+        caution_flags=tuple(
+            IpoCautionFlag(
+                name=entry["name"],
+                status=IpoCautionFlagStatus(entry["status"]),
+                evidence=entry["evidence"],
+            )
+            for entry in recommendation_row.caution_flags_json
+        ),
     )
     return IpoEvaluationRecord(
         issue_id=score_row.issue_id,
@@ -1224,6 +1647,11 @@ def _evaluation_record(score_row: Any, recommendation_row: Any) -> IpoEvaluation
         model_version=score_row.model_version,
         scored_at=_utc(score_row.scored_at),
         result=result,
+        inputs_fingerprint=score_row.inputs_fingerprint,
+        contributions={
+            name: Decimal(str(value))
+            for name, value in score_row.contributions_json.items()
+        },
     )
 
 
@@ -1231,11 +1659,23 @@ def evaluate_issue(
     issue_id: int,
     score_input: IpoScoreInput,
     *,
+    caution_flags: IpoCautionFlagReport | None = None,
+    inputs_fingerprint: str | None = None,
+    model_version: str = "ipo-001-v1",
     session_factory: SessionFactory = session_scope,
 ) -> IpoEvaluationRecord:
-    """Compute and atomically persist one immutable score/verdict pair."""
+    """Compute and atomically persist one immutable score/verdict pair.
+
+    Beginner note:
+        The three IPO-006 keyword arguments are optional so IPO-001 callers
+        keep their exact behavior. The scoring service passes a caution-flag
+        report (enforced inside ``build_recommendation``), the SHA-256
+        fingerprint of the evidence it consumed (the screener's idempotency
+        anchor), and its own model version; all three are persisted with the
+        immutable pair.
+    """
     score_result = score_ipo(score_input)
-    recommendation = build_recommendation(score_result)
+    recommendation = build_recommendation(score_result, caution_flags=caution_flags)
 
     with session_factory() as session:
         issue = get_ipo_issue(session, issue_id)
@@ -1271,7 +1711,8 @@ def evaluate_issue(
             ),
             "missing_data_json": list(score_result.missing_data),
             "reasons_json": list(score_result.reasons),
-            "model_version": "ipo-001-v1",
+            "model_version": model_version,
+            "inputs_fingerprint": inputs_fingerprint,
         }
         recommendation_values = {
             "recommendation": recommendation.recommendation.value,
@@ -1280,6 +1721,10 @@ def evaluate_issue(
             "reasons_json": list(recommendation.reasons),
             "missing_data_json": list(recommendation.missing_data),
             "source_documents_json": list(recommendation.source_documents),
+            "caution_flags_json": [
+                {"name": flag.name, "status": flag.status.value, "evidence": flag.evidence}
+                for flag in recommendation.caution_flags
+            ],
         }
         score_row, recommendation_row = insert_ipo_evaluation(
             session, issue_id, score_values, recommendation_values
@@ -1310,6 +1755,33 @@ def list_evaluations(
             _evaluation_record(score, recommendation)
             for score, recommendation in list_ipo_evaluation_rows(session, issue_id)
         ]
+
+
+def get_latest_evaluation(
+    issue_id: int, *, session_factory: SessionFactory = session_scope
+) -> IpoEvaluationRecord | None:
+    """Return the newest complete evaluation record for one issue, if any.
+
+    The IPO-006 scoring service compares its freshly computed inputs
+    fingerprint against this record to decide whether a re-score would be a
+    byte-identical no-op, which is what makes ``run_ipo_screener`` idempotent.
+    """
+    with session_factory() as session:
+        if get_ipo_issue(session, issue_id) is None:
+            raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
+        rows = get_latest_ipo_evaluation_rows(session, issue_id)
+        return _evaluation_record(*rows) if rows is not None else None
+
+
+def get_latest_subscription(
+    issue_id: int, *, session_factory: SessionFactory = session_scope
+) -> IpoSubscriptionRecord | None:
+    """Return only the newest demand snapshot for one issue, if any."""
+    with session_factory() as session:
+        if get_ipo_issue(session, issue_id) is None:
+            raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
+        row = get_latest_ipo_subscription(session, issue_id)
+        return _subscription_record(row) if row is not None else None
 
 
 def get_latest_recommendation(

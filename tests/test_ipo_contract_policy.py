@@ -30,10 +30,14 @@ DocumentedDefinition = ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
 # rewriting unrelated scanner, authentication, or persistence code.
 FULL_DOCUMENTATION_TARGETS = (
     ROOT / "backend" / "jobs" / "scan_ipo_filings.py",
+    ROOT / "backend" / "jobs" / "run_ipo_screener.py",
     ROOT / "backend" / "storage" / "ipo_repository.py",
     ROOT / "tests" / "test_scan_ipo_filings_job.py",
+    ROOT / "tests" / "test_run_ipo_screener_job.py",
     ROOT / "tests" / "test_app_ipo_manual_page.py",
+    ROOT / "tests" / "test_app_ipo_page.py",
     ROOT / "ui" / "ipo_manual_page.py",
+    ROOT / "ui" / "ipo_page.py",
 )
 SHARED_DOCUMENTATION_TARGETS: dict[Path, frozenset[str]] = {
     ROOT / "backend" / "config" / "settings.py": frozenset({"ipo_document_dir"}),
@@ -41,6 +45,8 @@ SHARED_DOCUMENTATION_TARGETS: dict[Path, frozenset[str]] = {
         {
             "IpoIssue",
             "IpoDocument",
+            "IpoEnrichmentSignal",
+            "IpoExtractionProposal",
             "IpoFinancial",
             "IpoManualExtraction",
             "IpoManualFinancialPeriod",
@@ -55,6 +61,7 @@ SHARED_DOCUMENTATION_TARGETS: dict[Path, frozenset[str]] = {
             "test_ipo002_downgrade_refuses_to_discard_ingested_identity",
             "test_ipo003_downgrade_refuses_to_discard_download_provenance",
             "test_ipo004_downgrade_refuses_to_discard_manual_revisions",
+            "test_ipo006_downgrade_refuses_to_discard_screener_artifacts",
         }
     ),
     ROOT / "tests" / "test_app_orchestration.py": frozenset(
@@ -128,9 +135,9 @@ def test_ipo_networking_is_isolated_to_sources_and_all_ipo_code_is_ui_free() -> 
     files = sorted(IPO_PACKAGE.rglob("*.py"))
     assert {path.name for path in files} >= {
         "models.py",
+        "recommendation.py",
         "repository.py",
-        "scorecard.py",
-        "verdict.py",
+        "score_model.py",
     }
 
     for path in files:

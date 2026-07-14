@@ -4,9 +4,9 @@
 |---|---|
 | **Component** | IPO ingestion, document cache, manual evidence, financial ratios, scoring, and recommendation subsystem |
 | **Source** | [`backend/ipo/`](../../../backend/ipo), [`backend/ipo/sources/sebi.py`](../../../backend/ipo/sources/sebi.py), [`backend/jobs/scan_ipo_filings.py`](../../../backend/jobs/scan_ipo_filings.py), [`backend/storage/ipo_repository.py`](../../../backend/storage/ipo_repository.py), [`backend/storage/models.py`](../../../backend/storage/models.py), [`migrations/versions/`](../../../migrations/versions) |
-| **Layer** | Framework-free backend plus one admin-only Streamlit adapter |
-| **Status** | Implemented: IPO-001 scoring through IPO-005 deterministic ratio derivation |
-| **Related** | [HLD](../high-level-design.md) - [IPO-001](../ipo-001-domain-score-contract.md) - [IPO-002](../ipo-002-sebi-filing-ingestion.md) - [IPO-003](../ipo-003-document-downloader-cache.md) - [IPO-004](../ipo-004-manual-extraction-mvp.md) - [IPO-005](../ipo-005-ratio-engine.md) - [storage](storage-persistence.md) - [security](security.md) |
+| **Layer** | Framework-free backend plus one admin-only and one read-only Streamlit adapter |
+| **Status** | Implemented: IPO-001 domain through IPO-010 fail-closed AI extraction proposals |
+| **Related** | [HLD](../high-level-design.md) - [IPO-001](../ipo-001-domain-score-contract.md) - [IPO-002](../ipo-002-sebi-filing-ingestion.md) - [IPO-003](../ipo-003-document-downloader-cache.md) - [IPO-004](../ipo-004-manual-extraction-mvp.md) - [IPO-005](../ipo-005-ratio-engine.md) - [IPO-006](../ipo-006-factor-derivation-and-verdict.md) - [IPO-007](../ipo-007-dashboard.md) - [IPO-008](../ipo-008-screener-orchestration.md) - [IPO-009](../ipo-009-serpapi-enrichment.md) - [IPO-010](../ipo-010-ai-extraction-proposals.md) - [extraction AI LLD](ipo-extraction-ai.md) - [storage](storage-persistence.md) - [security](security.md) |
 
 IPO-003's detailed cache and failure contract is documented in
 [ipo-003-document-downloader-cache.md](../ipo-003-document-downloader-cache.md).
@@ -87,13 +87,13 @@ never triggers a recommendation. Both paths persist only through `backend/storag
 | Module | Responsibility | May import |
 |---|---|---|
 | `backend/ipo/models.py` | Frozen DTOs, enums, validation (URLs, money, hashes). | stdlib, `backend.security`, `backend.url_safety` |
-| `backend/ipo/scorecard.py` | Fixed PDF weights, half-up rounding, missing-data receipt. | `models` |
-| `backend/ipo/verdict.py` | Score bands, confidence, fail-closed override. | `models` |
+| `backend/ipo/scoring/score_model.py` | Fixed PDF weights, half-up rounding, missing-data receipt. | `models` |
+| `backend/ipo/scoring/recommendation.py` | Score bands, confidence, fail-closed override. | `models` |
 | `backend/ipo/sources/sebi.py` | IPO-002 listing network I/O + hostile-HTML parsing. | `requests`, `bs4`, `models` |
 | `backend/ipo/documents/downloader.py` | IPO-003 detail/PDF I/O, SSRF controls, streamed atomic cache. | `requests`, `bs4`, `models` |
 | `backend/ipo/manual_extraction.py` | Frozen complete-entry DTOs, units, page validation, peers, canonical conversions. | stdlib, `models` |
 | `backend/ipo/financials/ratio_engine.py` | Pure Decimal formulas, typed status receipts, reconciliation, source/price snapshot. | stdlib, `manual_extraction` |
-| `backend/ipo/repository.py` | Typed transactions, ingestion identity/lifecycle, atomic evaluation. | `models`, `scorecard`, `verdict`, `scanning.result_contract`, `storage` |
+| `backend/ipo/repository.py` | Typed transactions, ingestion identity/lifecycle, atomic evaluation. | `models`, `scoring.score_model`, `scoring.recommendation`, `scanning.result_contract`, `storage` |
 | `backend/storage/ipo_repository.py` | Every SQLAlchemy statement for the `ipo_*` tables. | `sqlalchemy`, `storage.models` |
 | `backend/jobs/scan_ipo_filings.py` | CLI boundary: windows, per-category loop, exit code, audits. | `ipo`, `audit`, `observability`, `storage.database` |
 | `ui/ipo_manual_page.py` | Admin widgets, DTO conversion, prefill, latest profile, revision history. | `backend.ipo`, `backend.auth`, `streamlit` |
@@ -234,20 +234,42 @@ boundaries and treat every response as hostile:
   exact formulas, losses, leverage/net cash, invalid denominators, legacy evidence,
   missing prices, and EPS/book-value reconciliation.
 
-## 10. Extension points
+## 10. IPO-006..010 additions
+
+The formerly deferred layers landed as one staged change; each has its own
+design doc:
+
+- **Factor derivation + hard caution flags + verdict extension (IPO-006)** —
+  `backend/ipo/scoring/{factor_derivation,caution_flags,recommendation,score_model,service}.py`;
+  see [ipo-006-factor-derivation-and-verdict.md](../ipo-006-factor-derivation-and-verdict.md).
+- **Read-only dashboard (IPO-007)** — `backend/ipo/dashboard.py` +
+  `ui/ipo_page.py`; see [ipo-007-dashboard.md](../ipo-007-dashboard.md).
+- **One-command orchestration (IPO-008)** —
+  `python -m backend.jobs.run_ipo_screener`, idempotent via the stored inputs
+  fingerprint; see [ipo-008-screener-orchestration.md](../ipo-008-screener-orchestration.md).
+- **Optional web enrichment (IPO-009)** — `backend/ipo/sources/enrichment.py`
+  writing quarantined, low-confidence `ipo_enrichment_signals`; see
+  [ipo-009-serpapi-enrichment.md](../ipo-009-serpapi-enrichment.md).
+- **AI extraction proposals (IPO-010)** —
+  `backend/ipo/documents/{table_extractor,section_classifier}.py` +
+  `backend/ipo/agents/financial_extractor.py` feeding the
+  `ipo_extraction_proposals` review queue; see
+  [ipo-010-ai-extraction-proposals.md](../ipo-010-ai-extraction-proposals.md)
+  and the [extraction-AI LLD](ipo-extraction-ai.md).
+
+## 11. Extension points
 
 - **More sources**: add NSE/BSE subscription or GMP adapters under
   `backend/ipo/sources/`, each behind its own host allowlist; the ingestion and
   scoring contracts stay unchanged.
-- **Factor derivation**: a future ticket can combine IPO-005 receipts with qualitative
-  evidence and subscription facts to produce reviewed 0-100 scorecard inputs.
 - **Sector overrides**: banks/NBFCs, AMCs, insurers, and loss-making technology
-  issuers need separately reviewed definitions rather than silent v1 substitutions.
-- **Automation & UI**: `python -m backend.jobs.scan_ipo_filings` is manually
-  runnable and scheduler-compatible, but IPO-002 does not add a scheduler,
-  Render cron, Compose daemon, or Streamlit entrypoint. A future orchestration
-  ticket can schedule it, and a later read-only IPO surface can render
-  `IpoRecommendationResult.to_dict()`.
+  issuers need separately reviewed factor/flag definitions rather than silent
+  v1 substitutions (bump the factor/flag model versions).
+- **Scheduling**: `run_ipo_screener` is scheduler-compatible (idempotent, exit
+  codes); wiring a Render cron/Compose daemon remains a deployment ticket.
+- **Shared search client**: `sixty_seven.search_client.SerpApiClient` is
+  imported directly by the enrichment adapter; extracting it to a shared
+  package is a noted follow-up.
 
 Any extension must preserve URL safety, never invent missing evidence, and route
 all SQL through `backend/storage`.

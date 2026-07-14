@@ -44,10 +44,11 @@ testing · extension points.
 - [universe-management.md](components/universe-management.md) — universe build/load.
 - [storage-persistence.md](components/storage-persistence.md) — ORM, engine/session, repository, Alembic.
 - [validation.md](components/validation.md) — VALID-002 forward-return calculator + benchmark comparison service.
-- [ipo-screener.md](components/ipo-screener.md) — IPO-001 scoring through IPO-005 deterministic financial-ratio derivation.
+- [ipo-screener.md](components/ipo-screener.md) — IPO-001 domain through IPO-010: ingestion, cache, evidence, ratios, factors/flags, verdicts, dashboard, and orchestration.
 
 ### AI subsystems
 - [fundamentals-ai.md](components/fundamentals-ai.md) — Check Fundamentals agent + screener.in scraper + PDF reader + cache (the shared SDK plumbing).
+- [ipo-extraction-ai.md](components/ipo-extraction-ai.md) — IPO-010 financial-extraction agent: quarantined tools, host-side citation verification, fail-closed proposals.
 - [technical-analysis-ai.md](components/technical-analysis-ai.md) — Technical Analysis agent + detectors + MCP tools.
 - [sixty-seven-ka-funda-ai.md](components/sixty-seven-ka-funda-ai.md) — drawdown gate + SerpAPI + Claude verifier.
 
@@ -68,6 +69,11 @@ testing · extension points.
 - **[ipo-003-document-downloader-cache.md](ipo-003-document-downloader-cache.md)** — bounded SEBI PDF retrieval, content-addressed storage, cache provenance, and recovery semantics.
 - **[ipo-004-manual-extraction-mvp.md](ipo-004-manual-extraction-mvp.md)** — admin-only complete financial entry, exact page/document/user provenance, immutable revisions, and the raw-data scoring bridge.
 - **[ipo-005-ratio-engine.md](ipo-005-ratio-engine.md)** — exact general-company ratios, diagnostic missing-data receipts, raw-input additions, and accounting edge policies.
+- **[ipo-006-factor-derivation-and-verdict.md](ipo-006-factor-derivation-and-verdict.md)** — deterministic 0-100 factor bands from typed evidence, the None-vs-zero rule, seven hard caution flags, and the "Insufficient verified data" verdict type.
+- **[ipo-007-dashboard.md](ipo-007-dashboard.md)** — the read-only IPO screener page: Streamlit-free snapshot builder, seven spec sections, verdict filter, and the capability-gated re-score action.
+- **[ipo-008-screener-orchestration.md](ipo-008-screener-orchestration.md)** — the one-command `run_ipo_screener` pipeline and the inputs-fingerprint idempotency contract.
+- **[ipo-009-serpapi-enrichment.md](ipo-009-serpapi-enrichment.md)** — optional low-confidence web signals under strict trust rules: quarantine before storage, keywords-only red flags, graceful no-key skip.
+- **[ipo-010-ai-extraction-proposals.md](ipo-010-ai-extraction-proposals.md)** — bounded PDF extraction, deterministic section classification, and the fail-closed AI proposal/review trust model.
 - **[scan-run-persistence.md](scan-run-persistence.md)** — SCAN-001 scan-run persistence schema (the column-by-column rationale the Storage LLD links to).
 - **[scan-002-handoff.md](scan-002-handoff.md)** — SCAN-002 database-layer implementation handoff brief.
 - **[obs-003-audit-log.md](obs-003-audit-log.md)** — OBS-003 audit log + runtime-config schema, recorder design, and the seven tracked events.

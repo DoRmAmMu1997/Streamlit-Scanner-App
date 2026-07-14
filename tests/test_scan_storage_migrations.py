@@ -26,7 +26,7 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import Session
 
 from backend.storage import database
-from backend.storage.models import Base, IpoIssue, IpoManualExtraction
+from backend.storage.models import Base, IpoIssue, IpoManualExtraction, IpoScore
 
 
 def test_alembic_cli_does_not_echo_percent_encoded_database_password():
@@ -94,6 +94,8 @@ def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Pa
         "app_config",
         "audit_logs",
         "ipo_documents",
+        "ipo_enrichment_signals",
+        "ipo_extraction_proposals",
         "ipo_financials",
         "ipo_issues",
         "ipo_manual_extractions",
@@ -225,6 +227,41 @@ def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Pa
         child_fk = inspector.get_foreign_keys(table)[0]
         assert child_fk["referred_table"] == "ipo_manual_extractions"
         assert child_fk["options"] == {"ondelete": "CASCADE"}
+
+    # IPO-006..010: the review queue and enrichment tables hang off the issue
+    # root; a proposal additionally links to its document (CASCADE) and, once
+    # approved, to the immutable manual revision it became (SET NULL).
+    score_columns = {column["name"] for column in inspector.get_columns("ipo_scores")}
+    assert "inputs_fingerprint" in score_columns
+    recommendation_columns = {
+        column["name"] for column in inspector.get_columns("ipo_recommendations")
+    }
+    assert "caution_flags_json" in recommendation_columns
+    assert {
+        index["name"] for index in inspector.get_indexes("ipo_extraction_proposals")
+    } >= {
+        "ix_ipo_extraction_proposals_issue_id",
+        "ix_ipo_extraction_proposals_document_id",
+        "ix_ipo_extraction_proposals_manual_extraction_id",
+    }
+    proposal_fks = {
+        fk["referred_table"]: fk["options"]
+        for fk in inspector.get_foreign_keys("ipo_extraction_proposals")
+    }
+    assert proposal_fks == {
+        "ipo_issues": {"ondelete": "CASCADE"},
+        "ipo_documents": {"ondelete": "CASCADE"},
+        "ipo_manual_extractions": {"ondelete": "SET NULL"},
+    }
+    assert {
+        index["name"] for index in inspector.get_indexes("ipo_enrichment_signals")
+    } >= {
+        "ix_ipo_enrichment_signals_issue_id",
+        "ix_ipo_enrichment_signals_captured_at",
+    }
+    signal_fk = inspector.get_foreign_keys("ipo_enrichment_signals")[0]
+    assert signal_fk["referred_table"] == "ipo_issues"
+    assert signal_fk["options"] == {"ondelete": "CASCADE"}
     engine.dispose()
 
     command.downgrade(config, "base")
@@ -555,6 +592,58 @@ def test_ipo005_downgrade_refuses_to_discard_ratio_inputs(
     engine.dispose()
 
 
+def test_ipo006_downgrade_refuses_to_discard_screener_artifacts(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Downgrade stops before deleting any IPO-006 evaluation provenance.
+
+    Beginner note:
+        Every evaluation written by the ipo-006 scoring service stamps an
+        ``inputs_fingerprint`` on its score row, so one fingerprinted score is
+        enough evidence that the new columns and tables carry real history.
+        The guard must fire before any DDL runs, leaving the schema untouched.
+    """
+    db_path = tmp_path / "ipo006-downgrade.db"
+    database_url = f"sqlite:///{db_path.as_posix()}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = Config("alembic.ini")
+    command.upgrade(config, "head")
+
+    engine = create_engine(database_url, future=True)
+    with Session(engine) as session:
+        issue = IpoIssue(
+            company_name="Example Limited",
+            issue_type="mainboard",
+            status="rhp_filed",
+            source_confidence="high",
+        )
+        session.add(
+            IpoScore(
+                issue=issue,
+                total_score=50,
+                contributions_json={},
+                missing_data_json=[],
+                reasons_json=[],
+                model_version="ipo-006-v1",
+                inputs_fingerprint="a" * 64,
+            )
+        )
+        session.commit()
+    engine.dispose()
+
+    with pytest.raises(RuntimeError, match="discard IPO-006 screener artifacts"):
+        command.downgrade(config, "20260703ipo005")
+
+    engine = create_engine(database_url, future=True)
+    tables = set(inspect(engine).get_table_names())
+    assert {"ipo_extraction_proposals", "ipo_enrichment_signals"} <= tables
+    score_columns = {
+        column["name"] for column in inspect(engine).get_columns("ipo_scores")
+    }
+    assert "inputs_fingerprint" in score_columns
+    engine.dispose()
+
+
 def test_ensure_database_schema_creates_tables_and_short_circuits(monkeypatch, tmp_path: Path):
     """The runtime bootstrap applies migrations once, then skips on later calls.
 
@@ -575,6 +664,8 @@ def test_ensure_database_schema_creates_tables_and_short_circuits(monkeypatch, t
         "app_config",
         "audit_logs",
         "ipo_documents",
+        "ipo_enrichment_signals",
+        "ipo_extraction_proposals",
         "ipo_financials",
         "ipo_issues",
         "ipo_manual_extractions",

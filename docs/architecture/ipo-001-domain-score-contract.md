@@ -13,8 +13,8 @@ promoter quality 10, and GMP/sentiment 5.
 ## Boundaries
 
 - `backend/ipo/models.py` owns immutable DTOs, enums, and validation.
-- `backend/ipo/scorecard.py` applies the fixed weights without network or database access.
-- `backend/ipo/verdict.py` applies score bands, confidence, and fail-closed policy.
+- `backend/ipo/scoring/score_model.py` applies the fixed weights without network or database access.
+- `backend/ipo/scoring/recommendation.py` applies score bands, confidence, and fail-closed policy.
 - `backend/ipo/repository.py` owns typed transactions and detached return objects.
 - `backend/storage/models.py` owns ORM table shapes; `backend/storage/ipo_repository.py`
   owns every SQLAlchemy read/write operation.
