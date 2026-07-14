@@ -103,6 +103,7 @@ from backend.storage.ipo_repository import (
     get_latest_ipo_evaluation_rows,
     get_latest_ipo_filing_date,
     get_latest_ipo_manual_extraction,
+    get_latest_ipo_subscription,
     get_pending_ipo_extraction_proposal_for_document,
     insert_ipo_document,
     insert_ipo_enrichment_signals,
@@ -1646,6 +1647,7 @@ def _evaluation_record(score_row: Any, recommendation_row: Any) -> IpoEvaluation
         model_version=score_row.model_version,
         scored_at=_utc(score_row.scored_at),
         result=result,
+        inputs_fingerprint=score_row.inputs_fingerprint,
     )
 
 
@@ -1749,6 +1751,33 @@ def list_evaluations(
             _evaluation_record(score, recommendation)
             for score, recommendation in list_ipo_evaluation_rows(session, issue_id)
         ]
+
+
+def get_latest_evaluation(
+    issue_id: int, *, session_factory: SessionFactory = session_scope
+) -> IpoEvaluationRecord | None:
+    """Return the newest complete evaluation record for one issue, if any.
+
+    The IPO-006 scoring service compares its freshly computed inputs
+    fingerprint against this record to decide whether a re-score would be a
+    byte-identical no-op, which is what makes ``run_ipo_screener`` idempotent.
+    """
+    with session_factory() as session:
+        if get_ipo_issue(session, issue_id) is None:
+            raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
+        rows = get_latest_ipo_evaluation_rows(session, issue_id)
+        return _evaluation_record(*rows) if rows is not None else None
+
+
+def get_latest_subscription(
+    issue_id: int, *, session_factory: SessionFactory = session_scope
+) -> IpoSubscriptionRecord | None:
+    """Return only the newest demand snapshot for one issue, if any."""
+    with session_factory() as session:
+        if get_ipo_issue(session, issue_id) is None:
+            raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
+        row = get_latest_ipo_subscription(session, issue_id)
+        return _subscription_record(row) if row is not None else None
 
 
 def get_latest_recommendation(

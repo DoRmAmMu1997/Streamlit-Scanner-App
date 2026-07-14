@@ -30,8 +30,10 @@ DocumentedDefinition = ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
 # rewriting unrelated scanner, authentication, or persistence code.
 FULL_DOCUMENTATION_TARGETS = (
     ROOT / "backend" / "jobs" / "scan_ipo_filings.py",
+    ROOT / "backend" / "jobs" / "run_ipo_screener.py",
     ROOT / "backend" / "storage" / "ipo_repository.py",
     ROOT / "tests" / "test_scan_ipo_filings_job.py",
+    ROOT / "tests" / "test_run_ipo_screener_job.py",
     ROOT / "tests" / "test_app_ipo_manual_page.py",
     ROOT / "ui" / "ipo_manual_page.py",
 )

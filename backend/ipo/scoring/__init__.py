@@ -36,6 +36,11 @@ from backend.ipo.scoring.recommendation import (
 )
 from backend.ipo.scoring.score_model import PDF_WEIGHTS, score_ipo
 
+# Deliberately NOT re-exported here: backend.ipo.scoring.service. The domain
+# repository imports this package's pure modules, and the service imports the
+# repository, so pulling the service into this __init__ would create an import
+# cycle. Callers reach it via the backend.ipo facade (which initializes the
+# repository first) or import backend.ipo.scoring.service directly.
 __all__ = [
     "APPLY_AND_HOLD",
     "APPLY_FOR_LISTING_GAINS",

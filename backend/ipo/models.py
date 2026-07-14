@@ -870,7 +870,11 @@ class IpoExtractionProposalRecord:
 
 @dataclass(frozen=True)
 class IpoEvaluationRecord:
-    """Detached immutable score/recommendation pair."""
+    """Detached immutable score/recommendation pair.
+
+    ``inputs_fingerprint`` (IPO-006) is the SHA-256 of exactly the evidence the
+    scoring service consumed; legacy ipo-001-v1 rows carry ``None``.
+    """
 
     issue_id: int
     score_id: int
@@ -878,3 +882,4 @@ class IpoEvaluationRecord:
     model_version: str
     scored_at: dt.datetime
     result: IpoRecommendationResult
+    inputs_fingerprint: str | None = None

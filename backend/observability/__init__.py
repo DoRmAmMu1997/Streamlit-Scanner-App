@@ -87,6 +87,11 @@ EVENT_IPO_ENRICHMENT_SKIPPED = "ipo_enrichment_skipped"
 EVENT_IPO_EXTRACTION_PROPOSED = "ipo_extraction_proposed"
 EVENT_IPO_EXTRACTION_PROPOSAL_FAILED = "ipo_extraction_proposal_failed"
 EVENT_IPO_EXTRACTION_PROPOSAL_REVIEWED = "ipo_extraction_proposal_reviewed"
+# IPO-008 one-command screener lifecycle plus the per-issue scoring event the
+# service emits. All fields are ids, counts, and enum values — never evidence.
+EVENT_IPO_SCREENER_STARTED = "ipo_screener_started"
+EVENT_IPO_SCREENER_COMPLETED = "ipo_screener_completed"
+EVENT_IPO_ISSUE_SCORED = "ipo_issue_scored"
 EVENT_EXTERNAL_API_FAILED = "external_api_failed"
 # DATA-001 candle-quality events. ``_warning`` = a usable frame with suspicious
 # data; ``_failed`` = a frame quarantined before scanning. Both log finding
@@ -156,7 +161,10 @@ __all__ = [
     "EVENT_IPO_FILING_CATEGORY_FAILED",
     "EVENT_IPO_FILING_SCAN_COMPLETED",
     "EVENT_IPO_FILING_SCAN_STARTED",
+    "EVENT_IPO_ISSUE_SCORED",
     "EVENT_IPO_MANUAL_EXTRACTION_SUBMITTED",
+    "EVENT_IPO_SCREENER_COMPLETED",
+    "EVENT_IPO_SCREENER_STARTED",
     "EVENT_LOGIN_DENIED",
     "EVENT_LOGIN_SUCCESS",
     "EVENT_MANUAL_SCAN_STARTED",
