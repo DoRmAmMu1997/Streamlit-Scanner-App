@@ -74,6 +74,7 @@ testing · extension points.
 - **[ipo-008-screener-orchestration.md](ipo-008-screener-orchestration.md)** — the one-command `run_ipo_screener` pipeline and the inputs-fingerprint idempotency contract.
 - **[ipo-009-serpapi-enrichment.md](ipo-009-serpapi-enrichment.md)** — optional low-confidence web signals under strict trust rules: quarantine before storage, keywords-only red flags, graceful no-key skip.
 - **[ipo-010-ai-extraction-proposals.md](ipo-010-ai-extraction-proposals.md)** — bounded PDF extraction, deterministic section classification, and the fail-closed AI proposal/review trust model.
+- **[ipo-010-security-integrity-hardening.md](ipo-010-security-integrity-hardening.md)** — PR #108 follow-up ADR: killable PDF parsing, citation-bound financial facts, advisory web-evidence precedence, and atomic/idempotent review and scoring.
 - **[scan-run-persistence.md](scan-run-persistence.md)** — SCAN-001 scan-run persistence schema (the column-by-column rationale the Storage LLD links to).
 - **[scan-002-handoff.md](scan-002-handoff.md)** — SCAN-002 database-layer implementation handoff brief.
 - **[obs-003-audit-log.md](obs-003-audit-log.md)** — OBS-003 audit log + runtime-config schema, recorder design, and the seven tracked events.
