@@ -30,8 +30,10 @@ from backend.ipo.manual_extraction import (
 from backend.ipo.models import (
     Confidence,
     IpoCautionFlagStatus,
+    IpoEnrichmentBatchUsability,
     IpoEnrichmentSignalRecord,
     IpoEnrichmentSignalType,
+    IpoEvidenceAuthority,
     IpoIssueRecord,
     IpoIssueType,
     IpoStatus,
@@ -204,6 +206,8 @@ def _signal(
     *,
     matched_keywords: tuple[str, ...] = (),
     quarantined: bool = False,
+    authority: IpoEvidenceAuthority = IpoEvidenceAuthority.ADVISORY,
+    corroborated: bool = False,
 ) -> IpoEnrichmentSignalRecord:
     """Build one detached enrichment signal carrying only keyword metadata."""
     return IpoEnrichmentSignalRecord(
@@ -212,12 +216,27 @@ def _signal(
         signal_type=signal_type,
         captured_at=_AS_OF,
         query_text="Example Ltd IPO litigation",
-        payload=({"title": "result", "matched_keywords": list(matched_keywords)},),
+        payload=(
+            {
+                "title": "result",
+                "matched_keywords": list(matched_keywords),
+                "quarantine_status": "quarantined" if quarantined else "clean",
+                "authority": authority.value,
+                "corroborated": corroborated,
+            },
+        ),
         parsed_value=None,
         quarantined=quarantined,
         confidence=Confidence.LOW,
         source_policy="serpapi-low-confidence-v1",
         created_at=_AS_OF,
+        authority=authority,
+        corroborated=corroborated,
+        batch_usability=(
+            IpoEnrichmentBatchUsability.NOT_EVALUABLE
+            if quarantined
+            else IpoEnrichmentBatchUsability.USABLE
+        ),
     )
 
 
@@ -417,9 +436,9 @@ def test_high_debt_without_debt_reduction_use_reads_objects_of_issue() -> None:
     )
 
 
-def test_litigation_flag_reads_only_clean_keyword_matched_signals() -> None:
-    """Keyword-matched web signals trigger; quarantined text never does."""
-    matched = _inputs(
+def test_litigation_flag_requires_corroborated_non_web_authority() -> None:
+    """Advisory web matches request review but can never create a hard veto."""
+    advisory = _inputs(
         enrichment=(
             _signal(
                 IpoEnrichmentSignalType.LITIGATION_RED_FLAG,
@@ -427,16 +446,24 @@ def test_litigation_flag_reads_only_clean_keyword_matched_signals() -> None:
             ),
         )
     )
-    flag = _flag(evaluate_caution_flags(matched), FLAG_LITIGATION_RED_FLAG)
-    assert flag.status is IpoCautionFlagStatus.TRIGGERED
+    flag = _flag(evaluate_caution_flags(advisory), FLAG_LITIGATION_RED_FLAG)
+    assert flag.status is IpoCautionFlagStatus.NOT_EVALUABLE
     assert "litigation" in flag.evidence
+    assert "cannot trigger" in flag.evidence
 
-    clean = _inputs(
-        enrichment=(_signal(IpoEnrichmentSignalType.LITIGATION_RED_FLAG),)
+    corroborated = _inputs(
+        enrichment=(
+            _signal(
+                IpoEnrichmentSignalType.LITIGATION_RED_FLAG,
+                matched_keywords=("litigation", "sebi order"),
+                authority=IpoEvidenceAuthority.APPROVED_MANUAL,
+                corroborated=True,
+            ),
+        )
     )
     assert (
-        _flag(evaluate_caution_flags(clean), FLAG_LITIGATION_RED_FLAG).status
-        is IpoCautionFlagStatus.NOT_TRIGGERED
+        _flag(evaluate_caution_flags(corroborated), FLAG_LITIGATION_RED_FLAG).status
+        is IpoCautionFlagStatus.TRIGGERED
     )
 
     quarantined = _inputs(
@@ -450,7 +477,7 @@ def test_litigation_flag_reads_only_clean_keyword_matched_signals() -> None:
     )
     assert (
         _flag(evaluate_caution_flags(quarantined), FLAG_LITIGATION_RED_FLAG).status
-        is IpoCautionFlagStatus.NOT_TRIGGERED
+        is IpoCautionFlagStatus.NOT_EVALUABLE
     )
 
     no_enrichment = _inputs(enrichment=())

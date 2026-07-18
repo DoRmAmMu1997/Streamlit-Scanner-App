@@ -29,12 +29,14 @@ from backend.ipo.models import (
     IpoCautionFlag,
     IpoCautionFlagReport,
     IpoCautionFlagStatus,
+    IpoEnrichmentBatchUsability,
     IpoEnrichmentSignalType,
+    IpoEvidenceAuthority,
     IpoStatus,
 )
 from backend.ipo.scoring.factor_derivation import IpoFactorInputs, _peer_median
 
-CAUTION_FLAGS_VERSION: Final = "ipo-006-flags-v1"
+CAUTION_FLAGS_VERSION: Final = "ipo-006-flags-v2"
 
 FLAG_ENTIRELY_OFS_WEAK_GROWTH: Final = "entirely_ofs_weak_growth"
 FLAG_VERY_EXPENSIVE_VALUATION: Final = "very_expensive_valuation"
@@ -319,13 +321,12 @@ def _high_debt_without_reduction_use(inputs: IpoFactorInputs) -> IpoCautionFlag:
 
 
 def _litigation_red_flag(inputs: IpoFactorInputs) -> IpoCautionFlag:
-    """Trigger on keyword-matched litigation signals from clean web evidence.
+    """Require corroborated official/manual authority for a litigation veto.
 
     Beginner note:
-        Only the collector's recorded keyword matches are read here — never
-        snippet text — and quarantined signals are ignored entirely. A row that
-        tripped the prompt-injection scanner can therefore never argue its way
-        into a verdict, in either direction.
+        SerpAPI is advisory discovery only. Its observations can request human
+        review, but only corroborated official or approved-manual evidence may
+        trigger the hard caution.
     """
     litigation_signals = [
         signal
@@ -339,27 +340,67 @@ def _litigation_red_flag(inputs: IpoFactorInputs) -> IpoCautionFlag:
             "No litigation web signals collected (enrichment absent).",
         )
     matched: list[str] = []
+    advisory_matched: list[str] = []
+    trusted_evidence_seen = False
     for signal in litigation_signals:
-        if signal.quarantined:
+        if (
+            signal.batch_usability
+            is IpoEnrichmentBatchUsability.NOT_EVALUABLE
+        ):
             continue
         for entry in signal.payload:
+            if entry.get("quarantine_status", "clean") != "clean":
+                continue
+            entry_authority = IpoEvidenceAuthority(
+                str(entry.get("authority", signal.authority.value))
+            )
+            entry_corroborated = bool(
+                entry.get("corroborated", signal.corroborated)
+            )
+            trusted = (
+                entry_authority
+                in {
+                    IpoEvidenceAuthority.OFFICIAL,
+                    IpoEvidenceAuthority.APPROVED_MANUAL,
+                }
+                and entry_corroborated
+            )
+            trusted_evidence_seen = trusted_evidence_seen or trusted
             for keyword in entry.get("matched_keywords", ()):
-                if keyword not in matched:
-                    matched.append(str(keyword))
+                target = matched if trusted else advisory_matched
+                if keyword not in target:
+                    target.append(str(keyword))
     if matched:
         return _flag(
             FLAG_LITIGATION_RED_FLAG,
             IpoCautionFlagStatus.TRIGGERED,
             (
-                "Litigation-related web signals matched keywords: "
+                "Corroborated litigation evidence matched keywords: "
                 + ", ".join(sorted(matched))
-                + " (low-confidence web source)."
+                + "."
             ),
+        )
+    if advisory_matched:
+        return _flag(
+            FLAG_LITIGATION_RED_FLAG,
+            IpoCautionFlagStatus.NOT_EVALUABLE,
+            (
+                "Advisory web observations matched litigation keywords "
+                f"({', '.join(sorted(advisory_matched))}) but cannot trigger "
+                "a hard caution without official or approved-manual corroboration."
+            ),
+        )
+    if not trusted_evidence_seen:
+        return _flag(
+            FLAG_LITIGATION_RED_FLAG,
+            IpoCautionFlagStatus.NOT_EVALUABLE,
+            "Only advisory or unusable litigation discovery is available; "
+            "official or approved-manual corroboration is required.",
         )
     return _flag(
         FLAG_LITIGATION_RED_FLAG,
         IpoCautionFlagStatus.NOT_TRIGGERED,
-        "Litigation web signals collected; no red-flag keywords matched.",
+        "Corroborated litigation evidence contains no affirmative red-flag matches.",
     )
 
 

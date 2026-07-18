@@ -247,7 +247,7 @@ def _inputs(**overrides: Any) -> IpoFactorInputs:
 
 def test_model_version_constant_is_stable() -> None:
     """Pin the version string so silent threshold edits fail loudly in review."""
-    assert FACTOR_MODEL_VERSION == "ipo-006-factors-v1"
+    assert FACTOR_MODEL_VERSION == "ipo-006-factors-v2"
 
 
 @pytest.mark.parametrize(
@@ -283,7 +283,7 @@ def test_financial_growth_averages_revenue_and_pat_subscores() -> None:
     assert result.financial_growth.score == Decimal("87.50")
     assert result.financial_growth.reason is not None
     assert "ipo-ratio-v1" in result.financial_growth.reason
-    assert "extraction #7" in result.financial_growth.reason
+    assert "sha256 bbbbbbbbbbbb" in result.financial_growth.reason
 
 
 def test_undefined_pat_cagr_is_known_weak_not_missing() -> None:
@@ -469,7 +469,7 @@ def test_promoter_quality_averages_holding_and_ofs_share() -> None:
 
     assert result.promoter_quality.score == Decimal("70.00")
     assert result.promoter_quality.reason is not None
-    assert "manual extraction #7" in result.promoter_quality.reason
+    assert "sha256 bbbbbbbbbbbb" in result.promoter_quality.reason
 
 
 def test_promoter_quality_pure_ofs_earns_the_bottom_ofs_band() -> None:

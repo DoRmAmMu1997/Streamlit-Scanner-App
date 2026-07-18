@@ -602,6 +602,58 @@ def insert_ipo_enrichment_signals(
     return rows
 
 
+def _get_ipo_enrichment_signal_by_semantic_hash(
+    session: Session,
+    issue_id: int,
+    signal_type: str,
+    semantic_hash: str,
+) -> IpoEnrichmentSignal | None:
+    """Load one semantically identical enrichment observation."""
+    stmt = select(IpoEnrichmentSignal).where(
+        IpoEnrichmentSignal.issue_id == issue_id,
+        IpoEnrichmentSignal.signal_type == signal_type,
+        IpoEnrichmentSignal.semantic_hash == semantic_hash,
+    )
+    return session.scalar(stmt)
+
+
+def upsert_ipo_enrichment_signal(
+    session: Session,
+    issue_id: int,
+    values: dict[str, Any],
+) -> IpoEnrichmentSignal:
+    """Preserve first-seen identity and refresh last-seen on identical evidence."""
+    semantic_hash = str(values["semantic_hash"])
+    signal_type = str(values["signal_type"])
+    existing = _get_ipo_enrichment_signal_by_semantic_hash(
+        session, issue_id, signal_type, semantic_hash
+    )
+    if existing is None:
+        try:
+            with session.begin_nested():
+                row = IpoEnrichmentSignal(issue_id=issue_id, **values)
+                session.add(row)
+                session.flush()
+                return row
+        except IntegrityError:
+            existing = _get_ipo_enrichment_signal_by_semantic_hash(
+                session, issue_id, signal_type, semantic_hash
+            )
+            if existing is None:  # pragma: no cover - unrelated DB failure
+                raise
+
+    existing_last_seen = existing.last_seen_at
+    if existing_last_seen.tzinfo is None:
+        existing_last_seen = existing_last_seen.replace(tzinfo=dt.UTC)
+    existing_captured = existing.captured_at
+    if existing_captured.tzinfo is None:
+        existing_captured = existing_captured.replace(tzinfo=dt.UTC)
+    existing.last_seen_at = max(existing_last_seen, values["last_seen_at"])
+    existing.captured_at = max(existing_captured, values["captured_at"])
+    session.flush()
+    return existing
+
+
 def list_ipo_enrichment_signal_rows(
     session: Session,
     issue_id: int,

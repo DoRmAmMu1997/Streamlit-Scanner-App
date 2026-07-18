@@ -21,6 +21,8 @@ exactly as before.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -29,11 +31,19 @@ from typing import Any, Final, Protocol
 
 from backend.ipo.models import (
     Confidence,
+    IpoEnrichmentBatchUsability,
     IpoEnrichmentSignalData,
     IpoEnrichmentSignalRecord,
     IpoEnrichmentSignalType,
+    IpoEvidenceAuthority,
+    IpoValidationError,
 )
-from backend.ipo.repository import SessionFactory, record_enrichment_signals
+from backend.ipo.repository import (
+    IpoNotFoundError,
+    SessionFactory,
+    get_issue,
+    record_enrichment_signals,
+)
 from backend.observability import (
     EVENT_IPO_ENRICHMENT_COMPLETED,
     EVENT_IPO_ENRICHMENT_FAILED,
@@ -55,7 +65,8 @@ from backend.storage import session_scope
 
 logger = logging.getLogger(__name__)
 
-ENRICHMENT_SOURCE_POLICY: Final = "serpapi-low-confidence-v1"
+ENRICHMENT_SOURCE_POLICY: Final = "serpapi-low-confidence-v2"
+ENRICHMENT_AUTHORITY_POLICY_VERSION: Final = "ipo-enrichment-authority-v2"
 
 # One fixed, deterministic query template per signal type. Templates only ever
 # interpolate the company name, so a run's queries are reproducible provenance.
@@ -88,8 +99,18 @@ RED_FLAG_KEYWORDS: Final = (
 # Conservative GMP extraction: a text must actually mention GMP before any
 # number in it is trusted, percent readings win over rupee readings, and a
 # rupee reading is only convertible when the issue price is known.
+_GMP_TERM_PATTERN: Final = re.compile(
+    r"\b(?:gmp|grey\s+market\s+premium)\b", re.IGNORECASE
+)
 _PERCENT_PATTERN: Final = re.compile(r"(-?\d{1,3}(?:\.\d+)?)\s*%")
-_RUPEE_PATTERN: Final = re.compile(r"(?:₹|rs\.?|inr)\s*(-?\d{1,4}(?:\.\d+)?)", re.IGNORECASE)
+_RUPEE_PATTERN: Final = re.compile(
+    r"(?:₹|rs\.?|inr)\s*(-?\d{1,4}(?:\.\d+)?)", re.IGNORECASE
+)
+_NEGATION_PATTERN: Final = re.compile(
+    r"\b(?:no|not|never|without|den(?:y|ies|ied)|dismiss(?:ed|al)?|"
+    r"clear(?:ed)?|exonerat(?:ed|ion)|withdrawn)\b",
+    re.IGNORECASE,
+)
 
 _TWO_PLACES = Decimal("0.01")
 
@@ -121,11 +142,53 @@ class IpoEnrichmentOutcome:
     signals: tuple[IpoEnrichmentSignalRecord, ...]
     skipped_no_key: bool = False
     error_type: str | None = None
+    batch_usability: IpoEnrichmentBatchUsability = (
+        IpoEnrichmentBatchUsability.USABLE
+    )
+    human_review_required: bool = False
+
+
+def _semantic_item_hash(entry: dict[str, Any]) -> str:
+    """Hash one secret-safe normalized item for stable observation identity."""
+    canonical = json.dumps(
+        entry, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _red_flag_observations(text: str) -> list[dict[str, str]]:
+    """Classify keyword mentions with nearby negation and preserved context."""
+    normalized = normalize_external_text(text)
+    folded = normalized.casefold()
+    observations: list[dict[str, str]] = []
+    for keyword in RED_FLAG_KEYWORDS:
+        for match in re.finditer(re.escape(keyword), folded):
+            start = max(0, match.start() - 40)
+            end = min(len(normalized), match.end() + 40)
+            context = normalized[start:end]
+            before = folded[start : match.start()]
+            after = folded[match.end() : end]
+            negated = bool(_NEGATION_PATTERN.search(before)) or bool(
+                _NEGATION_PATTERN.search(after)
+            )
+            observations.append(
+                {
+                    "keyword": keyword,
+                    "status": "negated" if negated else "affirmative",
+                    "context": context,
+                    "reason": (
+                        "nearby_negation"
+                        if negated
+                        else "affirmative_keyword_context"
+                    ),
+                }
+            )
+    return observations
 
 
 def _normalize_entries(
     results: list[SearchResult],
-) -> tuple[tuple[dict[str, Any], ...], bool]:
+) -> tuple[tuple[dict[str, Any], ...], IpoEnrichmentBatchUsability]:
     """Convert raw results into storable entries, quarantining hostile text.
 
     Beginner note:
@@ -136,38 +199,101 @@ def _normalize_entries(
         hostile text never appears anywhere durable.
     """
     entries: list[dict[str, Any]] = []
-    any_quarantined = False
+    blocked_items = 0
+    clean_items = 0
     for result in results:
+        title = normalize_external_text(result.title)
+        snippet = normalize_external_text(result.snippet)
         entry: dict[str, Any] = {
-            "title": result.title,
+            "title": title,
             "link": result.link,
             "source": result.source,
-            "snippet": result.snippet,
+            "snippet": snippet,
             "date": result.date,
+            "authority": IpoEvidenceAuthority.ADVISORY.value,
+            "corroborated": False,
         }
+        if not title and not snippet:
+            blocked_items += 1
+            blocked = {
+                "title": BLOCKED_EVIDENCE_TEXT,
+                "link": "",
+                "source": "",
+                "snippet": BLOCKED_EVIDENCE_TEXT,
+                "date": "",
+                "matched_keywords": [],
+                "red_flag_observations": [],
+                "authority": IpoEvidenceAuthority.ADVISORY.value,
+                "corroborated": False,
+                "quarantine_status": "malformed",
+                "quarantine_reason": "empty_result_text",
+            }
+            blocked["semantic_hash"] = _semantic_item_hash(blocked)
+            entries.append(blocked)
+            continue
         if contains_injection(entry):
-            any_quarantined = True
+            blocked_items += 1
             logger.warning(
                 "Prompt-injection heuristics blocked one enrichment result; "
                 "the snippet was withheld from storage."
             )
-            entries.append(
-                {
-                    "title": BLOCKED_EVIDENCE_TEXT,
-                    "link": "",
-                    "source": "",
-                    "snippet": BLOCKED_EVIDENCE_TEXT,
-                    "date": "",
-                    "matched_keywords": [],
-                }
-            )
+            blocked = {
+                "title": BLOCKED_EVIDENCE_TEXT,
+                "link": "",
+                "source": "",
+                "snippet": BLOCKED_EVIDENCE_TEXT,
+                "date": "",
+                "matched_keywords": [],
+                "red_flag_observations": [],
+                "authority": IpoEvidenceAuthority.ADVISORY.value,
+                "corroborated": False,
+                "quarantine_status": "quarantined",
+                "quarantine_reason": "prompt_injection",
+            }
+            blocked["semantic_hash"] = _semantic_item_hash(blocked)
+            entries.append(blocked)
             continue
-        combined = normalize_external_text(f"{result.title} {result.snippet}").casefold()
+        clean_items += 1
+        combined = normalize_external_text(f"{title} {snippet}")
+        observations = _red_flag_observations(combined)
         entry["matched_keywords"] = [
-            keyword for keyword in RED_FLAG_KEYWORDS if keyword in combined
+            observation["keyword"]
+            for observation in observations
+            if observation["status"] == "affirmative"
         ]
+        entry["red_flag_observations"] = observations
+        entry["quarantine_status"] = "clean"
+        entry["quarantine_reason"] = ""
+        entry["semantic_hash"] = _semantic_item_hash(entry)
         entries.append(entry)
-    return tuple(entries), any_quarantined
+    if blocked_items and not clean_items:
+        usability = IpoEnrichmentBatchUsability.NOT_EVALUABLE
+    elif blocked_items:
+        usability = IpoEnrichmentBatchUsability.PARTIAL
+    else:
+        usability = IpoEnrichmentBatchUsability.USABLE
+    return tuple(entries), usability
+
+
+def _match_distance(left: re.Match[str], right: re.Match[str]) -> int:
+    """Return the number of characters separating two regex matches."""
+    if left.end() < right.start():
+        return right.start() - left.end()
+    if right.end() < left.start():
+        return left.start() - right.end()
+    return 0
+
+
+def _near_gmp_value(
+    text: str,
+    pattern: re.Pattern[str],
+) -> Decimal | None:
+    """Return the first numeric match within 40 characters of a GMP term."""
+    terms = list(_GMP_TERM_PATTERN.finditer(text))
+    for match in pattern.finditer(text):
+        if any(_match_distance(match, term) <= 40 for term in terms):
+            return Decimal(match.group(1))
+    return None
 
 
 def _parse_gmp(
@@ -184,17 +310,14 @@ def _parse_gmp(
     readings: list[Decimal] = []
     for entry in entries:
         text = normalize_external_text(f"{entry['title']} {entry['snippet']}")
-        if "gmp" not in text.casefold():
-            continue
-        percent_match = _PERCENT_PATTERN.search(text)
-        if percent_match is not None:
-            readings.append(Decimal(percent_match.group(1)))
+        percent = _near_gmp_value(text, _PERCENT_PATTERN)
+        if percent is not None:
+            readings.append(percent)
             continue
         if price_band_high is None or price_band_high <= 0:
             continue
-        rupee_match = _RUPEE_PATTERN.search(text)
-        if rupee_match is not None:
-            rupees = Decimal(rupee_match.group(1))
+        rupees = _near_gmp_value(text, _RUPEE_PATTERN)
+        if rupees is not None:
             readings.append(rupees / price_band_high * Decimal(100))
     if not readings:
         return None
@@ -211,8 +334,8 @@ def _parse_gmp(
 def collect_enrichment_signals(
     issue_id: int,
     *,
-    company_name: str,
-    price_band_high: Decimal | None,
+    company_name: str | None = None,
+    price_band_high: Decimal | None = None,
     client: SupportsIpoSearch | None = None,
     captured_at: dt.datetime | None = None,
     max_results: int = 5,
@@ -242,6 +365,23 @@ def collect_enrichment_signals(
         still persisted with an empty payload — "we looked and found nothing"
         is itself evidence worth keeping.
     """
+    issue = get_issue(issue_id, session_factory=session_factory)
+    if issue is None:
+        raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
+    if company_name is not None and str(company_name).strip() != issue.company_name:
+        raise IpoValidationError(
+            "company_name does not match the persisted IPO issue."
+        )
+    if (
+        price_band_high is not None
+        and price_band_high != issue.price_band_high
+    ):
+        raise IpoValidationError(
+            "price_band_high does not match the persisted IPO issue."
+        )
+    persisted_company_name = issue.company_name
+    persisted_price_band_high = issue.price_band_high
+
     active_client = client if client is not None else SerpApiClient()
     try:
         active_client.ensure_ready()
@@ -253,7 +393,9 @@ def collect_enrichment_signals(
     signals: list[IpoEnrichmentSignalData] = []
     error_types: list[str] = []
     for signal_type in IpoEnrichmentSignalType:
-        query = _QUERY_TEMPLATES[signal_type].format(company=company_name)
+        query = _QUERY_TEMPLATES[signal_type].format(
+            company=persisted_company_name
+        )
         try:
             results = active_client.search(query, max_results=max_results)
         except SerpApiSearchError as exc:
@@ -267,12 +409,14 @@ def collect_enrichment_signals(
                 error_type=type(exc).__name__,
             )
             continue
-        entries, any_quarantined = _normalize_entries(results)
+        entries, usability = _normalize_entries(results)
         clean_entries = tuple(
-            entry for entry in entries if entry.get("title") != BLOCKED_EVIDENCE_TEXT
+            entry
+            for entry in entries
+            if entry.get("quarantine_status") == "clean"
         )
         parsed_value = (
-            _parse_gmp(clean_entries, price_band_high)
+            _parse_gmp(clean_entries, persisted_price_band_high)
             if signal_type is IpoEnrichmentSignalType.GMP
             else None
         )
@@ -283,9 +427,14 @@ def collect_enrichment_signals(
                 query_text=query,
                 payload=entries,
                 parsed_value=parsed_value,
-                quarantined=any_quarantined,
+                quarantined=usability
+                is not IpoEnrichmentBatchUsability.USABLE,
                 confidence=Confidence.LOW,
                 source_policy=ENRICHMENT_SOURCE_POLICY,
+                authority=IpoEvidenceAuthority.ADVISORY,
+                corroborated=False,
+                authority_policy_version=ENRICHMENT_AUTHORITY_POLICY_VERSION,
+                batch_usability=usability,
             )
         )
 
@@ -300,8 +449,20 @@ def collect_enrichment_signals(
         quarantined=sum(1 for record in records if record.quarantined),
         failed_queries=len(error_types),
     )
+    usability_values = {record.batch_usability for record in records}
+    if usability_values == {IpoEnrichmentBatchUsability.NOT_EVALUABLE}:
+        overall_usability = IpoEnrichmentBatchUsability.NOT_EVALUABLE
+    elif usability_values - {IpoEnrichmentBatchUsability.USABLE}:
+        overall_usability = IpoEnrichmentBatchUsability.PARTIAL
+    else:
+        overall_usability = IpoEnrichmentBatchUsability.USABLE
     return IpoEnrichmentOutcome(
         issue_id=issue_id,
         signals=tuple(records),
         error_type=", ".join(sorted(set(error_types))) or None,
+        batch_usability=overall_usability,
+        human_review_required=(
+            overall_usability is not IpoEnrichmentBatchUsability.USABLE
+            or bool(error_types)
+        ),
     )

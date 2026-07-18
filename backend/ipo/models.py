@@ -173,6 +173,22 @@ class IpoEnrichmentSignalType(enum.StrEnum):
     PEER_DISCOVERY = "peer_discovery"
 
 
+class IpoEvidenceAuthority(enum.StrEnum):
+    """Authority tiers used by the central enrichment precedence policy."""
+
+    ADVISORY = "advisory"
+    OFFICIAL = "official"
+    APPROVED_MANUAL = "approved_manual"
+
+
+class IpoEnrichmentBatchUsability(enum.StrEnum):
+    """Whether a web-result batch is safe for advisory consumption."""
+
+    USABLE = "usable"
+    PARTIAL = "partial"
+    NOT_EVALUABLE = "not_evaluable"
+
+
 class IpoExtractionProposalStatus(enum.StrEnum):
     """Review lifecycle of one AI-proposed prospectus extraction (IPO-010).
 
@@ -833,6 +849,13 @@ class IpoEnrichmentSignalData:
     quarantined: bool
     confidence: Confidence
     source_policy: str
+    authority: IpoEvidenceAuthority = IpoEvidenceAuthority.ADVISORY
+    corroborated: bool = False
+    authority_policy_version: str = "ipo-enrichment-authority-v2"
+    batch_usability: IpoEnrichmentBatchUsability = (
+        IpoEnrichmentBatchUsability.PARTIAL
+    )
+    semantic_hash: str | None = None
 
     def __post_init__(self) -> None:
         """Normalize enums, bound text fields, and quantize the parsed value."""
@@ -867,6 +890,32 @@ class IpoEnrichmentSignalData:
         if not source_policy or len(source_policy) > 40:
             raise IpoValidationError("source_policy must contain 1 to 40 characters.")
         object.__setattr__(self, "source_policy", source_policy)
+        object.__setattr__(
+            self,
+            "authority",
+            _parse_enum(self.authority, IpoEvidenceAuthority, "authority"),
+        )
+        object.__setattr__(self, "corroborated", bool(self.corroborated))
+        policy_version = str(self.authority_policy_version).strip()
+        if not policy_version or len(policy_version) > 48:
+            raise IpoValidationError(
+                "authority_policy_version must contain 1 to 48 characters."
+            )
+        object.__setattr__(self, "authority_policy_version", policy_version)
+        object.__setattr__(
+            self,
+            "batch_usability",
+            _parse_enum(
+                self.batch_usability,
+                IpoEnrichmentBatchUsability,
+                "batch_usability",
+            ),
+        )
+        if self.semantic_hash is not None:
+            digest = str(self.semantic_hash).strip().lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise IpoValidationError("semantic_hash must be a SHA-256 digest.")
+            object.__setattr__(self, "semantic_hash", digest)
 
 
 @dataclass(frozen=True)
@@ -891,6 +940,15 @@ class IpoEnrichmentSignalRecord:
     confidence: Confidence
     source_policy: str
     created_at: dt.datetime
+    authority: IpoEvidenceAuthority = IpoEvidenceAuthority.ADVISORY
+    corroborated: bool = False
+    authority_policy_version: str = "ipo-enrichment-authority-v1"
+    batch_usability: IpoEnrichmentBatchUsability = (
+        IpoEnrichmentBatchUsability.PARTIAL
+    )
+    semantic_hash: str | None = None
+    first_seen_at: dt.datetime | None = None
+    last_seen_at: dt.datetime | None = None
 
     def __post_init__(self) -> None:
         """Freeze payload entries so a detached record stays read-only."""
@@ -898,6 +956,20 @@ class IpoEnrichmentSignalRecord:
             self,
             "payload",
             tuple(MappingProxyType(dict(entry)) for entry in self.payload),
+        )
+        object.__setattr__(
+            self,
+            "authority",
+            _parse_enum(self.authority, IpoEvidenceAuthority, "authority"),
+        )
+        object.__setattr__(
+            self,
+            "batch_usability",
+            _parse_enum(
+                self.batch_usability,
+                IpoEnrichmentBatchUsability,
+                "batch_usability",
+            ),
         )
 
 

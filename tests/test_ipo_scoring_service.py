@@ -10,6 +10,7 @@ pin (derive -> flags -> score -> persist -> skip) is the real one.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import hashlib
 from decimal import Decimal
@@ -38,6 +39,7 @@ from backend.ipo.repository import (
     create_document,
     create_issue,
     create_subscription,
+    load_ipo_factor_inputs_snapshot,
     record_enrichment_signals,
     submit_manual_extraction,
     update_issue,
@@ -319,3 +321,118 @@ def test_fingerprint_hashes_time_derived_facts_not_the_clock(
     evening = compute_inputs_fingerprint(inputs_at(_AS_OF + dt.timedelta(hours=6)))
 
     assert morning == evening
+
+
+def test_fingerprint_excludes_volatile_database_row_ids(
+    file_session_factory, tmp_path: Path
+) -> None:
+    """Equivalent evidence hashes identically even when persistence ids differ."""
+    issue = _scored_issue(file_session_factory, tmp_path)
+    create_subscription(
+        issue.id,
+        IpoSubscriptionData(
+            captured_at=_AS_OF,
+            qib_multiple=Decimal("22"),
+            source_confidence=Confidence.HIGH,
+        ),
+        session_factory=file_session_factory,
+    )
+    record_enrichment_signals(
+        issue.id,
+        [
+            IpoEnrichmentSignalData(
+                signal_type=IpoEnrichmentSignalType.GMP,
+                captured_at=_AS_OF,
+                query_text="Example Ltd IPO GMP grey market premium",
+                payload=({"title": "GMP report"},),
+                parsed_value=Decimal("25"),
+                quarantined=False,
+                confidence=Confidence.LOW,
+                source_policy="serpapi-low-confidence-v2",
+            )
+        ],
+        session_factory=file_session_factory,
+    )
+    original = load_ipo_factor_inputs_snapshot(
+        issue.id,
+        as_of=_AS_OF,
+        session_factory=file_session_factory,
+    )
+    assert original.profile is not None
+    assert original.ratios is not None
+    assert original.subscription is not None
+    assert original.enrichment
+
+    renumbered = dataclasses.replace(
+        original,
+        issue=dataclasses.replace(original.issue, id=999),
+        profile=dataclasses.replace(
+            original.profile,
+            id=998,
+            issue_id=999,
+            source_document_id=997,
+        ),
+        ratios=dataclasses.replace(
+            original.ratios,
+            extraction_id=998,
+            issue_id=999,
+        ),
+        subscription=dataclasses.replace(
+            original.subscription,
+            id=996,
+            issue_id=999,
+        ),
+        enrichment=tuple(
+            dataclasses.replace(signal, id=995 - index, issue_id=999)
+            for index, signal in enumerate(original.enrichment)
+        ),
+    )
+
+    assert compute_inputs_fingerprint(renumbered) == compute_inputs_fingerprint(
+        original
+    )
+
+
+def test_enrichment_freshness_refresh_does_not_duplicate_evaluation(
+    file_session_factory, tmp_path: Path
+) -> None:
+    """Re-seeing identical still-fresh web evidence refreshes, but does not rescore."""
+    issue = _scored_issue(file_session_factory, tmp_path)
+    signal = IpoEnrichmentSignalData(
+        signal_type=IpoEnrichmentSignalType.GMP,
+        captured_at=_AS_OF,
+        query_text="Example Ltd IPO GMP grey market premium",
+        payload=({"title": "GMP report"},),
+        parsed_value=Decimal("25"),
+        quarantined=False,
+        confidence=Confidence.LOW,
+        source_policy="serpapi-low-confidence-v2",
+    )
+    record_enrichment_signals(
+        issue.id,
+        [signal],
+        session_factory=file_session_factory,
+    )
+    first = rescore_issue(
+        issue.id,
+        as_of=_AS_OF,
+        session_factory=file_session_factory,
+    )
+    assert first.status == "evaluated"
+
+    refreshed_at = _AS_OF + dt.timedelta(hours=2)
+    record_enrichment_signals(
+        issue.id,
+        [dataclasses.replace(signal, captured_at=refreshed_at)],
+        session_factory=file_session_factory,
+    )
+    second = rescore_issue(
+        issue.id,
+        as_of=refreshed_at,
+        session_factory=file_session_factory,
+    )
+
+    assert second.status == "skipped_unchanged"
+    assert second.evaluation is not None
+    assert first.evaluation is not None
+    assert second.evaluation.score_id == first.evaluation.score_id

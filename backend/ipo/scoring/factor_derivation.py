@@ -32,6 +32,7 @@ from backend.ipo.financials.ratio_engine import (
 from backend.ipo.manual_extraction import IpoManualExtractionRecord, IpoPeerMetric
 from backend.ipo.models import (
     FactorAssessment,
+    IpoEnrichmentBatchUsability,
     IpoEnrichmentSignalRecord,
     IpoEnrichmentSignalType,
     IpoIssueRecord,
@@ -39,7 +40,7 @@ from backend.ipo.models import (
     IpoSubscriptionRecord,
 )
 
-FACTOR_MODEL_VERSION: Final = "ipo-006-factors-v1"
+FACTOR_MODEL_VERSION: Final = "ipo-006-factors-v2"
 
 # GMP chatter goes stale fast around an issue window; older observations are
 # ignored entirely rather than down-weighted so staleness cannot fabricate a
@@ -249,7 +250,7 @@ def _ratio_provenance(ratios: IpoRatioAnalysis | None) -> str:
         return ""
     return (
         f"Source: ratio engine {ratios.formula_version}, "
-        f"extraction #{ratios.extraction_id}, sha256 {ratios.source_content_sha256[:12]}."
+        f"sha256 {ratios.source_content_sha256[:12]}."
     )
 
 
@@ -368,8 +369,7 @@ def _promoter_quality(profile: IpoManualExtractionRecord | None) -> FactorAssess
         )
 
     provenance = (
-        f"Source: manual extraction #{profile.id}, "
-        f"sha256 {profile.source_content_sha256[:12]}."
+        f"Source: sha256 {profile.source_content_sha256[:12]}."
     )
     return _factor("Promoter quality", [holding_sub], optional, provenance)
 
@@ -416,9 +416,17 @@ def _gmp_sentiment(
         signal.parsed_value
         for signal in enrichment
         if signal.signal_type is IpoEnrichmentSignalType.GMP
-        and not signal.quarantined
+        and signal.batch_usability
+        is not IpoEnrichmentBatchUsability.NOT_EVALUABLE
+        and (
+            not signal.quarantined
+            or any(
+                entry.get("quarantine_status") == "clean"
+                for entry in signal.payload
+            )
+        )
         and signal.parsed_value is not None
-        and signal.captured_at >= cutoff
+        and (signal.last_seen_at or signal.captured_at) >= cutoff
     )
     if not usable:
         return FactorAssessment(

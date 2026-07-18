@@ -27,20 +27,16 @@ from dataclasses import dataclass
 from typing import Final, Literal
 
 from backend.ipo.models import (
+    IpoEnrichmentBatchUsability,
     IpoEnrichmentSignalType,
     IpoEvaluationRecord,
     IpoStatus,
 )
 from backend.ipo.repository import (
-    IpoNotFoundError,
     SessionFactory,
     evaluate_issue,
-    get_issue,
     get_latest_evaluation,
-    get_latest_ipo_ratios,
-    get_latest_manual_profile,
-    get_latest_subscription,
-    list_enrichment_signals,
+    load_ipo_factor_inputs_snapshot,
 )
 from backend.ipo.scoring.caution_flags import (
     CAUTION_FLAGS_VERSION,
@@ -58,7 +54,7 @@ from backend.storage import session_scope
 
 logger = logging.getLogger(__name__)
 
-SCREENER_MODEL_VERSION: Final = "ipo-006-v1"
+SCREENER_MODEL_VERSION: Final = "ipo-006-v2"
 
 
 @dataclass(frozen=True)
@@ -92,13 +88,56 @@ def compute_inputs_fingerprint(inputs: IpoFactorInputs) -> str:
     profile = inputs.profile
     subscription = inputs.subscription
     cutoff = inputs.as_of - dt.timedelta(days=GMP_SIGNAL_MAX_AGE_DAYS)
-    usable_gmp_ids = sorted(
-        signal.id
+    enrichment_facts = [
+        {
+            "semantic_hash": signal.semantic_hash,
+            "signal_type": signal.signal_type.value,
+            "parsed_value": (
+                str(signal.parsed_value)
+                if signal.parsed_value is not None
+                else None
+            ),
+            "batch_usability": signal.batch_usability.value,
+            "authority": signal.authority.value,
+            "corroborated": signal.corroborated,
+            "authority_policy_version": signal.authority_policy_version,
+            "source_policy": signal.source_policy,
+            "payload": [dict(entry) for entry in signal.payload],
+            "inside_freshness_window": (
+                (signal.last_seen_at or signal.captured_at) >= cutoff
+                if signal.signal_type is IpoEnrichmentSignalType.GMP
+                else None
+            ),
+        }
         for signal in inputs.enrichment
-        if signal.signal_type is IpoEnrichmentSignalType.GMP
-        and not signal.quarantined
-        and signal.parsed_value is not None
-        and signal.captured_at >= cutoff
+        if signal.batch_usability
+        is not IpoEnrichmentBatchUsability.NOT_EVALUABLE
+    ]
+    enrichment_facts.sort(
+        key=lambda fact: json.dumps(fact, sort_keys=True, separators=(",", ":"))
+    )
+    ratio_facts = (
+        {
+            "formula_version": inputs.ratios.formula_version,
+            "source_sha256": inputs.ratios.source_content_sha256,
+            "ratios": {
+                name.value: {
+                    "status": receipt.status.value,
+                    "value": (
+                        str(receipt.value)
+                        if receipt.value is not None
+                        else None
+                    ),
+                    "explanation": receipt.explanation,
+                }
+                for name, receipt in sorted(
+                    inputs.ratios.ratios.items(),
+                    key=lambda item: item[0].value,
+                )
+            },
+        }
+        if inputs.ratios is not None
+        else None
     )
     near_close = (
         issue.status in (IpoStatus.OPEN, IpoStatus.CLOSED)
@@ -111,29 +150,99 @@ def compute_inputs_fingerprint(inputs: IpoFactorInputs) -> str:
         "factor_model_version": FACTOR_MODEL_VERSION,
         "caution_flags_version": CAUTION_FLAGS_VERSION,
         "issue": {
-            "id": issue.id,
-            "updated_at": issue.updated_at.isoformat(),
+            "company_name": issue.company_name,
+            "issue_type": issue.issue_type.value,
             "status": issue.status.value,
+            "open_date": issue.open_date.isoformat() if issue.open_date else None,
+            "close_date": issue.close_date.isoformat() if issue.close_date else None,
+            "price_band_low": (
+                str(issue.price_band_low)
+                if issue.price_band_low is not None
+                else None
+            ),
+            "price_band_high": (
+                str(issue.price_band_high)
+                if issue.price_band_high is not None
+                else None
+            ),
         },
         "extraction": (
-            {"id": profile.id, "sha256": profile.source_content_sha256}
+            {
+                "sha256": profile.source_content_sha256,
+                "source_document_url": profile.source_document_url,
+                "units": {
+                    "financial": profile.financial_amount_unit.value,
+                    "issue": profile.issue_amount_unit.value,
+                    "shares": profile.equity_share_unit.value,
+                },
+                "canonical_values": {
+                    key: str(value)
+                    for key, value in sorted(profile.canonical_values.items())
+                },
+                "periods": [
+                    {
+                        key: value.isoformat()
+                        if isinstance(value, dt.date)
+                        else str(value)
+                        for key, value in sorted(period.items())
+                    }
+                    for period in profile.period_values_inr()
+                ],
+                "objects_of_issue": profile.objects_of_issue,
+                "objects_of_issue_page": profile.objects_of_issue_page,
+                "peers": [
+                    {
+                        "company_key": peer.company_key,
+                        "source_page": peer.source_page,
+                        "metrics": {
+                            str(getattr(metric, "value", metric)): str(value)
+                            for metric, value in sorted(
+                                peer.metrics.items(),
+                                key=lambda item: str(
+                                    getattr(item[0], "value", item[0])
+                                ),
+                            )
+                        },
+                    }
+                    for peer in sorted(
+                        profile.peers, key=lambda peer: peer.company_key
+                    )
+                ],
+            }
             if profile is not None
             else None
         ),
-        "price_band_high": str(issue.price_band_high)
-        if issue.price_band_high is not None
-        else None,
+        "ratios": ratio_facts,
         "subscription": (
             {
-                "id": subscription.id,
                 "captured_at": subscription.captured_at.isoformat(),
-                "qib": str(subscription.qib_multiple),
+                "qib": (
+                    str(subscription.qib_multiple)
+                    if subscription.qib_multiple is not None
+                    else None
+                ),
+                "nii": (
+                    str(subscription.nii_multiple)
+                    if subscription.nii_multiple is not None
+                    else None
+                ),
+                "retail": (
+                    str(subscription.retail_multiple)
+                    if subscription.retail_multiple is not None
+                    else None
+                ),
+                "total": (
+                    str(subscription.total_multiple)
+                    if subscription.total_multiple is not None
+                    else None
+                ),
+                "source_url": subscription.source_url,
+                "source_confidence": subscription.source_confidence.value,
             }
             if subscription is not None
             else None
         ),
-        "enrichment_ids": sorted(signal.id for signal in inputs.enrichment),
-        "usable_gmp_ids": usable_gmp_ids,
+        "enrichment": enrichment_facts,
         "near_close": near_close,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -164,12 +273,13 @@ def rescore_issue(
         dashboard's re-score button can safely call this inside a page action.
     """
     when = as_of if as_of is not None else dt.datetime.now(dt.UTC)
-    issue = get_issue(issue_id, session_factory=session_factory)
-    if issue is None:
-        raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
-
-    profile = get_latest_manual_profile(issue_id, session_factory=session_factory)
-    if profile is None:
+    inputs = load_ipo_factor_inputs_snapshot(
+        issue_id,
+        as_of=when,
+        session_factory=session_factory,
+    )
+    issue = inputs.issue
+    if inputs.profile is None:
         return IpoRescoreOutcome(
             issue_id=issue_id,
             company_name=issue.company_name,
@@ -177,16 +287,6 @@ def rescore_issue(
             missing=("manual_extraction",),
         )
 
-    inputs = IpoFactorInputs(
-        issue=issue,
-        profile=profile,
-        ratios=get_latest_ipo_ratios(issue_id, session_factory=session_factory),
-        subscription=get_latest_subscription(issue_id, session_factory=session_factory),
-        as_of=when,
-        enrichment=tuple(
-            list_enrichment_signals(issue_id, session_factory=session_factory)
-        ),
-    )
     fingerprint = compute_inputs_fingerprint(inputs)
 
     latest = get_latest_evaluation(issue_id, session_factory=session_factory)

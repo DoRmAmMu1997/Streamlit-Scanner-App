@@ -24,7 +24,7 @@ from collections.abc import Callable, Mapping
 from contextlib import suppress
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from backend.audit import record_audit_event
 from backend.config import get_settings
@@ -55,10 +55,12 @@ from backend.ipo.models import (
     IpoDocumentData,
     IpoDocumentParseStatus,
     IpoDocumentRecord,
+    IpoEnrichmentBatchUsability,
     IpoEnrichmentSignalData,
     IpoEnrichmentSignalRecord,
     IpoEnrichmentSignalType,
     IpoEvaluationRecord,
+    IpoEvidenceAuthority,
     IpoExtractionProposalRecord,
     IpoExtractionProposalStatus,
     IpoFilingData,
@@ -111,7 +113,6 @@ from backend.storage.ipo_repository import (
     get_latest_ipo_subscription,
     get_pending_ipo_extraction_proposal_for_document,
     insert_ipo_document,
-    insert_ipo_enrichment_signals,
     insert_ipo_evaluation,
     insert_ipo_financial,
     insert_ipo_issue,
@@ -133,6 +134,7 @@ from backend.storage.ipo_repository import (
     update_ipo_financial_row,
     update_ipo_issue_row,
     update_ipo_subscription_row,
+    upsert_ipo_enrichment_signal,
 )
 
 SessionFactory = Any
@@ -140,6 +142,9 @@ DocumentDownloader = Callable[..., IpoDocumentDownloadResult]
 AuditRecorder = Callable[..., bool]
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from backend.ipo.scoring.factor_derivation import IpoFactorInputs
 
 
 class IpoNotFoundError(LookupError):
@@ -900,6 +905,58 @@ def get_latest_ipo_ratios(
     )
 
 
+def load_ipo_factor_inputs_snapshot(
+    issue_id: int,
+    *,
+    as_of: dt.datetime,
+    session_factory: SessionFactory = session_scope,
+) -> IpoFactorInputs:
+    """Load every scoring input in one caller-owned read transaction.
+
+    Beginner note:
+        A scheduled job must not combine a profile from one instant with a
+        subscription or enrichment row committed a moment later. Detaching the
+        complete bundle inside one transaction makes the fingerprint and score
+        consume the same immutable snapshot.
+    """
+    from backend.ipo.scoring.factor_derivation import IpoFactorInputs
+
+    with session_factory() as session:
+        issue_row = get_ipo_issue(session, issue_id)
+        if issue_row is None:
+            raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
+        profile_row = get_latest_ipo_manual_extraction(session, issue_id)
+        subscription_row = get_latest_ipo_subscription(session, issue_id)
+        enrichment_rows = list_ipo_enrichment_signal_rows(session, issue_id)
+        issue = _issue_record(issue_row)
+        profile = _manual_record(profile_row) if profile_row is not None else None
+        subscription = (
+            _subscription_record(subscription_row)
+            if subscription_row is not None
+            else None
+        )
+        enrichment = tuple(
+            _enrichment_signal_record(row) for row in enrichment_rows
+        )
+    ratios = (
+        calculate_ipo_ratios(
+            profile,
+            price_band_high=issue.price_band_high,
+            issue_updated_at=issue.updated_at,
+        )
+        if profile is not None
+        else None
+    )
+    return IpoFactorInputs(
+        issue=issue,
+        profile=profile,
+        ratios=ratios,
+        subscription=subscription,
+        as_of=as_of,
+        enrichment=enrichment,
+    )
+
+
 _STATUS_ORDER = {
     IpoStatus.DRHP_FILED: 0,
     IpoStatus.RHP_FILED: 1,
@@ -1261,7 +1318,39 @@ def _enrichment_signal_record(row: Any) -> IpoEnrichmentSignalRecord:
         confidence=Confidence(row.confidence),
         source_policy=row.source_policy,
         created_at=_utc(row.created_at),
+        authority=IpoEvidenceAuthority(row.authority_level),
+        corroborated=bool(row.corroborated),
+        authority_policy_version=row.authority_policy_version,
+        batch_usability=IpoEnrichmentBatchUsability(row.batch_usability),
+        semantic_hash=row.semantic_hash,
+        first_seen_at=_utc(row.first_seen_at),
+        last_seen_at=_utc(row.last_seen_at),
     )
+
+
+def _enrichment_semantic_hash(signal: IpoEnrichmentSignalData) -> str:
+    """Hash stable advisory evidence while excluding observation timestamps."""
+    payload = {
+        "signal_type": signal.signal_type.value,
+        "query_text": signal.query_text,
+        "payload": normalize_secret_safe_json(
+            [dict(entry) for entry in signal.payload]
+        ),
+        "parsed_value": (
+            str(signal.parsed_value) if signal.parsed_value is not None else None
+        ),
+        "quarantined": signal.quarantined,
+        "confidence": signal.confidence.value,
+        "source_policy": signal.source_policy,
+        "authority": signal.authority.value,
+        "corroborated": signal.corroborated,
+        "authority_policy_version": signal.authority_policy_version,
+        "batch_usability": signal.batch_usability.value,
+    }
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def record_enrichment_signals(
@@ -1282,8 +1371,10 @@ def record_enrichment_signals(
     with session_factory() as session:
         if get_ipo_issue(session, issue_id) is None:
             raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
-        values_list = [
-            {
+        rows = []
+        for signal in signals:
+            semantic_hash = signal.semantic_hash or _enrichment_semantic_hash(signal)
+            values = {
                 "signal_type": signal.signal_type.value,
                 "captured_at": signal.captured_at,
                 "query_text": signal.query_text,
@@ -1294,10 +1385,15 @@ def record_enrichment_signals(
                 "quarantined": signal.quarantined,
                 "confidence": signal.confidence.value,
                 "source_policy": signal.source_policy,
+                "authority_level": signal.authority.value,
+                "corroborated": signal.corroborated,
+                "authority_policy_version": signal.authority_policy_version,
+                "batch_usability": signal.batch_usability.value,
+                "semantic_hash": semantic_hash,
+                "first_seen_at": signal.captured_at,
+                "last_seen_at": signal.captured_at,
             }
-            for signal in signals
-        ]
-        rows = insert_ipo_enrichment_signals(session, issue_id, values_list)
+            rows.append(upsert_ipo_enrichment_signal(session, issue_id, values))
         return [_enrichment_signal_record(row) for row in rows]
 
 
