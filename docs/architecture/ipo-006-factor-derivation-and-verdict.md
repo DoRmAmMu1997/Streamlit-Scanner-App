@@ -27,7 +27,7 @@ is usually known-weak zero (a loss-base CAGR carries the engine's own
 explanation into the reason string), and everything else leaves the
 sub-input unavailable.
 
-## v1 band tables (FACTOR_MODEL_VERSION = "ipo-006-factors-v1")
+## Band tables (FACTOR_MODEL_VERSION = "ipo-006-factors-v2")
 
 Bands are half-open (`lower <= x < upper`) `Decimal` module constants; a
 factor is the half-up-rounded mean of its available sub-scores. Core
@@ -50,7 +50,7 @@ prefix). Missing factors carry an explanatory reason too, so the dashboard's
 missing-data queue needs no reconstruction. Any threshold change must bump
 `FACTOR_MODEL_VERSION` so stored evaluations stay attributable.
 
-## Hard caution flags (CAUTION_FLAGS_VERSION = "ipo-006-flags-v1")
+## Hard caution flags (CAUTION_FLAGS_VERSION = "ipo-006-flags-v2")
 
 `evaluate_caution_flags` returns all seven flags in fixed catalog order, each
 `triggered`, `not_triggered`, or `not_evaluable` (required evidence absent —
@@ -62,9 +62,11 @@ reported honestly, never guessed):
    open/closed: QIB book <1x, or no snapshot at all.
 4. `negative_operating_cash_flow_despite_profits` — CFO <0 while latest PAT >0.
 5. `high_debt_without_debt_reduction_use` — D/E >1.5 or net debt/EBITDA >3 and the
-   objects of issue contain no repayment/deleveraging language.
+   cited `DebtReductionPurposeEvidence` is not affirmatively verified; negated,
+   ambiguous, missing, and legacy prose fail closed.
 6. `litigation_or_auditor_red_flag` — non-quarantined IPO-009 litigation signals
-   with recorded keyword matches (keywords only; snippet text never reaches here).
+   only when corroborated by official or approved-manual authority. Advisory
+   SerpAPI observations may request review but cannot trigger this hard caution.
 7. `loss_making_no_credible_path` — latest year is a loss that is not narrowing.
 
 ## Verdict precedence and the fourth type
@@ -86,3 +88,11 @@ by `IpoRecommendationResult.to_dict()`.
 None-versus-zero table; `tests/test_ipo_caution_flags.py` pins each flag's
 three outcomes; `tests/test_ipo_verdict.py` pins precedence (a triggered flag
 overrides a 95-point score; missing-critical outranks flags).
+
+> PR #108 hardening: this design is implemented with one immutable
+> `IpoFactorInputs` snapshot, semantic (row-id-free) fingerprinting, typed
+> citation-bound `DebtReductionPurposeEvidence`, corroborated authority for
+> litigation cautions, database-backed evaluation uniqueness, and seven public
+> `ScoreBreakdownItem` rows whose contributions sum to the total. Where older
+> text in this document describes keyword-only litigation/debt behavior, this paragraph
+> and the [hardening ADR](ipo-010-security-integrity-hardening.md) supersede it.

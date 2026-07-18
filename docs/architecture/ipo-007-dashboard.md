@@ -33,9 +33,9 @@ and weak" are deliberately different messages.
   completeness against the DB vocabulary.
 - A binary verdict filter (All / Recommended / Not Recommended) narrows
   every section; unscored issues appear only under All.
-- Per-issue score-breakdown expanders show the full receipt: every reason
-  string (with its provenance suffix), triggered hard flags, missing data,
-  and source documents.
+- Per-issue score-breakdown expanders show all seven typed rows: factor,
+  weight, normalized score or missing state, awarded contribution, and
+  evidence reason, plus hard flags, missing data, stale status, and sources.
 - The **Re-score all issues** button renders only with `MANAGE_IPO_DATA`
   (hiding is UX; the app dispatch capability check is the boundary). It runs
   the same `rescore_issue` service the job uses — repository work only —
@@ -52,3 +52,11 @@ with every repository seam stubbed (proving render purity), plus the label
 map, filter semantics, spec column contract, and the re-score audit/cache
 path. `tests/test_app_orchestration.py` pins the navigation entry, the
 re-export identity, and the keyword-only capability boundary.
+
+> PR #108 hardening: scored and unscored rows expose registered DRHP/RHP source
+> documents; `last_updated` is the newest relevant issue/document/profile/
+> proposal/subscription/enrichment/evaluation time; `evaluation_stale` routes
+> newer evidence back to the review queue. Positives sort by awarded points,
+> risks by lost points with factor-order ties. Every scored expander renders all
+> seven typed breakdown rows, and untrusted text is escaped before any
+> Markdown-capable Streamlit label/caption.

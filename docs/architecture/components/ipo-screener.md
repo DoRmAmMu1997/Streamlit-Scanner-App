@@ -13,8 +13,8 @@ IPO-003's detailed cache and failure contract is documented in
 
 ## 1. Purpose & responsibilities
 
-The IPO Screener evaluates Indian IPOs from official source facts. Five landed
-slices share one persistence model:
+The IPO Screener evaluates Indian IPOs from official source facts. Ten landed
+slices share one persistence and evidence-authority model:
 
 - **Domain & scoring (IPO-001)**: typed, framework-independent contracts, a fixed
   100-point PDF-weighted scorecard, a binary fail-closed verdict, and an immutable
@@ -29,58 +29,69 @@ slices share one persistence model:
 - **Ratio engine (IPO-005)**: a pure Decimal service derives sixteen
   general-company ratios from the newest immutable profile and returns a typed
   value-or-reason receipt without persisting calculations.
+- **Deterministic evaluation (IPO-006)**: one immutable evidence snapshot feeds
+  seven factor assessments, seven hard-caution receipts, the fixed weighted
+  score, and the binary fail-closed recommendation.
+- **Read-only dashboard (IPO-007)**: stored filings, source documents, complete
+  score breakdowns, missing/review work, and stale evaluations render without
+  network work.
+- **Orchestration (IPO-008)**: one headless, idempotent job composes filing
+  inventory, cache fill, optional enrichment/extraction, and re-scoring.
+- **Advisory enrichment (IPO-009)**: persisted issue identity drives SerpAPI
+  queries; results are quarantined per item and cannot override official or
+  approved-manual evidence.
+- **Automated extraction (IPO-010)**: a killable bounded PDF worker and
+  page-aware classifier feed citation-bound AI proposals that require human
+  approval before scoring.
 
 **Non-responsibilities (deliberate, current scope)**
 - IPO-002 never downloads prospectuses. IPO-003 downloads only through an
-  explicit service call and still performs no PDF parsing or page counting.
-- Ratios are not factor-score inference. The scorecard still consumes caller-supplied
-  normalized 0-100 factor scores; mapping raw ratios into them is a later ticket.
+  explicit service call; IPO-010 parsing is a separate process-contained stage.
 - Streamlit remains outside `backend`; `ui/ipo_manual_page.py` is the narrow
-  IPO-004 presentation adapter and repeats the admin guard.
-- No scraping outside `backend/ipo/sources`, and no source other than SEBI yet.
+  review/entry adapter and `ui/ipo_page.py` is a read-only rendering adapter.
+- OCR and sector-specific bank/NBFC/AMC/insurer factor models remain deferred.
+- SerpAPI is discovery/advisory context only. It cannot supply financial
+  statement values or an uncorroborated hard caution.
 
 ## 2. Position in the system
 
 ```mermaid
 flowchart LR
-    Operator["Operator / scheduler"] --> Job["scan_ipo_filings CLI"]
+    Operator["Operator / scheduler"] --> Job["run_ipo_screener CLI"]
     SEBI[("Official SEBI listings")]
-    subgraph Ingestion [Filing ingestion]
-      Fetch["fetch_sebi_filings"]
-      Build["build_filing_data -> IpoFilingData"]
-      Ingest["ingest_filings"]
-    end
-    subgraph Evaluation [Explicit evaluation]
-      Caller["Scoring caller with IpoScoreInput"]
-      Eval["evaluate_issue"]
-      Score["score_ipo"]
-      Verdict["build_recommendation"]
+    Serp["SerpAPI advisory results"]
+    Claude["Claude Agent SDK"]
+    subgraph Pipeline [Idempotent pipeline]
+      Ingest["inventory SEBI filings"]
+      Download["verify/cache DRHP and RHP"]
+      Enrich["per-item quarantine and authority policy"]
+      Worker["spawned bounded PDF worker"]
+      Proposal["citation-bound extraction proposal"]
+      Review["admin approve or reject"]
+      Snapshot["immutable IpoFactorInputs"]
+      Evaluate["factors, flags, score, binary verdict"]
     end
     Storage[("ipo_* tables via backend/storage")]
-    DownloadCaller["Explicit backend caller"]
-    Download["download_document"]
     Cache[("DATA_DIR/ipo/documents/<sha256>.pdf")]
-    RatioCaller["Ratio caller"]
-    Ratios["get_latest_ipo_ratios"]
-    Engine["calculate_ipo_ratios"]
 
-    Job --> Fetch
-    SEBI --> Fetch --> Build --> Ingest --> Storage
-    DownloadCaller --> Download
-    Download -->|read source, close transaction| Storage
+    Job --> Ingest
+    SEBI --> Ingest --> Storage
+    Ingest --> Download
     Download -->|validated detail + PDF requests| SEBI
     Download -->|atomic content-addressed write| Cache
     Download -->|persist provenance| Storage
-    Caller --> Eval --> Score --> Verdict
-    Eval -->|atomically persists score + verdict| Storage
-    RatioCaller --> Ratios -->|one short snapshot read| Storage
-    Ratios -->|detached evidence| Engine
+    Download --> Enrich
+    Serp --> Enrich --> Storage
+    Enrich --> Worker
+    Cache --> Worker --> Proposal
+    Claude --> Proposal --> Storage
+    Proposal --> Review --> Storage
+    Storage --> Snapshot --> Evaluate --> Storage
 ```
 
-The headless job orchestrates ingestion; evaluation is a separate, explicit call
-that receives a complete `IpoScoreInput`. Persisted financial and subscription
-facts are **not** automatically converted into factor scores, and filing ingestion
-never triggers a recommendation. Both paths persist only through `backend/storage`.
+The job isolates failures by document/issue and re-scores only from approved
+evidence. A proposal is never evidence, and the dashboard never performs these
+network or model stages. All persistence still routes through `backend/storage`.
 
 ## 3. Module boundaries
 
@@ -93,10 +104,19 @@ never triggers a recommendation. Both paths persist only through `backend/storag
 | `backend/ipo/documents/downloader.py` | IPO-003 detail/PDF I/O, SSRF controls, streamed atomic cache. | `requests`, `bs4`, `models` |
 | `backend/ipo/manual_extraction.py` | Frozen complete-entry DTOs, units, page validation, peers, canonical conversions. | stdlib, `models` |
 | `backend/ipo/financials/ratio_engine.py` | Pure Decimal formulas, typed status receipts, reconciliation, source/price snapshot. | stdlib, `manual_extraction` |
+| `backend/ipo/scoring/factor_derivation.py` | Pure seven-factor derivation plus typed, negation-aware debt-purpose evidence. | `models`, `ratio_engine`, `manual_extraction` |
+| `backend/ipo/scoring/caution_flags.py` | Seven fixed-order hard cautions over typed evidence authority. | `models`, `factor_derivation`, `ratio_engine` |
+| `backend/ipo/scoring/service.py` | One-transaction input snapshot, semantic fingerprint, idempotent evaluation orchestration. | `repository`, pure scoring modules |
+| `backend/ipo/documents/table_extractor.py` | Spawn-safe PDF worker, object/text/time/result budgets, typed parse receipts. | stdlib, lazy `pdfplumber` |
+| `backend/ipo/documents/section_classifier.py` | Page/span-preserving heading ownership and safe chunks. | `table_extractor` |
+| `backend/ipo/agents/financial_extractor.py` | Locked-down AI draft, host citation binding, proposal lifecycle outcomes. | `documents`, `models`, AI runtime |
+| `backend/ipo/sources/enrichment.py` | Persisted-identity queries, per-item quarantine, GMP proximity parsing, central advisory authority. | shared search client, `security`, `repository` |
 | `backend/ipo/repository.py` | Typed transactions, ingestion identity/lifecycle, atomic evaluation. | `models`, `scoring.score_model`, `scoring.recommendation`, `scanning.result_contract`, `storage` |
 | `backend/storage/ipo_repository.py` | Every SQLAlchemy statement for the `ipo_*` tables. | `sqlalchemy`, `storage.models` |
 | `backend/jobs/scan_ipo_filings.py` | CLI boundary: windows, per-category loop, exit code, audits. | `ipo`, `audit`, `observability`, `storage.database` |
+| `backend/jobs/run_ipo_screener.py` | Full scan/download/enrich/extract/score CLI with per-unit isolation and `--force-extract`. | IPO services, jobs, observability |
 | `ui/ipo_manual_page.py` | Admin widgets, DTO conversion, prefill, latest profile, revision history. | `backend.ipo`, `backend.auth`, `streamlit` |
+| `ui/ipo_page.py` | Read-only dashboard tables, complete breakdown, stale marker, Markdown-safe labels. | `backend.ipo.dashboard`, `streamlit` |
 
 These rules are enforced by the AST guard
 [`tests/test_ipo_contract_policy.py`](../../../tests/test_ipo_contract_policy.py):
@@ -108,8 +128,12 @@ no IPO module imports Streamlit, and network clients are allowed only under
 | Symbol | Contract |
 |---|---|
 | `score_ipo(IpoScoreInput) -> IpoScoreResult` | Applies the fixed weights; missing factors contribute zero and are never renormalized. |
-| `build_recommendation(IpoScoreResult) -> IpoRecommendationResult` | Maps a score to the binary verdict + confidence; `.to_dict()` is the exact public JSON. |
-| `evaluate_issue(issue_id, IpoScoreInput)` | Computes and atomically persists one immutable score/verdict pair. |
+| `build_recommendation(IpoScoreResult) -> IpoRecommendationResult` | Maps a score to the binary verdict + confidence; `.to_dict()` includes all seven typed breakdown rows. |
+| `evaluate_issue(issue_id, IpoScoreInput)` | Computes and atomically persists one immutable score/verdict pair; a semantic uniqueness race returns the winning pair. |
+| `load_ipo_factor_inputs_snapshot(issue_id, as_of=...)` | Reads issue/profile/subscription/enrichment in one transaction, then derives ratios from that exact detached snapshot. |
+| `extract_document_pages(path, budget=...)` | Compatible PDF facade returning a typed success or review-required receipt from a killable child. |
+| `collect_enrichment_signals(issue_id, ...)` | Uses persisted issuer/price identity, quarantines each result, and semantically upserts advisory observations. |
+| `propose_extraction(issue_id, document_id, force_extract=False)` | Produces a citation-bound review proposal or a stable skip/failure receipt; never scoring evidence. |
 | `fetch_sebi_filings(category, from_date, to_date)` | Bounded fetch of one fixed SEBI category; returns frozen `SebiFiling` rows. |
 | `build_filing_data(SebiFiling) -> IpoFilingData` | Derives display name, stable `sebi_company_key`, status, and the SHA-256 fingerprint. |
 | `ingest_filings(filings, *, session_factory)` | Atomically creates/updates issues and documents for one category; returns `IpoIngestionSummary`. |
@@ -126,7 +150,7 @@ authority of [IPO-001 design](../ipo-001-domain-score-contract.md).
 
 ## 5. Persistence
 
-Nine additive tables share the existing `Base`; full column rationale lives in
+Eleven additive tables share the existing `Base`; full column rationale lives in
 [storage-persistence.md](storage-persistence.md).
 
 - `ipo_issues` is the cascade root. IPO-002 adds nullable, uniquely-indexed
@@ -134,10 +158,20 @@ Nine additive tables share the existing `Base`; full column rationale lives in
 - `ipo_documents` holds registered filing URLs; IPO-002 adds nullable
   `filing_date` and a uniquely-indexed 64-char `record_hash` (length-checked).
   IPO-003 adds nullable content digest/time/path/page fields plus a constrained
-  `parse_status`; `page_count` remains null until a later parser exists.
+  `parse_status`; the download lifecycle remains separate from IPO-010 parse
+  receipts.
 - `ipo_financials`, `ipo_subscriptions` hold secret-safe normalized facts.
 - `ipo_scores` (immutable factor inputs + total) pairs one-to-one with
-  `ipo_recommendations` (immutable verdict).
+  `ipo_recommendations` (immutable verdict). A versioned seven-factor breakdown
+  and partial semantic unique index make public receipts complete and concurrent
+  reruns idempotent.
+- `ipo_enrichment_signals` stores per-observation authority/usability,
+  semantic identity, and first/last-seen freshness. Existing rows migrate as
+  advisory and uncorroborated.
+- `ipo_extraction_proposals` stores immutable URL/SHA snapshots, cited-evidence
+  schema/model identity, semantic fingerprints, and review status. One pending
+  proposal per document is database-enforced; reviewed rows survive document
+  deletion through `SET NULL`.
 - `ipo_manual_extractions` owns singleton facts and immutable provenance;
   `ipo_manual_financial_periods` owns exactly three annual rows; and
   `ipo_manual_peer_valuations` owns one or more allowlisted peer metric maps.
@@ -145,7 +179,7 @@ Nine additive tables share the existing `Base`; full column rationale lives in
   total assets/current liabilities, and post-issue shares. New submissions
   require the complete group; legacy rows keep all additions null.
 
-Migrations are additive and nullable, so manual / IPO-001 rows stay valid. The
+Migrations are additive/versioned, so manual / IPO-001 rows stay valid. The
 IPO-002 downgrade refuses to run while any SEBI identity exists rather than
 silently discarding fingerprints or reclassifying `unknown` issues. Schema-drift
 detection is metadata-driven, so new columns are covered automatically.
@@ -233,6 +267,20 @@ boundaries and treat every response as hostile:
 - [`tests/test_ipo_ratio_engine.py`](../../../tests/test_ipo_ratio_engine.py) -
   exact formulas, losses, leverage/net cash, invalid denominators, legacy evidence,
   missing prices, and EPS/book-value reconciliation.
+- [`tests/test_ipo_table_extractor.py`](../../../tests/test_ipo_table_extractor.py),
+  [`tests/test_ipo_section_classifier.py`](../../../tests/test_ipo_section_classifier.py),
+  [`tests/test_ipo_financial_extractor.py`](../../../tests/test_ipo_financial_extractor.py) -
+  worker timeout/crash/malformed and every object limit, exact citations,
+  period ordering, page-aware classification/chunks, quarantine, and typed facts.
+- [`tests/test_ipo_extraction_review.py`](../../../tests/test_ipo_extraction_review.py),
+  [`tests/test_ipo_enrichment.py`](../../../tests/test_ipo_enrichment.py) -
+  atomic proposal review/retention/idempotency plus per-item quarantine,
+  authority, GMP proximity, negation, and semantic first/last-seen upserts.
+- [`tests/test_ipo_scoring_service.py`](../../../tests/test_ipo_scoring_service.py),
+  [`tests/test_ipo_dashboard_builder.py`](../../../tests/test_ipo_dashboard_builder.py),
+  [`tests/test_app_ipo_page.py`](../../../tests/test_app_ipo_page.py) - semantic
+  input fingerprints, seven-row breakdowns, source/freshness display, impact
+  ordering, and Markdown-safe rendering.
 
 ## 10. IPO-006..010 additions
 
@@ -241,21 +289,31 @@ design doc:
 
 - **Factor derivation + hard caution flags + verdict extension (IPO-006)** —
   `backend/ipo/scoring/{factor_derivation,caution_flags,recommendation,score_model,service}.py`;
+  one snapshot and semantic fingerprint, citation-typed debt purpose, seven
+  `ScoreBreakdownItem` rows, and database-backed evaluation idempotency;
   see [ipo-006-factor-derivation-and-verdict.md](../ipo-006-factor-derivation-and-verdict.md).
 - **Read-only dashboard (IPO-007)** — `backend/ipo/dashboard.py` +
-  `ui/ipo_page.py`; see [ipo-007-dashboard.md](../ipo-007-dashboard.md).
+  `ui/ipo_page.py`; registered sources for scored/unscored rows, newest relevant
+  `last_updated`, `evaluation_stale`, impact-ranked positives/risks, and escaped
+  Markdown-capable sinks; see [ipo-007-dashboard.md](../ipo-007-dashboard.md).
 - **One-command orchestration (IPO-008)** —
   `python -m backend.jobs.run_ipo_screener`, idempotent via the stored inputs
-  fingerprint; see [ipo-008-screener-orchestration.md](../ipo-008-screener-orchestration.md).
+  fingerprint, with `--force-extract` limited to reviewed history; see
+  [ipo-008-screener-orchestration.md](../ipo-008-screener-orchestration.md).
 - **Optional web enrichment (IPO-009)** — `backend/ipo/sources/enrichment.py`
-  writing quarantined, low-confidence `ipo_enrichment_signals`; see
+  writing per-item quarantined, centrally authority-typed, semantically
+  deduplicated `ipo_enrichment_signals`; advisory results cannot create a hard
+  veto; see
   [ipo-009-serpapi-enrichment.md](../ipo-009-serpapi-enrichment.md).
 - **AI extraction proposals (IPO-010)** —
   `backend/ipo/documents/{table_extractor,section_classifier}.py` +
   `backend/ipo/agents/financial_extractor.py` feeding the
   `ipo_extraction_proposals` review queue; see
   [ipo-010-ai-extraction-proposals.md](../ipo-010-ai-extraction-proposals.md)
-  and the [extraction-AI LLD](ipo-extraction-ai.md).
+  and the [extraction-AI LLD](ipo-extraction-ai.md). Parsing runs in a killable
+  worker with all documented budgets, host verification binds complete Decimal
+  tokens/units/period/page/cell-span into typed facts, and approval/retention are
+  atomic under database constraints.
 
 ## 11. Extension points
 

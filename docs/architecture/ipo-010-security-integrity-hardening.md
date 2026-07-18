@@ -83,8 +83,8 @@ or nonannual periods are rejected.
 
 Each enrichment result carries:
 
-- authority `advisory_web`;
-- status `usable` or `quarantined`;
+- authority `advisory`, `official`, or `approved_manual`;
+- per-item quarantine status `clean` or `quarantined`;
 - a secret-safe quarantine reason;
 - a semantic content fingerprint; and
 - optional official/manual corroboration references.
@@ -134,11 +134,11 @@ unchanged.
 The public result adds a seven-entry breakdown receipt. Each entry carries the
 factor, weight, normalized score or missing state, contribution, and evidence
 reason. Existing result keys remain compatible. Legacy rows without the new
-receipt reconstruct the numeric portion from stored contributions and are
-identified as legacy rather than silently upgraded.
+receipt remain readable with an empty typed breakdown; they are not silently
+reconstructed or upgraded into newly verified evidence.
 
 High debt is fail-closed unless a structured, page-cited purpose state is
-affirmatively `debt_reduction`. Negated, ambiguous, missing, or legacy free
+affirmatively `AFFIRMATIVE`. Negated, ambiguous, missing, or legacy free
 text cannot suppress the caution.
 
 ## Alternatives considered

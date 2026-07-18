@@ -75,7 +75,7 @@ review → `/code-review` + `/security-review`; everything → `/using-superpowe
 | `config/` | Typed runtime settings from env (`get_settings`, `AppSettings`, `SettingsError`). |
 | `fundamentals/`, `technical/`, `sixty_seven/` | The three AI-assisted subsystems. |
 | `ipo/` | IPO domain: SEBI filing ingestion, verified content-addressed document cache, manual extraction records, deterministic ratio engine, immutable score/recommendation history, factor derivation + hard caution flags (`scoring/`), read-only dashboard builder, quarantined SerpAPI enrichment (`sources/enrichment.py`), and the fail-closed AI extraction agent (`agents/`, `documents/table_extractor.py`, `documents/section_classifier.py`) (IPO-001…010). |
-| `jobs/` | Headless CLIs (daily scan, forward-return computation, IPO filing ingestion). |
+| `jobs/` | Headless CLIs (daily scan, forward-return computation, IPO filing ingestion, and the idempotent IPO scan/download/enrich/extract/score pipeline). |
 | `admin/`, `auth/`, `notifications/`, `data_quality/` | Config overrides, OIDC gate, alerts, candle-quality receipts. |
 | `screener_registry.py`, `scanner_base.py`, `indicators.py`, `daily_data_loader.py`, `universe_*` | Screener framework, indicators, candle cache, universe management. |
 
@@ -280,6 +280,10 @@ python -m backend.jobs.scan_ipo_filings
 # Full IPO screener: scan -> download -> enrich -> score (idempotent re-runs;
 # add --extract to also draft AI extraction proposals for admin review)
 python -m backend.jobs.run_ipo_screener
+
+# Revisit reviewed extraction history for one issue. This still skips an
+# existing pending proposal and any semantically identical regenerated payload.
+python -m backend.jobs.run_ipo_screener --force-extract --issue-id 42
 ```
 
 See the [operations runbook](docs/operations.md) for scheduling, Docker/Compose, Render

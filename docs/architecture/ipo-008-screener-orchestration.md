@@ -30,6 +30,13 @@ newest stored evaluation carries the same model version and fingerprint the
 service reports `skipped_unchanged`; the fingerprint is stored on
 `ipo_scores.inputs_fingerprint` (legacy ipo-001-v1 rows keep `NULL`).
 
+The hardened implementation supersedes the volatile identities named above:
+it hashes rule/ratio/authority versions, source SHA and normalized approved
+values, ratio statuses/results, subscription facts, usable semantic enrichment
+facts, typed debt-purpose evidence, GMP freshness, and the near-close state.
+Database row ids are excluded, and a partial unique index closes concurrent
+check/insert races.
+
 ## Failure and configuration semantics
 
 - Every stage isolates per unit (one document, one issue, one query batch);
@@ -43,6 +50,9 @@ service reports `skipped_unchanged`; the fingerprint is stored on
 - `--issue-id` (repeatable) narrows downloads, enrichment, extraction, and
   scoring for targeted re-runs; `--skip-scan/--skip-download/--skip-enrich`
   gate their stages.
+- `--force-extract` implies `--extract` and bypasses reviewed-history pre-skips
+  only. Existing pending proposals and identical regenerated payloads still
+  count as skips.
 
 ## Summary grammar
 
@@ -65,3 +75,10 @@ band, subscription, or GMP change, plus clock-independence of the
 fingerprint. `tests/test_run_ipo_screener_job.py` pins stage gating,
 `--extract` targeting, isolation and exit codes, the no-key skip, and the
 CLI wiring.
+
+> PR #108 hardening: the scoring fingerprint covers semantic evidence and
+> policy/model/freshness states, excludes volatile row ids, and is protected by
+> a partial unique evaluation index. Enrichment is semantically upserted, so an
+> identical end-to-end rerun adds neither evidence nor evaluation rows.
+> `--force-extract` revisits reviewed extraction history only; pending and
+> identical proposals still skip.

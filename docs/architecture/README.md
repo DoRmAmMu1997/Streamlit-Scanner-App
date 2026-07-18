@@ -46,6 +46,11 @@ testing · extension points.
 - [validation.md](components/validation.md) — VALID-002 forward-return calculator + benchmark comparison service.
 - [ipo-screener.md](components/ipo-screener.md) — IPO-001 domain through IPO-010: ingestion, cache, evidence, ratios, factors/flags, verdicts, dashboard, and orchestration.
 
+The IPO entries above include the PR #108 hardening baseline: killable bounded
+PDF parsing, page/cell citation-bound facts, advisory per-item web authority,
+atomic proposal review, semantic idempotency, complete seven-factor receipts,
+and dashboard freshness/provenance.
+
 ### AI subsystems
 - [fundamentals-ai.md](components/fundamentals-ai.md) — Check Fundamentals agent + screener.in scraper + PDF reader + cache (the shared SDK plumbing).
 - [ipo-extraction-ai.md](components/ipo-extraction-ai.md) — IPO-010 financial-extraction agent: quarantined tools, host-side citation verification, fail-closed proposals.

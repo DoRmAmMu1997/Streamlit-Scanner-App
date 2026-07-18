@@ -18,18 +18,22 @@ the review UI before scoring can see a number.
 ## 2. Position in the pipeline
 
 ```
-verified cache (IPO-003) -> extract_document_pages -> classify_pages
-    -> propose_extraction (SDK loop over three in-process tools)
-    -> host verification -> ipo_extraction_proposals (pending)
-    -> admin Approve -> submit_manual_extraction path -> immutable revision
+verified cache (IPO-003) -> spawned bounded PDF worker -> parse receipt
+    -> page/span-aware classify_pages -> page-safe agent tools
+    -> host verification -> typed CitedFinancialFact set
+    -> ipo_extraction_proposals (pending, one per document)
+    -> admin Approve -> atomic revision + compare-and-set review transition
 ```
 
 ## 3. Public interface
 
 | Symbol | Contract |
 |---|---|
+| `extract_document_pages(path, budget=...)` | Compatible facade over a spawn-safe child; returns a typed success or timeout/resource/crash/malformed/empty review-required receipt. |
+| `PdfExtractionBudget` | Wall-time, page/table/row/column/cell/text/glyph/serialization/address-space limits. |
+| `force_extract=True` | Revisits reviewed history but cannot bypass one-pending-per-document or semantic-payload uniqueness. |
 | `propose_extraction(issue_id, document_id, *, data_dir=None, model=None, run_agent=None, session_factory=...)` | Returns `IpoExtractionProposalRecord` on success or a typed `IpoExtractionErrorReceipt`; never raises to batch callers. `run_agent` is the CI/test seam — the SDK is only touched when it is `None`. |
-| `EXTRACTOR_MODEL_VERSION` | `"ipo-010-extractor-v1"`, stamped on every proposal. |
+| `EXTRACTOR_MODEL_VERSION` | `"ipo-010-extractor-v2"`, stamped on every proposal. |
 | `IpoExtractionError` | Typed failure with a stable `code` (`unsupported_document`, `pending_proposal_exists`, `value_not_found`, ...). |
 
 ## 4. Key design decisions
@@ -39,8 +43,14 @@ verified cache (IPO-003) -> extract_document_pages -> classify_pages
 | Reuse `ai_runtime` + `ai_validation` (`run_agent_coroutine`, `extract_json_object`, `StrictAIModel`, `parse_with_retry`) | One reviewed implementation of the sync bridge, JSON extraction, strict schemas, and the bounded retry across all four agents. |
 | Locked-down `ClaudeAgentOptions` (`permission_mode="dontAsk"`, `setting_sources=[]`, in-process tools only) | The model can never touch the filesystem, network, or shell; behaviour comes entirely from our prompt. |
 | Values travel as decimal strings | The exact printed digits survive schema validation, host verification, storage, and reconstruction without binary float drift. |
-| Host string-matches every cited number on its cited page | Verification is deterministic host code, not model self-grading; a hallucinated citation cannot reach the review queue. |
+| Host parses complete tokens in the original table cell/text span | Formatting-equivalent Indian grouping/currency/whitespace/trailing zeros is accepted, but rounding, substring, and cross-cell matches fail. |
+| Unit, value, period, page, cell/span, source token, and document SHA form one typed fact | Independently plausible fields cannot be recombined into false high-confidence evidence. |
+| Exactly three distinct oldest-first annual periods | Duplicate, reversed, or nonannual rows fail before review persistence. |
 | Proposals, never records | The worst outcome of a bad run is a rejected queue item plus an error receipt — scoring only ever consumes human-attested revisions. |
+
+Approval is one caller-owned transaction: strict reconstruction, cache
+re-verification, revision header/children, and proposal compare-and-set either
+all commit or all roll back.
 
 ## 5. Failure modes / degradation
 
@@ -51,6 +61,11 @@ unavailability all become `IpoExtractionErrorReceipt` values carrying only
 stable codes and exception type names. The screener job counts them and
 keeps going.
 
+The parent also terminates and joins a timed-out/crashed child and rejects
+malformed or oversized worker output. Resource exhaustion, empty/scanned PDFs,
+stale source SHA, and legacy-unbound evidence are review-required rather than
+partial success. Raw hostile text is never stored in failure markers.
+
 ## 6. Configuration & dependencies
 
 Model id from the shared `CLAUDE_AGENT_MODEL` reader (default
@@ -60,12 +75,23 @@ subscription auth via the bundled CLI (`ANTHROPIC_API_KEY` must stay unset).
 The job only invokes the agent behind `--extract`, so schedulers and CI
 never spend plan credit by accident.
 
+The default worker limits are 60 seconds, 800 pages, 20 tables/page, 250
+rows/table, 50 columns/row, 100,000 cells/document, 200 characters/cell,
+20,000 text characters/page, 2,000,000/document, and 16 MiB serialized output.
+Linux applies a 512 MiB child address-space limit. Windows uses
+wall/object/text/result containment without a new `psutil` dependency.
+
 ## 7. Testing
 
 All agent tests inject `run_agent`; CI never spawns the SDK. The extractor
 tests drive real pdfplumber over a byte-accurate in-test PDF, so citation
 verification runs against genuinely extracted text. See
 [ipo-010-ai-extraction-proposals.md](../ipo-010-ai-extraction-proposals.md).
+
+Worker tests additionally cover spawn behavior, timeout, crash,
+malformed/oversized responses, cleanup, every object/text budget, and scanned
+PDFs. Verifier tests pin exact token/unit/page/cell binding, period order,
+quarantine, stale SHA, and legacy-confidence downgrade.
 
 ## 8. Extension points
 

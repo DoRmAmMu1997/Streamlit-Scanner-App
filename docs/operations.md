@@ -104,9 +104,10 @@ print(result.file_path, result.content_sha256, result.cache_hit)
 Only registered DRHP/RHP rows are eligible. The service validates SEBI DNS,
 every redirect, detail-page iframe shape, response type/size, PDF magic, and
 cache-path containment. It then stores the file beneath
-`DATA_DIR/ipo/documents/<sha256>.pdf`; `page_count` stays null because this sprint
-does not parse PDFs. Repeating the call rehashes a candidate cache file and uses
-it without HTTP only when the bytes still match the stored digest.
+`DATA_DIR/ipo/documents/<sha256>.pdf`; the download stage leaves `page_count`
+null because parsing is an independently contained IPO-010 operation. Repeating
+the call rehashes a candidate cache file and uses it without HTTP only when the
+bytes still match the stored digest.
 
 On failure, the row becomes `download_failed` with no trusted file/hash metadata.
 The durable audit contains only ids, document type, and a safe error code. Fix
@@ -142,9 +143,72 @@ P/B, EV/EBITDA, and EV/Sales; it does not invalidate operating ratios.
 If the page says the cache is unavailable, call `download_document` again rather
 than editing database paths or hashes. A source URL/type/hash change during entry
 fails safely and requires reloading the page. Manual profiles expose canonical
-INR/share values to backend callers but do not create a score or recommendation.
-The ratio analysis likewise does not call IPO-001 evaluation. Sector overrides for
-banks/NBFCs, AMCs, insurers, and loss-making technology issuers remain unsupported.
+INR/share values to backend callers but do not create a score or recommendation
+inside the page render. Run the IPO screener or use the capability-gated
+**Re-score all issues** action to derive factors from the newest approved
+revision. Sector overrides for banks/NBFCs, AMCs, insurers, and loss-making
+technology issuers remain unsupported.
+
+## Running the complete IPO screener
+
+IPO-008 provides the idempotent backend-only pipeline:
+
+```bash
+# Inventory -> download -> advisory enrichment -> deterministic re-score.
+python -m backend.jobs.run_ipo_screener
+
+# Also create review proposals from verified cached PDFs.
+python -m backend.jobs.run_ipo_screener --extract
+
+# Revisit reviewed extraction history for one issue. Pending and identical
+# proposals still skip, so force never creates a duplicate review item.
+python -m backend.jobs.run_ipo_screener --force-extract --issue-id 42
+
+# Re-score existing evidence without filing, download, or web network work.
+python -m backend.jobs.run_ipo_screener \
+  --skip-scan --skip-download --skip-enrich --issue-id 42
+```
+
+`--extract` is deliberately opt-in because it spends Claude plan credit.
+`--force-extract` implies `--extract`; it bypasses only reviewed-history
+pre-skips. It never bypasses the database rule allowing one pending proposal
+per document, and a semantically identical regenerated payload is still
+suppressed. Review pending proposals under **Admin IPO extraction**. Approval
+rehashes the cached bytes and atomically inserts the manual revision and review
+transition; rejection preserves the attributable review record.
+
+PDF parsing runs in a short-lived spawned worker. The defaults are 60 seconds,
+800 pages, 20 tables per page, 250 rows per table, 50 columns per row, 100,000
+cells per document, 200 characters per cell, 20,000 text characters per page,
+2,000,000 per document, and a 16 MiB serialized result. Linux additionally
+limits the child address space to 512 MiB. Windows relies on wall-time plus
+object/text/result limits; the lack of a portable hard RSS cap is an accepted
+residual risk. Timeout, crash, malformed output, resource exhaustion, and
+empty/scanned PDFs become review-required receipts rather than wedging the job
+or being treated as complete extraction.
+
+Only exact, complete `Decimal` tokens bound to the original page and table cell
+or text span can become cited financial facts. Units must be cited in the same
+table/header or bounded text context, and the three fiscal-year ends must be
+distinct, annual, and oldest-first. Legacy or low-confidence proposals remain
+review-required and cannot silently acquire stronger confidence.
+
+SerpAPI remains optional. Persisted issuer name and price band are the query
+authority; incompatible caller arguments fail before network access. Results
+are quarantined per item, so a hostile result cannot suppress clean siblings.
+All-hostile or malformed batches are `NOT_EVALUABLE`. Web observations are
+advisory: they may provide the bounded five-point GMP factor or request human
+review, but litigation hard cautions require corroborated official or
+approved-manual evidence. Identical observations update `last_seen_at` instead
+of creating duplicate rows.
+
+Scoring reads issue, approved profile, ratio receipts, subscription, and
+enrichment as one immutable snapshot. The semantic fingerprint excludes
+database ids; unchanged reruns insert neither duplicate enrichment evidence nor
+duplicate evaluations. Every result exposes all seven factor breakdown rows,
+whose weighted contributions sum to the score. The dashboard performs no
+network work, shows registered DRHP/RHP sources even for unscored issues, and
+marks an evaluation stale when newer evidence is awaiting a re-score.
 
 ### Scheduling on Windows (Task Scheduler)
 

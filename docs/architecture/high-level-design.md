@@ -24,14 +24,14 @@ job — is recorded to a scan-history database. Access is gated behind Google SS
 with an email allowlist for the interactive Streamlit surface.
 
 The backend also inventories official SEBI DRHP, RHP, and final-offer listings
-and stores immutable IPO score/recommendation history. IPO filing ingestion and
-evaluation remain explicit operations, and ingestion does not download PDFs or
-automatically derive factor scores. IPO-004 adds an admin-only Streamlit form for
-complete manual evidence from an already-cached DRHP/RHP.
-IPO-005 derives sixteen deterministic general-company financial ratios from the
-newest immutable profile, but still does not map them into factor scores.
-The separate IPO-003 repository service may explicitly download a registered
-DRHP/RHP into a verified local cache; it does not parse or score that PDF.
+and stores immutable IPO score/recommendation history. The explicit IPO screener
+job composes inventory, verified DRHP/RHP download, optional advisory enrichment,
+optional citation-bound extraction proposals, and deterministic re-scoring.
+Administrators may enter evidence manually or approve a proposal; only approved
+immutable revisions feed sixteen Decimal ratios, seven fixed-weight factors,
+seven hard-caution receipts, and the binary verdict. Hostile PDF parsing stays
+inside a killable bounded child, AI drafts stay outside scoring, and the
+Streamlit dashboard renders only stored state.
 
 ## 2. Goals & requirements
 
@@ -42,7 +42,9 @@ DRHP/RHP into a verified local cache; it does not parse or score that PDF.
 - Persist every scan run + shortlist for later "why was this shortlisted on date D?" audit.
 - Headless daily job for schedulers; Google-SSO gate + allowlist.
 - Inventory official SEBI IPO filing metadata and preserve deterministic,
-  explicitly invoked IPO score/recommendation history without inventing missing evidence.
+  explicitly invoked IPO score/recommendation history without inventing missing
+  evidence; optionally draft citation-bound PDF extraction proposals for human
+  review.
 
 **Non-functional**
 - **Single-writer research tool**, not a high-availability service: correctness, auditability, and low cost over throughput.
@@ -54,7 +56,8 @@ DRHP/RHP into a verified local cache; it does not parse or score that PDF.
 **Constraints**: Python 3.11+; DhanHQ account for candle data; `requests` +
 Beautiful Soup for official SEBI listing HTML; TA-Lib/pandas_ta optional
 (pure-pandas fallback); Claude Agent SDK + SerpAPI optional. IPO prospectus
-download/parsing and raw-factor derivation remain out of scope.
+parsing runs in a bounded local child process, and AI/web outputs remain
+untrusted until the typed authority and human-review boundaries accept them.
 
 ## 3. Context — external systems
 
@@ -64,7 +67,9 @@ flowchart TD
     Cron["Scheduler / cron"] --> JOB["Daily scan job"]
     JOB --> APP
     Operator["Operator / scheduler"] --> IPOJOB["IPO filing job"]
+    Operator --> IPOSCREEN["IPO screener job"]
     IPOJOB -->|DRHP, RHP, final-offer listings| SEBI["Official SEBI"]
+    IPOSCREEN -->|bounded DRHP/RHP retrieval| SEBI
     APP -->|OIDC sign-in| Google["Google OIDC"]
     APP -->|daily candles, instrument master| Dhan["DhanHQ API"]
     APP -->|company data scrape| ScreenerIn["screener.in"]
@@ -73,6 +78,7 @@ flowchart TD
     APP -->|chart lib via CDN+SRI| CDN["unpkg: Lightweight Charts"]
     APP --> DB[("SQLite / Postgres application database")]
     IPOJOB --> DB
+    IPOSCREEN --> DB
     APP --> Cache[("Local Parquet + JSON caches")]
 ```
 
@@ -95,6 +101,7 @@ flowchart TB
       UI["streamlit run app.py — UI"]
       JOB["python -m backend.jobs.run_daily_scan"]
       IPOJOB["python -m backend.jobs.scan_ipo_filings"]
+      IPOSCREEN["python -m backend.jobs.run_ipo_screener"]
     end
     subgraph Strategy["screeners/ (strategy)"]
       SCR["11 screeners : BaseScanner subclasses"]
@@ -103,7 +110,7 @@ flowchart TB
       REG["screener_registry"]; BASE["scanner_base"]; IND["indicators"]
       DATA["dhan_client + daily_data_loader"]; UNI["universe_*"]
       SVC["scanning.service + result_contract"]; VAL["validation"]; STORE["storage + migrations"]
-      IPO["ipo domain + SEBI source"]
+      IPO["ipo domain + sources + scoring + extraction review"]
       AIF["fundamentals"]; AIT["technical"]; AI67["sixty_seven"]
       CH["charts"]; AUTH["auth"]; CFG["config"]; OBS["observability"]; SEC["security"]; HLT["health"]
     end
@@ -111,6 +118,7 @@ flowchart TB
     UI --> AUTH --> REG --> SCR
     UI --> SVC; JOB --> SVC
     IPOJOB --> IPO --> STORE
+    IPOSCREEN --> IPO
     SCR --> BASE --> IND
     SVC --> SCR --> DATA --> UNI
     SVC --> STORE
@@ -137,7 +145,7 @@ flowchart TB
 | Screener catalog | [screener-catalog](components/screener-catalog.md) | The 11 strategies |
 | Scan service & provenance | [scan-service-and-provenance](components/scan-service-and-provenance.md) | `run_scan` lifecycle + strict result/provenance contract + AI evaluation receipts |
 | Ranking scorer | [scoring](components/scoring.md) | RANK-002 additive `final_score` scorer, score receipts, cache-only liquidity/risk, UI component breakdown |
-| IPO Screener (domain + ingestion + cache + manual entry + ratios) | [ipo-screener](components/ipo-screener.md) ([IPO-001](ipo-001-domain-score-contract.md), [IPO-002](ipo-002-sebi-filing-ingestion.md), [IPO-003](ipo-003-document-downloader-cache.md), [IPO-004](ipo-004-manual-extraction-mvp.md), [IPO-005](ipo-005-ratio-engine.md)) | Official-SEBI inventory, secure DRHP/RHP cache, immutable manual evidence, deterministic ratios, fail-closed recommendations, immutable evaluation history |
+| IPO Screener (IPO-001…010) | [ipo-screener](components/ipo-screener.md) ([extraction AI](components/ipo-extraction-ai.md), [hardening ADR](ipo-010-security-integrity-hardening.md)) | Official-SEBI inventory, secure DRHP/RHP cache, manual and citation-bound review evidence, deterministic ratios/factors/flags, advisory enrichment, idempotent orchestration, dashboard, and immutable binary verdict history |
 | Storage & persistence | [storage-persistence](components/storage-persistence.md) | Shared ORM/engine/session/Alembic layer, scan/audit/config/role/validation tables, nine `ipo_*` tables, and isolated scan-history/IPO query modules |
 | Scan comparison | [scan-comparison](components/scan-comparison.md) | JOB-003 latest-vs-previous shortlist read model over `scan_runs`/`scan_results` + finalized-run helpers |
 | Forward-return validation | [validation](components/validation.md) | VALID-002 calculator/service, VALID-003A/004 aggregate/dashboard metrics for `signal_forward_returns` rows, the read-only Validation / Signal Performance dashboard, and the headless compute job |
@@ -341,6 +349,7 @@ cached PDFs. Designs: [OBS-003](obs-003-audit-log.md),
 | **IPO verdicts fail closed (IPO-001)** | The scorecard uses fixed weights without renormalizing missing factors. Missing fundamental evidence forces `Not Recommended` / `Skip`, and evaluation atomically appends an immutable score/recommendation pair rather than mutating history. |
 | **SEBI ingestion is bounded and category-atomic (IPO-002)** | Only fixed official HTTPS SEBI listings may be fetched. Redirects, retries, response bytes, and page count are bounded; malformed filing rows fail the category. DRHP/RHP/final-offer categories commit independently for recovery, while any failed category still produces a nonzero aggregate exit. |
 | **IPO ratios are replayable receipts (IPO-005)** | Exact Decimal formulas run from one immutable manual revision plus an issue-price snapshot. Missing/undefined/not-meaningful values remain explicit, derived ratios are not persisted, and no calculation automatically changes the IPO-001 verdict. |
+| **IPO automation is contained and authority-typed (IPO-006…010)** | Hostile PDFs parse in killable, resource-bounded child processes; financial values remain atomic cited facts; AI output becomes a review proposal rather than scoring evidence; SerpAPI is advisory and quarantined per item; one semantic input snapshot produces a seven-row deterministic score receipt and at most one immutable evaluation. |
 | **Validate within a bounded attempt budget (AI-004)** | Strict-schema parsing may retry malformed output within the configured 1–3 attempt budget (never SDK/usage-limit errors); a budget of 1 disables retries, and invalid output is rejected and counted, never persisted. |
 | **Quarantine bad candle data at the loader boundary (DATA-001)** | A pure validator screens every OHLCV frame; structurally impossible candles (high<low, NaN, dup dates) are withheld from scanners and downgrade the run (`PARTIAL`/`FAILED`), while stale/gappy data passes as a recorded warning. Each run persists a bounded, redacted quality receipt (`scan_runs.data_quality_json`) so the app does not trust raw vendor candles without an audit trail. |
 | **Forward validation uses elapsed data only (VALID-002)** | Historical signal validation enters at the next trading day's open and exits at the Nth trading day's close. Rows stay `pending` while the window has not elapsed, become `insufficient_data` only after stale missing data, and never forward-fill absent bars. |
@@ -355,5 +364,5 @@ cached PDFs. Designs: [OBS-003](obs-003-audit-log.md),
 
 - **AI/external dependency** — Dhan/screener.in/SerpAPI/CLI changes can break features; mitigated by fallbacks, caches, and untrusted-evidence handling.
 - **Single-writer SQLite locally** — WAL + short sessions mitigate; Postgres for real concurrency.
-- **Recently shipped**: PROV-002 (deterministic per-screener receipts via `build_provenance`), PROV-003 (AI verdict receipts + the `ai_evaluations` ledger + HMAC verdict-cache integrity), DATA-001 (candle data-quality quarantine + per-run receipt), DEPLOY-001 (Docker runtime packaging), DEPLOY-002 (Docker Compose local production stack), DEPLOY-003/DEPLOY-003B (Render Blueprint + DB-URL driver normalization + committed daily-scan schedule), OBS-003 (user-action audit log + admin runtime-config form/viewer), JOB-003 (latest-vs-previous scan comparison), RANK-002 (deterministic `final_score` scorer + score component UI), VALID-001/VALID-002/VALID-003A/VALID-003B/VALID-004 (forward-return schema, calculator/service, backend aggregate metrics, read-only validation dashboard, dashboard slices/export, and headless compute job), and IPO-001 through IPO-005 (fail-closed evaluation, hardened filing inventory, secure PDF cache, immutable admin evidence, and deterministic ratios) are now in flight.
-- **Roadmap (backlog)**: RANK-003 (fundamental/valuation components), richer validation visualizations beyond v1 tables, AUTH-003 (role-gated features), later DEPLOY-* hosting automation, and future IPO prospectus extraction, ratio-to-factor derivation, sector-specific ratio overrides, read-only UI, and explicit deployment scheduling. These land through existing typed/JSON seams or separately reviewed runtime contracts without flag-day migrations.
+- **Recently shipped**: PROV-002 (deterministic per-screener receipts via `build_provenance`), PROV-003 (AI verdict receipts + the `ai_evaluations` ledger + HMAC verdict-cache integrity), DATA-001 (candle data-quality quarantine + per-run receipt), DEPLOY-001 (Docker runtime packaging), DEPLOY-002 (Docker Compose local production stack), DEPLOY-003/DEPLOY-003B (Render Blueprint + DB-URL driver normalization + committed daily-scan schedule), OBS-003 (user-action audit log + admin runtime-config form/viewer), JOB-003 (latest-vs-previous scan comparison), RANK-002 (deterministic `final_score` scorer + score component UI), VALID-001/VALID-002/VALID-003A/VALID-003B/VALID-004 (forward-return schema, calculator/service, backend aggregate metrics, read-only validation dashboard, dashboard slices/export, and headless compute job), and IPO-001 through IPO-010 (official inventory, cache, approved evidence, ratios, factors/flags, dashboard, orchestration, advisory enrichment, and contained extraction proposals).
+- **Roadmap (backlog)**: RANK-003 (fundamental/valuation components), richer validation visualizations beyond v1 tables, AUTH-003 (role-gated features), later DEPLOY-* hosting automation, sector-specific IPO factor overrides, OCR behind the existing bounded parse receipt, and explicit IPO deployment scheduling. These land through existing typed/JSON seams or separately reviewed runtime contracts without flag-day migrations.

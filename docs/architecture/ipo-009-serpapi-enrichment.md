@@ -18,16 +18,17 @@ follow-up, not part of this change.
 - **Web results can never override official documents or supply a
   financial-statement number.** Signals are typed records with no path into
   the manual-extraction contract or the ratio engine; they feed only the
-  optional GMP/sentiment factor and the litigation caution flag.
-- **Every snippet is prompt-injection scanned before storage** (the shared
-  TEST-003 engine). A hit replaces the entry's text with the blocked-evidence
-  marker, sets `quarantined=true` on the row, and logs a payload-free
-  warning; quarantined rows are ignored by both consumers.
-- **Red-flag evidence is keyword matches only.** The collector records which
-  allowlisted fragments (fraud, probe, investigation, litigation, sebi
-  order, ...) matched; the caution flag reads those matches and never the
-  snippet text.
-- **GMP parsing is conservative.** A text must explicitly mention GMP;
+  optional GMP/sentiment factor and advisory review observations. A litigation
+  hard caution requires corroborated official or approved-manual authority.
+- **Every result is prompt-injection scanned before storage** (the shared
+  TEST-003 engine). A hit replaces only that entry with a secret-safe blocked
+  marker/reason; clean siblings remain usable. Zero clean results makes the
+  batch `NOT_EVALUABLE` and human-review required.
+- **Red-flag observations are contextual and negation-aware.** The collector
+  records normalized matched context and reason for advisory review; it never
+  grants those observations hard-veto authority.
+- **GMP parsing is conservative.** A percent or rupee amount must occur within
+  40 characters of `GMP` or `grey market premium`;
   percent readings win; rupee readings convert only when the issue price is
   known; the median across entries becomes `parsed_value`, otherwise `NULL`.
   The factor weight is 5/100 and every reason string carries the
@@ -36,7 +37,7 @@ follow-up, not part of this change.
   graceful skip; the screener stays fully functional (the GMP factor is
   simply missing, which only lowers verdict confidence).
 - Rows are stamped `confidence='low'` and
-  `source_policy='serpapi-low-confidence-v1'` forever, and each batch
+  `source_policy='serpapi-low-confidence-v2'`, and each batch
   persists atomically per issue with per-type query isolation.
 
 ## Testing
@@ -45,3 +46,12 @@ follow-up, not part of this change.
 trip (hostile text never reaches storage), the GMP regex table including the
 rupee-to-percent conversion and the no-price-band case, red-flag keyword
 capture, per-type failure isolation, and the typed not-found error.
+
+> PR #108 hardening: persisted issuer name/price are the query authority;
+> optional compatibility arguments must match before network access. Quarantine
+> is per result, mixed batches preserve clean siblings, and all-hostile batches
+> are `NOT_EVALUABLE`. GMP values must occur within 40 characters of GMP/grey
+> market premium. Red-flag observations are negation-aware and advisory;
+> litigation hard cautions require corroborated official or approved-manual
+> evidence. Semantic hashes preserve `first_seen_at` and refresh
+> `last_seen_at` without duplicates.
