@@ -36,8 +36,14 @@ from backend.ipo.models import (
     IpoIssueData,
     IpoIssueType,
     IpoStatus,
+    IpoValidationError,
 )
-from backend.ipo.repository import create_document, create_issue
+from backend.ipo.repository import (
+    approve_extraction_proposal,
+    create_document,
+    create_issue,
+    reject_extraction_proposal,
+)
 from backend.security import BLOCKED_EVIDENCE_RESPONSE
 from backend.storage.ipo_repository import update_ipo_document_cache_if_source_matches
 
@@ -372,6 +378,13 @@ def test_one_unverified_optional_value_downgrades_to_medium(
     assert isinstance(result, IpoExtractionProposalRecord)
     assert result.confidence is Confidence.MEDIUM
     assert any("total_debt" in reason for reason in result.needs_review_reasons)
+    with pytest.raises(IpoValidationError, match=r"incomplete.*review"):
+        approve_extraction_proposal(
+            result.id,
+            reviewed_by_email="reviewer@example.com",
+            data_dir=tmp_path,
+            session_factory=file_session_factory,
+        )
 
 
 def test_malformed_json_gets_one_bounded_retry_then_succeeds(
@@ -468,6 +481,57 @@ def test_duplicate_pending_proposal_is_reported_not_duplicated(
 
     assert isinstance(result, IpoExtractionErrorReceipt)
     assert result.code == "pending_proposal_exists"
+
+
+def test_reviewed_history_skips_ai_unless_forced_and_identical_force_still_skips(
+    file_session_factory, tmp_path: Path
+) -> None:
+    """History avoids plan spend; force cannot duplicate identical evidence."""
+    issue, document, _digest = _cached_pdf_document(file_session_factory, tmp_path)
+    first = propose_extraction(
+        issue.id,
+        document.id,
+        data_dir=tmp_path,
+        run_agent=lambda _prompt: _agent_json(),
+        session_factory=file_session_factory,
+    )
+    assert isinstance(first, IpoExtractionProposalRecord)
+    reject_extraction_proposal(
+        first.id,
+        reviewed_by_email="reviewer@example.com",
+        reason="Exercise reviewed-history behavior.",
+        session_factory=file_session_factory,
+    )
+    calls = 0
+
+    def _agent(_prompt: str) -> str:
+        """Count expensive model calls while returning the same payload."""
+        nonlocal calls
+        calls += 1
+        return _agent_json()
+
+    normal = propose_extraction(
+        issue.id,
+        document.id,
+        data_dir=tmp_path,
+        run_agent=_agent,
+        session_factory=file_session_factory,
+    )
+    assert isinstance(normal, IpoExtractionErrorReceipt)
+    assert normal.code == "unchanged_extraction_history"
+    assert calls == 0
+
+    forced = propose_extraction(
+        issue.id,
+        document.id,
+        data_dir=tmp_path,
+        run_agent=_agent,
+        force_extract=True,
+        session_factory=file_session_factory,
+    )
+    assert isinstance(forced, IpoExtractionErrorReceipt)
+    assert forced.code == "identical_proposal"
+    assert calls == 1
 
 
 def test_unparseable_document_becomes_a_typed_receipt(

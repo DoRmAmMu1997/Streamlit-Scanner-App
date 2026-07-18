@@ -198,6 +198,7 @@ def run_ipo_screener(
     skip_download: bool = False,
     skip_enrich: bool = False,
     extract: bool = False,
+    force_extract: bool = False,
     issue_ids: Sequence[int] | None = None,
     to_date: dt.date | None = None,
     ensure_schema: Callable[[], object] = ensure_database_schema,
@@ -245,6 +246,7 @@ def run_ipo_screener(
         skip_download=skip_download,
         skip_enrich=skip_enrich,
         extract=extract,
+        force_extract=force_extract,
     )
 
     filings: IpoFilingJobOutcome | None = None
@@ -339,10 +341,17 @@ def run_ipo_screener(
                 ):
                     continue
                 result = extractor(
-                    issue.id, document.id, session_factory=session_factory
+                    issue.id,
+                    document.id,
+                    force_extract=force_extract,
+                    session_factory=session_factory,
                 )
                 if isinstance(result, IpoExtractionErrorReceipt):
-                    if result.code == "pending_proposal_exists":
+                    if result.code in {
+                        "pending_proposal_exists",
+                        "unchanged_extraction_history",
+                        "identical_proposal",
+                    }:
                         proposals_skipped += 1
                     else:
                         proposals_failed += 1
@@ -468,6 +477,14 @@ def main(
         ),
     )
     parser.add_argument(
+        "--force-extract",
+        action="store_true",
+        help=(
+            "Re-run reviewed extraction history, while still skipping pending "
+            "or semantically identical proposals. Implies --extract."
+        ),
+    )
+    parser.add_argument(
         "--issue-id",
         type=int,
         action="append",
@@ -484,7 +501,8 @@ def main(
         skip_scan=args.skip_scan,
         skip_download=args.skip_download,
         skip_enrich=args.skip_enrich,
-        extract=args.extract,
+        extract=args.extract or args.force_extract,
+        force_extract=args.force_extract,
         issue_ids=args.issue_ids,
         to_date=args.to_date,
     )

@@ -58,6 +58,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -924,7 +925,7 @@ class IpoDocument(Base):
         back_populates="source_document"
     )
     extraction_proposals: Mapped[list[IpoExtractionProposal]] = relationship(
-        back_populates="document", cascade="all, delete-orphan", passive_deletes=True
+        back_populates="document", passive_deletes=True
     )
 
 
@@ -1351,6 +1352,15 @@ class IpoScore(Base):
             name="ck_ipo_scores_inputs_fingerprint_length",
         ),
         Index("ix_ipo_scores_issue_scored_at", "issue_id", "scored_at"),
+        Index(
+            "ux_ipo_scores_semantic_evaluation",
+            "issue_id",
+            "model_version",
+            "inputs_fingerprint",
+            unique=True,
+            sqlite_where=text("inputs_fingerprint IS NOT NULL"),
+            postgresql_where=text("inputs_fingerprint IS NOT NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
@@ -1366,6 +1376,9 @@ class IpoScore(Base):
     gmp_sentiment: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
     total_score: Mapped[Decimal] = mapped_column(Numeric(5, 2), nullable=False)
     contributions_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    breakdown_json: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, nullable=False, default=list, server_default="[]"
+    )
     missing_data_json: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     reasons_json: Mapped[list[str]] = mapped_column(JSON, nullable=False)
     model_version: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -1478,6 +1491,14 @@ class IpoExtractionProposal(Base):
         CheckConstraint(
             "page_count > 0", name="ck_ipo_extraction_proposals_page_count"
         ),
+        CheckConstraint(
+            "status != 'pending' OR document_id IS NOT NULL",
+            name="ck_ipo_extraction_proposals_pending_document",
+        ),
+        CheckConstraint(
+            "semantic_fingerprint IS NULL OR length(semantic_fingerprint) = 64",
+            name="ck_ipo_extraction_proposals_semantic_fingerprint",
+        ),
         # Same hex-digest validation pattern as the IPO-003/IPO-004 hash columns:
         # SQLite has no regex, so nested replace() strips every hex digit and the
         # remainder must be empty. Keep this SQL byte-identical to migration
@@ -1492,18 +1513,38 @@ class IpoExtractionProposal(Base):
             "'b', ''), 'c', ''), 'd', ''), 'e', ''), 'f', '') = ''",
             name="ck_ipo_extraction_proposals_content_hash",
         ),
+        Index(
+            "ux_ipo_extraction_proposals_pending_document",
+            "document_id",
+            unique=True,
+            sqlite_where=text("status = 'pending'"),
+            postgresql_where=text("status = 'pending'"),
+        ),
+        Index(
+            "ux_ipo_extraction_proposals_semantic",
+            "document_id",
+            "semantic_fingerprint",
+            unique=True,
+            sqlite_where=text(
+                "document_id IS NOT NULL AND semantic_fingerprint IS NOT NULL"
+            ),
+            postgresql_where=text(
+                "document_id IS NOT NULL AND semantic_fingerprint IS NOT NULL"
+            ),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
     issue_id: Mapped[int] = mapped_column(
         BigIntPrimaryKey, ForeignKey("ipo_issues.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    document_id: Mapped[int] = mapped_column(
+    document_id: Mapped[int | None] = mapped_column(
         BigIntPrimaryKey,
-        ForeignKey("ipo_documents.id", ondelete="CASCADE"),
-        nullable=False,
+        ForeignKey("ipo_documents.id", ondelete="SET NULL"),
+        nullable=True,
         index=True,
     )
+    document_url_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="pending", server_default="pending"
     )
@@ -1511,6 +1552,15 @@ class IpoExtractionProposal(Base):
     # re-runs the strict domain validation on this payload, so a corrupted or
     # tampered proposal can never become an immutable revision.
     payload_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    evidence_schema_version: Mapped[str] = mapped_column(
+        String(40),
+        nullable=False,
+        default="legacy-unbound/v0",
+        server_default="legacy-unbound/v0",
+    )
+    semantic_fingerprint: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
     confidence: Mapped[str] = mapped_column(String(8), nullable=False)
     # Reviewer-facing notes from the deterministic verifier: which cited values
     # could not be string-matched on their cited pages, and why confidence was
@@ -1539,7 +1589,9 @@ class IpoExtractionProposal(Base):
     )
 
     issue: Mapped[IpoIssue] = relationship(back_populates="extraction_proposals")
-    document: Mapped[IpoDocument] = relationship(back_populates="extraction_proposals")
+    document: Mapped[IpoDocument | None] = relationship(
+        back_populates="extraction_proposals"
+    )
 
 
 class IpoEnrichmentSignal(Base):
@@ -1574,6 +1626,27 @@ class IpoEnrichmentSignal(Base):
             "confidence IN ('low', 'medium', 'high')",
             name="ck_ipo_enrichment_signals_confidence",
         ),
+        CheckConstraint(
+            "authority_level IN ('advisory', 'official', 'approved_manual')",
+            name="ck_ipo_enrichment_signals_authority",
+        ),
+        CheckConstraint(
+            "batch_usability IN ('usable', 'partial', 'not_evaluable')",
+            name="ck_ipo_enrichment_signals_batch_usability",
+        ),
+        CheckConstraint(
+            "semantic_hash IS NULL OR length(semantic_hash) = 64",
+            name="ck_ipo_enrichment_signals_semantic_hash",
+        ),
+        Index(
+            "ux_ipo_enrichment_signals_semantic",
+            "issue_id",
+            "signal_type",
+            "semantic_hash",
+            unique=True,
+            sqlite_where=text("semantic_hash IS NOT NULL"),
+            postgresql_where=text("semantic_hash IS NOT NULL"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
@@ -1595,6 +1668,28 @@ class IpoEnrichmentSignal(Base):
     quarantined: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     confidence: Mapped[str] = mapped_column(String(8), nullable=False)
     source_policy: Mapped[str] = mapped_column(String(40), nullable=False)
+    authority_level: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="advisory", server_default="advisory"
+    )
+    corroborated: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+    authority_policy_version: Mapped[str] = mapped_column(
+        String(48),
+        nullable=False,
+        default="ipo-enrichment-authority-v1",
+        server_default="ipo-enrichment-authority-v1",
+    )
+    batch_usability: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="partial", server_default="partial"
+    )
+    semantic_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    first_seen_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.UTC)
+    )
+    last_seen_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.UTC)
+    )
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: dt.datetime.now(dt.UTC)
     )

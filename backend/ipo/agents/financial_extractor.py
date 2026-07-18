@@ -999,6 +999,7 @@ def propose_extraction(
     data_dir: Path | None = None,
     model: str | None = None,
     run_agent: Callable[[str], str] | None = None,
+    force_extract: bool = False,
     session_factory: SessionFactory = session_scope,
 ) -> IpoExtractionProposalRecord | IpoExtractionErrorReceipt:
     """Draft one review-queue proposal from a cached prospectus PDF.
@@ -1011,6 +1012,8 @@ def propose_extraction(
         run_agent: Injectable runner mapping the kickoff prompt to the
             model's final text. Tests and CI always inject this; production
             leaves it ``None`` to use the locked-down SDK runner.
+        force_extract: Bypass matching reviewed-attempt history, while still
+            preserving pending and semantic-duplicate protections.
         session_factory: Injectable transaction scope.
 
     Returns:
@@ -1030,6 +1033,7 @@ def propose_extraction(
             data_dir=data_dir,
             model=model,
             run_agent=run_agent,
+            force_extract=force_extract,
             session_factory=session_factory,
         )
     except Exception as exc:  # noqa: BLE001 - batch boundary converts to receipts
@@ -1068,6 +1072,7 @@ def _propose_extraction_inner(
     data_dir: Path | None,
     model: str | None,
     run_agent: Callable[[str], str] | None,
+    force_extract: bool,
     session_factory: SessionFactory,
 ) -> IpoExtractionProposalRecord:
     """Run the full extract -> classify -> agent -> verify -> persist pipeline."""
@@ -1083,19 +1088,33 @@ def _propose_extraction_inner(
         raise IpoExtractionError(
             "unsupported_document", "Extraction accepts only a cached DRHP or RHP."
         )
+    agent_model = model if model is not None else get_fundamentals_model()
+    history = list_extraction_proposals(
+        issue_id=issue_id,
+        session_factory=session_factory,
+    )
     pending = [
         proposal
-        for proposal in list_extraction_proposals(
-            issue_id=issue_id,
-            status=IpoExtractionProposalStatus.PENDING,
-            session_factory=session_factory,
-        )
+        for proposal in history
         if proposal.document_id == document_id
+        and proposal.status is IpoExtractionProposalStatus.PENDING
     ]
     if pending:
         raise IpoExtractionError(
             "pending_proposal_exists",
             f"Document {document_id} already has pending proposal {pending[0].id}.",
+        )
+    if not force_extract and any(
+        proposal.document_id == document_id
+        and proposal.status is not IpoExtractionProposalStatus.PENDING
+        and proposal.source_content_sha256 == document.content_sha256
+        and proposal.model_version == EXTRACTOR_MODEL_VERSION
+        and proposal.agent_model == agent_model
+        for proposal in history
+    ):
+        raise IpoExtractionError(
+            "unchanged_extraction_history",
+            f"Document {document_id} already has a reviewed matching extraction attempt.",
         )
 
     cache_root = Path(data_dir) if data_dir is not None else get_settings().data_dir
@@ -1110,7 +1129,6 @@ def _propose_extraction_inner(
         raise
     sections = classify_pages(pages)
     prompt = _build_user_prompt(issue.company_name, document.document_type, sections)
-    agent_model = model if model is not None else get_fundamentals_model()
 
     def _run_once() -> str:
         """Produce one final message with a fresh evidence collector.
@@ -1175,5 +1193,6 @@ def _propose_extraction_inner(
         agent_model=agent_model,
         source_content_sha256=verified.content_sha256 or "",
         page_count=len(pages),
+        data_dir=cache_root,
         session_factory=session_factory,
     )

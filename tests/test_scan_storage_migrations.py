@@ -177,6 +177,7 @@ def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Pa
     assert {index["name"] for index in inspector.get_indexes("ipo_scores")} >= {
         "ix_ipo_scores_issue_id",
         "ix_ipo_scores_issue_scored_at",
+        "ux_ipo_scores_semantic_evaluation",
     }
     recommendation_indexes = {
         index["name"]: index for index in inspector.get_indexes("ipo_recommendations")
@@ -232,17 +233,29 @@ def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Pa
     # root; a proposal additionally links to its document (CASCADE) and, once
     # approved, to the immutable manual revision it became (SET NULL).
     score_columns = {column["name"] for column in inspector.get_columns("ipo_scores")}
-    assert "inputs_fingerprint" in score_columns
+    assert {"inputs_fingerprint", "breakdown_json"} <= score_columns
     recommendation_columns = {
         column["name"] for column in inspector.get_columns("ipo_recommendations")
     }
     assert "caution_flags_json" in recommendation_columns
+    proposal_columns = {
+        column["name"]: column
+        for column in inspector.get_columns("ipo_extraction_proposals")
+    }
+    assert {
+        "document_url_snapshot",
+        "evidence_schema_version",
+        "semantic_fingerprint",
+    } <= proposal_columns.keys()
+    assert proposal_columns["document_id"]["nullable"] is True
     assert {
         index["name"] for index in inspector.get_indexes("ipo_extraction_proposals")
     } >= {
         "ix_ipo_extraction_proposals_issue_id",
         "ix_ipo_extraction_proposals_document_id",
         "ix_ipo_extraction_proposals_manual_extraction_id",
+        "ux_ipo_extraction_proposals_pending_document",
+        "ux_ipo_extraction_proposals_semantic",
     }
     proposal_fks = {
         fk["referred_table"]: fk["options"]
@@ -250,14 +263,25 @@ def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Pa
     }
     assert proposal_fks == {
         "ipo_issues": {"ondelete": "CASCADE"},
-        "ipo_documents": {"ondelete": "CASCADE"},
+        "ipo_documents": {"ondelete": "SET NULL"},
         "ipo_manual_extractions": {"ondelete": "SET NULL"},
     }
+    enrichment_columns = {
+        column["name"] for column in inspector.get_columns("ipo_enrichment_signals")
+    }
+    assert {
+        "semantic_hash",
+        "authority_policy_version",
+        "batch_usability",
+        "first_seen_at",
+        "last_seen_at",
+    } <= enrichment_columns
     assert {
         index["name"] for index in inspector.get_indexes("ipo_enrichment_signals")
     } >= {
         "ix_ipo_enrichment_signals_issue_id",
         "ix_ipo_enrichment_signals_captured_at",
+        "ux_ipo_enrichment_signals_semantic",
     }
     signal_fk = inspector.get_foreign_keys("ipo_enrichment_signals")[0]
     assert signal_fk["referred_table"] == "ipo_issues"

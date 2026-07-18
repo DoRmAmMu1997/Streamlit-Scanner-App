@@ -16,12 +16,15 @@ learning SQLAlchemy or accidentally returning a session-bound ORM object.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
 import logging
+import re
 from collections.abc import Callable, Mapping
 from contextlib import suppress
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from backend.audit import record_audit_event
 from backend.config import get_settings
@@ -43,6 +46,7 @@ from backend.ipo.manual_extraction import (
     IpoShareUnit,
 )
 from backend.ipo.models import (
+    CitedFinancialFact,
     Confidence,
     FinancialPeriodType,
     IpoCautionFlag,
@@ -95,6 +99,7 @@ from backend.storage.ipo_repository import (
     get_ipo_document_by_url,
     get_ipo_evaluation_rows,
     get_ipo_extraction_proposal,
+    get_ipo_extraction_proposal_by_semantic_fingerprint,
     get_ipo_financial,
     get_ipo_issue,
     get_ipo_issue_by_sebi_key,
@@ -108,7 +113,6 @@ from backend.storage.ipo_repository import (
     insert_ipo_document,
     insert_ipo_enrichment_signals,
     insert_ipo_evaluation,
-    insert_ipo_extraction_proposal,
     insert_ipo_financial,
     insert_ipo_issue,
     insert_ipo_manual_extraction,
@@ -123,6 +127,7 @@ from backend.storage.ipo_repository import (
     list_ipo_subscription_rows,
     list_unclaimed_ipo_issues_by_company_name,
     mark_ipo_extraction_proposal_reviewed,
+    try_insert_ipo_extraction_proposal,
     update_ipo_document_cache_if_source_matches,
     update_ipo_document_values,
     update_ipo_financial_row,
@@ -139,6 +144,15 @@ logger = logging.getLogger(__name__)
 
 class IpoNotFoundError(LookupError):
     """Distinguish an absent parent/child row from invalid submitted data."""
+
+
+class IpoProposalConflictError(IpoValidationError):
+    """Stable idempotency outcome for pending or identical proposal races."""
+
+    def __init__(self, code: str, message: str) -> None:
+        """Store a batch-safe code while retaining validation-error compatibility."""
+        super().__init__(message)
+        self.code = code
 
 
 def _utc(value: dt.datetime) -> dt.datetime:
@@ -345,8 +359,17 @@ def delete_document(
     *,
     session_factory: SessionFactory = session_scope,
 ) -> bool:
-    """Delete one issue-owned metadata row without removing shared cache bytes."""
+    """Delete metadata while preserving reviewed proposal provenance."""
     with session_factory() as session:
+        if get_ipo_document(session, issue_id, document_id) is None:
+            return False
+        if (
+            get_pending_ipo_extraction_proposal_for_document(session, document_id)
+            is not None
+        ):
+            raise IpoValidationError(
+                f"Document {document_id} has a pending extraction proposal."
+            )
         return delete_ipo_document_row(session, issue_id, document_id)
 
 
@@ -1390,6 +1413,229 @@ def _proposal_payload_to_manual_data(
         ) from exc
 
 
+_CITED_FACT_SCHEMA_VERSION = "cited-financial-fact/v1"
+_AMOUNT_UNIT_MULTIPLIERS = {
+    IpoAmountUnit.INR.value: Decimal("1"),
+    IpoAmountUnit.THOUSAND_INR.value: Decimal("1000"),
+    IpoAmountUnit.LAKH_INR.value: Decimal("100000"),
+    IpoAmountUnit.MILLION_INR.value: Decimal("1000000"),
+    IpoAmountUnit.CRORE_INR.value: Decimal("10000000"),
+}
+_SHARE_UNIT_MULTIPLIERS = {
+    IpoShareUnit.SHARES.value: Decimal("1"),
+    IpoShareUnit.THOUSAND_SHARES.value: Decimal("1000"),
+    IpoShareUnit.LAKH_SHARES.value: Decimal("100000"),
+    IpoShareUnit.MILLION_SHARES.value: Decimal("1000000"),
+    IpoShareUnit.CRORE_SHARES.value: Decimal("10000000"),
+}
+_FINANCIAL_FACT_FIELDS = {
+    "net_worth",
+    "total_debt",
+    "cash",
+    "cash_flow_from_operations",
+    "total_assets",
+    "current_liabilities",
+}
+_ISSUE_FACT_FIELDS = {"fresh_issue_amount", "ofs_amount"}
+_SHARE_FACT_FIELDS = {"equity_shares", "post_issue_equity_shares"}
+
+
+def _expected_cited_facts(
+    payload: Mapping[str, Any],
+) -> dict[str, tuple[Decimal, int, dt.date | None, str | None, Decimal]]:
+    """Derive the exact facts that must bind every approvable numeric field."""
+    expected: dict[
+        str, tuple[Decimal, int, dt.date | None, str | None, Decimal]
+    ] = {}
+    financial_unit = str(payload["financial_amount_unit"])
+    issue_unit = str(payload["issue_amount_unit"])
+    share_unit = str(payload["equity_share_unit"])
+    for index, raw_period in enumerate(payload["periods"]):
+        period = dict(raw_period)
+        period_end = dt.date.fromisoformat(str(period["period_end"]))
+        for field in (
+            "revenue",
+            "ebitda",
+            "pat",
+            "profit_before_tax",
+            "finance_cost",
+        ):
+            expected[f"periods[{index}].{field}"] = (
+                Decimal(str(period[field])),
+                int(period[f"{field}_page"]),
+                period_end,
+                financial_unit,
+                _AMOUNT_UNIT_MULTIPLIERS[financial_unit],
+            )
+    for field in _PROPOSAL_VALUE_FIELDS:
+        unit: str | None = None
+        multiplier = Decimal("1")
+        if field in _FINANCIAL_FACT_FIELDS:
+            unit = financial_unit
+            multiplier = _AMOUNT_UNIT_MULTIPLIERS[financial_unit]
+        elif field in _ISSUE_FACT_FIELDS:
+            unit = issue_unit
+            multiplier = _AMOUNT_UNIT_MULTIPLIERS[issue_unit]
+        elif field in _SHARE_FACT_FIELDS:
+            unit = share_unit
+            multiplier = _SHARE_UNIT_MULTIPLIERS[share_unit]
+        expected[field] = (
+            Decimal(str(payload[field])),
+            int(payload[f"{field}_page"]),
+            None,
+            unit,
+            multiplier,
+        )
+    for raw_peer in payload["peers"]:
+        peer = dict(raw_peer)
+        for metric, value in dict(peer["metrics"]).items():
+            field_name = f"peer {peer['company_name']} {metric}"
+            expected[field_name] = (
+                Decimal(str(value)),
+                int(peer["source_page"]),
+                None,
+                None,
+                Decimal("1"),
+            )
+    return expected
+
+
+def _source_token_decimal(token: str) -> Decimal:
+    """Parse a stored printed token without permitting numeric reinterpretation."""
+    text = re.sub(
+        r"^(?:₹|rs\.?|inr)\s*", "", token.strip(), flags=re.IGNORECASE
+    )
+    parenthesized = text.startswith("(") and text.endswith(")")
+    if parenthesized:
+        text = text[1:-1].strip()
+    value = Decimal(text.replace(",", "").replace(" ", ""))
+    return -value.copy_abs() if parenthesized else value
+
+
+def _validate_cited_fact_binding(
+    payload: Mapping[str, Any],
+    *,
+    source_content_sha256: str,
+    require_complete: bool = True,
+) -> str:
+    """Require complete typed evidence before raw draft values can be approved."""
+    schema_version = str(payload.get("evidence_schema_version", "")).strip()
+    if schema_version != _CITED_FACT_SCHEMA_VERSION:
+        raise IpoValidationError(
+            "This legacy proposal lacks citation-bound evidence and requires "
+            "manual review/re-entry; it cannot be approved directly."
+        )
+    raw_facts = payload.get("cited_financial_facts")
+    if not isinstance(raw_facts, list):
+        raise IpoValidationError("Citation-bound financial facts are required.")
+    expected = _expected_cited_facts(payload)
+    seen: set[str] = set()
+    try:
+        for raw_fact in raw_facts:
+            fact_data = dict(raw_fact)
+            fact = CitedFinancialFact(
+                field_name=str(fact_data["field_name"]),
+                value=Decimal(str(fact_data["value"])),
+                unit=(
+                    str(fact_data["unit"])
+                    if fact_data.get("unit") is not None
+                    else None
+                ),
+                unit_multiplier=Decimal(str(fact_data["unit_multiplier"])),
+                period_end=(
+                    dt.date.fromisoformat(str(fact_data["period_end"]))
+                    if fact_data.get("period_end") is not None
+                    else None
+                ),
+                document_sha256=str(fact_data["document_sha256"]),
+                page_number=int(fact_data["page_number"]),
+                location=str(fact_data["location"]),
+                source_token=str(fact_data["source_token"]),
+                confidence=Confidence(str(fact_data["confidence"])),
+                verification_reasons=tuple(fact_data.get("verification_reasons", ())),
+            )
+            if fact.field_name in seen or fact.field_name not in expected:
+                raise IpoValidationError(
+                    "Citation-bound financial facts contain duplicate or unknown fields."
+                )
+            seen.add(fact.field_name)
+            value, page, period_end, unit, multiplier = expected[fact.field_name]
+            if (
+                fact.value != value
+                or fact.page_number != page
+                or fact.period_end != period_end
+                or fact.unit != unit
+                or fact.unit_multiplier != multiplier
+                or fact.document_sha256 != source_content_sha256
+                or _source_token_decimal(fact.source_token) != fact.value
+            ):
+                raise IpoValidationError(
+                    "Citation-bound financial facts do not match the proposal draft."
+                )
+            if not re.fullmatch(
+                r"(?:text-line:\d+|table:\d+:row:\d+:cell:\d+)",
+                fact.location,
+            ):
+                raise IpoValidationError(
+                    "Citation-bound financial facts have an invalid span identity."
+                )
+    except IpoValidationError:
+        raise
+    except (KeyError, TypeError, ValueError, InvalidOperation) as exc:
+        raise IpoValidationError(
+            "Citation-bound financial facts are malformed and require review."
+        ) from exc
+    if require_complete and seen != expected.keys():
+        raise IpoValidationError(
+            "Citation-bound financial facts are incomplete and require review."
+        )
+    return schema_version
+
+
+def _proposal_semantic_fingerprint(
+    *,
+    payload: Mapping[str, Any],
+    source_content_sha256: str,
+    evidence_schema_version: str,
+    model_version: str,
+    agent_model: str,
+) -> str:
+    """Hash normalized semantic evidence without volatile database row ids."""
+    normalized_value = normalize_secret_safe_json(dict(payload))
+    if not isinstance(normalized_value, dict):  # pragma: no cover - input is a mapping
+        raise IpoValidationError("Proposal payload normalization failed.")
+    normalized = cast(dict[str, Any], normalized_value)
+    facts = normalized.get("cited_financial_facts")
+    if isinstance(facts, list):
+        typed_facts = cast(list[dict[str, Any]], facts)
+        normalized["cited_financial_facts"] = sorted(
+            typed_facts,
+            key=lambda fact: json.dumps(
+                fact, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ),
+        )
+    peers = normalized.get("peers")
+    if isinstance(peers, list):
+        typed_peers = cast(list[dict[str, Any]], peers)
+        normalized["peers"] = sorted(
+            typed_peers,
+            key=lambda peer: str(peer.get("company_name", "")).casefold(),
+        )
+    canonical = json.dumps(
+        {
+            "source_content_sha256": source_content_sha256,
+            "evidence_schema_version": evidence_schema_version,
+            "model_version": str(model_version),
+            "agent_model": str(agent_model),
+            "payload": normalized,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _extraction_proposal_record(row: Any) -> IpoExtractionProposalRecord:
     """Reassemble one proposal ORM row into a detached typed record."""
     return IpoExtractionProposalRecord(
@@ -1397,7 +1643,7 @@ def _extraction_proposal_record(row: Any) -> IpoExtractionProposalRecord:
         issue_id=row.issue_id,
         document_id=row.document_id,
         company_name=row.issue.company_name,
-        document_url=row.document.document_url,
+        document_url=row.document_url_snapshot,
         status=IpoExtractionProposalStatus(row.status),
         payload=dict(row.payload_json),
         confidence=Confidence(row.confidence),
@@ -1411,6 +1657,8 @@ def _extraction_proposal_record(row: Any) -> IpoExtractionProposalRecord:
         reviewed_at=_utc(row.reviewed_at) if row.reviewed_at is not None else None,
         review_note=row.review_note,
         manual_extraction_id=row.manual_extraction_id,
+        evidence_schema_version=row.evidence_schema_version,
+        semantic_fingerprint=row.semantic_fingerprint,
     )
 
 
@@ -1425,6 +1673,7 @@ def submit_extraction_proposal(
     agent_model: str,
     source_content_sha256: str,
     page_count: int,
+    data_dir: Path | None = None,
     session_factory: SessionFactory = session_scope,
 ) -> IpoExtractionProposalRecord:
     """Queue one AI-proposed extraction for human review.
@@ -1436,32 +1685,107 @@ def submit_extraction_proposal(
         One pending proposal per document keeps the queue free of duplicates.
     """
     _proposal_payload_to_manual_data(payload, document_id)
+    evidence_schema_version = _validate_cited_fact_binding(
+        payload,
+        source_content_sha256=source_content_sha256,
+        require_complete=False,
+    )
+    fingerprint = _proposal_semantic_fingerprint(
+        payload=payload,
+        source_content_sha256=source_content_sha256,
+        evidence_schema_version=evidence_schema_version,
+        model_version=model_version,
+        agent_model=agent_model,
+    )
     with session_factory() as session:
         if get_ipo_issue(session, issue_id) is None:
             raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
-        if get_ipo_document(session, issue_id, document_id) is None:
+        document_row = get_ipo_document(session, issue_id, document_id)
+        if document_row is None:
             raise IpoValidationError(
                 f"Source document {document_id} does not belong to IPO issue {issue_id}."
             )
-        if get_pending_ipo_extraction_proposal_for_document(session, document_id) is not None:
+        document = _document_record(document_row)
+        if document.content_sha256 != source_content_sha256:
             raise IpoValidationError(
+                "Proposal source SHA does not match the current document."
+            )
+        if get_pending_ipo_extraction_proposal_for_document(session, document_id) is not None:
+            raise IpoProposalConflictError(
+                "pending_proposal_exists",
                 f"Document {document_id} already has a pending extraction proposal."
             )
-        row = insert_ipo_extraction_proposal(
+        if (
+            get_ipo_extraction_proposal_by_semantic_fingerprint(
+                session, document_id, fingerprint
+            )
+            is not None
+        ):
+            raise IpoProposalConflictError(
+                "identical_proposal",
+                f"Document {document_id} already has an identical proposal.",
+            )
+
+    cache_root = Path(data_dir) if data_dir is not None else get_settings().data_dir
+    try:
+        verified = verify_cached_document_file(document, data_dir=cache_root)
+    except IpoDocumentDownloadError as exc:
+        raise IpoValidationError(
+            "Proposal submission requires a verified cached PDF."
+        ) from exc
+    if verified.content_sha256 != source_content_sha256:
+        raise IpoValidationError(
+            "Proposal source SHA does not match verified cached bytes."
+        )
+
+    values = {
+        "status": IpoExtractionProposalStatus.PENDING.value,
+        "document_url_snapshot": document.document_url,
+        "payload_json": normalize_secret_safe_json(dict(payload)),
+        "evidence_schema_version": evidence_schema_version,
+        "semantic_fingerprint": fingerprint,
+        "confidence": _parse_confidence(confidence).value,
+        "needs_review_reasons_json": [
+            str(reason) for reason in needs_review_reasons
+        ],
+        "model_version": str(model_version),
+        "agent_model": str(agent_model),
+        "source_content_sha256": str(source_content_sha256),
+        "page_count": int(page_count),
+    }
+    with session_factory() as session:
+        current = get_ipo_document(session, issue_id, document_id)
+        if (
+            current is None
+            or current.document_url != document.document_url
+            or current.document_type != document.document_type
+            or current.content_sha256 != verified.content_sha256
+            or current.file_path != verified.file_path
+        ):
+            raise IpoValidationError(
+                "The selected IPO source document changed before proposal submission."
+            )
+        row = try_insert_ipo_extraction_proposal(
             session,
             issue_id,
             document_id,
-            {
-                "status": IpoExtractionProposalStatus.PENDING.value,
-                "payload_json": normalize_secret_safe_json(dict(payload)),
-                "confidence": _parse_confidence(confidence).value,
-                "needs_review_reasons_json": [str(reason) for reason in needs_review_reasons],
-                "model_version": str(model_version),
-                "agent_model": str(agent_model),
-                "source_content_sha256": str(source_content_sha256),
-                "page_count": int(page_count),
-            },
+            values,
         )
+        if row is None:
+            if (
+                get_pending_ipo_extraction_proposal_for_document(
+                    session, document_id
+                )
+                is not None
+            ):
+                raise IpoProposalConflictError(
+                    "pending_proposal_exists",
+                    f"Document {document_id} already has a pending extraction proposal.",
+                )
+            raise IpoProposalConflictError(
+                "identical_proposal",
+                f"Document {document_id} already has an identical proposal.",
+            )
         return _extraction_proposal_record(row)
 
 
@@ -1503,49 +1827,119 @@ def approve_extraction_proposal(
         themselves. The conversion replays the full manual-submission path —
         strict payload validation plus re-verification of the cached PDF bytes
         — so scoring can never tell (and never needs to know) that an agent
-        drafted the numbers. If another reviewer decided the same proposal
-        concurrently, the marking step fails loudly; the freshly appended
-        revision remains as append-only history and is reported in the error.
+        drafted the numbers. The manual header, child rows, and proposal
+        compare-and-set share one transaction, so losing a concurrent review
+        race rolls the attempted revision back completely.
     """
     reviewer = _manual_email(reviewed_by_email)
+    reviewed_at = now()
+    if not isinstance(reviewed_at, dt.datetime) or reviewed_at.tzinfo is None:
+        raise IpoValidationError(
+            "The proposal-review clock must return a timezone-aware datetime."
+        )
+    reviewed_at = reviewed_at.astimezone(dt.UTC)
     with session_factory() as session:
         row = get_ipo_extraction_proposal(session, proposal_id)
         if row is None:
             raise IpoNotFoundError(f"Extraction proposal {proposal_id} was not found.")
         record = _extraction_proposal_record(row)
+        if row.document is None or record.document_id is None:
+            raise IpoValidationError(
+                f"Extraction proposal {proposal_id} is stale because its document "
+                "is no longer current."
+            )
+        document = _document_record(row.document)
     if record.status is not IpoExtractionProposalStatus.PENDING:
         raise IpoValidationError(
             f"Extraction proposal {proposal_id} was already {record.status.value}."
         )
-
-    data = _proposal_payload_to_manual_data(record.payload, record.document_id)
-    revision = submit_manual_extraction(
-        record.issue_id,
-        data,
-        entered_by_email=reviewer,
-        data_dir=data_dir,
-        now=now,
-        audit_recorder=audit_recorder,
-        session_factory=session_factory,
+    if record.evidence_schema_version != _CITED_FACT_SCHEMA_VERSION:
+        raise IpoValidationError(
+            "This legacy proposal requires manual review/re-entry and cannot be "
+            "approved directly."
+        )
+    _validate_cited_fact_binding(
+        record.payload,
+        source_content_sha256=record.source_content_sha256,
     )
+    if document.content_sha256 != record.source_content_sha256:
+        raise IpoValidationError(
+            f"Extraction proposal {proposal_id} is stale because its source SHA "
+            "does not match the current document."
+        )
+    data = _proposal_payload_to_manual_data(record.payload, document.id)
+    cache_root = Path(data_dir) if data_dir is not None else get_settings().data_dir
+    try:
+        verified = verify_cached_document_file(document, data_dir=cache_root)
+    except IpoDocumentDownloadError as exc:
+        raise IpoValidationError(
+            "Proposal approval requires verified cached source bytes."
+        ) from exc
+    if verified.content_sha256 != record.source_content_sha256:
+        raise IpoValidationError(
+            f"Extraction proposal {proposal_id} is stale because cached bytes changed."
+        )
 
     with session_factory() as session:
+        current_proposal = get_ipo_extraction_proposal(session, proposal_id)
+        if (
+            current_proposal is None
+            or current_proposal.status
+            != IpoExtractionProposalStatus.PENDING.value
+        ):
+            raise IpoValidationError(
+                f"Extraction proposal {proposal_id} was reviewed concurrently."
+            )
+        current_document = get_ipo_document(session, record.issue_id, document.id)
+        if (
+            current_document is None
+            or current_document.document_url != document.document_url
+            or current_document.document_type != document.document_type
+            or current_document.content_sha256 != verified.content_sha256
+            or current_document.file_path != verified.file_path
+        ):
+            raise IpoValidationError(
+                f"Extraction proposal {proposal_id} is stale because its document "
+                "changed before approval."
+            )
+        current_record = _document_record(current_document)
+        inserted = insert_ipo_manual_extraction(
+            session,
+            record.issue_id,
+            _manual_header_values(
+                data,
+                document=current_record,
+                entered_by_email=reviewer,
+                submitted_at=reviewed_at,
+            ),
+            _manual_period_values(data),
+            _manual_peer_values(data),
+        )
         marked = mark_ipo_extraction_proposal_reviewed(
             session,
             proposal_id,
             {
                 "status": IpoExtractionProposalStatus.APPROVED.value,
                 "reviewed_by_email": reviewer,
-                "reviewed_at": now().astimezone(dt.UTC),
-                "manual_extraction_id": revision.id,
+                "reviewed_at": reviewed_at,
+                "manual_extraction_id": inserted.id,
             },
         )
         if marked is None:
             raise IpoValidationError(
                 f"Extraction proposal {proposal_id} was reviewed concurrently; "
-                f"manual revision {revision.id} was still appended and remains "
-                "in the immutable history."
+                "the attempted manual revision was rolled back."
             )
+        revision = _manual_record(inserted)
+    log_event(
+        logger,
+        EVENT_IPO_MANUAL_EXTRACTION_SUBMITTED,
+        issue_id=record.issue_id,
+        extraction_id=revision.id,
+        document_id=document.id,
+        period_count=len(revision.periods),
+        peer_count=len(revision.peers),
+    )
     log_event(
         logger,
         EVENT_IPO_EXTRACTION_PROPOSAL_REVIEWED,
@@ -1554,17 +1948,31 @@ def approve_extraction_proposal(
         decision=IpoExtractionProposalStatus.APPROVED.value,
         manual_extraction_id=revision.id,
     )
-    audit_recorder(
-        event=EVENT_IPO_EXTRACTION_PROPOSAL_REVIEWED,
-        user_email=reviewer,
-        metadata={
-            "proposal_id": proposal_id,
-            "issue_id": record.issue_id,
-            "decision": IpoExtractionProposalStatus.APPROVED.value,
-            "manual_extraction_id": revision.id,
-        },
-        session_factory=session_factory,
-    )
+    with suppress(Exception):
+        audit_recorder(
+            event=EVENT_IPO_MANUAL_EXTRACTION_SUBMITTED,
+            user_email=reviewer,
+            metadata={
+                "issue_id": record.issue_id,
+                "extraction_id": revision.id,
+                "document_id": document.id,
+                "period_count": len(revision.periods),
+                "peer_count": len(revision.peers),
+            },
+            session_factory=session_factory,
+        )
+    with suppress(Exception):
+        audit_recorder(
+            event=EVENT_IPO_EXTRACTION_PROPOSAL_REVIEWED,
+            user_email=reviewer,
+            metadata={
+                "proposal_id": proposal_id,
+                "issue_id": record.issue_id,
+                "decision": IpoExtractionProposalStatus.APPROVED.value,
+                "manual_extraction_id": revision.id,
+            },
+            session_factory=session_factory,
+        )
     return revision
 
 

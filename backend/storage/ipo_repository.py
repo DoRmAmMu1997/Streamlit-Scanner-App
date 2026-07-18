@@ -11,6 +11,7 @@ from typing import Any, cast
 
 from sqlalchemy import func, select, update
 from sqlalchemy.engine import CursorResult
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from backend.storage.models import (
@@ -455,6 +456,19 @@ def insert_ipo_extraction_proposal(
     return row
 
 
+def try_insert_ipo_extraction_proposal(
+    session: Session, issue_id: int, document_id: int, values: dict[str, Any]
+) -> IpoExtractionProposal | None:
+    """Insert under a savepoint and return ``None`` on a uniqueness race."""
+    try:
+        with session.begin_nested():
+            return insert_ipo_extraction_proposal(
+                session, issue_id, document_id, values
+            )
+    except IntegrityError:
+        return None
+
+
 def get_ipo_extraction_proposal(
     session: Session, proposal_id: int
 ) -> IpoExtractionProposal | None:
@@ -525,6 +539,27 @@ def get_pending_ipo_extraction_proposal_for_document(
     return session.scalar(stmt)
 
 
+def get_ipo_extraction_proposal_by_semantic_fingerprint(
+    session: Session,
+    document_id: int,
+    semantic_fingerprint: str,
+) -> IpoExtractionProposal | None:
+    """Find an identical historical proposal for deterministic idempotency."""
+    stmt = (
+        select(IpoExtractionProposal)
+        .where(
+            IpoExtractionProposal.document_id == document_id,
+            IpoExtractionProposal.semantic_fingerprint == semantic_fingerprint,
+        )
+        .options(
+            joinedload(IpoExtractionProposal.issue),
+            joinedload(IpoExtractionProposal.document),
+        )
+        .limit(1)
+    )
+    return session.scalar(stmt)
+
+
 def mark_ipo_extraction_proposal_reviewed(
     session: Session, proposal_id: int, values: dict[str, Any]
 ) -> IpoExtractionProposal | None:
@@ -535,23 +570,21 @@ def mark_ipo_extraction_proposal_reviewed(
     silently overwriting the first reviewer's decision.
     """
     stmt = (
-        select(IpoExtractionProposal)
+        update(IpoExtractionProposal)
         .where(
             IpoExtractionProposal.id == proposal_id,
             IpoExtractionProposal.status == "pending",
         )
-        .options(
-            joinedload(IpoExtractionProposal.issue),
-            joinedload(IpoExtractionProposal.document),
-        )
+        .values(**values)
+        .returning(IpoExtractionProposal.id)
+        .execution_options(synchronize_session=False)
     )
-    row = session.scalar(stmt)
-    if row is None:
+    reviewed_id = session.scalar(stmt)
+    if reviewed_id is None:
         return None
-    for name, value in values.items():
-        setattr(row, name, value)
     session.flush()
-    return row
+    session.expire_all()
+    return get_ipo_extraction_proposal(session, reviewed_id)
 
 
 def insert_ipo_enrichment_signals(

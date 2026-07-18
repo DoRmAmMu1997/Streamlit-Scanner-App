@@ -278,6 +278,46 @@ def test_extract_flag_targets_cached_documents_and_counts_outcomes() -> None:
     assert result.exit_code == 0
 
 
+def test_force_extract_reaches_the_extractor_and_counts_history_as_skip() -> None:
+    """Force bypasses reviewed history but pending/identical outcomes stay skips."""
+    issue = _issue(1, "Acme Ltd")
+    received: list[bool] = []
+
+    def _extractor(_issue_id: int, _document_id: int, **kwargs: Any) -> Any:
+        """Capture force policy and mimic an identical regenerated payload."""
+        received.append(kwargs["force_extract"])
+        return IpoExtractionErrorReceipt(
+            issue_id=1,
+            document_id=5,
+            error_type="IpoProposalConflictError",
+            code="identical_proposal",
+        )
+
+    result = run_ipo_screener(
+        skip_scan=True,
+        skip_download=True,
+        skip_enrich=True,
+        extract=True,
+        force_extract=True,
+        ensure_schema=lambda: True,
+        issue_lister=lambda **_kwargs: [issue],
+        document_lister=lambda *_args, **_kwargs: [
+            _document(5, parse_status=IpoDocumentParseStatus.PENDING)
+        ],
+        extractor=_extractor,
+        rescorer=lambda issue_id, **_kwargs: _rescore(
+            issue, "insufficient_inputs", missing=("manual_extraction",)
+        ),
+        session_factory=object,
+        output=io.StringIO(),
+    )
+
+    assert received == [True]
+    assert result.proposals_created == 0
+    assert result.proposals_skipped == 1
+    assert result.proposals_failed == 0
+
+
 def test_failures_stay_isolated_but_drive_the_exit_code() -> None:
     """A download error and a scoring crash never stop the sibling issues."""
     issues = [_issue(1, "Acme Ltd"), _issue(2, "Beta Ltd")]
@@ -404,7 +444,7 @@ def test_main_wires_cli_flags_into_the_runner() -> None:
         [
             "--skip-scan",
             "--skip-enrich",
-            "--extract",
+            "--force-extract",
             "--issue-id",
             "7",
             "--issue-id",
@@ -420,5 +460,6 @@ def test_main_wires_cli_flags_into_the_runner() -> None:
     assert received["skip_download"] is False
     assert received["skip_enrich"] is True
     assert received["extract"] is True
+    assert received["force_extract"] is True
     assert received["issue_ids"] == [7, 9]
     assert str(received["to_date"]) == "2026-07-13"

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from backend.ipo.models import (
     Confidence,
@@ -34,13 +35,17 @@ from backend.ipo.repository import (
     approve_extraction_proposal,
     create_document,
     create_issue,
+    delete_document,
     get_latest_manual_profile,
     list_extraction_proposals,
     reject_extraction_proposal,
     submit_extraction_proposal,
 )
 from backend.observability import EVENT_IPO_EXTRACTION_PROPOSAL_REVIEWED
-from backend.storage.ipo_repository import update_ipo_document_cache_if_source_matches
+from backend.storage.ipo_repository import (
+    insert_ipo_extraction_proposal,
+    update_ipo_document_cache_if_source_matches,
+)
 
 _NOW = dt.datetime(2026, 7, 13, 10, 0, tzinfo=dt.UTC)
 
@@ -119,8 +124,11 @@ def _payload(**overrides: Any) -> dict[str, Any]:
     """Build one complete, approvable proposal payload."""
     values: dict[str, Any] = {
         "financial_amount_unit": "crore_inr",
+        "financial_amount_unit_page": 10,
         "issue_amount_unit": "crore_inr",
+        "issue_amount_unit_page": 13,
         "equity_share_unit": "lakh_shares",
+        "equity_share_unit_page": 12,
         "periods": [_period_payload(year) for year in (2023, 2024, 2025)],
         "net_worth": "90",
         "net_worth_page": 11,
@@ -164,18 +172,111 @@ def _payload(**overrides: Any) -> dict[str, Any]:
     return values
 
 
+def _bound_payload(digest: str, **overrides: Any) -> dict[str, Any]:
+    """Attach host-verifiable cited facts to the raw proposal draft."""
+    payload = _payload(**overrides)
+    facts: list[dict[str, Any]] = []
+
+    def _fact(
+        field_name: str,
+        value: str,
+        page_number: int,
+        *,
+        unit: str | None = None,
+        multiplier: str = "1",
+        period_end: str | None = None,
+    ) -> None:
+        """Append one JSON-safe fact bound to the fixture document."""
+        facts.append(
+            {
+                "field_name": field_name,
+                "value": value,
+                "unit": unit,
+                "unit_multiplier": multiplier,
+                "period_end": period_end,
+                "document_sha256": digest,
+                "page_number": page_number,
+                "location": f"text-line:{page_number}",
+                "source_token": value,
+                "confidence": "high",
+                "verification_reasons": [],
+            }
+        )
+
+    for index, period in enumerate(payload["periods"]):
+        for field in ("revenue", "ebitda", "pat", "profit_before_tax", "finance_cost"):
+            _fact(
+                f"periods[{index}].{field}",
+                str(period[field]),
+                int(period[f"{field}_page"]),
+                unit="crore_inr",
+                multiplier="10000000",
+                period_end=str(period["period_end"]),
+            )
+    financial_fields = {
+        "net_worth",
+        "total_debt",
+        "cash",
+        "cash_flow_from_operations",
+        "total_assets",
+        "current_liabilities",
+    }
+    issue_fields = {"fresh_issue_amount", "ofs_amount"}
+    share_fields = {"equity_shares", "post_issue_equity_shares"}
+    for field in (
+        "net_worth",
+        "total_debt",
+        "cash",
+        "cash_flow_from_operations",
+        "equity_shares",
+        "eps",
+        "nav_book_value",
+        "fresh_issue_amount",
+        "ofs_amount",
+        "promoter_holding_pre_issue",
+        "promoter_holding_post_issue",
+        "total_assets",
+        "current_liabilities",
+        "post_issue_equity_shares",
+    ):
+        unit = None
+        multiplier = "1"
+        if field in financial_fields or field in issue_fields:
+            unit, multiplier = "crore_inr", "10000000"
+        elif field in share_fields:
+            unit, multiplier = "lakh_shares", "100000"
+        _fact(
+            field,
+            str(payload[field]),
+            int(payload[f"{field}_page"]),
+            unit=unit,
+            multiplier=multiplier,
+        )
+    for peer in payload["peers"]:
+        for metric, value in peer["metrics"].items():
+            _fact(
+                f"peer {peer['company_name']} {metric}",
+                str(value),
+                int(peer["source_page"]),
+            )
+    payload["evidence_schema_version"] = "cited-financial-fact/v1"
+    payload["cited_financial_facts"] = facts
+    return payload
+
+
 def _submit(issue_id: int, document_id: int, digest: str, session_factory, **overrides: Any):
     """Queue one pending proposal with sensible defaults for the scenarios."""
     return submit_extraction_proposal(
         issue_id,
         document_id,
-        payload=_payload(**overrides.pop("payload_overrides", {})),
+        payload=_bound_payload(digest, **overrides.pop("payload_overrides", {})),
         confidence=overrides.pop("confidence", Confidence.HIGH),
         needs_review_reasons=overrides.pop("needs_review_reasons", ()),
         model_version="ipo-010-extractor-v1",
         agent_model="claude-sonnet-4-6",
         source_content_sha256=digest,
         page_count=16,
+        data_dir=overrides.pop("data_dir"),
         session_factory=session_factory,
     )
 
@@ -191,6 +292,7 @@ def test_submit_persists_a_pending_proposal_round_trip(
         document.id,
         digest,
         file_session_factory,
+        data_dir=tmp_path,
         confidence=Confidence.MEDIUM,
         needs_review_reasons=("Could not independently verify eps (page 12).",),
     )
@@ -210,7 +312,7 @@ def test_submit_persists_a_pending_proposal_round_trip(
         session_factory=file_session_factory,
     )
     assert [row.id for row in listed] == [proposal.id]
-    assert dict(listed[0].payload) == _payload()
+    assert dict(listed[0].payload) == _bound_payload(digest)
 
 
 def test_submit_rejects_malformed_payload_and_duplicates(
@@ -225,24 +327,26 @@ def test_submit_rejects_malformed_payload_and_duplicates(
             document.id,
             digest,
             file_session_factory,
+            data_dir=tmp_path,
             payload_overrides={"net_worth": "not-a-number"},
         )
 
-    _submit(issue.id, document.id, digest, file_session_factory)
+    _submit(issue.id, document.id, digest, file_session_factory, data_dir=tmp_path)
     with pytest.raises(IpoValidationError, match="pending extraction proposal"):
-        _submit(issue.id, document.id, digest, file_session_factory)
+        _submit(issue.id, document.id, digest, file_session_factory, data_dir=tmp_path)
 
     with pytest.raises(IpoNotFoundError, match="IPO issue 999"):
         submit_extraction_proposal(
             999,
             document.id,
-            payload=_payload(),
+            payload=_bound_payload(digest),
             confidence=Confidence.HIGH,
             needs_review_reasons=(),
             model_version="ipo-010-extractor-v1",
             agent_model="claude-sonnet-4-6",
             source_content_sha256=digest,
             page_count=16,
+            data_dir=tmp_path,
             session_factory=file_session_factory,
         )
 
@@ -259,7 +363,9 @@ def test_approve_converts_the_proposal_into_a_manual_revision(
         agent drafted the numbers.
     """
     issue, document, digest = _cached_document(file_session_factory, tmp_path)
-    proposal = _submit(issue.id, document.id, digest, file_session_factory)
+    proposal = _submit(
+        issue.id, document.id, digest, file_session_factory, data_dir=tmp_path
+    )
     audit_events: list[dict[str, Any]] = []
 
     def _record_audit(**kwargs: Any) -> bool:
@@ -302,7 +408,9 @@ def test_approve_requires_a_pending_proposal(
 ) -> None:
     """Missing and already-reviewed proposals both fail loudly."""
     issue, document, digest = _cached_document(file_session_factory, tmp_path)
-    proposal = _submit(issue.id, document.id, digest, file_session_factory)
+    proposal = _submit(
+        issue.id, document.id, digest, file_session_factory, data_dir=tmp_path
+    )
 
     with pytest.raises(IpoNotFoundError, match="proposal 999"):
         approve_extraction_proposal(
@@ -333,7 +441,9 @@ def test_reject_keeps_an_attributable_record(
 ) -> None:
     """Rejection stores the reviewer, instant, and a required reason."""
     issue, document, digest = _cached_document(file_session_factory, tmp_path)
-    proposal = _submit(issue.id, document.id, digest, file_session_factory)
+    proposal = _submit(
+        issue.id, document.id, digest, file_session_factory, data_dir=tmp_path
+    )
 
     with pytest.raises(IpoValidationError, match="non-empty reason"):
         reject_extraction_proposal(
@@ -369,3 +479,220 @@ def test_reject_keeps_an_attributable_record(
         get_latest_manual_profile(issue.id, session_factory=file_session_factory)
         is None
     )
+
+
+def test_submit_rejects_a_source_sha_that_is_not_current(
+    file_session_factory, tmp_path: Path
+) -> None:
+    """A proposal cannot claim bytes different from the current document row."""
+    issue, document, _digest = _cached_document(file_session_factory, tmp_path)
+
+    with pytest.raises(IpoValidationError, match="source SHA"):
+        _submit(
+            issue.id,
+            document.id,
+            "b" * 64,
+            file_session_factory,
+            data_dir=tmp_path,
+        )
+
+
+def test_approval_refuses_a_stale_document_and_cached_bytes(
+    file_session_factory, tmp_path: Path
+) -> None:
+    """Refreshing a document after extraction makes its proposal non-approvable."""
+    issue, document, digest = _cached_document(file_session_factory, tmp_path)
+    proposal = _submit(
+        issue.id, document.id, digest, file_session_factory, data_dir=tmp_path
+    )
+    replacement = b"%PDF-1.7\nreplacement prospectus\n%%EOF"
+    replacement_digest = hashlib.sha256(replacement).hexdigest()
+    replacement_path = tmp_path / "ipo" / "documents" / f"{replacement_digest}.pdf"
+    replacement_path.write_bytes(replacement)
+    with file_session_factory() as session:
+        assert update_ipo_document_cache_if_source_matches(
+            session,
+            issue.id,
+            document.id,
+            expected_document_url=document.document_url,
+            expected_document_type=document.document_type,
+            values={
+                "content_sha256": replacement_digest,
+                "downloaded_at": _NOW,
+                "file_path": f"ipo/documents/{replacement_digest}.pdf",
+                "page_count": None,
+                "parse_status": IpoDocumentParseStatus.PENDING.value,
+            },
+        )
+
+    with pytest.raises(IpoValidationError, match="stale"):
+        approve_extraction_proposal(
+            proposal.id,
+            reviewed_by_email="reviewer@example.com",
+            data_dir=tmp_path,
+            session_factory=file_session_factory,
+        )
+
+    assert get_latest_manual_profile(
+        issue.id, session_factory=file_session_factory
+    ) is None
+
+
+def test_legacy_unbound_proposal_is_review_required_not_approvable(
+    file_session_factory, tmp_path: Path
+) -> None:
+    """Historical pending rows without cited facts never inherit new trust."""
+    issue, document, digest = _cached_document(file_session_factory, tmp_path)
+    with file_session_factory() as session:
+        legacy = insert_ipo_extraction_proposal(
+            session,
+            issue.id,
+            document.id,
+            {
+                "status": "pending",
+                "document_url_snapshot": document.document_url,
+                "payload_json": _payload(),
+                "confidence": "high",
+                "needs_review_reasons_json": [],
+                "model_version": "ipo-010-extractor-v1",
+                "agent_model": "claude-sonnet-4-6",
+                "source_content_sha256": digest,
+                "page_count": 16,
+            },
+        )
+        proposal_id = legacy.id
+
+    with pytest.raises(IpoValidationError, match=r"legacy.*review"):
+        approve_extraction_proposal(
+            proposal_id,
+            reviewed_by_email="reviewer@example.com",
+            data_dir=tmp_path,
+            session_factory=file_session_factory,
+        )
+
+    assert get_latest_manual_profile(
+        issue.id, session_factory=file_session_factory
+    ) is None
+
+
+def test_lost_approval_race_rolls_back_the_manual_revision(
+    file_session_factory, tmp_path: Path, monkeypatch
+) -> None:
+    """Proposal CAS and all manual child rows share one transaction."""
+    issue, document, digest = _cached_document(file_session_factory, tmp_path)
+    proposal = _submit(
+        issue.id, document.id, digest, file_session_factory, data_dir=tmp_path
+    )
+    monkeypatch.setattr(
+        "backend.ipo.repository.mark_ipo_extraction_proposal_reviewed",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(IpoValidationError, match="reviewed concurrently"):
+        approve_extraction_proposal(
+            proposal.id,
+            reviewed_by_email="reviewer@example.com",
+            data_dir=tmp_path,
+            session_factory=file_session_factory,
+        )
+
+    assert get_latest_manual_profile(
+        issue.id, session_factory=file_session_factory
+    ) is None
+
+
+def test_pending_proposal_blocks_document_deletion_but_reviewed_history_survives(
+    file_session_factory, tmp_path: Path
+) -> None:
+    """Retention keeps reviewed provenance while pending work fails closed."""
+    issue, document, digest = _cached_document(file_session_factory, tmp_path)
+    proposal = _submit(
+        issue.id, document.id, digest, file_session_factory, data_dir=tmp_path
+    )
+
+    with pytest.raises(IpoValidationError, match="pending extraction proposal"):
+        delete_document(
+            issue.id, document.id, session_factory=file_session_factory
+        )
+
+    reject_extraction_proposal(
+        proposal.id,
+        reviewed_by_email="reviewer@example.com",
+        reason="Reviewer rejected the draft.",
+        session_factory=file_session_factory,
+    )
+    assert delete_document(
+        issue.id, document.id, session_factory=file_session_factory
+    )
+    retained = list_extraction_proposals(
+        issue_id=issue.id, session_factory=file_session_factory
+    )[0]
+    assert retained.document_id is None
+    assert retained.document_url == document.document_url
+    assert retained.source_content_sha256 == digest
+
+
+def test_reviewed_semantic_duplicate_is_skipped_but_changed_payload_is_allowed(
+    file_session_factory, tmp_path: Path
+) -> None:
+    """Payload identity prevents repeats without freezing future corrections."""
+    issue, document, digest = _cached_document(file_session_factory, tmp_path)
+    first = _submit(
+        issue.id, document.id, digest, file_session_factory, data_dir=tmp_path
+    )
+    reject_extraction_proposal(
+        first.id,
+        reviewed_by_email="reviewer@example.com",
+        reason="Try extraction again.",
+        session_factory=file_session_factory,
+    )
+
+    with pytest.raises(IpoValidationError, match="identical proposal"):
+        _submit(
+            issue.id,
+            document.id,
+            digest,
+            file_session_factory,
+            data_dir=tmp_path,
+        )
+
+    changed = _submit(
+        issue.id,
+        document.id,
+        digest,
+        file_session_factory,
+        data_dir=tmp_path,
+        payload_overrides={"net_worth": "91"},
+    )
+    assert changed.status is IpoExtractionProposalStatus.PENDING
+    assert changed.semantic_fingerprint != first.semantic_fingerprint
+
+
+def test_database_enforces_one_pending_proposal_per_document(
+    file_session_factory, tmp_path: Path
+) -> None:
+    """The partial unique index closes concurrent read-before-write races."""
+    issue, document, digest = _cached_document(file_session_factory, tmp_path)
+    _submit(
+        issue.id, document.id, digest, file_session_factory, data_dir=tmp_path
+    )
+
+    with pytest.raises(IntegrityError), file_session_factory() as session:
+        insert_ipo_extraction_proposal(
+            session,
+            issue.id,
+            document.id,
+            {
+                "status": "pending",
+                "document_url_snapshot": document.document_url,
+                "payload_json": _bound_payload(digest, net_worth="91"),
+                "evidence_schema_version": "cited-financial-fact/v1",
+                "semantic_fingerprint": "c" * 64,
+                "confidence": "high",
+                "needs_review_reasons_json": [],
+                "model_version": "ipo-010-extractor-v2",
+                "agent_model": "claude-sonnet-4-6",
+                "source_content_sha256": digest,
+                "page_count": 16,
+            },
+        )
