@@ -9,6 +9,7 @@ exhausting memory, and typed error codes instead of raw parser tracebacks.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,10 @@ from backend.ipo.documents.table_extractor import (
     ExtractedPage,
     ExtractedTable,
     IpoDocumentParseError,
+    PdfExtractionBudget,
+    PdfParseStatus,
     extract_document_pages,
+    parse_document_pages,
 )
 
 
@@ -86,20 +90,128 @@ def test_pages_are_numbered_from_one_with_text_and_tables(tmp_path: Path) -> Non
     )
 
 
-def test_hostile_pdf_caps_bound_cells_text_and_table_count(tmp_path: Path) -> None:
-    """Oversized content is truncated, never loaded unbounded into memory."""
+def test_hostile_pdf_text_limit_returns_review_receipt(tmp_path: Path) -> None:
+    """Oversized page text is rejected, never silently treated as complete."""
     huge_cell = "9" * 1000
     many_tables = [[[huge_cell]] for _ in range(50)]
     pages = [_FakePage("x" * 100_000, tables=many_tables)]
 
-    extracted = extract_document_pages(
-        tmp_path / "doc.pdf", open_pdf=_open_pdf_factory(pages)
+    receipt = parse_document_pages(
+        tmp_path / "doc.pdf",
+        budget=PdfExtractionBudget(max_page_text_chars=20_000),
+        open_pdf=_open_pdf_factory(pages),
     )
 
-    page = extracted[0]
-    assert len(page.text) == 20_000
-    assert len(page.tables) == 20
-    assert all(len(cell) <= 200 for table in page.tables for row in table.rows for cell in row)
+    assert receipt.status is PdfParseStatus.REVIEW_REQUIRED
+    assert receipt.error_code == "page_text_limit_exceeded"
+    assert receipt.pages == ()
+
+
+def test_hostile_pdf_table_shape_limits_fail_closed(tmp_path: Path) -> None:
+    """Rows, columns, cells, and cell length are all independently bounded."""
+    pages = [_FakePage("text", tables=[[["x" * 201]]])]
+
+    receipt = parse_document_pages(
+        tmp_path / "doc.pdf",
+        budget=PdfExtractionBudget(max_cell_chars=200),
+        open_pdf=_open_pdf_factory(pages),
+    )
+
+    assert receipt.status is PdfParseStatus.REVIEW_REQUIRED
+    assert receipt.error_code == "cell_text_limit_exceeded"
+
+    many_rows = [[["1"] for _ in range(251)]]
+    row_receipt = parse_document_pages(
+        tmp_path / "doc.pdf",
+        budget=PdfExtractionBudget(max_rows_per_table=250),
+        open_pdf=_open_pdf_factory([_FakePage("text", tables=many_rows)]),
+    )
+    assert row_receipt.error_code == "table_row_limit_exceeded"
+
+    many_columns = [[["1" for _ in range(51)]]]
+    column_receipt = parse_document_pages(
+        tmp_path / "doc.pdf",
+        budget=PdfExtractionBudget(max_columns_per_row=50),
+        open_pdf=_open_pdf_factory([_FakePage("text", tables=many_columns)]),
+    )
+    assert column_receipt.error_code == "table_column_limit_exceeded"
+
+    two_cells = [[["1", "2"]]]
+    total_receipt = parse_document_pages(
+        tmp_path / "doc.pdf",
+        budget=PdfExtractionBudget(max_cells_per_document=1),
+        open_pdf=_open_pdf_factory([_FakePage("text", tables=two_cells)]),
+    )
+    assert total_receipt.error_code == "document_cell_limit_exceeded"
+
+
+def test_worker_failures_and_oversized_wire_results_are_typed(tmp_path: Path) -> None:
+    """The parent maps timeout/crash/wire failures to review-safe receipts."""
+    path = tmp_path / "doc.pdf"
+
+    def _timeout(_path: Path, _budget: PdfExtractionBudget) -> bytes:
+        """Simulate the parent terminating a child that missed its deadline."""
+        raise TimeoutError
+
+    timeout = parse_document_pages(path, run_worker=_timeout)
+    assert timeout.status is PdfParseStatus.REVIEW_REQUIRED
+    assert timeout.error_code == "worker_timeout"
+
+    def _crash(_path: Path, _budget: PdfExtractionBudget) -> bytes:
+        """Simulate a child process exiting without a result."""
+        raise ChildProcessError
+
+    crash = parse_document_pages(path, run_worker=_crash)
+    assert crash.error_code == "worker_crashed"
+
+    malformed = parse_document_pages(
+        path, run_worker=lambda _path, _budget: b"{not-json"
+    )
+    assert malformed.error_code == "malformed_worker_response"
+
+    oversized = parse_document_pages(
+        path,
+        budget=PdfExtractionBudget(max_serialized_result_bytes=10),
+        run_worker=lambda _path, _budget: b"x" * 11,
+    )
+    assert oversized.error_code == "worker_result_limit_exceeded"
+
+
+def test_parent_revalidates_worker_object_budgets(tmp_path: Path) -> None:
+    """A compromised/mismatched child cannot return objects beyond policy."""
+    oversized_success = json.dumps(
+        {
+            "status": "success",
+            "error_code": None,
+            "pages": [
+                {"page_number": 1, "text": "one", "tables": []},
+                {"page_number": 2, "text": "two", "tables": []},
+            ],
+        }
+    ).encode()
+
+    receipt = parse_document_pages(
+        tmp_path / "doc.pdf",
+        budget=PdfExtractionBudget(max_pages=1),
+        run_worker=lambda _path, _budget: oversized_success,
+    )
+
+    assert receipt.status is PdfParseStatus.REVIEW_REQUIRED
+    assert receipt.error_code == "worker_result_budget_exceeded"
+
+
+def test_custom_budget_is_not_overridden_by_facade_default(tmp_path: Path) -> None:
+    """Passing a complete budget keeps every caller-selected limit intact."""
+    pages = [_FakePage("one"), _FakePage("two")]
+
+    with pytest.raises(IpoDocumentParseError) as excinfo:
+        extract_document_pages(
+            tmp_path / "doc.pdf",
+            budget=PdfExtractionBudget(max_pages=1),
+            open_pdf=_open_pdf_factory(pages),
+        )
+
+    assert excinfo.value.code == "page_limit_exceeded"
 
 
 def test_none_cells_become_empty_strings(tmp_path: Path) -> None:
@@ -208,7 +320,7 @@ def _minimal_pdf(pages: list[list[str]]) -> bytes:
 
 
 def test_real_pdfplumber_reads_the_generated_fixture(tmp_path: Path) -> None:
-    """Integration: the default pdfplumber path extracts real page text."""
+    """Integration: the default spawn worker extracts real page text."""
     pdf_path = tmp_path / "fixture.pdf"
     pdf_path.write_bytes(
         _minimal_pdf(

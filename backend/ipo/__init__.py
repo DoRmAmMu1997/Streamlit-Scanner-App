@@ -30,6 +30,7 @@ from backend.ipo.manual_extraction import (
     IpoShareUnit,
 )
 from backend.ipo.models import (
+    CitedFinancialFact,
     Confidence,
     FactorAssessment,
     FinancialPeriodType,
@@ -141,6 +142,7 @@ __all__ = [
     "FACTOR_MODEL_VERSION",
     "INSUFFICIENT_VERIFIED_DATA",
     "SCREENER_MODEL_VERSION",
+    "CitedFinancialFact",
     "Confidence",
     "FactorAssessment",
     "FinancialPeriodType",

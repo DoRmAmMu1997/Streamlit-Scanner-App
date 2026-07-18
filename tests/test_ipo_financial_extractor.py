@@ -16,12 +16,17 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+from pydantic import ValidationError
+
 from backend.ipo.agents import financial_extractor
 from backend.ipo.agents.financial_extractor import (
     EXTRACTOR_MODEL_VERSION,
     IpoExtractionErrorReceipt,
     propose_extraction,
 )
+from backend.ipo.documents.section_classifier import ClassifiedSection, IpoSectionType
+from backend.ipo.documents.table_extractor import ExtractedPage, ExtractedTable
 from backend.ipo.models import (
     Confidence,
     IpoDocumentData,
@@ -107,12 +112,13 @@ _FIXTURE_PAGES = [
         "Balance sheet extracts (in crore)",
         "Net worth 90 Total debt 12 Cash 5",
         "Cash flow from operations 14",
-        "Equity shares 50 EPS 3.00 NAV 18.75",
+        "Equity shares 50 lakh EPS 3.00 NAV 18.75",
         "Total assets 150 Current liabilities 45",
         "Post issue equity shares 60",
     ],
     [
         "OBJECTS OF THE OFFER",
+        "Issue amounts in crore",
         "Fresh issue 300 Offer for sale 0",
         "Promoter holding 75.25 before and 56.44 after",
         "Basis for offer price: Peer One Ltd P/E 21.40 EPS 8.25",
@@ -141,8 +147,11 @@ def _agent_json(**overrides: Any) -> str:
 
     payload: dict[str, Any] = {
         "financial_amount_unit": "crore_inr",
+        "financial_amount_unit_page": 1,
         "issue_amount_unit": "crore_inr",
+        "issue_amount_unit_page": 3,
         "equity_share_unit": "lakh_shares",
+        "equity_share_unit_page": 2,
         "periods": [
             period(2024, "100", "20", "10", "12"),
             period(2025, "120", "24", "12", "14"),
@@ -257,6 +266,25 @@ def test_verified_draft_becomes_a_pending_high_confidence_proposal(
     assert result.source_content_sha256 == digest
     assert result.page_count == 3
     assert result.payload["net_worth"] == "90"
+    assert result.payload["evidence_schema_version"] == "cited-financial-fact/v1"
+    cited_net_worth = next(
+        fact
+        for fact in result.payload["cited_financial_facts"]
+        if fact["field_name"] == "net_worth"
+    )
+    assert cited_net_worth == {
+        "field_name": "net_worth",
+        "value": "90",
+        "unit": "crore_inr",
+        "unit_multiplier": "10000000",
+        "period_end": None,
+        "document_sha256": digest,
+        "page_number": 2,
+        "location": "text-line:2",
+        "source_token": "90",
+        "confidence": "high",
+        "verification_reasons": [],
+    }
 
 
 def test_prompt_names_company_and_classified_sections(
@@ -487,3 +515,109 @@ def test_quarantine_helper_blocks_hostile_tool_text() -> None:
         assert clean_response["content"][0]["text"] == "Revenue 100"
     finally:
         financial_extractor._EVIDENCE_COLLECTOR.reset(token)
+
+
+def test_numeric_verifier_rejects_rounding_substrings_and_cross_cell_values() -> None:
+    """Only one complete, formatting-equivalent token proves a cited Decimal."""
+    plain = ExtractedPage(page_number=1, text="Revenue 90", tables=())
+    cross_cell = ExtractedPage(
+        page_number=1,
+        text="",
+        tables=(
+            ExtractedTable(page_number=1, rows=(("12", "34"),)),
+        ),
+    )
+
+    assert financial_extractor._number_appears_on_page("90.49", plain) is False
+    assert financial_extractor._number_appears_on_page("9", plain) is False
+    assert financial_extractor._number_appears_on_page("1234", cross_cell) is False
+
+
+def test_numeric_verifier_accepts_only_formatting_equivalent_tokens() -> None:
+    """Currency/grouping/trailing-zero notation may normalize without rounding."""
+    page = ExtractedPage(
+        page_number=1,
+        text="Net worth ₹ 1,23,456.00 and loss (2,500.0)",
+        tables=(),
+    )
+
+    assert financial_extractor._number_appears_on_page("123456", page) is True
+    assert financial_extractor._number_appears_on_page("-2500.00", page) is True
+
+
+def test_wrong_but_allowlisted_unit_cannot_receive_high_confidence(
+    file_session_factory, tmp_path: Path
+) -> None:
+    """A model-selected scale must occur in the cited document context."""
+    issue, document, _digest = _cached_pdf_document(file_session_factory, tmp_path)
+
+    result = propose_extraction(
+        issue.id,
+        document.id,
+        data_dir=tmp_path,
+        run_agent=lambda _prompt: _agent_json(financial_amount_unit="million_inr"),
+        session_factory=file_session_factory,
+    )
+
+    assert isinstance(result, IpoExtractionErrorReceipt)
+    assert result.error_type == "AIValidationError"
+
+
+def test_periods_must_be_distinct_consecutive_and_oldest_first(
+    file_session_factory, tmp_path: Path
+) -> None:
+    """Reversed annual rows cannot redefine which row is treated as latest."""
+    issue, document, _digest = _cached_pdf_document(file_session_factory, tmp_path)
+    payload = json.loads(_agent_json())
+    payload["periods"] = list(reversed(payload["periods"]))
+
+    result = propose_extraction(
+        issue.id,
+        document.id,
+        data_dir=tmp_path,
+        run_agent=lambda _prompt: json.dumps(payload),
+        session_factory=file_session_factory,
+    )
+
+    assert isinstance(result, IpoExtractionErrorReceipt)
+    assert result.error_type == "AIValidationError"
+
+
+@pytest.mark.parametrize(
+    "period_ends",
+    [
+        ("2024-03-31", "2024-03-31", "2026-03-31"),
+        ("2024-03-31", "2025-09-30", "2026-03-31"),
+    ],
+)
+def test_period_schema_rejects_duplicate_or_nonannual_rows(
+    period_ends: tuple[str, str, str],
+) -> None:
+    """List position cannot disguise duplicate or nonannual financial rows."""
+    payload = json.loads(_agent_json())
+    for period, period_end in zip(payload["periods"], period_ends, strict=True):
+        period["period_end"] = period_end
+
+    with pytest.raises(ValidationError):
+        financial_extractor._ProposalModel.model_validate(payload)
+
+
+def test_section_chunks_repeat_the_page_marker_without_crossing_pages() -> None:
+    """Every chunk independently carries the page provenance the model cites."""
+    section = ClassifiedSection(
+        section=IpoSectionType.FINANCIAL_STATEMENTS,
+        page_numbers=(1, 2),
+        keyword_hits=("restated financial information",),
+    )
+    pages = (
+        ExtractedPage(page_number=1, text="A" * 13_000, tables=()),
+        ExtractedPage(page_number=2, text="B" * 100, tables=()),
+    )
+
+    chunks = financial_extractor._section_chunks(section, pages)
+
+    assert len(chunks) == 3
+    assert chunks[0].startswith("[page 1]\n")
+    assert chunks[1].startswith("[page 1]\n")
+    assert chunks[2].startswith("[page 2]\n")
+    assert all(chunk.count("[page ") == 1 for chunk in chunks)

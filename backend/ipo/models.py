@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import enum
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -72,6 +73,72 @@ class Confidence(enum.StrEnum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
+
+
+@dataclass(frozen=True)
+class CitedFinancialFact:
+    """One exact financial value bound to immutable document provenance.
+
+    Beginner note:
+        The model's JSON is only a draft. This host-created fact records the
+        exact printed token and its original text-line/table-cell identity so
+        approval can distinguish verified evidence from untrusted raw fields.
+    """
+
+    field_name: str
+    value: Decimal
+    unit: str | None
+    unit_multiplier: Decimal
+    period_end: dt.date | None
+    document_sha256: str
+    page_number: int
+    location: str
+    source_token: str
+    confidence: Confidence
+    verification_reasons: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate the immutable evidence anchor and normalize enum fields."""
+        if not self.field_name.strip():
+            raise IpoValidationError("Cited financial fact field_name is required.")
+        if not self.value.is_finite() or not self.unit_multiplier.is_finite():
+            raise IpoValidationError("Cited financial fact decimals must be finite.")
+        if self.unit_multiplier <= 0:
+            raise IpoValidationError("Cited financial fact unit multiplier must be positive.")
+        digest = self.document_sha256.strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise IpoValidationError("Cited financial fact document SHA-256 is invalid.")
+        if self.page_number < 1:
+            raise IpoValidationError("Cited financial fact page number must be positive.")
+        if not self.location.strip() or not self.source_token.strip():
+            raise IpoValidationError("Cited financial fact source identity is required.")
+        object.__setattr__(self, "document_sha256", digest)
+        object.__setattr__(self, "confidence", Confidence(self.confidence))
+        object.__setattr__(
+            self,
+            "verification_reasons",
+            tuple(
+                str(reason).strip()
+                for reason in self.verification_reasons
+                if str(reason).strip()
+            ),
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        """Return a JSON-safe, versioned proposal representation."""
+        return {
+            "field_name": self.field_name,
+            "value": str(self.value),
+            "unit": self.unit,
+            "unit_multiplier": str(self.unit_multiplier),
+            "period_end": self.period_end.isoformat() if self.period_end else None,
+            "document_sha256": self.document_sha256,
+            "page_number": self.page_number,
+            "location": self.location,
+            "source_token": self.source_token,
+            "confidence": self.confidence.value,
+            "verification_reasons": list(self.verification_reasons),
+        }
 
 
 class FinancialPeriodType(enum.StrEnum):

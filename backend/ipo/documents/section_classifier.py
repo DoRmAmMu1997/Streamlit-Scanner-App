@@ -133,8 +133,16 @@ def classify_pages(pages: Sequence[ExtractedPage]) -> tuple[ClassifiedSection, .
     """
     assigned: dict[IpoSectionType, list[int]] = {}
     hits_by_section: dict[IpoSectionType, set[str]] = {}
-    for page in pages:
+    current_section = IpoSectionType.OTHER
+    for page in sorted(pages, key=lambda item: item.page_number):
         section, hits = _classify_page(page.text)
+        if section is IpoSectionType.OTHER and current_section is not IpoSectionType.OTHER:
+            # Prospectus headings normally appear only on the first page of a
+            # multi-page section. An unheaded page therefore continues the
+            # last explicit section until another reviewed heading takes over.
+            section = current_section
+        elif section is not IpoSectionType.OTHER:
+            current_section = section
         assigned.setdefault(section, []).append(page.page_number)
         hits_by_section.setdefault(section, set()).update(hits)
 

@@ -8,9 +8,9 @@ with the prospectus page it came from. The host then does the real work:
 1. every excerpt handed to the model was prompt-injection scanned first
    (TEST-003 quarantine; a hit blocks the run, non-retryably);
 2. the JSON is parsed against a strict Pydantic schema (extra keys rejected);
-3. every cited page must exist, and every cited number must literally appear
-   on its cited page's text or tables — string-matched by the host, not
-   trusted from the model;
+3. every cited page must exist, and every cited number and unit must appear
+   as a complete token in its original page text span or table cell — parsed
+   by the host, not trusted from the model;
 4. the result is persisted only as a *pending proposal*. An administrator
    approves it in the UI, which replays the exact manual-extraction
    validation path. Scoring never reads proposals.
@@ -32,6 +32,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, Final
 
@@ -50,6 +51,7 @@ from backend.ipo.documents.table_extractor import (
 )
 from backend.ipo.manual_extraction import IpoAmountUnit, IpoPeerMetric, IpoShareUnit
 from backend.ipo.models import (
+    CitedFinancialFact,
     Confidence,
     IpoExtractionProposalRecord,
     IpoExtractionProposalStatus,
@@ -75,7 +77,7 @@ from backend.storage import session_scope
 
 logger = logging.getLogger(__name__)
 
-EXTRACTOR_MODEL_VERSION: Final = "ipo-010-extractor-v1"
+EXTRACTOR_MODEL_VERSION: Final = "ipo-010-extractor-v2"
 
 _MAX_TURNS: Final = 8
 # One tool response stays well under the model's context budget; a section is
@@ -85,6 +87,7 @@ _SECTION_CHUNK_CHARS: Final = 12_000
 # all core values verified -> medium (with reviewer notes); anything less is a
 # fail-closed run that persists nothing.
 _MEDIUM_CONFIDENCE_MIN_VERIFIED: Final = 0.9
+_CITED_FACT_SCHEMA_VERSION: Final = "cited-financial-fact/v1"
 
 # Request-local collector for raw text that tripped the injection scanner.
 # The model only ever sees the blocked-evidence marker; the run is failed
@@ -279,8 +282,11 @@ class _ProposalModel(StrictAIModel):
     """The complete extraction the agent must emit as its final message."""
 
     financial_amount_unit: str
+    financial_amount_unit_page: int
     issue_amount_unit: str
+    issue_amount_unit_page: int
     equity_share_unit: str
+    equity_share_unit_page: int
     periods: list[_PeriodModel]
     net_worth: str
     net_worth_page: int
@@ -333,9 +339,17 @@ class _ProposalModel(StrictAIModel):
     @field_validator("periods")
     @classmethod
     def _three_periods(cls, value: list[_PeriodModel]) -> list[_PeriodModel]:
-        """Require exactly the three annual periods the manual contract needs."""
+        """Require three distinct annual periods, strictly oldest first."""
         if len(value) != 3:
             raise ValueError("periods must contain exactly three annual rows.")
+        dates = [dt.date.fromisoformat(period.period_end) for period in value]
+        if dates != sorted(set(dates)):
+            raise ValueError(
+                "periods must be distinct and ordered strictly oldest first."
+            )
+        gaps = ((later - earlier).days for earlier, later in pairwise(dates))
+        if any(days not in {365, 366} for days in gaps):
+            raise ValueError("periods must be consecutive annual fiscal year ends.")
         return value
 
     @field_validator("peers")
@@ -346,7 +360,13 @@ class _ProposalModel(StrictAIModel):
             raise ValueError("peers must contain at least one row.")
         return value
 
-    @field_validator(*(f"{name}_page" for name in _VALUE_FIELDS), "objects_of_issue_page")
+    @field_validator(
+        *(f"{name}_page" for name in _VALUE_FIELDS),
+        "objects_of_issue_page",
+        "financial_amount_unit_page",
+        "issue_amount_unit_page",
+        "equity_share_unit_page",
+    )
     @classmethod
     def _pages(cls, value: int, info: Any) -> int:
         """Require positive 1-based page citations."""
@@ -372,38 +392,132 @@ class _ProposalModel(StrictAIModel):
 # ---------------------------------------------------------------------------
 
 
-def _normalized_page_corpus(page: ExtractedPage) -> str:
-    """Flatten one page's text and table cells for literal number matching."""
-    parts = [page.text]
-    for table in page.tables:
-        for row in table.rows:
-            parts.extend(row)
-    corpus = " ".join(parts)
-    # Strip formatting the prospectus may add around digits so "1,234.50",
-    # "Rs. 1234.50" and a plain "1234.50" all match the same cited value.
-    return re.sub(r"[,\s₹]|Rs\.?", "", corpus, flags=re.IGNORECASE)
+_NUMBER_TOKEN_PATTERN: Final = re.compile(
+    r"""
+    (?<![\w.])
+    (?P<token>
+        (?:₹|rs\.?|inr)?\s*
+        (?:\(\s*)?
+        [+-]?
+        (?:
+            \d{1,3}(?:,\d{2})*,\d{3}
+            |\d{1,3}(?:,\d{3})+
+            |\d+
+        )
+        (?:\.\d+)?
+        (?:\s*\))?
+    )
+    (?![\w.])
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+_AMOUNT_UNIT_PATTERNS: Final[dict[str, re.Pattern[str]]] = {
+    IpoAmountUnit.INR.value: re.compile(
+        r"(?:₹|\brs\.?\b|\binr\b|\brupees?\b)", re.IGNORECASE
+    ),
+    IpoAmountUnit.THOUSAND_INR.value: re.compile(
+        r"\bthousands?\b", re.IGNORECASE
+    ),
+    IpoAmountUnit.LAKH_INR.value: re.compile(
+        r"\b(?:lakhs?|lacs?)\b", re.IGNORECASE
+    ),
+    IpoAmountUnit.MILLION_INR.value: re.compile(
+        r"\bmillions?\b", re.IGNORECASE
+    ),
+    IpoAmountUnit.CRORE_INR.value: re.compile(
+        r"\b(?:crores?|cr\.?)\b", re.IGNORECASE
+    ),
+}
+_SHARE_UNIT_PATTERNS: Final[dict[str, re.Pattern[str]]] = {
+    IpoShareUnit.SHARES.value: re.compile(r"\bshares?\b", re.IGNORECASE),
+    IpoShareUnit.THOUSAND_SHARES.value: re.compile(
+        r"\bthousands?\b", re.IGNORECASE
+    ),
+    IpoShareUnit.LAKH_SHARES.value: re.compile(
+        r"\b(?:lakhs?|lacs?)\b", re.IGNORECASE
+    ),
+    IpoShareUnit.MILLION_SHARES.value: re.compile(
+        r"\bmillions?\b", re.IGNORECASE
+    ),
+    IpoShareUnit.CRORE_SHARES.value: re.compile(
+        r"\b(?:crores?|cr\.?)\b", re.IGNORECASE
+    ),
+}
 
 
-def _number_variants(text: str) -> tuple[str, ...]:
-    """Enumerate the literal spellings one cited number may take on a page."""
-    value = Decimal(text)
-    variants = {text.lstrip("+")}
-    normalized = value.normalize()
-    variants.add(format(normalized, "f"))
-    for places in ("0.01", "0.1", "1"):
-        try:
-            variants.add(format(value.quantize(Decimal(places)), "f"))
-        except InvalidOperation:  # pragma: no cover - astronomically large values
-            continue
-    if value < 0:
-        # Financial statements often print negatives in parentheses.
-        variants.update(f"({variant.lstrip('-')})" for variant in tuple(variants))
-    return tuple(variants)
+def _page_spans(page: ExtractedPage) -> tuple[tuple[str, str], ...]:
+    """Return page text lines and table cells without joining trust boundaries.
+
+    Beginner note:
+        Keeping cells separate prevents adjacent values such as ``12`` and
+        ``34`` from being misread as one invented value, ``1234``.
+    """
+    spans = [
+        (f"text-line:{line_number}", line)
+        for line_number, line in enumerate(page.text.splitlines(), start=1)
+    ]
+    for table_number, table in enumerate(page.tables, start=1):
+        for row_number, row in enumerate(table.rows, start=1):
+            spans.extend(
+                (
+                    f"table:{table_number}:row:{row_number}:cell:{column_number}",
+                    cell,
+                )
+                for column_number, cell in enumerate(row, start=1)
+            )
+    return tuple(spans)
 
 
-def _number_appears_on_page(text: str, corpus: str) -> bool:
-    """Return True when one cited value literally appears in the page corpus."""
-    return any(variant in corpus for variant in _number_variants(text))
+def _parse_printed_number(token: str) -> Decimal | None:
+    """Parse one complete printed number using formatting normalization only."""
+    stripped = re.sub(
+        r"^(?:₹|rs\.?|inr)\s*", "", token.strip(), flags=re.IGNORECASE
+    )
+    parenthesized = stripped.startswith("(") and stripped.endswith(")")
+    if parenthesized:
+        stripped = stripped[1:-1].strip()
+    normalized = stripped.replace(",", "").replace(" ", "")
+    try:
+        value = Decimal(normalized)
+    except InvalidOperation:
+        return None
+    if not value.is_finite():
+        return None
+    return -value.copy_abs() if parenthesized else value
+
+
+def _matching_numeric_source(
+    text: str, page: ExtractedPage
+) -> tuple[str, str] | None:
+    """Return the original token and span identity for one exact cited value."""
+    expected = Decimal(text)
+    for location, span in _page_spans(page):
+        for match in _NUMBER_TOKEN_PATTERN.finditer(span):
+            source_token = match.group("token").strip()
+            if _parse_printed_number(source_token) == expected:
+                return source_token, location
+    return None
+
+
+def _number_appears_on_page(text: str, page: ExtractedPage) -> bool:
+    """Return whether an exact formatting-equivalent token occurs on the page."""
+    return _matching_numeric_source(text, page) is not None
+
+
+def _page_contains_unit(
+    page: ExtractedPage,
+    unit: str,
+    *,
+    share_unit: bool,
+) -> bool:
+    """Verify that the selected scale appears in the cited page context."""
+    patterns = _SHARE_UNIT_PATTERNS if share_unit else _AMOUNT_UNIT_PATTERNS
+    pattern = patterns[unit]
+    text = "\n".join(span for _location, span in _page_spans(page))
+    if not pattern.search(text):
+        return False
+    return not share_unit or re.search(r"\bshares?\b", text, re.IGNORECASE) is not None
 
 
 def _citations(proposal: _ProposalModel) -> tuple[tuple[str, str | None, int], ...]:
@@ -431,6 +545,56 @@ def _citations(proposal: _ProposalModel) -> tuple[tuple[str, str | None, int], .
     return tuple(entries)
 
 
+_FINANCIAL_AMOUNT_FIELDS: Final = {
+    "net_worth",
+    "total_debt",
+    "cash",
+    "cash_flow_from_operations",
+    "total_assets",
+    "current_liabilities",
+}
+_ISSUE_AMOUNT_FIELDS: Final = {"fresh_issue_amount", "ofs_amount"}
+_SHARE_COUNT_FIELDS: Final = {"equity_shares", "post_issue_equity_shares"}
+
+
+def _required_unit_pages(proposal: _ProposalModel) -> tuple[tuple[str, str, bool, set[int]], ...]:
+    """Return each selected unit and every page whose values use that scale."""
+    financial_pages = {
+        getattr(period, f"{field}_page")
+        for period in proposal.periods
+        for field in ("revenue", "ebitda", "pat", "profit_before_tax", "finance_cost")
+    }
+    financial_pages.update(
+        getattr(proposal, f"{field}_page") for field in _FINANCIAL_AMOUNT_FIELDS
+    )
+    issue_pages = {
+        getattr(proposal, f"{field}_page") for field in _ISSUE_AMOUNT_FIELDS
+    }
+    share_pages = {
+        getattr(proposal, f"{field}_page") for field in _SHARE_COUNT_FIELDS
+    }
+    return (
+        (
+            "financial_amount_unit",
+            proposal.financial_amount_unit,
+            False,
+            financial_pages | {proposal.financial_amount_unit_page},
+        ),
+        (
+            "issue_amount_unit",
+            proposal.issue_amount_unit,
+            False,
+            issue_pages | {proposal.issue_amount_unit_page},
+        ),
+        (
+            "equity_share_unit",
+            proposal.equity_share_unit,
+            True,
+            share_pages | {proposal.equity_share_unit_page},
+        ),
+    )
+
+
 def _verify_proposal(
     proposal: _ProposalModel, pages: tuple[ExtractedPage, ...]
 ) -> tuple[Confidence, tuple[str, ...]]:
@@ -443,14 +607,37 @@ def _verify_proposal(
         unverifiable numbers fail the whole run so nothing half-checked ever
         reaches the review queue.
     """
-    corpus_by_page = {page.page_number: _normalized_page_corpus(page) for page in pages}
+    page_by_number = {page.page_number: page for page in pages}
     citations = _citations(proposal)
+    unit_pages = {
+        page
+        for _label, _unit, _share_unit, required_pages in _required_unit_pages(proposal)
+        for page in required_pages
+    }
     out_of_range = sorted(
-        {page for _label, _value, page in citations if page not in corpus_by_page}
+        {page for _label, _value, page in citations if page not in page_by_number}
+        | {page for page in unit_pages if page not in page_by_number}
     )
     if out_of_range:
         raise _ExtractionOutputError(
             f"Cited pages outside the document: {out_of_range}."
+        )
+
+    invalid_units = [
+        f"{label}={unit} (page {page})"
+        for label, unit, share_unit, required_pages in _required_unit_pages(proposal)
+        for page in sorted(required_pages)
+        if not _page_contains_unit(
+            page_by_number[page],
+            unit,
+            share_unit=share_unit,
+        )
+    ]
+    if invalid_units:
+        raise _ExtractionOutputError(
+            "Selected units were not verified in every cited value context: "
+            + ", ".join(invalid_units)
+            + "."
         )
 
     unverified: list[str] = []
@@ -459,11 +646,10 @@ def _verify_proposal(
         if value is None:
             continue
         numeric_total += 1
-        if not _number_appears_on_page(value, corpus_by_page[page]):
+        if not _number_appears_on_page(value, page_by_number[page]):
             unverified.append(f"{label} (page {page})")
 
-    # "period 3" is the last-listed (latest) fiscal year; chronological order
-    # itself is enforced later by the manual contract on approval.
+    # Period order is already schema-validated, so row three is latest.
     core_labels = {
         "period 3 revenue",
         "period 3 ebitda",
@@ -491,9 +677,105 @@ def _verify_proposal(
     )
 
 
-def _payload_from_model(proposal: _ProposalModel) -> dict[str, Any]:
-    """Convert the validated schema into the storable proposal payload."""
-    return json.loads(proposal.model_dump_json())
+_AMOUNT_MULTIPLIERS: Final[dict[str, Decimal]] = {
+    IpoAmountUnit.INR.value: Decimal("1"),
+    IpoAmountUnit.THOUSAND_INR.value: Decimal("1000"),
+    IpoAmountUnit.LAKH_INR.value: Decimal("100000"),
+    IpoAmountUnit.MILLION_INR.value: Decimal("1000000"),
+    IpoAmountUnit.CRORE_INR.value: Decimal("10000000"),
+}
+_SHARE_MULTIPLIERS: Final[dict[str, Decimal]] = {
+    IpoShareUnit.SHARES.value: Decimal("1"),
+    IpoShareUnit.THOUSAND_SHARES.value: Decimal("1000"),
+    IpoShareUnit.LAKH_SHARES.value: Decimal("100000"),
+    IpoShareUnit.MILLION_SHARES.value: Decimal("1000000"),
+    IpoShareUnit.CRORE_SHARES.value: Decimal("10000000"),
+}
+
+
+def _fact_identity(
+    label: str,
+    proposal: _ProposalModel,
+) -> tuple[str, dt.date | None, str | None, Decimal]:
+    """Map one internal citation label to its typed unit and period identity."""
+    period_match = re.fullmatch(r"period (\d+) ([a-z_]+)", label)
+    if period_match:
+        period_index = int(period_match.group(1)) - 1
+        field_name = period_match.group(2)
+        return (
+            f"periods[{period_index}].{field_name}",
+            dt.date.fromisoformat(proposal.periods[period_index].period_end),
+            proposal.financial_amount_unit,
+            _AMOUNT_MULTIPLIERS[proposal.financial_amount_unit],
+        )
+    if label in _FINANCIAL_AMOUNT_FIELDS:
+        return (
+            label,
+            None,
+            proposal.financial_amount_unit,
+            _AMOUNT_MULTIPLIERS[proposal.financial_amount_unit],
+        )
+    if label in _ISSUE_AMOUNT_FIELDS:
+        return (
+            label,
+            None,
+            proposal.issue_amount_unit,
+            _AMOUNT_MULTIPLIERS[proposal.issue_amount_unit],
+        )
+    if label in _SHARE_COUNT_FIELDS:
+        return (
+            label,
+            None,
+            proposal.equity_share_unit,
+            _SHARE_MULTIPLIERS[proposal.equity_share_unit],
+        )
+    return label, None, None, Decimal("1")
+
+
+def _cited_financial_facts(
+    proposal: _ProposalModel,
+    pages: tuple[ExtractedPage, ...],
+    *,
+    source_content_sha256: str,
+    confidence: Confidence,
+) -> tuple[CitedFinancialFact, ...]:
+    """Create facts only for values the host matched to an original span."""
+    page_by_number = {page.page_number: page for page in pages}
+    facts: list[CitedFinancialFact] = []
+    for label, value, page_number in _citations(proposal):
+        if value is None:
+            continue
+        source = _matching_numeric_source(value, page_by_number[page_number])
+        if source is None:
+            continue
+        source_token, location = source
+        field_name, period_end, unit, multiplier = _fact_identity(label, proposal)
+        facts.append(
+            CitedFinancialFact(
+                field_name=field_name,
+                value=Decimal(value),
+                unit=unit,
+                unit_multiplier=multiplier,
+                period_end=period_end,
+                document_sha256=source_content_sha256,
+                page_number=page_number,
+                location=location,
+                source_token=source_token,
+                confidence=confidence,
+            )
+        )
+    return tuple(facts)
+
+
+def _payload_from_model(
+    proposal: _ProposalModel,
+    cited_facts: tuple[CitedFinancialFact, ...],
+) -> dict[str, Any]:
+    """Combine the raw review draft with separately host-verified facts."""
+    payload = json.loads(proposal.model_dump_json())
+    payload["evidence_schema_version"] = _CITED_FACT_SCHEMA_VERSION
+    payload["cited_financial_facts"] = [fact.to_payload() for fact in cited_facts]
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -513,7 +795,8 @@ _SYSTEM_PROMPT: Final = (
     "- Report the units the statements are printed in via "
     "financial_amount_unit / issue_amount_unit / equity_share_unit (one of: "
     "inr, thousand_inr, lakh_inr, million_inr, crore_inr; shares equivalents "
-    "use *_shares).\n"
+    "use *_shares). Cite the page containing each unit label in the matching "
+    "*_unit_page field.\n"
     "- Every value needs the exact 1-based PDF page number you read it from "
     "(as shown in the [page N] markers and read_tables results).\n"
     "- periods: exactly the three most recent consecutive annual fiscal "
@@ -562,19 +845,24 @@ def _quarantined_tool_text(text: str) -> tuple[dict[str, Any], bool]:
 
 
 def _section_chunks(section: ClassifiedSection, pages: tuple[ExtractedPage, ...]) -> list[str]:
-    """Join one section's pages (with [page N] markers) into bounded chunks."""
+    """Split pages independently and repeat their marker on every bounded chunk."""
     by_number = {page.page_number: page for page in pages}
-    joined = "\n\n".join(
-        f"[page {number}]\n{by_number[number].text}"
-        for number in section.page_numbers
-        if number in by_number
-    )
-    if not joined:
-        return []
-    return [
-        joined[start : start + _SECTION_CHUNK_CHARS]
-        for start in range(0, len(joined), _SECTION_CHUNK_CHARS)
-    ]
+    chunks: list[str] = []
+    for number in section.page_numbers:
+        page = by_number.get(number)
+        if page is None:
+            continue
+        marker = f"[page {number}]\n"
+        content_chars = _SECTION_CHUNK_CHARS - len(marker)
+        text = page.text or ""
+        if not text:
+            chunks.append(marker)
+            continue
+        chunks.extend(
+            marker + text[start : start + content_chars]
+            for start in range(0, len(text), content_chars)
+        )
+    return chunks
 
 
 def _default_run_agent(
@@ -845,7 +1133,7 @@ def _propose_extraction_inner(
             raise _ExtractionEvidenceError()
         return text
 
-    verified_confidence: dict[str, Any] = {}
+    verified_result: dict[str, Any] = {}
 
     def _parse_once(text: str) -> _ProposalModel:
         """Parse, schema-validate, and independently verify one final message."""
@@ -859,8 +1147,14 @@ def _propose_extraction_inner(
             )
         proposal = _ProposalModel.model_validate(payload)
         confidence, reasons = _verify_proposal(proposal, pages)
-        verified_confidence["confidence"] = confidence
-        verified_confidence["reasons"] = reasons
+        verified_result["confidence"] = confidence
+        verified_result["reasons"] = reasons
+        verified_result["facts"] = _cited_financial_facts(
+            proposal,
+            pages,
+            source_content_sha256=verified.content_sha256 or "",
+            confidence=confidence,
+        )
         return proposal
 
     proposal = parse_with_retry(
@@ -874,9 +1168,9 @@ def _propose_extraction_inner(
     return submit_extraction_proposal(
         issue_id,
         document_id,
-        payload=_payload_from_model(proposal),
-        confidence=verified_confidence["confidence"],
-        needs_review_reasons=tuple(verified_confidence["reasons"]),
+        payload=_payload_from_model(proposal, tuple(verified_result["facts"])),
+        confidence=verified_result["confidence"],
+        needs_review_reasons=tuple(verified_result["reasons"]),
         model_version=EXTRACTOR_MODEL_VERSION,
         agent_model=agent_model,
         source_content_sha256=verified.content_sha256 or "",

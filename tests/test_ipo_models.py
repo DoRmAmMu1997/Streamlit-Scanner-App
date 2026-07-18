@@ -149,6 +149,7 @@ def test_public_ipo_package_exports_the_domain_and_repository_contract() -> None
     expected = {
         "CAUTION_FLAGS_VERSION",
         "CAUTION_FLAG_ORDER",
+        "CitedFinancialFact",
         "Confidence",
         "ENRICHMENT_SOURCE_POLICY",
         "FACTOR_MODEL_VERSION",

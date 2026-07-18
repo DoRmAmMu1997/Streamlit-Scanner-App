@@ -110,6 +110,25 @@ def test_sections_collect_all_their_pages_sorted() -> None:
     assert _section(sections, IpoSectionType.RISK_FACTORS).page_numbers == (1, 2, 3)
 
 
+def test_unmatched_continuation_pages_inherit_the_previous_heading() -> None:
+    """A multi-page section keeps unheaded continuation pages until a new heading."""
+    sections = classify_pages(
+        [
+            _page(5, "Further details about repayment of borrowings."),
+            _page(1, "GENERAL INFORMATION"),
+            _page(4, "OBJECTS OF THE OFFER"),
+            _page(3, "Revenue 100 EBITDA 20 PAT 10"),
+            _page(2, "RESTATED CONSOLIDATED FINANCIAL INFORMATION"),
+        ]
+    )
+
+    assert _section(sections, IpoSectionType.OTHER).page_numbers == (1,)
+    assert _section(
+        sections, IpoSectionType.FINANCIAL_STATEMENTS
+    ).page_numbers == (2, 3)
+    assert _section(sections, IpoSectionType.OBJECTS_OF_ISSUE).page_numbers == (4, 5)
+
+
 def test_classification_is_deterministic() -> None:
     """Two runs over the same pages produce identical receipts."""
     pages = [_page(1, "RISK FACTORS"), _page(2, "capital structure")]
