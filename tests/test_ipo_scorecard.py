@@ -114,3 +114,28 @@ def test_scorecard_preserves_reasons_in_pdf_factor_order() -> None:
     )
     assert result.source_documents == ("https://www.sebi.gov.in/example-rhp.pdf",)
 
+
+def test_scorecard_always_returns_seven_citation_ready_breakdown_rows() -> None:
+    """Every factor remains visible, including missing evidence worth zero points."""
+    result = score_ipo(
+        _input(
+            valuation=_factor(None, "No cited peer valuation evidence."),
+            gmp_sentiment=_factor(None),
+        )
+    )
+
+    assert tuple(item.factor for item in result.breakdown) == tuple(PDF_WEIGHTS)
+    assert len(result.breakdown) == 7
+    assert sum(
+        (item.weighted_contribution for item in result.breakdown),
+        start=Decimal(0),
+    ) == result.score
+    valuation = next(
+        item for item in result.breakdown if item.factor == "valuation"
+    )
+    assert valuation.weight == 15
+    assert valuation.normalized_score is None
+    assert valuation.missing is True
+    assert valuation.weighted_contribution == Decimal("0.00")
+    assert valuation.evidence_reason == "No cited peer valuation evidence."
+

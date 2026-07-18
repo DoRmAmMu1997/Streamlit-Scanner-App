@@ -481,6 +481,10 @@ def test_promoter_quality_pure_ofs_earns_the_bottom_ofs_band() -> None:
     result = derive_score_input(inputs)
     # Holding 55 -> 80; pure OFS -> 0; mean 40.
     assert result.promoter_quality.score == Decimal("40.00")
+    assert result.promoter_quality.reason is not None
+    assert "entirely OFS with zero fresh-issue proceeds" in (
+        result.promoter_quality.reason
+    )
 
 
 @pytest.mark.parametrize(

@@ -23,6 +23,7 @@ from backend.ipo.scoring.factor_derivation import (
     FACTOR_MODEL_VERSION,
     GMP_SIGNAL_MAX_AGE_DAYS,
     IpoFactorInputs,
+    derive_debt_reduction_purpose_evidence,
     derive_score_input,
 )
 from backend.ipo.scoring.recommendation import (
@@ -55,6 +56,7 @@ __all__ = [
     "SKIP",
     "IpoFactorInputs",
     "build_recommendation",
+    "derive_debt_reduction_purpose_evidence",
     "derive_score_input",
     "evaluate_caution_flags",
     "score_ipo",

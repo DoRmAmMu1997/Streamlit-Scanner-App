@@ -104,4 +104,5 @@ def build_recommendation(
         missing_data=score_result.missing_data,
         source_documents=score_result.source_documents,
         caution_flags=caution_flags.flags if caution_flags is not None else (),
+        breakdown=score_result.breakdown,
     )

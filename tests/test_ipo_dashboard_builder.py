@@ -34,6 +34,7 @@ from backend.ipo.models import (
     IpoCautionFlag,
     IpoCautionFlagStatus,
     IpoEvaluationRecord,
+    IpoExtractionProposalStatus,
     IpoRecommendationResult,
     IpoStatus,
     Recommendation,
@@ -98,6 +99,32 @@ def test_top_reasons_rank_by_weight_and_exclude_missing_factors() -> None:
     assert risks == (
         "financial growth (5.00/20)",
         "promoter quality (2.00/10)",
+    )
+
+
+def test_top_reasons_rank_by_awarded_and_lost_points_not_factor_weight() -> None:
+    """Impact ordering uses actual contribution and loss with stable ties."""
+    evaluation = _evaluation(
+        contributions={
+            "business_quality": "19.00",
+            "financial_growth": "20.00",
+            "return_ratios": "5.00",
+            "valuation": "0.00",
+            "qib_subscription": "8.00",
+            "promoter_quality": "10.00",
+            "gmp_sentiment": "5.00",
+        }
+    )
+
+    positives, risks = top_positive_and_risk_reasons(evaluation)
+
+    assert positives[:2] == (
+        "financial growth (20.00/20)",
+        "business quality (19.00/25)",
+    )
+    assert risks[:2] == (
+        "valuation (0.00/15)",
+        "return ratios (5.00/15)",
     )
 
 
@@ -168,13 +195,40 @@ def test_missing_data_queue_catches_every_evidence_gap() -> None:
 
 def test_build_snapshot_denormalizes_stored_state_per_issue(monkeypatch) -> None:
     """The builder reads repositories only and flattens them into rows."""
+    issue_updated = _SCORED_AT - dt.timedelta(days=2)
     issues = [
-        SimpleNamespace(id=1, company_name="Scored Ltd", status=IpoStatus.OPEN),
-        SimpleNamespace(id=2, company_name="Fresh Ltd", status=IpoStatus.DRHP_FILED),
+        SimpleNamespace(
+            id=1,
+            company_name="Scored Ltd",
+            status=IpoStatus.OPEN,
+            updated_at=issue_updated,
+        ),
+        SimpleNamespace(
+            id=2,
+            company_name="Fresh Ltd",
+            status=IpoStatus.DRHP_FILED,
+            updated_at=issue_updated,
+        ),
     ]
     documents = {
-        1: [SimpleNamespace(document_type="rhp", content_sha256="a" * 64)],
-        2: [SimpleNamespace(document_type="drhp", content_sha256=None)],
+        1: [
+            SimpleNamespace(
+                document_type="rhp",
+                document_url="https://www.sebi.gov.in/scored-rhp",
+                content_sha256="a" * 64,
+                created_at=issue_updated,
+                downloaded_at=issue_updated,
+            )
+        ],
+        2: [
+            SimpleNamespace(
+                document_type="drhp",
+                document_url="https://www.sebi.gov.in/fresh-drhp",
+                content_sha256=None,
+                created_at=issue_updated,
+                downloaded_at=None,
+            )
+        ],
     }
     evaluation = _evaluation(
         contributions={"business_quality": "21.25"},
@@ -195,12 +249,39 @@ def test_build_snapshot_denormalizes_stored_state_per_issue(monkeypatch) -> None
     monkeypatch.setattr(
         dashboard,
         "get_latest_manual_profile",
-        lambda issue_id, **_kwargs: object() if issue_id == 1 else None,
+        lambda issue_id, **_kwargs: (
+            SimpleNamespace(
+                source_document_url="https://www.sebi.gov.in/scored-rhp",
+                submitted_at=issue_updated,
+            )
+            if issue_id == 1
+            else None
+        ),
     )
     monkeypatch.setattr(
         dashboard,
         "list_extraction_proposals",
-        lambda **kwargs: [object()] if kwargs.get("issue_id") == 2 else [],
+        lambda **kwargs: (
+            [
+                SimpleNamespace(
+                    status=IpoExtractionProposalStatus.PENDING,
+                    created_at=issue_updated,
+                    reviewed_at=None,
+                )
+            ]
+            if kwargs.get("issue_id") == 2
+            else []
+        ),
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "list_subscriptions",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "list_enrichment_signals",
+        lambda *_args, **_kwargs: [],
     )
     monkeypatch.setattr(
         dashboard,
@@ -220,4 +301,68 @@ def test_build_snapshot_denormalizes_stored_state_per_issue(monkeypatch) -> None
     assert fresh.recommendation is None
     assert fresh.pending_proposals == 1
     assert fresh.documents_downloaded == 0
-    assert fresh.last_updated is None
+    assert fresh.last_updated == issue_updated
+    assert fresh.source_documents == (
+        "https://www.sebi.gov.in/fresh-drhp",
+    )
+
+
+def test_newer_evidence_marks_the_displayed_evaluation_stale(
+    monkeypatch,
+) -> None:
+    """Fresh evidence after scored_at routes the issue back to the review queue."""
+    newer = _SCORED_AT + dt.timedelta(hours=1)
+    issue = SimpleNamespace(
+        id=1,
+        company_name="Scored Ltd",
+        status=IpoStatus.OPEN,
+        updated_at=_SCORED_AT - dt.timedelta(days=1),
+    )
+    document = SimpleNamespace(
+        document_type="rhp",
+        document_url="https://www.sebi.gov.in/scored-rhp",
+        content_sha256="a" * 64,
+        created_at=_SCORED_AT,
+        downloaded_at=_SCORED_AT,
+    )
+    monkeypatch.setattr(dashboard, "list_issues", lambda **_kwargs: [issue])
+    monkeypatch.setattr(
+        dashboard, "list_documents", lambda *_args, **_kwargs: [document]
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "get_latest_manual_profile",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            source_document_url=document.document_url,
+            submitted_at=_SCORED_AT,
+        ),
+    )
+    monkeypatch.setattr(
+        dashboard, "list_extraction_proposals", lambda **_kwargs: []
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "list_subscriptions",
+        lambda *_args, **_kwargs: [
+            SimpleNamespace(captured_at=newer, created_at=newer)
+        ],
+    )
+    monkeypatch.setattr(
+        dashboard, "list_enrichment_signals", lambda *_args, **_kwargs: []
+    )
+    monkeypatch.setattr(
+        dashboard,
+        "get_latest_evaluation",
+        lambda *_args, **_kwargs: _evaluation(
+            contributions={"business_quality": "21.25"}
+        ),
+    )
+
+    snapshot = build_dashboard_snapshot(
+        now=newer,
+        session_factory=object,
+    )
+
+    assert snapshot.rows[0].evaluation_stale is True
+    assert snapshot.rows[0].last_updated == newer
+    assert section_missing_data_queue(snapshot) == snapshot.rows

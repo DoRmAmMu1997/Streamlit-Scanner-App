@@ -25,14 +25,17 @@ from backend.ipo.models import (
     IpoExtractionProposalStatus,
     IpoStatus,
     Recommendation,
+    ScoreBreakdownItem,
 )
 from backend.ipo.repository import (
     SessionFactory,
     get_latest_evaluation,
     get_latest_manual_profile,
     list_documents,
+    list_enrichment_signals,
     list_extraction_proposals,
     list_issues,
+    list_subscriptions,
 )
 from backend.ipo.scoring.score_model import PDF_WEIGHTS
 from backend.storage import session_scope
@@ -67,6 +70,8 @@ class IpoDashboardRow:
     pending_proposals: int
     documents_downloaded: int
     documents_total: int
+    breakdown: tuple[ScoreBreakdownItem, ...] = ()
+    evaluation_stale: bool = False
 
 
 @dataclass(frozen=True)
@@ -90,9 +95,9 @@ def top_positive_and_risk_reasons(
         checked and it is weak" are deliberately different messages.
     """
     missing = set(evaluation.result.missing_data)
-    positives: list[tuple[int, str]] = []
-    risks: list[tuple[int, str]] = []
-    for name, weight in PDF_WEIGHTS.items():
+    positives: list[tuple[Decimal, int, str]] = []
+    risks: list[tuple[Decimal, int, str]] = []
+    for factor_order, (name, weight) in enumerate(PDF_WEIGHTS.items()):
         if name in missing:
             continue
         contribution = evaluation.contributions.get(name)
@@ -101,14 +106,15 @@ def top_positive_and_risk_reasons(
         ratio = contribution / Decimal(weight)
         label = f"{name.replace('_', ' ')} ({contribution}/{weight})"
         if ratio >= _POSITIVE_RATIO:
-            positives.append((weight, label))
+            positives.append((contribution, factor_order, label))
         elif ratio <= _RISK_RATIO:
-            risks.append((weight, label))
-    positives.sort(key=lambda item: item[0], reverse=True)
-    risks.sort(key=lambda item: item[0], reverse=True)
+            lost_points = Decimal(weight) - contribution
+            risks.append((lost_points, factor_order, label))
+    positives.sort(key=lambda item: (-item[0], item[1]))
+    risks.sort(key=lambda item: (-item[0], item[1]))
     return (
-        tuple(label for _weight, label in positives[:_TOP_N]),
-        tuple(label for _weight, label in risks[:_TOP_N]),
+        tuple(label for _points, _order, label in positives[:_TOP_N]),
+        tuple(label for _points, _order, label in risks[:_TOP_N]),
     )
 
 
@@ -123,14 +129,91 @@ def _row_for_issue(
     ]
     downloaded = sum(1 for document in documents if document.content_sha256)
     profile = get_latest_manual_profile(issue.id, session_factory=session_factory)
-    pending_proposals = len(
-        list_extraction_proposals(
-            issue_id=issue.id,
-            status=IpoExtractionProposalStatus.PENDING,
-            session_factory=session_factory,
-        )
+    proposals = list_extraction_proposals(
+        issue_id=issue.id,
+        session_factory=session_factory,
+    )
+    pending_proposals = sum(
+        proposal.status is IpoExtractionProposalStatus.PENDING
+        for proposal in proposals
+    )
+    subscriptions = list_subscriptions(
+        issue.id, session_factory=session_factory
+    )
+    enrichment = list_enrichment_signals(
+        issue.id, session_factory=session_factory
     )
     evaluation = get_latest_evaluation(issue.id, session_factory=session_factory)
+    source_documents = tuple(
+        dict.fromkeys(
+            (
+                *(
+                    document.document_url
+                    for document in documents
+                    if getattr(document, "document_url", None)
+                ),
+                *(
+                    (profile.source_document_url,)
+                    if profile is not None
+                    and getattr(profile, "source_document_url", None)
+                    else ()
+                ),
+            )
+        )
+    )
+    evidence_times = [
+        value
+        for value in (
+            getattr(issue, "updated_at", None),
+            *(
+                max(
+                    (
+                        value
+                        for value in (
+                            getattr(document, "created_at", None),
+                            getattr(document, "downloaded_at", None),
+                        )
+                        if value is not None
+                    ),
+                    default=None,
+                )
+                for document in documents
+            ),
+            getattr(profile, "submitted_at", None),
+            *(
+                proposal.reviewed_at or proposal.created_at
+                for proposal in proposals
+            ),
+            *(
+                max(subscription.captured_at, subscription.created_at)
+                for subscription in subscriptions
+            ),
+            *(
+                signal.last_seen_at
+                or signal.captured_at
+                or signal.created_at
+                for signal in enrichment
+            ),
+        )
+        if value is not None
+    ]
+    latest_evidence_at = max(evidence_times, default=None)
+    evaluation_stale = bool(
+        evaluation is not None
+        and latest_evidence_at is not None
+        and latest_evidence_at > evaluation.scored_at
+    )
+    last_updated = max(
+        (
+            value
+            for value in (
+                latest_evidence_at,
+                evaluation.scored_at if evaluation is not None else None,
+            )
+            if value is not None
+        ),
+        default=None,
+    )
 
     if evaluation is None:
         return IpoDashboardRow(
@@ -146,12 +229,13 @@ def _row_for_issue(
             missing_data=(),
             triggered_flags=(),
             reasons=(),
-            source_documents=(),
-            last_updated=None,
+            source_documents=source_documents,
+            last_updated=last_updated,
             has_manual_profile=profile is not None,
             pending_proposals=pending_proposals,
             documents_downloaded=downloaded,
             documents_total=len(documents),
+            evaluation_stale=False,
         )
 
     result = evaluation.result
@@ -173,12 +257,16 @@ def _row_for_issue(
             if flag.status.value == "triggered"
         ),
         reasons=result.reasons,
-        source_documents=result.source_documents,
-        last_updated=evaluation.scored_at,
+        source_documents=tuple(
+            dict.fromkeys((*source_documents, *result.source_documents))
+        ),
+        last_updated=last_updated,
         has_manual_profile=profile is not None,
         pending_proposals=pending_proposals,
         documents_downloaded=downloaded,
         documents_total=len(documents),
+        breakdown=result.breakdown,
+        evaluation_stale=evaluation_stale,
     )
 
 
@@ -260,4 +348,5 @@ def section_missing_data_queue(snapshot: IpoDashboardSnapshot) -> tuple[IpoDashb
         or row.documents_downloaded == 0
         or row.missing_data
         or row.pending_proposals > 0
+        or row.evaluation_stale
     )

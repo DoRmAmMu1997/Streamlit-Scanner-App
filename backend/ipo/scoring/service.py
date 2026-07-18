@@ -34,7 +34,7 @@ from backend.ipo.models import (
 )
 from backend.ipo.repository import (
     SessionFactory,
-    evaluate_issue,
+    _evaluate_issue_once,
     get_latest_evaluation,
     load_ipo_factor_inputs_snapshot,
 )
@@ -243,6 +243,21 @@ def compute_inputs_fingerprint(inputs: IpoFactorInputs) -> str:
             else None
         ),
         "enrichment": enrichment_facts,
+        "debt_reduction_purpose": (
+            {
+                "status": inputs.debt_reduction_purpose.status.value,
+                "source_sha256": (
+                    inputs.debt_reduction_purpose.source_content_sha256
+                ),
+                "page": inputs.debt_reduction_purpose.page_number,
+                "span": inputs.debt_reduction_purpose.text_span_identity,
+                "verification_reasons": list(
+                    inputs.debt_reduction_purpose.verification_reasons
+                ),
+            }
+            if inputs.debt_reduction_purpose is not None
+            else None
+        ),
         "near_close": near_close,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
@@ -304,7 +319,7 @@ def rescore_issue(
 
     score_input = derive_score_input(inputs)
     caution_flags = evaluate_caution_flags(inputs)
-    evaluation = evaluate_issue(
+    evaluation, inserted = _evaluate_issue_once(
         issue_id,
         score_input,
         caution_flags=caution_flags,
@@ -312,6 +327,13 @@ def rescore_issue(
         model_version=SCREENER_MODEL_VERSION,
         session_factory=session_factory,
     )
+    if not inserted:
+        return IpoRescoreOutcome(
+            issue_id=issue_id,
+            company_name=issue.company_name,
+            status="skipped_unchanged",
+            evaluation=evaluation,
+        )
     log_event(
         logger,
         EVENT_IPO_ISSUE_SCORED,

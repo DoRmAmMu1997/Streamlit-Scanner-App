@@ -32,6 +32,8 @@ from backend.ipo.manual_extraction import (
 from backend.ipo.models import (
     CitedFinancialFact,
     Confidence,
+    DebtReductionPurposeEvidence,
+    DebtReductionPurposeStatus,
     FactorAssessment,
     FinancialPeriodType,
     IpoCautionFlag,
@@ -63,6 +65,7 @@ from backend.ipo.models import (
     IpoSubscriptionRecord,
     IpoValidationError,
     Recommendation,
+    ScoreBreakdownItem,
     SebiFiling,
     SebiFilingCategory,
 )
@@ -119,6 +122,7 @@ from backend.ipo.scoring.caution_flags import (
 from backend.ipo.scoring.factor_derivation import (
     FACTOR_MODEL_VERSION,
     IpoFactorInputs,
+    derive_debt_reduction_purpose_evidence,
     derive_score_input,
 )
 from backend.ipo.scoring.recommendation import (
@@ -149,6 +153,8 @@ __all__ = [
     "SCREENER_MODEL_VERSION",
     "CitedFinancialFact",
     "Confidence",
+    "DebtReductionPurposeEvidence",
+    "DebtReductionPurposeStatus",
     "FactorAssessment",
     "FinancialPeriodType",
     "IpoAmountUnit",
@@ -199,6 +205,7 @@ __all__ = [
     "IpoSubscriptionRecord",
     "IpoValidationError",
     "Recommendation",
+    "ScoreBreakdownItem",
     "SebiFiling",
     "SebiFilingCategory",
     "approve_extraction_proposal",
@@ -214,6 +221,7 @@ __all__ = [
     "delete_financial",
     "delete_issue",
     "delete_subscription",
+    "derive_debt_reduction_purpose_evidence",
     "derive_score_input",
     "download_document",
     "evaluate_caution_flags",

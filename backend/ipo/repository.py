@@ -77,6 +77,7 @@ from backend.ipo.models import (
     IpoSubscriptionRecord,
     IpoValidationError,
     Recommendation,
+    ScoreBreakdownItem,
 )
 from backend.ipo.scoring.recommendation import build_recommendation
 from backend.ipo.scoring.score_model import score_ipo
@@ -919,7 +920,10 @@ def load_ipo_factor_inputs_snapshot(
         complete bundle inside one transaction makes the fingerprint and score
         consume the same immutable snapshot.
     """
-    from backend.ipo.scoring.factor_derivation import IpoFactorInputs
+    from backend.ipo.scoring.factor_derivation import (
+        IpoFactorInputs,
+        derive_debt_reduction_purpose_evidence,
+    )
 
     with session_factory() as session:
         issue_row = get_ipo_issue(session, issue_id)
@@ -928,6 +932,7 @@ def load_ipo_factor_inputs_snapshot(
         profile_row = get_latest_ipo_manual_extraction(session, issue_id)
         subscription_row = get_latest_ipo_subscription(session, issue_id)
         enrichment_rows = list_ipo_enrichment_signal_rows(session, issue_id)
+        document_rows = list_ipo_document_rows(session, issue_id)
         issue = _issue_record(issue_row)
         profile = _manual_record(profile_row) if profile_row is not None else None
         subscription = (
@@ -937,6 +942,13 @@ def load_ipo_factor_inputs_snapshot(
         )
         enrichment = tuple(
             _enrichment_signal_record(row) for row in enrichment_rows
+        )
+        source_documents = tuple(
+            dict.fromkeys(
+                row.document_url
+                for row in document_rows
+                if row.document_type in {"drhp", "rhp"}
+            )
         )
     ratios = (
         calculate_ipo_ratios(
@@ -954,6 +966,8 @@ def load_ipo_factor_inputs_snapshot(
         subscription=subscription,
         as_of=as_of,
         enrichment=enrichment,
+        debt_reduction_purpose=derive_debt_reduction_purpose_evidence(profile),
+        source_documents=source_documents,
     )
 
 
@@ -2124,6 +2138,27 @@ def reject_extraction_proposal(
 
 def _evaluation_record(score_row: Any, recommendation_row: Any) -> IpoEvaluationRecord:
     """Reassemble two immutable ORM rows into one detached public evaluation."""
+    breakdown = tuple(
+        ScoreBreakdownItem(
+            factor=str(entry["factor"]),
+            weight=int(entry["weight"]),
+            normalized_score=(
+                Decimal(str(entry["normalized_score"]))
+                if entry.get("normalized_score") is not None
+                else None
+            ),
+            missing=bool(entry["missing"]),
+            weighted_contribution=Decimal(
+                str(entry["weighted_contribution"])
+            ),
+            evidence_reason=(
+                str(entry["evidence_reason"])
+                if entry.get("evidence_reason") is not None
+                else None
+            ),
+        )
+        for entry in score_row.breakdown_json
+    )
     result = IpoRecommendationResult(
         company_name=score_row.issue.company_name,
         score=score_row.total_score,
@@ -2143,6 +2178,7 @@ def _evaluation_record(score_row: Any, recommendation_row: Any) -> IpoEvaluation
             )
             for entry in recommendation_row.caution_flags_json
         ),
+        breakdown=breakdown,
     )
     return IpoEvaluationRecord(
         issue_id=score_row.issue_id,
@@ -2159,7 +2195,7 @@ def _evaluation_record(score_row: Any, recommendation_row: Any) -> IpoEvaluation
     )
 
 
-def evaluate_issue(
+def _evaluate_issue_once(
     issue_id: int,
     score_input: IpoScoreInput,
     *,
@@ -2167,8 +2203,8 @@ def evaluate_issue(
     inputs_fingerprint: str | None = None,
     model_version: str = "ipo-001-v1",
     session_factory: SessionFactory = session_scope,
-) -> IpoEvaluationRecord:
-    """Compute and atomically persist one immutable score/verdict pair.
+) -> tuple[IpoEvaluationRecord, bool]:
+    """Persist one semantic evaluation once and report whether this call won.
 
     Beginner note:
         The three IPO-006 keyword arguments are optional so IPO-001 callers
@@ -2213,6 +2249,25 @@ def evaluate_issue(
             "contributions_json": normalize_secret_safe_json(
                 dict(score_result.contributions)
             ),
+            "breakdown_json": normalize_secret_safe_json(
+                [
+                    {
+                        "factor": item.factor,
+                        "weight": item.weight,
+                        "normalized_score": (
+                            str(item.normalized_score)
+                            if item.normalized_score is not None
+                            else None
+                        ),
+                        "missing": item.missing,
+                        "weighted_contribution": str(
+                            item.weighted_contribution
+                        ),
+                        "evidence_reason": item.evidence_reason,
+                    }
+                    for item in score_result.breakdown
+                ]
+            ),
             "missing_data_json": list(score_result.missing_data),
             "reasons_json": list(score_result.reasons),
             "model_version": model_version,
@@ -2230,10 +2285,36 @@ def evaluate_issue(
                 for flag in recommendation.caution_flags
             ],
         }
-        score_row, recommendation_row = insert_ipo_evaluation(
+        score_row, recommendation_row, inserted = insert_ipo_evaluation(
             session, issue_id, score_values, recommendation_values
         )
-        return _evaluation_record(score_row, recommendation_row)
+        return _evaluation_record(score_row, recommendation_row), inserted
+
+
+def evaluate_issue(
+    issue_id: int,
+    score_input: IpoScoreInput,
+    *,
+    caution_flags: IpoCautionFlagReport | None = None,
+    inputs_fingerprint: str | None = None,
+    model_version: str = "ipo-001-v1",
+    session_factory: SessionFactory = session_scope,
+) -> IpoEvaluationRecord:
+    """Compute and atomically persist one immutable score/verdict pair.
+
+    Identical versioned fingerprints are idempotent at the database boundary:
+    concurrent callers receive the winning immutable evaluation instead of an
+    integrity error or a duplicate score.
+    """
+    evaluation, _inserted = _evaluate_issue_once(
+        issue_id,
+        score_input,
+        caution_flags=caution_flags,
+        inputs_fingerprint=inputs_fingerprint,
+        model_version=model_version,
+        session_factory=session_factory,
+    )
+    return evaluation
 
 
 def get_evaluation(

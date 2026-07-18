@@ -685,13 +685,56 @@ def insert_ipo_evaluation(
     issue_id: int,
     score_values: dict[str, Any],
     recommendation_values: dict[str, Any],
-) -> tuple[IpoScore, IpoRecommendation]:
-    """Stage an immutable score and its one-to-one verdict as one unit of work."""
+) -> tuple[IpoScore, IpoRecommendation, bool]:
+    """Insert one evaluation or return the concurrent semantic winner.
+
+    The partial unique index is the final race boundary. A savepoint keeps a
+    losing insert from aborting the caller-owned transaction, after which the
+    already-committed winner is loaded as the stable result.
+    """
     score = IpoScore(issue_id=issue_id, **score_values)
     recommendation = IpoRecommendation(score=score, **recommendation_values)
-    session.add_all([score, recommendation])
-    session.flush()
-    return score, recommendation
+    try:
+        with session.begin_nested():
+            session.add_all([score, recommendation])
+            session.flush()
+        return score, recommendation, True
+    except IntegrityError:
+        fingerprint = score_values.get("inputs_fingerprint")
+        model_version = score_values.get("model_version")
+        if not fingerprint or not model_version:
+            raise
+        existing = get_ipo_evaluation_rows_by_fingerprint(
+            session,
+            issue_id,
+            model_version=str(model_version),
+            inputs_fingerprint=str(fingerprint),
+        )
+        if existing is None:
+            raise
+        return existing[0], existing[1], False
+
+
+def get_ipo_evaluation_rows_by_fingerprint(
+    session: Session,
+    issue_id: int,
+    *,
+    model_version: str,
+    inputs_fingerprint: str,
+) -> tuple[IpoScore, IpoRecommendation] | None:
+    """Load the unique complete evaluation for one semantic input snapshot."""
+    stmt = (
+        select(IpoScore, IpoRecommendation)
+        .join(IpoRecommendation, IpoRecommendation.score_id == IpoScore.id)
+        .where(
+            IpoScore.issue_id == issue_id,
+            IpoScore.model_version == model_version,
+            IpoScore.inputs_fingerprint == inputs_fingerprint,
+        )
+        .options(joinedload(IpoScore.issue))
+    )
+    row = session.execute(stmt).one_or_none()
+    return (row[0], row[1]) if row is not None else None
 
 
 def get_ipo_evaluation_rows(

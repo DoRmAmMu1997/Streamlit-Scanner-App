@@ -698,6 +698,14 @@ def test_evaluation_round_trips_caution_flags_fingerprint_and_model_version(
     assert stored.result.recommendation.value == "Not Recommended"
     assert stored.result.caution_flags == report.flags
     assert stored.result.reasons[0].startswith("Hard caution flag:")
+    assert len(stored.result.breakdown) == 7
+    assert sum(
+        (
+            item.weighted_contribution
+            for item in stored.result.breakdown
+        ),
+        start=Decimal(0),
+    ) == stored.result.score
 
     reloaded = get_evaluation(
         issue.id, stored.score_id, session_factory=file_session_factory
@@ -707,6 +715,44 @@ def test_evaluation_round_trips_caution_flags_fingerprint_and_model_version(
     with file_session_factory() as session:
         row = session.get(IpoScore, stored.score_id)
         assert row is not None and row.inputs_fingerprint == fingerprint
+
+
+def test_semantic_evaluation_uniqueness_returns_the_existing_winner(
+    file_session_factory,
+) -> None:
+    """The database uniqueness boundary makes duplicate score writes idempotent."""
+    issue = create_issue(_issue_data(), session_factory=file_session_factory)
+    create_document(
+        issue.id,
+        _document_data(),
+        session_factory=file_session_factory,
+    )
+    fingerprint = "e" * 64
+
+    first = evaluate_issue(
+        issue.id,
+        _score_input(),
+        inputs_fingerprint=fingerprint,
+        model_version="ipo-006-v2",
+        session_factory=file_session_factory,
+    )
+    second = evaluate_issue(
+        issue.id,
+        _score_input(),
+        inputs_fingerprint=fingerprint,
+        model_version="ipo-006-v2",
+        session_factory=file_session_factory,
+    )
+
+    assert second == first
+    with file_session_factory() as session:
+        assert session.scalar(select(func.count()).select_from(IpoScore)) == 1
+        assert (
+            session.scalar(
+                select(func.count()).select_from(IpoRecommendation)
+            )
+            == 1
+        )
 
 
 def test_get_latest_recommendation_handles_missing_issue_and_empty_history(

@@ -19,6 +19,7 @@ prevent.
 from __future__ import annotations
 
 import datetime as dt
+import re
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Final
@@ -31,6 +32,8 @@ from backend.ipo.financials.ratio_engine import (
 )
 from backend.ipo.manual_extraction import IpoManualExtractionRecord, IpoPeerMetric
 from backend.ipo.models import (
+    DebtReductionPurposeEvidence,
+    DebtReductionPurposeStatus,
     FactorAssessment,
     IpoEnrichmentBatchUsability,
     IpoEnrichmentSignalRecord,
@@ -143,6 +146,99 @@ class IpoFactorInputs:
     subscription: IpoSubscriptionRecord | None
     as_of: dt.datetime
     enrichment: tuple[IpoEnrichmentSignalRecord, ...] = ()
+    debt_reduction_purpose: DebtReductionPurposeEvidence | None = None
+    source_documents: tuple[str, ...] = ()
+
+
+_DEBT_PURPOSE_PATTERN: Final = re.compile(
+    r"\b(?:"
+    r"repay(?:ment|ing)?|prepay(?:ment|ing)?|redemption|"
+    r"deleverag(?:e|ing)|"
+    r"(?:reduction|reduce)\s+(?:of\s+)?(?:debt|borrowings?|loans?)"
+    r")\b",
+    re.IGNORECASE,
+)
+_DEBT_CONTEXT_PATTERN: Final = re.compile(
+    r"\b(?:debt|borrowings?|loans?|credit facilities)\b",
+    re.IGNORECASE,
+)
+_NEGATION_BEFORE_PATTERN: Final = re.compile(
+    r"\b(?:not|no|without|excluding|exclude|shall not|will not|"
+    r"cannot|won't|isn't|aren't)\b.{0,80}$",
+    re.IGNORECASE,
+)
+_NEGATION_AFTER_PATTERN: Final = re.compile(
+    r"^.{0,30}\b(?:not|excluded|excluding)\b",
+    re.IGNORECASE,
+)
+
+
+def derive_debt_reduction_purpose_evidence(
+    profile: IpoManualExtractionRecord | None,
+) -> DebtReductionPurposeEvidence | None:
+    """Classify the approved objects-of-issue span into a cited typed fact.
+
+    Beginner note:
+        This parser is intentionally narrow. It recognizes explicit repayment
+        language and checks nearby negation, while ambiguous debt references
+        fail closed. The caution rule consumes only this typed conclusion and
+        never performs its own substring search.
+    """
+    if profile is None:
+        return None
+    text = " ".join(profile.objects_of_issue.split())
+    source_sha256 = profile.source_content_sha256
+    page_number = profile.objects_of_issue_page
+    span_identity = f"objects_of_issue:p{page_number}"
+    matches = list(_DEBT_PURPOSE_PATTERN.finditer(text))
+    if not matches:
+        status = (
+            DebtReductionPurposeStatus.AMBIGUOUS
+            if _DEBT_CONTEXT_PATTERN.search(text)
+            else DebtReductionPurposeStatus.MISSING
+        )
+        reason = (
+            "Debt is mentioned without an explicit repayment purpose."
+            if status is DebtReductionPurposeStatus.AMBIGUOUS
+            else "No explicit debt-reduction purpose was found."
+        )
+        return DebtReductionPurposeEvidence(
+            status=status,
+            source_content_sha256=source_sha256,
+            page_number=page_number,
+            text_span_identity=span_identity,
+            evidence_text=text,
+            verification_reasons=(reason,),
+        )
+
+    affirmative = False
+    negated = False
+    for match in matches:
+        before = text[max(0, match.start() - 100) : match.start()]
+        after = text[match.end() : match.end() + 40]
+        is_negated = bool(
+            _NEGATION_BEFORE_PATTERN.search(before)
+            or _NEGATION_AFTER_PATTERN.search(after)
+        )
+        negated = negated or is_negated
+        affirmative = affirmative or not is_negated
+    if affirmative and negated:
+        status = DebtReductionPurposeStatus.AMBIGUOUS
+        reason = "The cited passage contains conflicting repayment statements."
+    elif affirmative:
+        status = DebtReductionPurposeStatus.AFFIRMATIVE
+        reason = "Explicit non-negated debt-reduction purpose verified."
+    else:
+        status = DebtReductionPurposeStatus.NEGATIVE
+        reason = "Repayment language is explicitly negated."
+    return DebtReductionPurposeEvidence(
+        status=status,
+        source_content_sha256=source_sha256,
+        page_number=page_number,
+        text_span_identity=span_identity,
+        evidence_text=text,
+        verification_reasons=(reason,),
+    )
 
 
 @dataclass(frozen=True)
@@ -356,15 +452,22 @@ def _promoter_quality(profile: IpoManualExtractionRecord | None) -> FactorAssess
         fraction = ofs / total
         if fraction == 0:
             ofs_score = Decimal(100)
+            ofs_note = "all-fresh issue with zero OFS proceeds -> 100"
         elif fraction == 1:
             ofs_score = Decimal(0)
+            ofs_note = (
+                "entirely OFS with zero fresh-issue proceeds -> 0"
+            )
         else:
             ofs_score = _band(fraction, OFS_FRACTION_BANDS)
+            ofs_note = (
+                f"offer-for-sale share {_fmt(fraction)} of issue -> {ofs_score}"
+            )
         optional.append(
             _SubScore(
                 label="offer-for-sale share",
                 score=ofs_score,
-                note=f"offer-for-sale share {_fmt(fraction)} of issue -> {ofs_score}",
+                note=ofs_note,
             )
         )
 
@@ -539,8 +642,8 @@ def derive_score_input(inputs: IpoFactorInputs) -> IpoScoreInput:
         provenance,
     )
 
-    source_documents: tuple[str, ...] = ()
-    if inputs.profile is not None:
+    source_documents = inputs.source_documents
+    if not source_documents and inputs.profile is not None:
         source_documents = (inputs.profile.source_document_url,)
 
     return IpoScoreInput(

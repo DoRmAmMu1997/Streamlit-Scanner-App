@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from decimal import ROUND_HALF_UP, Decimal
 
-from backend.ipo.models import IpoScoreInput, IpoScoreResult
+from backend.ipo.models import IpoScoreInput, IpoScoreResult, ScoreBreakdownItem
 
 PDF_WEIGHTS: dict[str, int] = {
     "business_quality": 25,
@@ -37,8 +37,8 @@ def score_ipo(score_input: IpoScoreInput) -> IpoScoreResult:
     receipt stable and familiar to financial users; binary floating-point and
     Python's default half-even rounding could otherwise shift boundary values.
     """
-    raw_total = Decimal(0)
     contributions: dict[str, Decimal] = {}
+    breakdown: list[ScoreBreakdownItem] = []
     missing_data: list[str] = []
     reasons: list[str] = []
 
@@ -52,17 +52,32 @@ def score_ipo(score_input: IpoScoreInput) -> IpoScoreResult:
             missing_data.append(factor_name)
         else:
             contribution = assessment.score * Decimal(weight) / _HUNDRED
-            raw_total += contribution
-        contributions[factor_name] = contribution.quantize(_PENNY, rounding=ROUND_HALF_UP)
+        rounded_contribution = contribution.quantize(
+            _PENNY, rounding=ROUND_HALF_UP
+        )
+        contributions[factor_name] = rounded_contribution
+        breakdown.append(
+            ScoreBreakdownItem(
+                factor=factor_name,
+                weight=weight,
+                normalized_score=assessment.score,
+                missing=assessment.score is None,
+                weighted_contribution=rounded_contribution,
+                evidence_reason=assessment.reason,
+            )
+        )
         if assessment.reason:
             reasons.append(assessment.reason)
 
     return IpoScoreResult(
         company_name=score_input.company_name,
-        score=raw_total.quantize(_PENNY, rounding=ROUND_HALF_UP),
+        score=sum(
+            contributions.values(), start=Decimal(0)
+        ).quantize(_PENNY, rounding=ROUND_HALF_UP),
         contributions=contributions,
         reasons=tuple(reasons),
         missing_data=tuple(missing_data),
         source_documents=score_input.source_documents,
+        breakdown=tuple(breakdown),
     )
 

@@ -141,6 +141,87 @@ class CitedFinancialFact:
         }
 
 
+class DebtReductionPurposeStatus(enum.StrEnum):
+    """Typed conclusion about whether issue proceeds reduce borrowings."""
+
+    AFFIRMATIVE = "affirmative"
+    NEGATIVE = "negative"
+    AMBIGUOUS = "ambiguous"
+    MISSING = "missing"
+
+
+@dataclass(frozen=True)
+class DebtReductionPurposeEvidence:
+    """Bind a debt-repayment conclusion to the approved prospectus passage.
+
+    Beginner note:
+        A caution flag must never clear because a loose word such as "repay"
+        appeared somewhere in a document. Only ``AFFIRMATIVE`` evidence with
+        an immutable document hash, page, and span token has that authority.
+    """
+
+    status: DebtReductionPurposeStatus
+    source_content_sha256: str | None = None
+    page_number: int | None = None
+    text_span_identity: str | None = None
+    evidence_text: str | None = None
+    verification_reasons: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Normalize the conclusion and enforce citations for affirmative use."""
+        object.__setattr__(
+            self,
+            "status",
+            _parse_enum(
+                self.status,
+                DebtReductionPurposeStatus,
+                "debt reduction purpose status",
+            ),
+        )
+        digest = (
+            str(self.source_content_sha256).strip().lower()
+            if self.source_content_sha256 is not None
+            else None
+        )
+        if digest is not None and not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise IpoValidationError(
+                "Debt-reduction evidence document SHA-256 is invalid."
+            )
+        if self.page_number is not None and self.page_number < 1:
+            raise IpoValidationError(
+                "Debt-reduction evidence page number must be positive."
+            )
+        span = (
+            str(self.text_span_identity).strip()
+            if self.text_span_identity is not None
+            else None
+        )
+        evidence = (
+            str(redact_text(str(self.evidence_text).strip()))
+            if self.evidence_text is not None
+            else None
+        )
+        reasons = tuple(
+            str(redact_text(str(reason).strip()))
+            for reason in self.verification_reasons
+            if str(reason).strip()
+        )
+        if self.status is DebtReductionPurposeStatus.AFFIRMATIVE and (
+            digest is None
+            or self.page_number is None
+            or not span
+            or not evidence
+        ):
+            raise IpoValidationError(
+                "Affirmative debt-reduction evidence requires document, page, "
+                "span, and evidence text."
+            )
+        object.__setattr__(self, "source_content_sha256", digest)
+        object.__setattr__(self, "text_span_identity", span or None)
+        object.__setattr__(self, "evidence_text", evidence or None)
+        object.__setattr__(self, "verification_reasons", reasons)
+
+
 class FinancialPeriodType(enum.StrEnum):
     """Supported financial statement periods."""
 
@@ -417,6 +498,88 @@ class IpoScoreInput:
 
 
 @dataclass(frozen=True)
+class ScoreBreakdownItem:
+    """One factor's normalized score, weight, contribution, and evidence."""
+
+    factor: str
+    weight: int
+    normalized_score: Decimal | None
+    missing: bool
+    weighted_contribution: Decimal
+    evidence_reason: str | None
+
+    def __post_init__(self) -> None:
+        """Normalize arithmetic and prevent internally contradictory rows."""
+        factor = str(self.factor).strip()
+        if not factor:
+            raise IpoValidationError("Score breakdown factor is required.")
+        if not isinstance(self.weight, int) or isinstance(self.weight, bool):
+            raise IpoValidationError("Score breakdown weight must be an integer.")
+        if self.weight < 0 or self.weight > 100:
+            raise IpoValidationError("Score breakdown weight must be from 0 to 100.")
+        score = (
+            _score_decimal(self.normalized_score)
+            if self.normalized_score is not None
+            else None
+        )
+        missing = bool(self.missing)
+        if missing != (score is None):
+            raise IpoValidationError(
+                "Score breakdown missing must match the absence of normalized_score."
+            )
+        try:
+            contribution = Decimal(str(self.weighted_contribution))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise IpoValidationError(
+                "Score breakdown contribution must be numeric."
+            ) from exc
+        if (
+            not contribution.is_finite()
+            or contribution < 0
+            or contribution > Decimal(self.weight)
+        ):
+            raise IpoValidationError(
+                "Score breakdown contribution must be finite and within its weight."
+            )
+        reason = (
+            str(redact_text(str(self.evidence_reason).strip()))
+            if self.evidence_reason is not None
+            else None
+        )
+        object.__setattr__(self, "factor", factor)
+        object.__setattr__(self, "normalized_score", score)
+        object.__setattr__(self, "missing", missing)
+        object.__setattr__(
+            self,
+            "weighted_contribution",
+            contribution.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP),
+        )
+        object.__setattr__(self, "evidence_reason", reason or None)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-native additive public receipt."""
+
+        def _number(value: Decimal | None) -> int | float | None:
+            """Preserve whole numbers while keeping fractional JSON values."""
+            if value is None:
+                return None
+            return (
+                int(value)
+                if value == value.to_integral_value()
+                else float(value)
+            )
+
+        return {
+            "factor": self.factor,
+            "weight": self.weight,
+            "normalized_score": _number(self.normalized_score),
+            "missing": self.missing,
+            "weighted_contribution": _number(self.weighted_contribution),
+            "evidence_reason": self.evidence_reason,
+        }
+
+
+@dataclass(frozen=True)
 class IpoScoreResult:
     """Preserve the numeric receipt before recommendation policy is applied."""
 
@@ -426,6 +589,7 @@ class IpoScoreResult:
     reasons: tuple[str, ...]
     missing_data: tuple[str, ...]
     source_documents: tuple[str, ...]
+    breakdown: tuple[ScoreBreakdownItem, ...] = ()
 
     def __post_init__(self) -> None:
         """Freeze the nested contribution mapping as well as the outer record."""
@@ -456,6 +620,7 @@ class IpoRecommendationResult:
     missing_data: tuple[str, ...]
     source_documents: tuple[str, ...]
     caution_flags: tuple[IpoCautionFlag, ...] = ()
+    breakdown: tuple[ScoreBreakdownItem, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """Return the exact public JSON shape promised by IPO-001 and IPO-006."""
@@ -481,6 +646,7 @@ class IpoRecommendationResult:
                 }
                 for flag in self.caution_flags
             ],
+            "breakdown": [item.to_dict() for item in self.breakdown],
         }
 
 

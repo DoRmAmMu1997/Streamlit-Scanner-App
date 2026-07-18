@@ -14,6 +14,7 @@ from backend.ipo.models import (
     IpoCautionFlagStatus,
     IpoScoreResult,
     Recommendation,
+    ScoreBreakdownItem,
 )
 from backend.ipo.scoring.recommendation import (
     APPLY_AND_HOLD,
@@ -41,6 +42,16 @@ def _score_result(
     missing_data: tuple[str, ...] = (),
 ) -> IpoScoreResult:
     """Build the reusable score result fixture used by the scenarios below."""
+    breakdown = (
+        ScoreBreakdownItem(
+            factor="business_quality",
+            weight=25,
+            normalized_score=Decimal(score),
+            missing=False,
+            weighted_contribution=Decimal(score) * Decimal("0.25"),
+            evidence_reason="Official RHP evidence.",
+        ),
+    )
     return IpoScoreResult(
         company_name="Example Ltd",
         score=Decimal(score),
@@ -48,7 +59,24 @@ def _score_result(
         reasons=("Strong revenue growth", "Reasonable valuation versus peers"),
         missing_data=missing_data,
         source_documents=("https://www.sebi.gov.in/example-rhp.pdf",),
+        breakdown=breakdown,
     )
+
+
+def test_public_json_includes_typed_score_breakdown() -> None:
+    """The additive public contract exposes factor arithmetic and evidence."""
+    result = build_recommendation(_score_result("80"))
+
+    assert result.to_dict()["breakdown"] == [
+        {
+            "factor": "business_quality",
+            "weight": 25,
+            "normalized_score": 80,
+            "missing": False,
+            "weighted_contribution": 20,
+            "evidence_reason": "Official RHP evidence.",
+        }
+    ]
 
 
 @pytest.mark.parametrize(
@@ -130,9 +158,19 @@ def test_json_contract_has_exact_keys_and_json_native_values() -> None:
         "confidence": "high",
         "reasons": ["Strong revenue growth", "Reasonable valuation versus peers"],
         "missing_data": [],
-        "source_documents": ["https://www.sebi.gov.in/example-rhp.pdf"],
-        "caution_flags": [],
-    }
+            "source_documents": ["https://www.sebi.gov.in/example-rhp.pdf"],
+            "caution_flags": [],
+            "breakdown": [
+                {
+                    "factor": "business_quality",
+                    "weight": 25,
+                    "normalized_score": 78,
+                    "missing": False,
+                    "weighted_contribution": 19.5,
+                    "evidence_reason": "Official RHP evidence.",
+                }
+            ],
+        }
     assert json.loads(json.dumps(payload)) == payload
 
 

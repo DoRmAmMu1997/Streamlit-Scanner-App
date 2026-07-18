@@ -16,13 +16,14 @@ from decimal import Decimal
 from typing import Any
 
 from backend.ipo.dashboard import IpoDashboardRow, IpoDashboardSnapshot
-from backend.ipo.models import IpoStatus
+from backend.ipo.models import IpoStatus, ScoreBreakdownItem
 from backend.ipo.scoring.recommendation import (
     APPLY_AND_HOLD,
     APPLY_FOR_LISTING_GAINS,
     INSUFFICIENT_VERIFIED_DATA,
     SKIP,
 )
+from backend.ipo.scoring.score_model import PDF_WEIGHTS
 from backend.ipo.scoring.service import IpoRescoreOutcome
 from ui import ipo_page
 
@@ -58,6 +59,21 @@ def _row(**overrides: Any) -> IpoDashboardRow:
 def _snapshot(*rows: IpoDashboardRow) -> IpoDashboardSnapshot:
     """Wrap rows in a snapshot stamped at the fixed test instant."""
     return IpoDashboardSnapshot(generated_at=_SCORED_AT, rows=tuple(rows))
+
+
+def _breakdown() -> tuple[ScoreBreakdownItem, ...]:
+    """Build the full seven-factor display receipt."""
+    return tuple(
+        ScoreBreakdownItem(
+            factor=name,
+            weight=weight,
+            normalized_score=Decimal("80"),
+            missing=False,
+            weighted_contribution=Decimal(weight) * Decimal("0.8"),
+            evidence_reason=f"Cited evidence for {name}.",
+        )
+        for name, weight in PDF_WEIGHTS.items()
+    )
 
 
 def test_label_map_covers_every_stored_recommendation_type() -> None:
@@ -104,6 +120,7 @@ def test_rows_frame_carries_every_spec_column() -> None:
         "Documents",
         "Source documents",
         "Last updated",
+        "Evaluation stale",
     ]
     record = frame.iloc[0]
     assert record["Company"] == "Example Ltd"
@@ -111,6 +128,7 @@ def test_rows_frame_carries_every_spec_column() -> None:
     assert record["Recommendation"] == "Recommended - high conviction"
     assert record["Missing data"] == "gmp_sentiment"
     assert record["Documents"] == "1/1"
+    assert bool(record["Evaluation stale"]) is False
 
 
 def test_rows_frame_marks_missing_profile_and_prepends_flags_to_risks() -> None:
@@ -150,6 +168,7 @@ class _FakeStreamlit:
         self.warnings: list[str] = []
         self.radio_options: tuple[str, ...] | None = None
         self.button_keys: list[str] = []
+        self.expander_labels: list[str] = []
 
     def subheader(self, *_args: Any, **_kwargs: Any) -> None:
         """Accept the page heading."""
@@ -184,9 +203,57 @@ class _FakeStreamlit:
         """Record hard-caution callouts in breakdowns."""
         self.warnings.append(str(text))
 
-    def expander(self, *_args: Any, **_kwargs: Any) -> Any:
+    def expander(self, label: str, **_kwargs: Any) -> Any:
         """Provide the context-manager shape of a real expander."""
+        self.expander_labels.append(str(label))
         return contextlib.nullcontext()
+
+
+def test_breakdown_render_contains_all_seven_factors() -> None:
+    """The expander renders the complete receipt rather than only reasons."""
+    fake_st = _FakeStreamlit()
+    original = ipo_page.st
+    try:
+        ipo_page.st = fake_st
+        ipo_page._render_breakdowns((_row(breakdown=_breakdown()),))
+    finally:
+        ipo_page.st = original
+
+    assert len(fake_st.frames) == 1
+    frame = fake_st.frames[0]
+    assert list(frame["Factor"]) == [
+        name.replace("_", " ") for name in PDF_WEIGHTS
+    ]
+    assert len(frame) == 7
+
+
+def test_untrusted_markdown_cannot_create_remote_image_syntax() -> None:
+    """Issuer, reason, evidence, and source labels are escaped at display sinks."""
+    hostile = "Bad ![tracker](https://evil.invalid/pixel) **issuer**"
+    row = _row(
+        company_name=hostile,
+        reasons=(hostile,),
+        source_documents=(hostile,),
+        breakdown=(),
+    )
+    fake_st = _FakeStreamlit()
+    original = ipo_page.st
+    try:
+        ipo_page.st = fake_st
+        ipo_page._render_breakdowns((row,))
+    finally:
+        ipo_page.st = original
+
+    rendered = " ".join(
+        (
+            *fake_st.markdowns,
+            *fake_st.captions,
+            *fake_st.expander_labels,
+        )
+    )
+    assert "![" not in rendered
+    assert "](" not in rendered
+    assert "**issuer**" not in rendered
 
 
 class _FakeLoader:

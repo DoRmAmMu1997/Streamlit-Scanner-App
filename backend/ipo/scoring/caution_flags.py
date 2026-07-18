@@ -26,6 +26,7 @@ from backend.ipo.financials.ratio_engine import (
 )
 from backend.ipo.manual_extraction import IpoPeerMetric
 from backend.ipo.models import (
+    DebtReductionPurposeStatus,
     IpoCautionFlag,
     IpoCautionFlagReport,
     IpoCautionFlagStatus,
@@ -66,11 +67,6 @@ HIGH_DEBT_TO_EQUITY: Final = Decimal("1.5")
 HIGH_NET_DEBT_TO_EBITDA: Final = Decimal("3")
 QIB_WEAK_MULTIPLE: Final = Decimal("1")
 NEAR_CLOSE_WINDOW_DAYS: Final = 1
-
-# Case-folded fragments that count as a debt-reduction use of proceeds.
-# "repay" also matches "repayment" and "prepay(ment)"; the check is
-# deliberately generous because the safe failure direction is NOT triggering.
-DEBT_REDUCTION_KEYWORDS: Final = ("repay", "debt reduction", "reduction of debt", "deleverag")
 
 _TWO_PLACES = Decimal("0.01")
 
@@ -301,22 +297,41 @@ def _high_debt_without_reduction_use(inputs: IpoFactorInputs) -> IpoCautionFlag:
             IpoCautionFlagStatus.NOT_TRIGGERED,
             f"Leverage within limits ({summary}).",
         )
-    objects_text = inputs.profile.objects_of_issue.casefold()
-    if any(keyword in objects_text for keyword in DEBT_REDUCTION_KEYWORDS):
+    purpose = inputs.debt_reduction_purpose
+    if (
+        purpose is not None
+        and purpose.status is DebtReductionPurposeStatus.AFFIRMATIVE
+        and purpose.source_content_sha256
+        and purpose.page_number is not None
+        and purpose.text_span_identity
+    ):
         return _flag(
             FLAG_HIGH_DEBT_NO_REDUCTION_USE,
             IpoCautionFlagStatus.NOT_TRIGGERED,
-            "Leverage is high but the objects of issue name debt repayment.",
+            (
+                "Leverage is high but cited affirmative debt-reduction evidence "
+                f"was verified on page {purpose.page_number} "
+                f"({purpose.text_span_identity}, sha256 "
+                f"{purpose.source_content_sha256[:12]})."
+            ),
         )
     summary = ", ".join(
         f"{receipt.name.value} {_fmt(receipt.value)}"
         for receipt in breaches
         if receipt.value is not None
     )
+    purpose_status = (
+        purpose.status.value
+        if purpose is not None
+        else DebtReductionPurposeStatus.MISSING.value
+    )
     return _flag(
         FLAG_HIGH_DEBT_NO_REDUCTION_USE,
         IpoCautionFlagStatus.TRIGGERED,
-        f"High leverage ({summary}) with no debt-reduction use of proceeds.",
+        (
+            f"High leverage ({summary}) without cited affirmative debt-reduction "
+            f"use of proceeds (purpose evidence: {purpose_status})."
+        ),
     )
 
 

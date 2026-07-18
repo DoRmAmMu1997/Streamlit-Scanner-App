@@ -10,6 +10,8 @@ same repository-only scoring service the job uses.
 
 from __future__ import annotations
 
+import re
+
 import pandas as pd
 import streamlit as st
 
@@ -58,6 +60,19 @@ _SECTIONS = (
 )
 
 _VERDICT_FILTERS = ("All", "Recommended", "Not Recommended")
+_MARKDOWN_CONTROL = re.compile(r"([`*_{}\[\]()#+\-.!|><~$^])")
+
+
+def _neutralize_markdown(value: object) -> str:
+    """Escape untrusted text before sending it to a Markdown-capable widget.
+
+    Streamlit interprets Markdown in labels, warnings, captions, and markdown
+    bodies. Escaping the complete control set prevents an issuer name or model
+    evidence string such as ``![x](https://tracker)`` from creating a remote
+    image request or changing the page structure.
+    """
+    text = str(value).replace("\\", "\\\\")
+    return _MARKDOWN_CONTROL.sub(r"\\\1", text)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -103,13 +118,25 @@ def _rows_frame(rows: tuple[IpoDashboardRow, ...]) -> pd.DataFrame:
                 "Recommendation": _verdict_label(row),
                 "Confidence": row.confidence or "",
                 "Top positives": "; ".join(row.top_positives),
-                "Top risks": "; ".join((*row.triggered_flags, *row.top_risks)),
-                "Missing data": "; ".join(row.missing_data)
-                or ("" if row.has_manual_profile else "manual extraction"),
+                "Top risks": "; ".join(
+                    (*row.triggered_flags, *row.top_risks)
+                ),
+                "Missing data": "; ".join(
+                    (
+                        *row.missing_data,
+                        *(("evaluation stale",) if row.evaluation_stale else ()),
+                    )
+                )
+                or (
+                    ""
+                    if row.has_manual_profile
+                    else "manual extraction"
+                ),
                 "Pending proposals": row.pending_proposals,
                 "Documents": f"{row.documents_downloaded}/{row.documents_total}",
                 "Source documents": "; ".join(row.source_documents),
                 "Last updated": row.last_updated.isoformat() if row.last_updated else "",
+                "Evaluation stale": row.evaluation_stale,
             }
             for row in rows
         ]
@@ -132,17 +159,65 @@ def _render_breakdowns(rows: tuple[IpoDashboardRow, ...]) -> None:
         return
     st.markdown("**Score breakdowns**")
     for row in scored:
-        with st.expander(f"{row.company_name} - {row.score}/100 ({_verdict_label(row)})"):
+        company = _neutralize_markdown(row.company_name)
+        with st.expander(
+            f"{company} - {row.score}/100 ({_verdict_label(row)})"
+        ):
             if row.triggered_flags:
                 st.warning(
-                    "Hard caution flags: " + ", ".join(row.triggered_flags)
+                    "Hard caution flags: "
+                    + ", ".join(
+                        _neutralize_markdown(flag)
+                        for flag in row.triggered_flags
+                    )
                 )
-            for reason in row.reasons:
-                st.markdown(f"- {reason}")
+            if row.breakdown:
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {
+                                "Factor": item.factor.replace("_", " "),
+                                "Weight": item.weight,
+                                "Normalized score": (
+                                    str(item.normalized_score)
+                                    if item.normalized_score is not None
+                                    else "Missing"
+                                ),
+                                "Contribution": str(
+                                    item.weighted_contribution
+                                ),
+                                "Evidence": _neutralize_markdown(
+                                    item.evidence_reason or "No evidence supplied"
+                                ),
+                            }
+                            for item in row.breakdown
+                        ]
+                    ),
+                    hide_index=True,
+                )
+            else:
+                for reason in row.reasons:
+                    st.markdown(f"- {_neutralize_markdown(reason)}")
             if row.missing_data:
-                st.caption("Missing data: " + ", ".join(row.missing_data))
+                st.caption(
+                    "Missing data: "
+                    + ", ".join(
+                        _neutralize_markdown(value)
+                        for value in row.missing_data
+                    )
+                )
+            if row.evaluation_stale:
+                st.caption(
+                    "Evaluation stale: newer evidence is waiting to be scored."
+                )
             if row.source_documents:
-                st.caption("Source documents: " + "; ".join(row.source_documents))
+                st.caption(
+                    "Source documents: "
+                    + "; ".join(
+                        _neutralize_markdown(value)
+                        for value in row.source_documents
+                    )
+                )
 
 
 def _run_rescore_all(

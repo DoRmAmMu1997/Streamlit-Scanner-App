@@ -29,6 +29,7 @@ from backend.ipo.manual_extraction import (
 )
 from backend.ipo.models import (
     Confidence,
+    DebtReductionPurposeStatus,
     IpoCautionFlagStatus,
     IpoEnrichmentBatchUsability,
     IpoEnrichmentSignalRecord,
@@ -51,7 +52,10 @@ from backend.ipo.scoring.caution_flags import (
     FLAG_WEAK_QIB_DEMAND_NEAR_CLOSE,
     evaluate_caution_flags,
 )
-from backend.ipo.scoring.factor_derivation import IpoFactorInputs
+from backend.ipo.scoring.factor_derivation import (
+    IpoFactorInputs,
+    derive_debt_reduction_purpose_evidence,
+)
 
 _AS_OF = dt.datetime(2026, 7, 13, 12, 0, tzinfo=dt.UTC)
 _SHA = "a" * 64
@@ -255,6 +259,12 @@ def _inputs(**overrides: Any) -> IpoFactorInputs:
         "enrichment": (),
     }
     values.update(overrides)
+    profile = values["profile"]
+    values["debt_reduction_purpose"] = (
+        derive_debt_reduction_purpose_evidence(profile)
+        if profile is not None
+        else None
+    )
     return IpoFactorInputs(**values)
 
 
@@ -404,8 +414,8 @@ def test_negative_operating_cash_flow_despite_profits_triggers() -> None:
     )
 
 
-def test_high_debt_without_debt_reduction_use_reads_objects_of_issue() -> None:
-    """High leverage triggers unless the objects name debt repayment."""
+def test_high_debt_requires_affirmative_cited_debt_reduction_evidence() -> None:
+    """High leverage clears only for typed, cited, affirmative repayment evidence."""
     leveraged = _inputs(ratios=_ratios(_receipt(IpoRatioName.DEBT_TO_EQUITY, "2.10")))
     assert (
         _flag(evaluate_caution_flags(leveraged), FLAG_HIGH_DEBT_NO_REDUCTION_USE).status
@@ -422,6 +432,11 @@ def test_high_debt_without_debt_reduction_use_reads_objects_of_issue() -> None:
         _flag(evaluate_caution_flags(repaying), FLAG_HIGH_DEBT_NO_REDUCTION_USE).status
         is IpoCautionFlagStatus.NOT_TRIGGERED
     )
+    assert (
+        repaying.debt_reduction_purpose is not None
+        and repaying.debt_reduction_purpose.status
+        is DebtReductionPurposeStatus.AFFIRMATIVE
+    )
 
     modest = _inputs(ratios=_ratios(_receipt(IpoRatioName.DEBT_TO_EQUITY, "0.40")))
     assert (
@@ -434,6 +449,31 @@ def test_high_debt_without_debt_reduction_use_reads_objects_of_issue() -> None:
         _flag(evaluate_caution_flags(unknown), FLAG_HIGH_DEBT_NO_REDUCTION_USE).status
         is IpoCautionFlagStatus.NOT_EVALUABLE
     )
+
+
+def test_negated_debt_purpose_cannot_suppress_high_debt_caution() -> None:
+    """A nearby negation remains typed negative and the leverage veto fails closed."""
+    inputs = _inputs(
+        profile=_profile(
+            objects_of_issue=(
+                "The net proceeds will not be used for repayment of borrowings; "
+                "they fund general corporate purposes."
+            )
+        ),
+        ratios=_ratios(_receipt(IpoRatioName.DEBT_TO_EQUITY, "2.10")),
+    )
+
+    assert inputs.debt_reduction_purpose is not None
+    assert (
+        inputs.debt_reduction_purpose.status
+        is DebtReductionPurposeStatus.NEGATIVE
+    )
+    flag = _flag(
+        evaluate_caution_flags(inputs),
+        FLAG_HIGH_DEBT_NO_REDUCTION_USE,
+    )
+    assert flag.status is IpoCautionFlagStatus.TRIGGERED
+    assert "negative" in flag.evidence
 
 
 def test_litigation_flag_requires_corroborated_non_web_authority() -> None:
