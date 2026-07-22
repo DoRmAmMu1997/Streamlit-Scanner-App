@@ -162,15 +162,33 @@ _DEBT_CONTEXT_PATTERN: Final = re.compile(
     r"\b(?:debt|borrowings?|loans?|credit facilities)\b",
     re.IGNORECASE,
 )
-_NEGATION_BEFORE_PATTERN: Final = re.compile(
-    r"\b(?:not|no|without|excluding|exclude|shall not|will not|"
-    r"cannot|won't|isn't|aren't)\b.{0,80}$",
+_DEBT_PURPOSE_CLAUSE_BOUNDARY_PATTERN: Final = re.compile(r"(?<=[.;!?])\s+")
+_NOT_ONLY_PATTERN: Final = re.compile(r"\bnot\s+only\b", re.IGNORECASE)
+_NEGATIVE_DEBT_PURPOSE_PATTERN: Final = re.compile(
+    r"\b(?:"
+    r"no|not|never|without|neither|nor|"
+    r"exclud(?:e|ed|es|ing)?|"
+    r"prohibit(?:ed|s|ing)?|forbid(?:den|s|ding)?|bar(?:red|s|ring)?|"
+    r"cannot|can't|won't|shall\s+not|will\s+not|may\s+not|"
+    r"is(?:n't|\s+not)|are(?:n't|\s+not)"
+    r")\b",
     re.IGNORECASE,
 )
-_NEGATION_AFTER_PATTERN: Final = re.compile(
-    r"^.{0,30}\b(?:not|excluded|excluding)\b",
-    re.IGNORECASE,
-)
+
+
+def _classify_debt_purpose_clause(clause: str) -> DebtReductionPurposeStatus:
+    """Classify one complete repayment proposition as affirmative or negative.
+
+    Beginner note:
+        A negator can govern a repayment word from either side of a sentence,
+        so a fixed character window is not a safe proxy for meaning.  This
+        deliberately conservative classifier examines the complete clause;
+        any recognized denial or prohibition makes the clause negative.
+    """
+    clause_without_not_only = _NOT_ONLY_PATTERN.sub("", clause)
+    if _NEGATIVE_DEBT_PURPOSE_PATTERN.search(clause_without_not_only):
+        return DebtReductionPurposeStatus.NEGATIVE
+    return DebtReductionPurposeStatus.AFFIRMATIVE
 
 
 def derive_debt_reduction_purpose_evidence(
@@ -180,9 +198,9 @@ def derive_debt_reduction_purpose_evidence(
 
     Beginner note:
         This parser is intentionally narrow. It recognizes explicit repayment
-        language and checks nearby negation, while ambiguous debt references
-        fail closed. The caution rule consumes only this typed conclusion and
-        never performs its own substring search.
+        language in complete sentences or punctuation-delimited clauses, while
+        ambiguous debt references fail closed. The caution rule consumes only
+        this typed conclusion and never performs its own substring search.
     """
     if profile is None:
         return None
@@ -211,21 +229,15 @@ def derive_debt_reduction_purpose_evidence(
             verification_reasons=(reason,),
         )
 
-    affirmative = False
-    negated = False
-    for match in matches:
-        before = text[max(0, match.start() - 100) : match.start()]
-        after = text[match.end() : match.end() + 40]
-        is_negated = bool(
-            _NEGATION_BEFORE_PATTERN.search(before)
-            or _NEGATION_AFTER_PATTERN.search(after)
-        )
-        negated = negated or is_negated
-        affirmative = affirmative or not is_negated
-    if affirmative and negated:
+    clause_statuses = [
+        _classify_debt_purpose_clause(clause)
+        for clause in _DEBT_PURPOSE_CLAUSE_BOUNDARY_PATTERN.split(text)
+        if _DEBT_PURPOSE_PATTERN.search(clause)
+    ]
+    if len(set(clause_statuses)) > 1:
         status = DebtReductionPurposeStatus.AMBIGUOUS
         reason = "The cited passage contains conflicting repayment statements."
-    elif affirmative:
+    elif clause_statuses[0] is DebtReductionPurposeStatus.AFFIRMATIVE:
         status = DebtReductionPurposeStatus.AFFIRMATIVE
         reason = "Explicit non-negated debt-reduction purpose verified."
     else:

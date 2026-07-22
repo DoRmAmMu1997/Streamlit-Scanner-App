@@ -32,6 +32,7 @@ from backend.ipo.manual_extraction import (
 )
 from backend.ipo.models import (
     Confidence,
+    DebtReductionPurposeStatus,
     IpoEnrichmentSignalRecord,
     IpoEnrichmentSignalType,
     IpoIssueRecord,
@@ -43,6 +44,7 @@ from backend.ipo.scoring.factor_derivation import (
     FACTOR_MODEL_VERSION,
     GMP_SIGNAL_MAX_AGE_DAYS,
     IpoFactorInputs,
+    derive_debt_reduction_purpose_evidence,
     derive_score_input,
 )
 
@@ -145,6 +147,58 @@ def _profile(**overrides: Any) -> IpoManualExtractionRecord:
     }
     values.update(overrides)
     return IpoManualExtractionRecord(**values)
+
+
+def _debt_purpose_status(text: str) -> DebtReductionPurposeStatus:
+    """Derive the debt-purpose status from a cited approved objects span."""
+    evidence = derive_debt_reduction_purpose_evidence(_profile(objects_of_issue=text))
+    assert evidence is not None
+    return evidence.status
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "No portion of the fresh issue proceeds, after allocation toward capital expenditure, "
+            "working capital requirements, lease deposits, technology upgrades, issue expenses, and "
+            "general corporate purposes, shall be applied toward repayment of borrowings.",
+            DebtReductionPurposeStatus.NEGATIVE,
+        ),
+        (
+            "Repayment of borrowings from the net proceeds is expressly prohibited under the financing "
+            "agreements.",
+            DebtReductionPurposeStatus.NEGATIVE,
+        ),
+        (
+            "The net proceeds won't be used for repayment of borrowings.",
+            DebtReductionPurposeStatus.NEGATIVE,
+        ),
+        (
+            "The net proceeds will be used for repayment of outstanding borrowings.",
+            DebtReductionPurposeStatus.AFFIRMATIVE,
+        ),
+        (
+            "The net proceeds will be used not only for repayment of borrowings but also for working capital.",
+            DebtReductionPurposeStatus.AFFIRMATIVE,
+        ),
+        (
+            "The company has outstanding debt and borrowings.",
+            DebtReductionPurposeStatus.AMBIGUOUS,
+        ),
+        (
+            "The net proceeds will be used for repayment of borrowings. "
+            "No portion of the proceeds shall be used for repayment of borrowings.",
+            DebtReductionPurposeStatus.AMBIGUOUS,
+        ),
+    ],
+)
+def test_debt_purpose_classification_is_sentence_aware_and_fail_closed(
+    text: str,
+    expected: DebtReductionPurposeStatus,
+) -> None:
+    """Classify purpose propositions without treating unrelated text as a local negator."""
+    assert _debt_purpose_status(text) is expected
 
 
 def _receipt(
