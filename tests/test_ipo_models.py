@@ -150,6 +150,7 @@ def test_public_ipo_package_exports_the_domain_and_repository_contract() -> None
         "CAUTION_FLAGS_VERSION",
         "CAUTION_FLAG_ORDER",
         "CitedFinancialFact",
+        "CitedTextEvidence",
         "Confidence",
         "DebtReductionPurposeEvidence",
         "DebtReductionPurposeStatus",

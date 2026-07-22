@@ -36,10 +36,8 @@ from backend.ipo.models import (
     IpoIssueData,
     IpoIssueType,
     IpoStatus,
-    IpoValidationError,
 )
 from backend.ipo.repository import (
-    approve_extraction_proposal,
     create_document,
     create_issue,
     reject_extraction_proposal,
@@ -107,26 +105,42 @@ def _minimal_pdf(pages: list[list[str]]) -> bytes:
 _FIXTURE_PAGES = [
     [
         "RESTATED CONSOLIDATED FINANCIAL INFORMATION",
-        "Statement of profit and loss (in crore)",
-        "Revenue 100 120 150",
-        "EBITDA 20 24 30",
-        "PAT 10 12 15",
-        "Profit before tax 12 14 18",
-        "Finance cost 2 2 2",
+        "Revenue FY2024 100 (in crore INR)",
+        "Revenue FY2025 120 (in crore INR)",
+        "Revenue FY2026 150 (in crore INR)",
+        "EBITDA FY2024 20 (in crore INR)",
+        "EBITDA FY2025 24 (in crore INR)",
+        "EBITDA FY2026 30 (in crore INR)",
+        "PAT FY2024 10 (in crore INR)",
+        "PAT FY2025 12 (in crore INR)",
+        "PAT FY2026 15 (in crore INR)",
+        "Profit before tax FY2024 12 (in crore INR)",
+        "Profit before tax FY2025 14 (in crore INR)",
+        "Profit before tax FY2026 18 (in crore INR)",
+        "Finance cost FY2024 2 (in crore INR)",
+        "Finance cost FY2025 2 (in crore INR)",
+        "Finance cost FY2026 2 (in crore INR)",
     ],
     [
-        "Balance sheet extracts (in crore)",
-        "Net worth 90 Total debt 12 Cash 5",
-        "Cash flow from operations 14",
-        "Equity shares 50 lakh EPS 3.00 NAV 18.75",
-        "Total assets 150 Current liabilities 45",
-        "Post issue equity shares 60",
+        "Balance sheet extracts",
+        "Net worth 90 (in crore INR)",
+        "Total debt 12 (in crore INR)",
+        "Cash 5 (in crore INR)",
+        "Cash flow from operations 14 (in crore INR)",
+        "Equity shares 50 lakh shares",
+        "EPS 3.00",
+        "NAV 18.75",
+        "Total assets 150 (in crore INR)",
+        "Current liabilities 45 (in crore INR)",
+        "Post issue equity shares 60 lakh shares",
     ],
     [
         "OBJECTS OF THE OFFER",
-        "Issue amounts in crore",
-        "Fresh issue 300 Offer for sale 0",
-        "Promoter holding 75.25 before and 56.44 after",
+        "Fresh issue 300 (amounts in crore INR)",
+        "Offer for sale 0 (amounts in crore INR)",
+        "Promoter holding before issue 75.25",
+        "Promoter holding after issue 56.44",
+        "Fresh issue and offer for sale as described.",
         "Basis for offer price: Peer One Ltd P/E 21.40 EPS 8.25",
     ],
 ]
@@ -272,7 +286,7 @@ def test_verified_draft_becomes_a_pending_high_confidence_proposal(
     assert result.source_content_sha256 == digest
     assert result.page_count == 3
     assert result.payload["net_worth"] == "90"
-    assert result.payload["evidence_schema_version"] == "cited-financial-fact/v1"
+    assert result.payload["evidence_schema_version"] == "cited-financial-fact/v2"
     cited_net_worth = next(
         fact
         for fact in result.payload["cited_financial_facts"]
@@ -289,8 +303,22 @@ def test_verified_draft_becomes_a_pending_high_confidence_proposal(
         "location": "text-line:2",
         "source_token": "90",
         "confidence": "high",
-        "verification_reasons": [],
+        "verification_reasons": [
+            "Matched the field label and value in one source line.",
+            "Matched the selected unit in the same bounded text context.",
+        ],
     }
+    assert result.payload["cited_text_evidence"] == [
+        {
+            "field_name": "objects_of_issue",
+            "document_sha256": digest,
+            "page_number": 3,
+            "location": "text-line:6",
+            "source_text": "Fresh issue and offer for sale as described.",
+            "confidence": "high",
+            "verification_reasons": ["Matched the exact normalized source span."],
+        }
+    ]
 
 
 def test_prompt_names_company_and_classified_sections(
@@ -361,10 +389,10 @@ def test_unverifiable_core_value_fails_closed(
     assert result.error_type == "AIValidationError"
 
 
-def test_one_unverified_optional_value_downgrades_to_medium(
+def test_one_unverified_optional_value_fails_closed_without_complete_facts(
     file_session_factory, tmp_path: Path
 ) -> None:
-    """A single non-core mismatch is queued at medium with reviewer notes."""
+    """A partial v2 fact set cannot enter the queue, even at medium confidence."""
     issue, document, _digest = _cached_pdf_document(file_session_factory, tmp_path)
 
     result = propose_extraction(
@@ -375,16 +403,9 @@ def test_one_unverified_optional_value_downgrades_to_medium(
         session_factory=file_session_factory,
     )
 
-    assert isinstance(result, IpoExtractionProposalRecord)
-    assert result.confidence is Confidence.MEDIUM
-    assert any("total_debt" in reason for reason in result.needs_review_reasons)
-    with pytest.raises(IpoValidationError, match=r"incomplete.*review"):
-        approve_extraction_proposal(
-            result.id,
-            reviewed_by_email="reviewer@example.com",
-            data_dir=tmp_path,
-            session_factory=file_session_factory,
-        )
+    assert isinstance(result, IpoExtractionErrorReceipt)
+    assert result.error_type == "IpoValidationError"
+    assert result.code == "extraction_failed"
 
 
 def test_malformed_json_gets_one_bounded_retry_then_succeeds(
@@ -607,6 +628,279 @@ def test_numeric_verifier_accepts_only_formatting_equivalent_tokens() -> None:
 
     assert financial_extractor._number_appears_on_page("123456", page) is True
     assert financial_extractor._number_appears_on_page("-2500.00", page) is True
+
+
+def _semantic_fixture_pages(*, include_objects_excerpt: bool = True) -> tuple[ExtractedPage, ...]:
+    """Return the synthetic PDF text as host-side page receipts.
+
+    Beginner note:
+        These tests call the deterministic verifier directly. Adding the exact
+        objects excerpt by default keeps each numeric test focused on the one
+        semantic mismatch it is meant to prove.
+    """
+    raw_pages = [list(lines) for lines in _FIXTURE_PAGES]
+    excerpt = "Fresh issue and offer for sale as described."
+    if include_objects_excerpt and excerpt not in raw_pages[2]:
+        raw_pages[2].append("Fresh issue and offer for sale as described.")
+    elif not include_objects_excerpt:
+        raw_pages[2] = [line for line in raw_pages[2] if line != excerpt]
+    return tuple(
+        ExtractedPage(page_number=index, text="\n".join(lines), tables=())
+        for index, lines in enumerate(raw_pages, start=1)
+    )
+
+
+def test_equal_value_in_wrong_financial_row_is_not_verified() -> None:
+    """A real debt token cannot be promoted into a net-worth fact."""
+    proposal = financial_extractor._ProposalModel.model_validate(
+        json.loads(_agent_json(net_worth="12"))
+    )
+
+    with pytest.raises(financial_extractor._ExtractionOutputError):
+        financial_extractor._verify_proposal(proposal, _semantic_fixture_pages())
+
+    table_page = ExtractedPage(
+        page_number=2,
+        text="",
+        tables=(
+            ExtractedTable(
+                page_number=2,
+                rows=(
+                    ("Metric", "Value", "Unit"),
+                    ("Revenue", "12", "in crore INR"),
+                    ("Net worth", "90", "in crore INR"),
+                ),
+            ),
+        ),
+    )
+    assert (
+        financial_extractor._matching_numeric_source_for_fact(
+            "net_worth", "12", table_page, proposal
+        )
+        is None
+    )
+    compact_table_page = ExtractedPage(
+        page_number=2,
+        text="",
+        tables=(
+            ExtractedTable(
+                page_number=2,
+                rows=(
+                    ("Metric", "Value", "Metric", "Value", "Unit"),
+                    ("Net worth", "90", "Total debt", "12", "in crore INR"),
+                ),
+            ),
+        ),
+    )
+    assert (
+        financial_extractor._matching_numeric_source_for_fact(
+            "net_worth", "12", compact_table_page, proposal
+        )
+        is None
+    )
+
+
+def test_period_value_requires_matching_column_header() -> None:
+    """Valid annual dates still fail when the cited source has other fiscal years."""
+    payload = json.loads(_agent_json())
+    for period, year in zip(payload["periods"], (2037, 2038, 2039), strict=True):
+        period["period_end"] = f"{year}-03-31"
+    proposal = financial_extractor._ProposalModel.model_validate(payload)
+
+    with pytest.raises(financial_extractor._ExtractionOutputError):
+        financial_extractor._verify_proposal(proposal, _semantic_fixture_pages())
+
+    table_page = ExtractedPage(
+        page_number=1,
+        text="",
+        tables=(
+            ExtractedTable(
+                page_number=1,
+                rows=(
+                    ("Metric", "FY2023", "FY2024", "Unit"),
+                    ("Revenue", "100", "999", "in crore INR"),
+                ),
+            ),
+        ),
+    )
+    source = financial_extractor._matching_numeric_source_for_fact(
+        "period 1 revenue", "100", table_page, financial_extractor._ProposalModel.model_validate(
+            json.loads(_agent_json())
+        )
+    )
+    assert source is None
+
+
+def test_unit_must_share_the_value_table_or_bounded_text_context() -> None:
+    """An unrelated share-count phrase cannot prove a monetary scale."""
+    page = ExtractedPage(
+        page_number=1,
+        text="Revenue 100 (in crore INR)\nThe offer comprises 10 million shares.",
+        tables=(),
+    )
+
+    assert (
+        financial_extractor._page_contains_unit(
+            page,
+            "million_inr",
+            share_unit=False,
+        )
+        is False
+    )
+    proposal = financial_extractor._ProposalModel.model_validate(
+        json.loads(_agent_json(financial_amount_unit="million_inr"))
+    )
+    table_page = ExtractedPage(
+        page_number=2,
+        text="",
+        tables=(
+            ExtractedTable(
+                page_number=2,
+                rows=(("Metric", "Value", "Unit"), ("Net worth", "90", "in crore INR")),
+            ),
+            ExtractedTable(
+                page_number=2,
+                rows=(("Offer", "Count"), ("Equity offered", "10 million shares")),
+            ),
+        ),
+    )
+    assert (
+        financial_extractor._matching_numeric_source_for_fact(
+            "net_worth", "90", table_page, proposal
+        )
+        is None
+    )
+    share_proposal = financial_extractor._ProposalModel.model_validate(
+        json.loads(_agent_json(equity_share_unit="million_shares"))
+    )
+    mixed_header_page = ExtractedPage(
+        page_number=2,
+        text="",
+        tables=(
+            ExtractedTable(
+                page_number=2,
+                rows=(
+                    ("Amounts in INR million", "Number of shares"),
+                    ("Equity shares", "50"),
+                ),
+            ),
+        ),
+    )
+    assert (
+        financial_extractor._matching_numeric_source_for_fact(
+            "equity_shares", "50", mixed_header_page, share_proposal
+        )
+        is None
+    )
+
+
+def test_base_unit_rejects_scaled_source_context() -> None:
+    """An INR proposal cannot erase a multiplier declared beside the value."""
+    proposal = financial_extractor._ProposalModel.model_validate(
+        json.loads(_agent_json(financial_amount_unit="inr"))
+    )
+    page = ExtractedPage(
+        page_number=2,
+        text="",
+        tables=(
+            ExtractedTable(
+                page_number=2,
+                rows=(
+                    ("Financial statement (amounts in INR)", "", ""),
+                    ("Metric", "Value", "Unit"),
+                    ("Figures in millions", "", ""),
+                    ("Net worth", "90", ""),
+                ),
+            ),
+        ),
+    )
+
+    assert (
+        financial_extractor._matching_numeric_source_for_fact(
+            "net_worth", "90", page, proposal
+        )
+        is None
+    )
+
+
+def test_overlapping_labels_do_not_cross_bind_values() -> None:
+    """Generic fields cannot borrow values from their more-specific siblings."""
+    proposal = financial_extractor._ProposalModel.model_validate(
+        json.loads(_agent_json())
+    )
+    page = ExtractedPage(
+        page_number=2,
+        text="",
+        tables=(
+            ExtractedTable(
+                page_number=2,
+                rows=(
+                    ("Metric", "Value", "Unit"),
+                    ("Cash and cash flow from operations", "14", "in crore INR"),
+                    ("Post-issue equity shares", "60", "lakh shares"),
+                    ("Equity shares", "50", "lakh shares"),
+                ),
+            ),
+        ),
+    )
+
+    assert (
+        financial_extractor._matching_numeric_source_for_fact(
+            "cash", "14", page, proposal
+        )
+        is None
+    )
+    assert (
+        financial_extractor._matching_numeric_source_for_fact(
+            "equity_shares", "60", page, proposal
+        )
+        is None
+    )
+    assert (
+        financial_extractor._matching_numeric_source_for_fact(
+            "post_issue_equity_shares", "50", page, proposal
+        )
+        is None
+    )
+
+
+def test_period_lookup_ignores_preceding_data_rows() -> None:
+    """A year in an earlier fact row is not a header for a later value cell."""
+    proposal = financial_extractor._ProposalModel.model_validate(
+        json.loads(_agent_json())
+    )
+    page = ExtractedPage(
+        page_number=1,
+        text="",
+        tables=(
+            ExtractedTable(
+                page_number=1,
+                rows=(
+                    ("Metric", "FY2023", "Unit"),
+                    ("EBITDA", "FY2024", "in crore INR"),
+                    ("Revenue", "100", "in crore INR"),
+                ),
+            ),
+        ),
+    )
+
+    assert (
+        financial_extractor._matching_numeric_source_for_fact(
+            "period 1 revenue", "100", page, proposal
+        )
+        is None
+    )
+
+
+def test_objects_of_issue_requires_exact_source_span() -> None:
+    """Model-written prose absent from the cited page is not evidence."""
+    proposal = financial_extractor._ProposalModel.model_validate(json.loads(_agent_json()))
+
+    with pytest.raises(financial_extractor._ExtractionOutputError):
+        financial_extractor._verify_proposal(
+            proposal,
+            _semantic_fixture_pages(include_objects_excerpt=False),
+        )
 
 
 def test_wrong_but_allowlisted_unit_cannot_receive_high_confidence(

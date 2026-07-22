@@ -47,6 +47,7 @@ from backend.ipo.manual_extraction import (
 )
 from backend.ipo.models import (
     CitedFinancialFact,
+    CitedTextEvidence,
     Confidence,
     FinancialPeriodType,
     IpoCautionFlag,
@@ -1523,7 +1524,7 @@ def _proposal_payload_to_manual_data(
         ) from exc
 
 
-_CITED_FACT_SCHEMA_VERSION = "cited-financial-fact/v1"
+_CITED_FACT_SCHEMA_VERSION = "cited-financial-fact/v2"
 _AMOUNT_UNIT_MULTIPLIERS = {
     IpoAmountUnit.INR.value: Decimal("1"),
     IpoAmountUnit.THOUSAND_INR.value: Decimal("1000"),
@@ -1638,6 +1639,11 @@ def _validate_cited_fact_binding(
     raw_facts = payload.get("cited_financial_facts")
     if not isinstance(raw_facts, list):
         raise IpoValidationError("Citation-bound financial facts are required.")
+    raw_text_evidence = payload.get("cited_text_evidence")
+    if not isinstance(raw_text_evidence, list) or len(raw_text_evidence) != 1:
+        raise IpoValidationError(
+            "Exactly one citation-bound objects_of_issue text evidence record is required."
+        )
     expected = _expected_cited_facts(payload)
     seen: set[str] = set()
     try:
@@ -1699,6 +1705,40 @@ def _validate_cited_fact_binding(
         raise IpoValidationError(
             "Citation-bound financial facts are incomplete and require review."
         )
+    try:
+        text_data = dict(raw_text_evidence[0])
+        text_evidence = CitedTextEvidence(
+            field_name=str(text_data["field_name"]),
+            document_sha256=str(text_data["document_sha256"]),
+            page_number=int(text_data["page_number"]),
+            location=str(text_data["location"]),
+            source_text=str(text_data["source_text"]),
+            confidence=Confidence(str(text_data["confidence"])),
+            verification_reasons=tuple(text_data.get("verification_reasons", ())),
+        )
+        if (
+            text_evidence.field_name != "objects_of_issue"
+            or text_evidence.document_sha256 != source_content_sha256
+            or text_evidence.page_number != int(payload["objects_of_issue_page"])
+            or " ".join(text_evidence.source_text.split())
+            != " ".join(str(payload["objects_of_issue"]).split())
+        ):
+            raise IpoValidationError(
+                "Citation-bound objects_of_issue text evidence does not match the proposal draft."
+            )
+        if not re.fullmatch(
+            r"(?:text-line:\d+|table:\d+:row:\d+:cell:\d+)",
+            text_evidence.location,
+        ):
+            raise IpoValidationError(
+                "Citation-bound objects_of_issue text evidence has an invalid span identity."
+            )
+    except IpoValidationError:
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
+        raise IpoValidationError(
+            "Citation-bound objects_of_issue text evidence is malformed and requires review."
+        ) from exc
     return schema_version
 
 
@@ -1798,7 +1838,6 @@ def submit_extraction_proposal(
     evidence_schema_version = _validate_cited_fact_binding(
         payload,
         source_content_sha256=source_content_sha256,
-        require_complete=False,
     )
     fingerprint = _proposal_semantic_fingerprint(
         payload=payload,

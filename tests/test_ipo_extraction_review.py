@@ -259,8 +259,19 @@ def _bound_payload(digest: str, **overrides: Any) -> dict[str, Any]:
                 str(value),
                 int(peer["source_page"]),
             )
-    payload["evidence_schema_version"] = "cited-financial-fact/v1"
+    payload["evidence_schema_version"] = "cited-financial-fact/v2"
     payload["cited_financial_facts"] = facts
+    payload["cited_text_evidence"] = [
+        {
+            "field_name": "objects_of_issue",
+            "document_sha256": digest,
+            "page_number": int(payload["objects_of_issue_page"]),
+            "location": f"text-line:{payload['objects_of_issue_page']}",
+            "source_text": str(payload["objects_of_issue"]),
+            "confidence": "high",
+            "verification_reasons": ["Matched the exact normalized source span."],
+        }
+    ]
     return payload
 
 
@@ -343,6 +354,74 @@ def test_submit_rejects_malformed_payload_and_duplicates(
             confidence=Confidence.HIGH,
             needs_review_reasons=(),
             model_version="ipo-010-extractor-v1",
+            agent_model="claude-sonnet-4-6",
+            source_content_sha256=digest,
+            page_count=16,
+            data_dir=tmp_path,
+            session_factory=file_session_factory,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["missing", "empty", "duplicate", "wrong_digest", "wrong_page", "wrong_location", "wrong_text"],
+)
+def test_submit_requires_one_matching_objects_text_fact(
+    file_session_factory,
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    """Raw narrative cannot enter the queue without one host-bound source span."""
+    issue, document, digest = _cached_document(file_session_factory, tmp_path)
+    payload = _bound_payload(digest)
+    if mutation == "missing":
+        payload.pop("cited_text_evidence")
+    elif mutation == "empty":
+        payload["cited_text_evidence"] = []
+    elif mutation == "duplicate":
+        payload["cited_text_evidence"] *= 2
+    elif mutation == "wrong_digest":
+        payload["cited_text_evidence"][0]["document_sha256"] = "b" * 64
+    elif mutation == "wrong_page":
+        payload["cited_text_evidence"][0]["page_number"] = 12
+    elif mutation == "wrong_location":
+        payload["cited_text_evidence"][0]["location"] = "page-wide"
+    else:
+        payload["cited_text_evidence"][0]["source_text"] = "Invented repayment narrative."
+
+    with pytest.raises(IpoValidationError, match=r"text evidence|Cited text|citation-bound"):
+        submit_extraction_proposal(
+            issue.id,
+            document.id,
+            payload=payload,
+            confidence=Confidence.HIGH,
+            needs_review_reasons=(),
+            model_version="ipo-010-extractor-v2",
+            agent_model="claude-sonnet-4-6",
+            source_content_sha256=digest,
+            page_count=16,
+            data_dir=tmp_path,
+            session_factory=file_session_factory,
+        )
+
+
+def test_v1_proposal_is_legacy_and_cannot_be_submitted(
+    file_session_factory, tmp_path: Path
+) -> None:
+    """The former numeric-only schema never inherits narrative authority."""
+    issue, document, digest = _cached_document(file_session_factory, tmp_path)
+    payload = _bound_payload(digest)
+    payload["evidence_schema_version"] = "cited-financial-fact/v1"
+    payload.pop("cited_text_evidence")
+
+    with pytest.raises(IpoValidationError, match=r"legacy.*review"):
+        submit_extraction_proposal(
+            issue.id,
+            document.id,
+            payload=payload,
+            confidence=Confidence.HIGH,
+            needs_review_reasons=(),
+            model_version="ipo-010-extractor-v2",
             agent_model="claude-sonnet-4-6",
             source_content_sha256=digest,
             page_count=16,
@@ -573,6 +652,79 @@ def test_legacy_unbound_proposal_is_review_required_not_approvable(
     assert get_latest_manual_profile(
         issue.id, session_factory=file_session_factory
     ) is None
+
+
+def test_v1_pending_history_is_review_required_not_approvable(
+    file_session_factory, tmp_path: Path
+) -> None:
+    """A stored numeric-only v1 row remains visible but cannot become evidence."""
+    issue, document, digest = _cached_document(file_session_factory, tmp_path)
+    payload = _bound_payload(digest)
+    payload["evidence_schema_version"] = "cited-financial-fact/v1"
+    payload.pop("cited_text_evidence")
+    with file_session_factory() as session:
+        legacy = insert_ipo_extraction_proposal(
+            session,
+            issue.id,
+            document.id,
+            {
+                "status": "pending",
+                "document_url_snapshot": document.document_url,
+                "payload_json": payload,
+                "evidence_schema_version": "cited-financial-fact/v1",
+                "confidence": "high",
+                "needs_review_reasons_json": [],
+                "model_version": "ipo-010-extractor-v2",
+                "agent_model": "claude-sonnet-4-6",
+                "source_content_sha256": digest,
+                "page_count": 16,
+            },
+        )
+        proposal_id = legacy.id
+
+    with pytest.raises(IpoValidationError, match=r"legacy.*review"):
+        approve_extraction_proposal(
+            proposal_id,
+            reviewed_by_email="reviewer@example.com",
+            data_dir=tmp_path,
+            session_factory=file_session_factory,
+        )
+
+
+def test_approval_revalidates_objects_text_evidence(
+    file_session_factory, tmp_path: Path
+) -> None:
+    """A malformed stored v2 text fact cannot bypass the approval boundary."""
+    issue, document, digest = _cached_document(file_session_factory, tmp_path)
+    payload = _bound_payload(digest)
+    payload["cited_text_evidence"][0]["source_text"] = "Invented repayment narrative."
+    with file_session_factory() as session:
+        malformed = insert_ipo_extraction_proposal(
+            session,
+            issue.id,
+            document.id,
+            {
+                "status": "pending",
+                "document_url_snapshot": document.document_url,
+                "payload_json": payload,
+                "evidence_schema_version": "cited-financial-fact/v2",
+                "confidence": "high",
+                "needs_review_reasons_json": [],
+                "model_version": "ipo-010-extractor-v2",
+                "agent_model": "claude-sonnet-4-6",
+                "source_content_sha256": digest,
+                "page_count": 16,
+            },
+        )
+        proposal_id = malformed.id
+
+    with pytest.raises(IpoValidationError, match=r"text evidence does not match"):
+        approve_extraction_proposal(
+            proposal_id,
+            reviewed_by_email="reviewer@example.com",
+            data_dir=tmp_path,
+            session_factory=file_session_factory,
+        )
 
 
 def test_lost_approval_race_rolls_back_the_manual_revision(

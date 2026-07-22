@@ -31,6 +31,7 @@ from backend.ipo.manual_extraction import (
 )
 from backend.ipo.models import (
     CitedFinancialFact,
+    CitedTextEvidence,
     Confidence,
     DebtReductionPurposeEvidence,
     DebtReductionPurposeStatus,
@@ -152,6 +153,7 @@ __all__ = [
     "INSUFFICIENT_VERIFIED_DATA",
     "SCREENER_MODEL_VERSION",
     "CitedFinancialFact",
+    "CitedTextEvidence",
     "Confidence",
     "DebtReductionPurposeEvidence",
     "DebtReductionPurposeStatus",

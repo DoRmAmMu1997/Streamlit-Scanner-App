@@ -141,6 +141,60 @@ class CitedFinancialFact:
         }
 
 
+@dataclass(frozen=True)
+class CitedTextEvidence:
+    """One exact source span bound to a narrative proposal field.
+
+    Beginner note:
+        A page number alone does not prove that model-written prose came from
+        the prospectus. This host-created object preserves the original line or
+        table cell so approval can reject invented narrative evidence.
+    """
+
+    field_name: str
+    document_sha256: str
+    page_number: int
+    location: str
+    source_text: str
+    confidence: Confidence
+    verification_reasons: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate and normalize the immutable source-span identity."""
+        if not self.field_name.strip():
+            raise IpoValidationError("Cited text evidence field_name is required.")
+        digest = self.document_sha256.strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise IpoValidationError("Cited text evidence document SHA-256 is invalid.")
+        if self.page_number < 1:
+            raise IpoValidationError("Cited text evidence page number must be positive.")
+        if not self.location.strip() or not self.source_text.strip():
+            raise IpoValidationError("Cited text evidence source identity is required.")
+        object.__setattr__(self, "document_sha256", digest)
+        object.__setattr__(self, "confidence", Confidence(self.confidence))
+        object.__setattr__(
+            self,
+            "verification_reasons",
+            tuple(
+                str(reason).strip()
+                for reason in self.verification_reasons
+                if str(reason).strip()
+            ),
+        )
+
+    def to_payload(self) -> dict[str, Any]:
+        """Return the JSON-safe proposal representation."""
+        return {
+            "field_name": self.field_name,
+            "document_sha256": self.document_sha256,
+            "page_number": self.page_number,
+            "location": self.location,
+            "source_text": self.source_text,
+            "confidence": self.confidence.value,
+            "verification_reasons": list(self.verification_reasons),
+        }
+
+
 class DebtReductionPurposeStatus(enum.StrEnum):
     """Typed conclusion about whether issue proceeds reduce borrowings."""
 

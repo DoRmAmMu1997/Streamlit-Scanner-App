@@ -52,6 +52,7 @@ from backend.ipo.documents.table_extractor import (
 from backend.ipo.manual_extraction import IpoAmountUnit, IpoPeerMetric, IpoShareUnit
 from backend.ipo.models import (
     CitedFinancialFact,
+    CitedTextEvidence,
     Confidence,
     IpoExtractionProposalRecord,
     IpoExtractionProposalStatus,
@@ -87,7 +88,7 @@ _SECTION_CHUNK_CHARS: Final = 12_000
 # all core values verified -> medium (with reviewer notes); anything less is a
 # fail-closed run that persists nothing.
 _MEDIUM_CONFIDENCE_MIN_VERIFIED: Final = 0.9
-_CITED_FACT_SCHEMA_VERSION: Final = "cited-financial-fact/v1"
+_CITED_FACT_SCHEMA_VERSION: Final = "cited-financial-fact/v2"
 
 # Request-local collector for raw text that tripped the injection scanner.
 # The model only ever sees the blocked-evidence marker; the run is failed
@@ -505,19 +506,339 @@ def _number_appears_on_page(text: str, page: ExtractedPage) -> bool:
     return _matching_numeric_source(text, page) is not None
 
 
+@dataclass(frozen=True)
+class _VerifiedSource:
+    """One host-resolved source token with the reasons it is authoritative."""
+
+    source_token: str
+    location: str
+    verification_reasons: tuple[str, ...]
+
+
+_FIELD_LABEL_PATTERNS: Final[dict[str, tuple[re.Pattern[str], ...]]] = {
+    "revenue": (re.compile(r"\brevenue\b", re.IGNORECASE),),
+    "ebitda": (re.compile(r"\bebitda\b", re.IGNORECASE),),
+    "pat": (
+        re.compile(r"\bpat\b", re.IGNORECASE),
+        re.compile(r"\bprofit\s+after\s+tax\b", re.IGNORECASE),
+    ),
+    "profit_before_tax": (
+        re.compile(r"\bprofit\s+before\s+tax\b", re.IGNORECASE),
+        re.compile(r"\bpbt\b", re.IGNORECASE),
+    ),
+    "finance_cost": (re.compile(r"\bfinance\s+costs?\b", re.IGNORECASE),),
+    "net_worth": (re.compile(r"\bnet\s+worth\b", re.IGNORECASE),),
+    "total_debt": (
+        re.compile(r"\btotal\s+debt\b", re.IGNORECASE),
+        re.compile(r"\btotal\s+borrowings?\b", re.IGNORECASE),
+    ),
+    "cash": (re.compile(r"\bcash\b(?!\s+flow)", re.IGNORECASE),),
+    "cash_flow_from_operations": (
+        re.compile(r"\bcash\s+flow\s+from\s+operations\b", re.IGNORECASE),
+        re.compile(r"\bnet\s+cash\s+from\s+operating\s+activities\b", re.IGNORECASE),
+    ),
+    "equity_shares": (
+        re.compile(r"(?<!post\sissue\s)\bequity\s+shares\b", re.IGNORECASE),
+    ),
+    "eps": (
+        re.compile(r"\beps\b", re.IGNORECASE),
+        re.compile(r"\bearnings\s+per\s+share\b", re.IGNORECASE),
+    ),
+    "nav_book_value": (
+        re.compile(r"\bnav\b", re.IGNORECASE),
+        re.compile(r"\bbook\s+value\b", re.IGNORECASE),
+    ),
+    "fresh_issue_amount": (re.compile(r"\bfresh\s+issue\b", re.IGNORECASE),),
+    "ofs_amount": (
+        re.compile(r"\boffer\s+for\s+sale\b", re.IGNORECASE),
+        re.compile(r"\bofs\b", re.IGNORECASE),
+    ),
+    "promoter_holding_pre_issue": (
+        re.compile(r"\bpromoter\s+holding\s+(?:before|pre)[-\s]?issue\b", re.IGNORECASE),
+    ),
+    "promoter_holding_post_issue": (
+        re.compile(r"\bpromoter\s+holding\s+(?:after|post)[-\s]?issue\b", re.IGNORECASE),
+    ),
+    "total_assets": (re.compile(r"\btotal\s+assets\b", re.IGNORECASE),),
+    "current_liabilities": (
+        re.compile(r"\bcurrent\s+liabilities\b", re.IGNORECASE),
+    ),
+    "post_issue_equity_shares": (
+        re.compile(r"\bpost[-\s]?issue\s+equity\s+shares\b", re.IGNORECASE),
+    ),
+    "pe": (
+        re.compile(r"\bp\s*/?\s*e\b", re.IGNORECASE),
+        re.compile(r"\bprice[-\s]+earnings\b", re.IGNORECASE),
+    ),
+    "ronw": (re.compile(r"\bronw\b", re.IGNORECASE),),
+    "ev_ebitda": (re.compile(r"\bev\s*/?\s*ebitda\b", re.IGNORECASE),),
+    "price_sales": (re.compile(r"\bprice\s*/?\s*sales\b", re.IGNORECASE),),
+}
+
+_MORE_SPECIFIC_FIELD_LABELS: Final[dict[str, tuple[str, ...]]] = {
+    "cash": ("cash_flow_from_operations",),
+    "equity_shares": ("post_issue_equity_shares",),
+}
+
+
+def _citation_field_name(label: str) -> str:
+    """Return the semantic field key carried by one internal citation label."""
+    period_match = re.fullmatch(r"period \d+ ([a-z_]+)", label)
+    if period_match:
+        return period_match.group(1)
+    peer_match = re.fullmatch(
+        r"peer (.+) (eps|pe|nav_book_value|ronw|ev_ebitda|price_sales)",
+        label,
+    )
+    return peer_match.group(2) if peer_match else label
+
+
+def _semantic_field_labels(span: str) -> set[str]:
+    """Return unambiguous field meanings named in one source span."""
+    matched = {
+        field_name
+        for field_name, patterns in _FIELD_LABEL_PATTERNS.items()
+        if any(pattern.search(span) for pattern in patterns)
+    }
+    for generic_field, specific_fields in _MORE_SPECIFIC_FIELD_LABELS.items():
+        if any(specific_field in matched for specific_field in specific_fields):
+            matched.discard(generic_field)
+    return matched
+
+
+def _span_matches_field_label(label: str, span: str) -> bool:
+    """Require the claimed field identity in the same candidate row or line."""
+    field_name = _citation_field_name(label)
+    semantic_fields = _semantic_field_labels(span)
+    if field_name not in semantic_fields:
+        return False
+    peer_match = re.fullmatch(
+        r"peer (.+) (eps|pe|nav_book_value|ronw|ev_ebitda|price_sales)",
+        label,
+    )
+    if peer_match is None:
+        # A compact row containing multiple facts does not prove which number
+        # belongs to which label without column-span metadata. Reject it rather
+        # than borrowing a sibling field's value from elsewhere in the row.
+        return len(semantic_fields) == 1
+    normalized_company = " ".join(peer_match.group(1).casefold().split())
+    normalized_span = " ".join(span.casefold().split())
+    return normalized_company in normalized_span
+
+
+def _span_numeric_token(value: str, span: str) -> str | None:
+    """Return the exact printed token for a formatting-equivalent Decimal."""
+    expected = Decimal(value)
+    for match in _NUMBER_TOKEN_PATTERN.finditer(span):
+        source_token = match.group("token").strip()
+        if _parse_printed_number(source_token) == expected:
+            return source_token
+    return None
+
+
+def _period_pattern(period_end: dt.date) -> re.Pattern[str]:
+    """Build conservative fiscal-header spellings for one annual period."""
+    year = period_end.year
+    prior_short = str(year - 1)[-2:]
+    current_short = str(year)[-2:]
+    return re.compile(
+        rf"(?:\bfy\s*{year}\b|\b{year}\b|\b{year - 1}\s*[-/]\s*{current_short}\b|"
+        rf"\b{prior_short}\s*[-/]\s*{current_short}\b)",
+        re.IGNORECASE,
+    )
+
+
+def _context_contains_unit(context: str, unit: str, *, share_unit: bool) -> bool:
+    """Require a selected scale in one local table-row or text-block context."""
+    patterns = _SHARE_UNIT_PATTERNS if share_unit else _AMOUNT_UNIT_PATTERNS
+    if not patterns[unit].search(context):
+        return False
+    if share_unit:
+        amount_unit_for_share_unit = {
+            IpoShareUnit.THOUSAND_SHARES.value: IpoAmountUnit.THOUSAND_INR.value,
+            IpoShareUnit.LAKH_SHARES.value: IpoAmountUnit.LAKH_INR.value,
+            IpoShareUnit.MILLION_SHARES.value: IpoAmountUnit.MILLION_INR.value,
+            IpoShareUnit.CRORE_SHARES.value: IpoAmountUnit.CRORE_INR.value,
+        }
+        amount_unit = amount_unit_for_share_unit.get(unit)
+        if amount_unit is not None and _context_contains_unit(
+            context,
+            amount_unit,
+            share_unit=False,
+        ):
+            return False
+        if unit == IpoShareUnit.SHARES.value and any(
+            pattern.search(context)
+            for candidate, pattern in patterns.items()
+            if candidate != IpoShareUnit.SHARES.value
+        ):
+            return False
+        return re.search(r"\bshares?\b", context, re.IGNORECASE) is not None
+    if unit == IpoAmountUnit.INR.value:
+        # A currency token does not cancel an explicit scale. For example,
+        # "in millions INR" proves million INR, not base INR.
+        return not any(
+            pattern.search(context)
+            for candidate, pattern in patterns.items()
+            if candidate != IpoAmountUnit.INR.value
+        )
+    # A bare phrase such as "10 million shares" is a share count, not a
+    # monetary unit. Monetary scales need an explicit local amount/currency cue.
+    scale = {
+        IpoAmountUnit.THOUSAND_INR.value: r"thousands?",
+        IpoAmountUnit.LAKH_INR.value: r"(?:lakhs?|lacs?)",
+        IpoAmountUnit.MILLION_INR.value: r"millions?",
+        IpoAmountUnit.CRORE_INR.value: r"(?:crores?|cr\.?)",
+    }[unit]
+    return (
+        re.search(
+            rf"(?:\bamounts?\b|\bfigures?\b|\N{{INDIAN RUPEE SIGN}}|\brs\.?\b|\binr\b|\brupees?\b)"
+            rf"[^\n]{{0,32}}\b{scale}\b",
+            context,
+            re.IGNORECASE,
+        )
+        is not None
+        or re.search(
+            rf"\b(?:in|expressed\s+in|denominated\s+in)\s+{scale}\b(?!\s+shares?\b)",
+            context,
+            re.IGNORECASE,
+        )
+        is not None
+    )
+
+
+def _table_header_rows(rows: tuple[tuple[str, ...], ...]) -> tuple[tuple[str, ...], ...]:
+    """Return only the leading rows before the table's first financial fact.
+
+    Beginner note:
+        A prior data row can contain a year, but that does not make the year a
+        column heading for later rows. Restricting period proof to the leading
+        header block preserves the table's row/column meaning.
+    """
+    header_rows: list[tuple[str, ...]] = []
+    all_label_patterns = (
+        pattern
+        for patterns in _FIELD_LABEL_PATTERNS.values()
+        for pattern in patterns
+    )
+    # Materialize once because each row must be compared with every pattern.
+    label_patterns = tuple(all_label_patterns)
+    for row in rows:
+        row_text = " ".join(row)
+        if any(pattern.search(row_text) for pattern in label_patterns):
+            break
+        header_rows.append(row)
+    return tuple(header_rows)
+
+
+def _matching_numeric_source_for_fact(
+    label: str,
+    value: str,
+    page: ExtractedPage,
+    proposal: _ProposalModel,
+) -> _VerifiedSource | None:
+    """Match only a row/line whose label, period, and unit prove the fact.
+
+    Beginner note:
+        Finding the same number somewhere on the page proves only spelling.
+        The host therefore resolves the semantic neighbors too, and never
+        borrows a label, fiscal header, or scale from another source context.
+    """
+    _field_name, period_end, unit, _multiplier = _fact_identity(label, proposal)
+    share_unit = unit is not None and unit in _SHARE_UNIT_PATTERNS
+
+    for table_number, table in enumerate(page.tables, start=1):
+        rows = table.rows
+        header_rows = _table_header_rows(rows)
+        table_context = "\n".join(" ".join(row) for row in rows)
+        table_has_unit = unit is None or _context_contains_unit(
+            table_context,
+            unit,
+            share_unit=share_unit,
+        )
+        if not table_has_unit:
+            continue
+        for row_number, row in enumerate(rows, start=1):
+            row_text = " ".join(row)
+            if not _span_matches_field_label(label, row_text):
+                continue
+            for column_number, cell in enumerate(row, start=1):
+                source_token = _span_numeric_token(value, cell)
+                if source_token is None:
+                    continue
+                if period_end is not None:
+                    header_text = " ".join(
+                        header_row[column_number - 1]
+                        for header_row in header_rows
+                        if len(header_row) >= column_number
+                    )
+                    if not _period_pattern(period_end).search(header_text):
+                        continue
+                reasons = ["Matched the field label and value in one source table row."]
+                if period_end is not None:
+                    reasons.append("Matched the fiscal period in the same table column header.")
+                if unit is not None:
+                    reasons.append("Matched the selected unit in the same source table.")
+                return _VerifiedSource(
+                    source_token=source_token,
+                    location=(
+                        f"table:{table_number}:row:{row_number}:cell:{column_number}"
+                    ),
+                    verification_reasons=tuple(reasons),
+                )
+
+    lines = page.text.splitlines()
+    for line_number, line in enumerate(lines, start=1):
+        if not _span_matches_field_label(label, line):
+            continue
+        source_token = _span_numeric_token(value, line)
+        if source_token is None:
+            continue
+        if period_end is not None and not _period_pattern(period_end).search(line):
+            continue
+        previous = lines[line_number - 2] if line_number > 1 else ""
+        bounded_context = line
+        if previous and _NUMBER_TOKEN_PATTERN.search(previous) is None:
+            bounded_context = f"{previous}\n{line}"
+        if unit is not None and not _context_contains_unit(
+            bounded_context,
+            unit,
+            share_unit=share_unit,
+        ):
+            continue
+        reasons = ["Matched the field label and value in one source line."]
+        if period_end is not None:
+            reasons.append("Matched the fiscal period in the same source line.")
+        if unit is not None:
+            reasons.append("Matched the selected unit in the same bounded text context.")
+        return _VerifiedSource(
+            source_token=source_token,
+            location=f"text-line:{line_number}",
+            verification_reasons=tuple(reasons),
+        )
+    return None
+
+
+def _matching_text_source(text: str, page: ExtractedPage) -> tuple[str, str] | None:
+    """Return one original span only when its normalized text exactly matches."""
+    expected = " ".join(text.split())
+    for location, source_text in _page_spans(page):
+        if " ".join(source_text.split()) == expected:
+            return source_text, location
+    return None
+
+
 def _page_contains_unit(
     page: ExtractedPage,
     unit: str,
     *,
     share_unit: bool,
 ) -> bool:
-    """Verify that the selected scale appears in the cited page context."""
-    patterns = _SHARE_UNIT_PATTERNS if share_unit else _AMOUNT_UNIT_PATTERNS
-    pattern = patterns[unit]
-    text = "\n".join(span for _location, span in _page_spans(page))
-    if not pattern.search(text):
-        return False
-    return not share_unit or re.search(r"\bshares?\b", text, re.IGNORECASE) is not None
+    """Return whether one bounded source span contains the selected scale."""
+    return any(
+        _context_contains_unit(span, unit, share_unit=share_unit)
+        for _location, span in _page_spans(page)
+    )
 
 
 def _citations(proposal: _ProposalModel) -> tuple[tuple[str, str | None, int], ...]:
@@ -604,8 +925,8 @@ def _verify_proposal(
         This is deterministic host code, not the model grading itself. A page
         citation outside the document is an immediate failure; a cited number
         that cannot be found on its cited page lowers confidence; too many
-        unverifiable numbers fail the whole run so nothing half-checked ever
-        reaches the review queue.
+        unverifiable semantic facts fail the whole run so nothing half-checked
+        ever reaches the review queue.
     """
     page_by_number = {page.page_number: page for page in pages}
     citations = _citations(proposal)
@@ -623,21 +944,12 @@ def _verify_proposal(
             f"Cited pages outside the document: {out_of_range}."
         )
 
-    invalid_units = [
-        f"{label}={unit} (page {page})"
-        for label, unit, share_unit, required_pages in _required_unit_pages(proposal)
-        for page in sorted(required_pages)
-        if not _page_contains_unit(
-            page_by_number[page],
-            unit,
-            share_unit=share_unit,
-        )
-    ]
-    if invalid_units:
+    if _matching_text_source(
+        proposal.objects_of_issue,
+        page_by_number[proposal.objects_of_issue_page],
+    ) is None:
         raise _ExtractionOutputError(
-            "Selected units were not verified in every cited value context: "
-            + ", ".join(invalid_units)
-            + "."
+            "objects_of_issue was not found in one original cited-page span."
         )
 
     unverified: list[str] = []
@@ -646,7 +958,15 @@ def _verify_proposal(
         if value is None:
             continue
         numeric_total += 1
-        if not _number_appears_on_page(value, page_by_number[page]):
+        if (
+            _matching_numeric_source_for_fact(
+                label,
+                value,
+                page_by_number[page],
+                proposal,
+            )
+            is None
+        ):
             unverified.append(f"{label} (page {page})")
 
     # Period order is already schema-validated, so row three is latest.
@@ -745,10 +1065,14 @@ def _cited_financial_facts(
     for label, value, page_number in _citations(proposal):
         if value is None:
             continue
-        source = _matching_numeric_source(value, page_by_number[page_number])
+        source = _matching_numeric_source_for_fact(
+            label,
+            value,
+            page_by_number[page_number],
+            proposal,
+        )
         if source is None:
             continue
-        source_token, location = source
         field_name, period_end, unit, multiplier = _fact_identity(label, proposal)
         facts.append(
             CitedFinancialFact(
@@ -759,22 +1083,54 @@ def _cited_financial_facts(
                 period_end=period_end,
                 document_sha256=source_content_sha256,
                 page_number=page_number,
-                location=location,
-                source_token=source_token,
+                location=source.location,
+                source_token=source.source_token,
                 confidence=confidence,
+                verification_reasons=source.verification_reasons,
             )
         )
     return tuple(facts)
 
 
+def _cited_text_evidence(
+    proposal: _ProposalModel,
+    pages: tuple[ExtractedPage, ...],
+    *,
+    source_content_sha256: str,
+    confidence: Confidence,
+) -> CitedTextEvidence:
+    """Create the objects evidence only from one exact original source span."""
+    page_by_number = {page.page_number: page for page in pages}
+    source = _matching_text_source(
+        proposal.objects_of_issue,
+        page_by_number[proposal.objects_of_issue_page],
+    )
+    if source is None:  # pragma: no cover - verification rejects this first
+        raise _ExtractionOutputError(
+            "objects_of_issue was not found in one original cited-page span."
+        )
+    source_text, location = source
+    return CitedTextEvidence(
+        field_name="objects_of_issue",
+        document_sha256=source_content_sha256,
+        page_number=proposal.objects_of_issue_page,
+        location=location,
+        source_text=source_text,
+        confidence=confidence,
+        verification_reasons=("Matched the exact normalized source span.",),
+    )
+
+
 def _payload_from_model(
     proposal: _ProposalModel,
     cited_facts: tuple[CitedFinancialFact, ...],
+    cited_text: CitedTextEvidence,
 ) -> dict[str, Any]:
     """Combine the raw review draft with separately host-verified facts."""
     payload = json.loads(proposal.model_dump_json())
     payload["evidence_schema_version"] = _CITED_FACT_SCHEMA_VERSION
     payload["cited_financial_facts"] = [fact.to_payload() for fact in cited_facts]
+    payload["cited_text_evidence"] = [cited_text.to_payload()]
     return payload
 
 
@@ -804,6 +1160,8 @@ _SYSTEM_PROMPT: Final = (
     "and finance cost.\n"
     "- peers: the listed-peer comparison rows with metrics keyed by: eps, "
     "pe, nav_book_value, ronw, ev_ebitda, price_sales.\n"
+    "- objects_of_issue must be one exact, complete line or table-cell excerpt "
+    "from the cited page; do not summarize or combine spans.\n"
     "- NEVER guess or compute a value. If you cannot find a required value "
     "verbatim in the document, stop and emit exactly "
     '{"error": "value_not_found", "field": "<field name>"} instead of the '
@@ -1173,6 +1531,12 @@ def _propose_extraction_inner(
             source_content_sha256=verified.content_sha256 or "",
             confidence=confidence,
         )
+        verified_result["text_evidence"] = _cited_text_evidence(
+            proposal,
+            pages,
+            source_content_sha256=verified.content_sha256 or "",
+            confidence=confidence,
+        )
         return proposal
 
     proposal = parse_with_retry(
@@ -1186,7 +1550,11 @@ def _propose_extraction_inner(
     return submit_extraction_proposal(
         issue_id,
         document_id,
-        payload=_payload_from_model(proposal, tuple(verified_result["facts"])),
+        payload=_payload_from_model(
+            proposal,
+            tuple(verified_result["facts"]),
+            verified_result["text_evidence"],
+        ),
         confidence=verified_result["confidence"],
         needs_review_reasons=tuple(verified_result["reasons"]),
         model_version=EXTRACTOR_MODEL_VERSION,
