@@ -25,7 +25,7 @@ class _FakeResponse:
         headers: dict[str, str] | None = None,
         status_error: BaseException | None = None,
         stream_error: Exception | None = None,
-        close_error: Exception | None = None,
+        close_error: BaseException | None = None,
     ):
         self._payload = payload
         self._body = (
@@ -327,3 +327,61 @@ def test_cleanup_is_attempted_without_overriding_cancellation():
         ).search("bounded")
 
     assert response.closed is True
+
+
+@pytest.mark.parametrize(
+    ("primary", "cleanup"),
+    [
+        (KeyboardInterrupt("primary keyboard"), SystemExit("cleanup system")),
+        (SystemExit("primary system"), GeneratorExit("cleanup generator")),
+        (GeneratorExit("primary generator"), KeyboardInterrupt("cleanup keyboard")),
+    ],
+)
+def test_cleanup_base_exception_never_replaces_primary_cancellation(
+    primary: BaseException,
+    cleanup: BaseException,
+) -> None:
+    response = _FakeResponse(
+        {"organic_results": []},
+        status_error=primary,
+        close_error=cleanup,
+    )
+
+    caught: BaseException | None = None
+    try:
+        SerpApiClient(
+            api_key="secret", session=_FakeSession(response)
+        ).search("bounded")
+    except BaseException as exc:
+        caught = exc
+
+    assert response.closed is True
+    assert caught is primary
+
+
+@pytest.mark.parametrize(
+    "cleanup",
+    [
+        KeyboardInterrupt("close keyboard"),
+        SystemExit("close system"),
+        GeneratorExit("close generator"),
+    ],
+)
+def test_close_only_cancellation_propagates_unchanged(
+    cleanup: BaseException,
+) -> None:
+    response = _FakeResponse(
+        {"organic_results": []},
+        close_error=cleanup,
+    )
+
+    caught: BaseException | None = None
+    try:
+        SerpApiClient(
+            api_key="secret", session=_FakeSession(response)
+        ).search("bounded")
+    except BaseException as exc:
+        caught = exc
+
+    assert response.closed is True
+    assert caught is cleanup

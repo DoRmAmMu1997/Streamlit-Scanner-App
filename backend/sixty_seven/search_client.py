@@ -253,9 +253,12 @@ def _close_response(
     """Close a streamed response without allowing cleanup to mask failures."""
     try:
         response.close()
-    except Exception as exc:
+    except BaseException as exc:
         if suppress_errors:
             return
+        # Cancellation remains cancellation when cleanup is the only failure.
+        if not isinstance(exc, Exception):
+            raise
         detail = redact_text(str(exc), extra_secrets=[api_key])
         raise SerpApiSearchError(
             f"SerpAPI response cleanup failed: {detail}"
