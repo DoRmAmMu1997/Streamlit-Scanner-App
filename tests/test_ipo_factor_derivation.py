@@ -175,6 +175,38 @@ def _debt_purpose_status(text: str) -> DebtReductionPurposeStatus:
             DebtReductionPurposeStatus.NEGATIVE,
         ),
         (
+            "The net proceeds doesn't fund repayment of borrowings.",
+            DebtReductionPurposeStatus.NEGATIVE,
+        ),
+        (
+            "The net proceeds won\u2019t fund repayment of borrowings.",
+            DebtReductionPurposeStatus.NEGATIVE,
+        ),
+        (
+            "The net proceeds don't fund repayment of borrowings.",
+            DebtReductionPurposeStatus.NEGATIVE,
+        ),
+        (
+            "The net proceeds didn't fund repayment of borrowings.",
+            DebtReductionPurposeStatus.NEGATIVE,
+        ),
+        (
+            "The net proceeds haven't been allocated for repayment of borrowings.",
+            DebtReductionPurposeStatus.NEGATIVE,
+        ),
+        (
+            "The fresh issue wasn't allocated for repayment of borrowings.",
+            DebtReductionPurposeStatus.NEGATIVE,
+        ),
+        (
+            "The proceeds weren't allocated for repayment of borrowings.",
+            DebtReductionPurposeStatus.NEGATIVE,
+        ),
+        (
+            "The company shouldn't use the net proceeds for repayment of borrowings.",
+            DebtReductionPurposeStatus.NEGATIVE,
+        ),
+        (
             "The net proceeds will be used for repayment of outstanding borrowings.",
             DebtReductionPurposeStatus.AFFIRMATIVE,
         ),
@@ -190,6 +222,21 @@ def _debt_purpose_status(text: str) -> DebtReductionPurposeStatus:
             "The net proceeds will be used for repayment of borrowings. "
             "No portion of the proceeds shall be used for repayment of borrowings.",
             DebtReductionPurposeStatus.AMBIGUOUS,
+        ),
+        (
+            "The proceeds will be used for repayment of term loans, but will not be used for repayment "
+            "of working-capital borrowings.",
+            DebtReductionPurposeStatus.AMBIGUOUS,
+        ),
+        (
+            "The proceeds will be used for repayment of term loans, but not for repayment of "
+            "working-capital borrowings.",
+            DebtReductionPurposeStatus.AMBIGUOUS,
+        ),
+        (
+            "The company does not anticipate delays, and the net proceeds will be used for repayment "
+            "of borrowings.",
+            DebtReductionPurposeStatus.AFFIRMATIVE,
         ),
     ],
 )

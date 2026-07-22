@@ -162,7 +162,15 @@ _DEBT_CONTEXT_PATTERN: Final = re.compile(
     r"\b(?:debt|borrowings?|loans?|credit facilities)\b",
     re.IGNORECASE,
 )
-_DEBT_PURPOSE_CLAUSE_BOUNDARY_PATTERN: Final = re.compile(r"(?<=[.;!?])\s+")
+_DEBT_PURPOSE_PROPOSITION_BOUNDARY_PATTERN: Final = re.compile(
+    r"(?<=[.;!?])\s+|,\s+\b(?:and|but|or|nor|yet|so|however|whereas)\b\s+(?=(?:"
+    r"the\s+(?:net\s+)?proceeds?|the\s+(?:company|issue|funds?)|they|it|we|"
+    r"no\s+(?:portion|part)|not|will|shall|may|can|could|should|would|do|does|did|"
+    r"is|are|was|were|has|have)\b)|"
+    r"\s+\b(?:and|but|or|nor|yet|so|however|whereas)\b\s+(?=(?:"
+    r"not|will|shall|may|can|could|should|would|do|does|did|is|are|was|were|has|have)\b)",
+    re.IGNORECASE,
+)
 _NOT_ONLY_PATTERN: Final = re.compile(r"\bnot\s+only\b", re.IGNORECASE)
 _NEGATIVE_DEBT_PURPOSE_PATTERN: Final = re.compile(
     r"\b(?:"
@@ -170,23 +178,25 @@ _NEGATIVE_DEBT_PURPOSE_PATTERN: Final = re.compile(
     r"exclud(?:e|ed|es|ing)?|"
     r"prohibit(?:ed|s|ing)?|forbid(?:den|s|ding)?|bar(?:red|s|ring)?|"
     r"cannot|can't|won't|shall\s+not|will\s+not|may\s+not|"
+    r"(?:do|does|did|has|have|was|were|should|would|could|must|might|need|is|are)n't|"
     r"is(?:n't|\s+not)|are(?:n't|\s+not)"
     r")\b",
     re.IGNORECASE,
 )
+_APOSTROPHE_VARIANT_TRANSLATION: Final = str.maketrans({"\u2018": "'", "\u2019": "'", "\u02BC": "'"})
 
 
-def _classify_debt_purpose_clause(clause: str) -> DebtReductionPurposeStatus:
+def _classify_debt_purpose_proposition(proposition: str) -> DebtReductionPurposeStatus:
     """Classify one complete repayment proposition as affirmative or negative.
 
     Beginner note:
         A negator can govern a repayment word from either side of a sentence,
         so a fixed character window is not a safe proxy for meaning.  This
-        deliberately conservative classifier examines the complete clause;
-        any recognized denial or prohibition makes the clause negative.
+        deliberately conservative classifier examines the governing proposition;
+        any recognized denial or prohibition makes the proposition negative.
     """
-    clause_without_not_only = _NOT_ONLY_PATTERN.sub("", clause)
-    if _NEGATIVE_DEBT_PURPOSE_PATTERN.search(clause_without_not_only):
+    proposition_without_not_only = _NOT_ONLY_PATTERN.sub("", proposition)
+    if _NEGATIVE_DEBT_PURPOSE_PATTERN.search(proposition_without_not_only):
         return DebtReductionPurposeStatus.NEGATIVE
     return DebtReductionPurposeStatus.AFFIRMATIVE
 
@@ -198,21 +208,22 @@ def derive_debt_reduction_purpose_evidence(
 
     Beginner note:
         This parser is intentionally narrow. It recognizes explicit repayment
-        language in complete sentences or punctuation-delimited clauses, while
+        language in complete sentences or coordinated propositions, while
         ambiguous debt references fail closed. The caution rule consumes only
         this typed conclusion and never performs its own substring search.
     """
     if profile is None:
         return None
     text = " ".join(profile.objects_of_issue.split())
+    classification_text = text.translate(_APOSTROPHE_VARIANT_TRANSLATION)
     source_sha256 = profile.source_content_sha256
     page_number = profile.objects_of_issue_page
     span_identity = f"objects_of_issue:p{page_number}"
-    matches = list(_DEBT_PURPOSE_PATTERN.finditer(text))
+    matches = list(_DEBT_PURPOSE_PATTERN.finditer(classification_text))
     if not matches:
         status = (
             DebtReductionPurposeStatus.AMBIGUOUS
-            if _DEBT_CONTEXT_PATTERN.search(text)
+            if _DEBT_CONTEXT_PATTERN.search(classification_text)
             else DebtReductionPurposeStatus.MISSING
         )
         reason = (
@@ -229,15 +240,15 @@ def derive_debt_reduction_purpose_evidence(
             verification_reasons=(reason,),
         )
 
-    clause_statuses = [
-        _classify_debt_purpose_clause(clause)
-        for clause in _DEBT_PURPOSE_CLAUSE_BOUNDARY_PATTERN.split(text)
-        if _DEBT_PURPOSE_PATTERN.search(clause)
+    proposition_statuses = [
+        _classify_debt_purpose_proposition(proposition)
+        for proposition in _DEBT_PURPOSE_PROPOSITION_BOUNDARY_PATTERN.split(classification_text)
+        if _DEBT_PURPOSE_PATTERN.search(proposition)
     ]
-    if len(set(clause_statuses)) > 1:
+    if len(set(proposition_statuses)) > 1:
         status = DebtReductionPurposeStatus.AMBIGUOUS
         reason = "The cited passage contains conflicting repayment statements."
-    elif clause_statuses[0] is DebtReductionPurposeStatus.AFFIRMATIVE:
+    elif proposition_statuses[0] is DebtReductionPurposeStatus.AFFIRMATIVE:
         status = DebtReductionPurposeStatus.AFFIRMATIVE
         reason = "Explicit non-negated debt-reduction purpose verified."
     else:
