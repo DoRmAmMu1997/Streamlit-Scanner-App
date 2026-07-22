@@ -168,7 +168,9 @@ _DEBT_PURPOSE_PROPOSITION_BOUNDARY_PATTERN: Final = re.compile(
     r"no\s+(?:portion|part)|not|will|shall|may|can|could|should|would|do|does|did|"
     r"is|are|was|were|has|have)\b)|"
     r"\s+\b(?:and|but|or|nor|yet|so|however|whereas)\b\s+(?=(?:"
-    r"not|will|shall|may|can|could|should|would|do|does|did|is|are|was|were|has|have)\b)",
+    r"the\s+(?:net\s+)?proceeds?|the\s+(?:company|issue|funds?)|they|it|we|"
+    r"no\s+(?:portion|part)|not|will|shall|may|can|could|should|would|do|does|did|"
+    r"is|are|was|were|has|have)\b)",
     re.IGNORECASE,
 )
 _NOT_ONLY_PATTERN: Final = re.compile(r"\bnot\s+only\b", re.IGNORECASE)

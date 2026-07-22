@@ -234,8 +234,18 @@ def _debt_purpose_status(text: str) -> DebtReductionPurposeStatus:
             DebtReductionPurposeStatus.AMBIGUOUS,
         ),
         (
+            "The proceeds will be used for repayment of term loans and no portion will be used for repayment "
+            "of working-capital borrowings.",
+            DebtReductionPurposeStatus.AMBIGUOUS,
+        ),
+        (
             "The company does not anticipate delays, and the net proceeds will be used for repayment "
             "of borrowings.",
+            DebtReductionPurposeStatus.AFFIRMATIVE,
+        ),
+        (
+            "The company does not anticipate delays and the net proceeds will be used for repayment of "
+            "borrowings.",
             DebtReductionPurposeStatus.AFFIRMATIVE,
         ),
     ],
