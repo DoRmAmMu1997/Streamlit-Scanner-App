@@ -361,6 +361,7 @@ def test_gmp_parser_ignores_unrelated_numbers_outside_proximity(
     ("title", "snippet", "expected"),
     [
         ("Example update", "Subscription rose 25%; GMP data unavailable.", None),
+        ("Example update", "Subscription rose 25%\nGMP data unavailable.", None),
         ("Subscription rose 25%", "GMP data unavailable.", None),
         ("Example update", "Issue price Rs 40. GMP data unavailable.", None),
         (

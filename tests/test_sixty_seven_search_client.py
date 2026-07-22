@@ -23,12 +23,18 @@ class _FakeResponse:
         body: bytes | None = None,
         chunks: list[bytes] | None = None,
         headers: dict[str, str] | None = None,
+        status_error: BaseException | None = None,
+        stream_error: Exception | None = None,
+        close_error: Exception | None = None,
     ):
         self._payload = payload
         self._body = (
             json.dumps(payload).encode("utf-8") if body is None else body
         )
         self._chunks = chunks
+        self._status_error = status_error
+        self._stream_error = stream_error
+        self._close_error = close_error
         self.status_code = status_code
         self.text = str(payload)
         self.headers = headers or {}
@@ -37,6 +43,8 @@ class _FakeResponse:
         self.closed = False
 
     def raise_for_status(self):
+        if self._status_error is not None:
+            raise self._status_error
         if self.status_code >= 400:
             raise requests.HTTPError(f"HTTP {self.status_code}")
 
@@ -46,6 +54,8 @@ class _FakeResponse:
 
     def iter_content(self, chunk_size: int):
         self.iterated = True
+        if self._stream_error is not None:
+            raise self._stream_error
         if self._chunks is not None:
             yield from self._chunks
             return
@@ -54,6 +64,8 @@ class _FakeResponse:
 
     def close(self):
         self.closed = True
+        if self._close_error is not None:
+            raise self._close_error
 
 
 class _FakeSession:
@@ -247,3 +259,71 @@ def test_serpapi_client_accepts_only_strings_and_caps_each_result_field():
     assert result.date == ""
     assert result.source == long_text[:2_000]
     assert result.snippet == long_text[:2_000]
+
+
+def test_serpapi_client_reports_redacted_cleanup_error_after_successful_decode():
+    secret = "serp-secret"
+    response = _FakeResponse(
+        {"organic_results": []},
+        close_error=requests.ConnectionError(
+            f"close failed for https://serpapi.com/?api_key={secret}"
+        ),
+    )
+
+    with pytest.raises(SerpApiSearchError, match="cleanup failed") as exc_info:
+        SerpApiClient(api_key=secret, session=_FakeSession(response)).search("DEMO")
+
+    assert response.closed is True
+    assert secret not in str(exc_info.value)
+    assert "***REDACTED***" in str(exc_info.value)
+
+
+def test_cleanup_failure_does_not_override_redacted_streaming_error():
+    secret = "serp-secret"
+    response = _FakeResponse(
+        {"organic_results": []},
+        stream_error=requests.Timeout(
+            f"stream failed for https://serpapi.com/?api_key={secret}"
+        ),
+        close_error=requests.ConnectionError("cleanup replacement"),
+    )
+
+    with pytest.raises(SerpApiSearchError, match="stream failed") as exc_info:
+        SerpApiClient(api_key=secret, session=_FakeSession(response)).search("DEMO")
+
+    message = str(exc_info.value)
+    assert response.closed is True
+    assert "cleanup replacement" not in message
+    assert secret not in message
+    assert "***REDACTED***" in message
+
+
+def test_cleanup_failure_does_not_override_primary_response_limit_error():
+    response = _FakeResponse(
+        body=b"",
+        chunks=[b"x" * _ONE_MIB, b"x"],
+        close_error=requests.ConnectionError("cleanup replacement"),
+    )
+
+    with pytest.raises(SerpApiSearchError, match="response exceeded") as exc_info:
+        SerpApiClient(
+            api_key="secret", session=_FakeSession(response)
+        ).search("bounded")
+
+    assert response.closed is True
+    assert "cleanup replacement" not in str(exc_info.value)
+
+
+def test_cleanup_is_attempted_without_overriding_cancellation():
+    response = _FakeResponse(
+        {"organic_results": []},
+        status_error=KeyboardInterrupt(),
+        close_error=requests.ConnectionError("cleanup replacement"),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        SerpApiClient(
+            api_key="secret", session=_FakeSession(response)
+        ).search("bounded")
+
+    assert response.closed is True

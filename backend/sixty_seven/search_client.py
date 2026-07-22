@@ -133,7 +133,6 @@ class SerpApiClient:
             "output": "json",
             "num": result_limit,
         }
-        response: requests.Response | None = None
         try:
             response = self.session.get(
                 self.ENDPOINT,
@@ -141,23 +140,33 @@ class SerpApiClient:
                 timeout=self.TIMEOUT_SECONDS,
                 stream=True,
             )
+        except requests.RequestException as exc:
+            detail = redact_text(str(exc), extra_secrets=[self.api_key])
+            raise SerpApiSearchError(f"SerpAPI request failed: {detail}") from exc
+
+        try:
             response.raise_for_status()
             payload = _bounded_json(response)
+            # API-level errors arrive with HTTP 200, so classify them before
+            # cleanup and preserve them if closing the response also fails.
+            if isinstance(payload, dict) and payload.get("error"):
+                detail = redact_text(
+                    str(payload["error"]), extra_secrets=[self.api_key]
+                )
+                raise SerpApiSearchError(detail)
         except requests.RequestException as exc:
             # A requests error can echo the full request URL — including the
             # api_key query param — so scrub through the same utility used by
             # Streamlit errors and scanner failure details.
             detail = redact_text(str(exc), extra_secrets=[self.api_key])
+            _close_response(response, api_key=self.api_key, suppress_errors=True)
             raise SerpApiSearchError(f"SerpAPI request failed: {detail}") from exc
-        finally:
-            if response is not None:
-                response.close()
-
-        # SerpAPI reports API-level problems (bad key, quota) in an "error" field
-        # with HTTP 200, so check the body even though raise_for_status() passed.
-        if isinstance(payload, dict) and payload.get("error"):
-            detail = redact_text(str(payload["error"]), extra_secrets=[self.api_key])
-            raise SerpApiSearchError(detail)
+        except BaseException:
+            # Cleanup must never replace a typed/redacted primary failure.
+            _close_response(response, api_key=self.api_key, suppress_errors=True)
+            raise
+        else:
+            _close_response(response, api_key=self.api_key, suppress_errors=False)
 
         organic = payload.get("organic_results", []) if isinstance(payload, dict) else []
         if not isinstance(organic, list):
@@ -233,3 +242,21 @@ def _bounded_result_field(value: Any) -> str:
     if not isinstance(value, str):
         return ""
     return value.strip()[:_MAX_RESULT_FIELD_CHARS]
+
+
+def _close_response(
+    response: requests.Response,
+    *,
+    api_key: str,
+    suppress_errors: bool,
+) -> None:
+    """Close a streamed response without allowing cleanup to mask failures."""
+    try:
+        response.close()
+    except Exception as exc:
+        if suppress_errors:
+            return
+        detail = redact_text(str(exc), extra_secrets=[api_key])
+        raise SerpApiSearchError(
+            f"SerpAPI response cleanup failed: {detail}"
+        ) from exc

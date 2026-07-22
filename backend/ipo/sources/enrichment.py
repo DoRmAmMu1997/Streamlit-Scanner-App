@@ -119,6 +119,18 @@ _NEGATION_PATTERN: Final = re.compile(
 _TWO_PLACES = Decimal("0.01")
 
 
+def _normalize_enrichment_text(value: str) -> str:
+    """Normalize web text without erasing newline clause boundaries.
+
+    Beginner note:
+        The shared normalizer intentionally collapses whitespace, including
+        newlines. Converting line breaks to an explicit clause delimiter first
+        keeps two provider claims separate during later GMP parsing.
+    """
+    clause_aware = re.sub(r"[\r\n]+", "; ", value)
+    return normalize_external_text(clause_aware)
+
+
 class SupportsIpoSearch(Protocol):
     """The two-client-method seam the collector needs from SerpAPI.
 
@@ -206,8 +218,8 @@ def _normalize_entries(
     blocked_items = 0
     clean_items = 0
     for result in results:
-        title = normalize_external_text(result.title)
-        snippet = normalize_external_text(result.snippet)
+        title = _normalize_enrichment_text(result.title)
+        snippet = _normalize_enrichment_text(result.snippet)
         entry: dict[str, Any] = {
             "title": title,
             "link": result.link,
