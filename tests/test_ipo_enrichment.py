@@ -357,6 +357,99 @@ def test_gmp_parser_ignores_unrelated_numbers_outside_proximity(
     assert gmp.parsed_value is None
 
 
+@pytest.mark.parametrize(
+    ("title", "snippet", "expected"),
+    [
+        ("Example update", "Subscription rose 25%; GMP data unavailable.", None),
+        ("Subscription rose 25%", "GMP data unavailable.", None),
+        ("Example update", "Issue price Rs 40. GMP data unavailable.", None),
+        (
+            "Example update",
+            "Issue price INR 40 for investors. GMP data unavailable.",
+            None,
+        ),
+        ("Example update", "GMP is 25%.", Decimal("25.00")),
+        ("Example update", "GMP Rs. 40 per share.", Decimal("40.00")),
+    ],
+)
+def test_gmp_number_must_be_in_same_clause_and_source_field(
+    file_session_factory,
+    title: str,
+    snippet: str,
+    expected: Decimal | None,
+) -> None:
+    """Only a value bound to GMP in one source clause may affect scoring."""
+    issue = create_issue(_issue_data(), session_factory=file_session_factory)
+
+    outcome = collect_enrichment_signals(
+        issue.id,
+        client=_FakeClient({"GMP": [_result(title, snippet)]}),
+        captured_at=_CAPTURED_AT,
+        session_factory=file_session_factory,
+    )
+
+    gmp = next(
+        signal
+        for signal in outcome.signals
+        if signal.signal_type is IpoEnrichmentSignalType.GMP
+    )
+    assert gmp.parsed_value == expected
+
+
+def test_duplicate_and_reordered_results_have_one_stable_identity(
+    file_session_factory,
+) -> None:
+    """Exact duplicates cannot gain a GMP vote or change payload identity."""
+    duplicated_issue = create_issue(
+        _issue_data(), session_factory=file_session_factory
+    )
+    reordered_issue = create_issue(
+        _issue_data(), session_factory=file_session_factory
+    )
+    low = _result(
+        "Example IPO discount",
+        "GMP is -10%.",
+        link="https://news.example.com/low",
+    )
+    high = _result(
+        "Example IPO premium",
+        "GMP is 30%.",
+        link="https://news.example.com/high",
+    )
+
+    duplicated = collect_enrichment_signals(
+        duplicated_issue.id,
+        client=_FakeClient({"GMP": [low, high, high]}),
+        captured_at=_CAPTURED_AT,
+        session_factory=file_session_factory,
+    )
+    reordered = collect_enrichment_signals(
+        reordered_issue.id,
+        client=_FakeClient({"GMP": [high, low]}),
+        captured_at=_CAPTURED_AT,
+        session_factory=file_session_factory,
+    )
+    duplicated_gmp = next(
+        signal
+        for signal in duplicated.signals
+        if signal.signal_type is IpoEnrichmentSignalType.GMP
+    )
+    reordered_gmp = next(
+        signal
+        for signal in reordered.signals
+        if signal.signal_type is IpoEnrichmentSignalType.GMP
+    )
+
+    assert len(duplicated_gmp.payload) == 2
+    assert duplicated_gmp.payload == reordered_gmp.payload
+    assert [entry["semantic_hash"] for entry in duplicated_gmp.payload] == sorted(
+        entry["semantic_hash"] for entry in duplicated_gmp.payload
+    )
+    assert duplicated_gmp.parsed_value == reordered_gmp.parsed_value == Decimal(
+        "10.00"
+    )
+
+
 def test_red_flag_keywords_are_recorded_for_clean_entries(file_session_factory) -> None:
     """The litigation caution flag reads only these recorded keyword matches."""
     issue = create_issue(_issue_data(), session_factory=file_session_factory)

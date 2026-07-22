@@ -106,6 +106,10 @@ _PERCENT_PATTERN: Final = re.compile(r"(-?\d{1,3}(?:\.\d+)?)\s*%")
 _RUPEE_PATTERN: Final = re.compile(
     r"(?:₹|rs\.?|inr)\s*(-?\d{1,4}(?:\.\d+)?)", re.IGNORECASE
 )
+_RUPEE_ABBREVIATION_PATTERN: Final = re.compile(
+    r"\b(rs)\.(?=\s*-?\d)", re.IGNORECASE
+)
+_CLAUSE_SPLIT_PATTERN: Final = re.compile(r"[;\n!?]+|(?<!\d)\.|\.(?!\d)")
 _NEGATION_PATTERN: Final = re.compile(
     r"\b(?:no|not|never|without|den(?:y|ies|ied)|dismiss(?:ed|al)?|"
     r"clear(?:ed)?|exonerat(?:ed|ion)|withdrawn)\b",
@@ -272,7 +276,14 @@ def _normalize_entries(
         usability = IpoEnrichmentBatchUsability.PARTIAL
     else:
         usability = IpoEnrichmentBatchUsability.USABLE
-    return tuple(entries), usability
+    # Usability describes every provider item inspected, including repeated
+    # blocked items. The payload itself is a semantic set: duplicates must not
+    # gain extra votes or create a new durable identity through result order.
+    unique_by_hash = {str(entry["semantic_hash"]): entry for entry in entries}
+    canonical_entries = tuple(
+        unique_by_hash[item_hash] for item_hash in sorted(unique_by_hash)
+    )
+    return canonical_entries, usability
 
 
 def _match_distance(left: re.Match[str], right: re.Match[str]) -> int:
@@ -288,11 +299,15 @@ def _near_gmp_value(
     text: str,
     pattern: re.Pattern[str],
 ) -> Decimal | None:
-    """Return the first numeric match within 40 characters of a GMP term."""
-    terms = list(_GMP_TERM_PATTERN.finditer(text))
-    for match in pattern.finditer(text):
-        if any(_match_distance(match, term) <= 40 for term in terms):
-            return Decimal(match.group(1))
+    """Return the first value bound to a GMP term in the same short clause."""
+    # Protect only the standalone currency abbreviation when it introduces a
+    # numeric amount. Ordinary words ending in "rs." remain sentence endings.
+    clause_text = _RUPEE_ABBREVIATION_PATTERN.sub(r"\1 ", text)
+    for clause in _CLAUSE_SPLIT_PATTERN.split(clause_text):
+        terms = list(_GMP_TERM_PATTERN.finditer(clause))
+        for match in pattern.finditer(clause):
+            if any(_match_distance(match, term) <= 40 for term in terms):
+                return Decimal(match.group(1))
     return None
 
 
@@ -309,14 +324,33 @@ def _parse_gmp(
     """
     readings: list[Decimal] = []
     for entry in entries:
-        text = normalize_external_text(f"{entry['title']} {entry['snippet']}")
-        percent = _near_gmp_value(text, _PERCENT_PATTERN)
+        # Title and snippet are separate provider claims. Keeping that boundary
+        # prevents a number in one field from binding to "GMP" in the other.
+        source_fields = tuple(
+            normalize_external_text(str(entry[field]))
+            for field in ("title", "snippet")
+        )
+        percent = next(
+            (
+                value
+                for text in source_fields
+                if (value := _near_gmp_value(text, _PERCENT_PATTERN)) is not None
+            ),
+            None,
+        )
         if percent is not None:
             readings.append(percent)
             continue
         if price_band_high is None or price_band_high <= 0:
             continue
-        rupees = _near_gmp_value(text, _RUPEE_PATTERN)
+        rupees = next(
+            (
+                value
+                for text in source_fields
+                if (value := _near_gmp_value(text, _RUPEE_PATTERN)) is not None
+            ),
+            None,
+        )
         if rupees is not None:
             readings.append(rupees / price_band_high * Decimal(100))
     if not readings:
