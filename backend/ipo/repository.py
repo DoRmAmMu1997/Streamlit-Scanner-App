@@ -1742,6 +1742,40 @@ def _validate_cited_fact_binding(
     return schema_version
 
 
+def _verify_cited_receipts_from_cached_pdf(
+    payload: Mapping[str, Any],
+    *,
+    source_content_sha256: str,
+    cache_root: Path,
+    file_path: str,
+) -> None:
+    """Parse verified bytes and re-resolve every caller-supplied source receipt."""
+    # Lazy imports avoid the existing extractor -> repository cycle while
+    # keeping this authority check at both public persistence boundaries.
+    from backend.ipo.agents.financial_extractor import (
+        verify_cited_receipts_against_pages,
+    )
+    from backend.ipo.documents.table_extractor import (
+        IpoDocumentParseError,
+        extract_document_pages,
+    )
+
+    try:
+        pages = extract_document_pages(cache_root / file_path)
+    except IpoDocumentParseError as exc:
+        raise IpoValidationError(
+            "Proposal receipt verification could not parse the verified cached PDF."
+        ) from exc
+    if not verify_cited_receipts_against_pages(
+        payload,
+        pages,
+        source_content_sha256=source_content_sha256,
+    ):
+        raise IpoValidationError(
+            "Proposal receipts do not match the verified cached PDF source pages."
+        )
+
+
 def _proposal_semantic_fingerprint(
     *,
     payload: Mapping[str, Any],
@@ -1886,6 +1920,12 @@ def submit_extraction_proposal(
         raise IpoValidationError(
             "Proposal source SHA does not match verified cached bytes."
         )
+    _verify_cited_receipts_from_cached_pdf(
+        payload,
+        source_content_sha256=source_content_sha256,
+        cache_root=cache_root,
+        file_path=verified.file_path,
+    )
 
     values = {
         "status": IpoExtractionProposalStatus.PENDING.value,
@@ -2028,6 +2068,12 @@ def approve_extraction_proposal(
         raise IpoValidationError(
             f"Extraction proposal {proposal_id} is stale because cached bytes changed."
         )
+    _verify_cited_receipts_from_cached_pdf(
+        record.payload,
+        source_content_sha256=record.source_content_sha256,
+        cache_root=cache_root,
+        file_path=verified.file_path,
+    )
 
     with session_factory() as session:
         current_proposal = get_ipo_extraction_proposal(session, proposal_id)

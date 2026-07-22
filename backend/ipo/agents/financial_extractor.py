@@ -29,7 +29,7 @@ import datetime as dt
 import json
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from itertools import pairwise
@@ -610,20 +610,20 @@ def _span_matches_field_label(label: str, span: str) -> bool:
     """Require the claimed field identity in the same candidate row or line."""
     field_name = _citation_field_name(label)
     semantic_fields = _semantic_field_labels(span)
-    if field_name not in semantic_fields:
-        return False
     peer_match = re.fullmatch(
         r"peer (.+) (eps|pe|nav_book_value|ronw|ev_ebitda|price_sales)",
         label,
     )
-    if peer_match is None:
-        # A compact row containing multiple facts does not prove which number
-        # belongs to which label without column-span metadata. Reject it rather
-        # than borrowing a sibling field's value from elsewhere in the row.
-        return len(semantic_fields) == 1
-    normalized_company = " ".join(peer_match.group(1).casefold().split())
-    normalized_span = " ".join(span.casefold().split())
-    return normalized_company in normalized_span
+    if peer_match is not None:
+        normalized_company = " ".join(peer_match.group(1).casefold().split())
+        normalized_span = " ".join(span.casefold().split())
+        return normalized_company in normalized_span
+    if field_name not in semantic_fields:
+        return False
+    # A compact row containing multiple facts does not prove which number
+    # belongs to which label without column-span metadata. Reject it rather
+    # than borrowing a sibling field's value from elsewhere in the row.
+    return len(semantic_fields) == 1
 
 
 def _span_numeric_token(value: str, span: str) -> str | None:
@@ -716,19 +716,79 @@ def _table_header_rows(rows: tuple[tuple[str, ...], ...]) -> tuple[tuple[str, ..
         header block preserves the table's row/column meaning.
     """
     header_rows: list[tuple[str, ...]] = []
-    all_label_patterns = (
-        pattern
-        for patterns in _FIELD_LABEL_PATTERNS.values()
-        for pattern in patterns
-    )
-    # Materialize once because each row must be compared with every pattern.
-    label_patterns = tuple(all_label_patterns)
     for row in rows:
         row_text = " ".join(row)
-        if any(pattern.search(row_text) for pattern in label_patterns):
+        later_cells = " ".join(row[1:])
+        has_data_marker = _NUMBER_TOKEN_PATTERN.search(later_cells) is not None or re.search(
+            r"\bfy\s*\d{2,4}\b", later_cells, re.IGNORECASE
+        ) is not None
+        if _semantic_field_labels(row_text) and has_data_marker:
             break
+        if has_data_marker:
+            first_cell = row[0].strip() if row else ""
+            structural_label = re.fullmatch(
+                r"(?:metric|particulars?|description|year(?:\s+ended)?|period|date)?",
+                first_cell,
+                re.IGNORECASE,
+            )
+            fiscal_first_cell = re.fullmatch(
+                r"(?:fy\s*)?\d{2,4}(?:\s*[-/]\s*\d{2,4})?",
+                first_cell,
+                re.IGNORECASE,
+            )
+            if structural_label is None and fiscal_first_cell is None:
+                break
         header_rows.append(row)
     return tuple(header_rows)
+
+
+def _table_value_context(
+    row: tuple[str, ...],
+    column_number: int,
+    header_rows: tuple[tuple[str, ...], ...],
+) -> str:
+    """Return only unit text that can govern one candidate value cell.
+
+    Beginner note:
+        A table may put monetary amounts and share counts side by side. Global
+        one-cell headings apply to the whole table, while multi-column headings
+        apply only to their own column; unrelated columns are deliberately left
+        out so their scale cannot overwrite the candidate's unit.
+    """
+    context: list[str] = []
+    for header_row in header_rows:
+        nonempty = [cell for cell in header_row if cell.strip()]
+        if len(nonempty) == 1:
+            context.append(nonempty[0])
+        elif len(header_row) >= column_number:
+            context.append(header_row[column_number - 1])
+    context.append(" ".join(row))
+    return "\n".join(part for part in context if part.strip())
+
+
+def _peer_metric_matches_cell_or_header(
+    label: str,
+    cell: str,
+    column_number: int,
+    header_rows: tuple[tuple[str, ...], ...],
+) -> bool:
+    """Bind a peer value to exactly one named metric in its cell or column."""
+    peer_match = re.fullmatch(
+        r"peer (.+) (eps|pe|nav_book_value|ronw|ev_ebitda|price_sales)",
+        label,
+    )
+    if peer_match is None:
+        return True
+    metric = peer_match.group(2)
+    cell_fields = _semantic_field_labels(cell)
+    if cell_fields == {metric}:
+        return True
+    header_text = " ".join(
+        header_row[column_number - 1]
+        for header_row in header_rows
+        if len(header_row) >= column_number
+    )
+    return _semantic_field_labels(header_text) == {metric}
 
 
 def _matching_numeric_source_for_fact(
@@ -750,14 +810,6 @@ def _matching_numeric_source_for_fact(
     for table_number, table in enumerate(page.tables, start=1):
         rows = table.rows
         header_rows = _table_header_rows(rows)
-        table_context = "\n".join(" ".join(row) for row in rows)
-        table_has_unit = unit is None or _context_contains_unit(
-            table_context,
-            unit,
-            share_unit=share_unit,
-        )
-        if not table_has_unit:
-            continue
         for row_number, row in enumerate(rows, start=1):
             row_text = " ".join(row)
             if not _span_matches_field_label(label, row_text):
@@ -765,6 +817,13 @@ def _matching_numeric_source_for_fact(
             for column_number, cell in enumerate(row, start=1):
                 source_token = _span_numeric_token(value, cell)
                 if source_token is None:
+                    continue
+                if not _peer_metric_matches_cell_or_header(
+                    label,
+                    cell,
+                    column_number,
+                    header_rows,
+                ):
                     continue
                 if period_end is not None:
                     header_text = " ".join(
@@ -774,6 +833,12 @@ def _matching_numeric_source_for_fact(
                     )
                     if not _period_pattern(period_end).search(header_text):
                         continue
+                if unit is not None and not _context_contains_unit(
+                    _table_value_context(row, column_number, header_rows),
+                    unit,
+                    share_unit=share_unit,
+                ):
+                    continue
                 reasons = ["Matched the field label and value in one source table row."]
                 if period_end is not None:
                     reasons.append("Matched the fiscal period in the same table column header.")
@@ -790,6 +855,8 @@ def _matching_numeric_source_for_fact(
     lines = page.text.splitlines()
     for line_number, line in enumerate(lines, start=1):
         if not _span_matches_field_label(label, line):
+            continue
+        if not _peer_metric_matches_cell_or_header(label, line, 1, ()):
             continue
         source_token = _span_numeric_token(value, line)
         if source_token is None:
@@ -1119,6 +1186,80 @@ def _cited_text_evidence(
         confidence=confidence,
         verification_reasons=("Matched the exact normalized source span.",),
     )
+
+
+def verify_cited_receipts_against_pages(
+    payload: Mapping[str, Any],
+    pages: tuple[ExtractedPage, ...],
+    *,
+    source_content_sha256: str,
+) -> bool:
+    """Recompute every claimed receipt from bounded, host-parsed PDF pages.
+
+    Beginner note:
+        Payload fields can agree with one another and still be invented. This
+        pure verifier treats the pages as the authority, rebuilds each numeric
+        and narrative source match, and accepts only the deterministic location,
+        token, and reasons that the host itself would have emitted.
+    """
+    try:
+        proposal = _ProposalModel.model_validate(
+            {name: payload[name] for name in _ProposalModel.model_fields}
+        )
+        raw_facts = payload["cited_financial_facts"]
+        raw_text_evidence = payload["cited_text_evidence"]
+        if not isinstance(raw_facts, list) or not isinstance(raw_text_evidence, list):
+            return False
+        claimed_facts = {
+            str(fact["field_name"]): fact
+            for fact in raw_facts
+            if isinstance(fact, Mapping)
+        }
+        if len(claimed_facts) != len(raw_facts):
+            return False
+        page_by_number = {page.page_number: page for page in pages}
+        numeric_count = 0
+        for label, value, page_number in _citations(proposal):
+            if value is None:
+                continue
+            numeric_count += 1
+            page = page_by_number.get(page_number)
+            if page is None:
+                return False
+            source = _matching_numeric_source_for_fact(label, value, page, proposal)
+            field_name, _period_end, _unit, _multiplier = _fact_identity(label, proposal)
+            claimed = claimed_facts.get(field_name)
+            if source is None or claimed is None:
+                return False
+            if (
+                str(claimed.get("document_sha256")) != source_content_sha256
+                or str(claimed.get("location")) != source.location
+                or str(claimed.get("source_token")) != source.source_token
+                or tuple(claimed.get("verification_reasons", ()))
+                != source.verification_reasons
+            ):
+                return False
+        if numeric_count != len(claimed_facts):
+            return False
+        if len(raw_text_evidence) != 1 or not isinstance(raw_text_evidence[0], Mapping):
+            return False
+        claimed_text = raw_text_evidence[0]
+        page = page_by_number.get(proposal.objects_of_issue_page)
+        if page is None:
+            return False
+        source_text = _matching_text_source(proposal.objects_of_issue, page)
+        if source_text is None:
+            return False
+        original_text, location = source_text
+        return (
+            str(claimed_text.get("document_sha256")) == source_content_sha256
+            and str(claimed_text.get("location")) == location
+            and str(claimed_text.get("source_text")) == original_text
+            and tuple(claimed_text.get("verification_reasons", ()))
+            == ("Matched the exact normalized source span.",)
+        )
+    except (KeyError, TypeError, ValueError, ValidationError):
+        return False
 
 
 def _payload_from_model(

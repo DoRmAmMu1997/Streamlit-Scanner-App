@@ -20,6 +20,9 @@ from typing import Any
 import pytest
 from sqlalchemy.exc import IntegrityError
 
+from backend.ipo.agents import financial_extractor
+from backend.ipo.documents import table_extractor
+from backend.ipo.documents.table_extractor import ExtractedPage
 from backend.ipo.models import (
     Confidence,
     IpoDocumentData,
@@ -172,6 +175,71 @@ def _payload(**overrides: Any) -> dict[str, Any]:
     return values
 
 
+def _verified_parsed_pages() -> tuple[ExtractedPage, ...]:
+    """Return truthful bounded page receipts for the review-flow fixtures."""
+    lines_by_page: dict[int, tuple[str, ...]] = {
+        10: tuple(
+            f"{label} FY{year} {value} (in crore INR)"
+            for year, period in zip((2023, 2024, 2025), _payload()["periods"], strict=True)
+            for label, value in (
+                ("Revenue", period["revenue"]),
+                ("EBITDA", period["ebitda"]),
+                ("PAT", period["pat"]),
+                ("Profit before tax", period["profit_before_tax"]),
+                ("Finance cost", period["finance_cost"]),
+            )
+        ),
+        11: (
+            "Net worth 90 (in crore INR)",
+            "Net worth 91 (in crore INR)",
+            "Total debt 12 (in crore INR)",
+            "Cash 5 (in crore INR)",
+            "Cash flow from operations 14 (in crore INR)",
+        ),
+        12: (
+            "Equity shares 50 lakh shares",
+            "EPS 2.50",
+            "NAV 18.75",
+        ),
+        13: (
+            "Fresh issue 300 (in crore INR)",
+            "Offer for sale 0 (in crore INR)",
+            "Build a plant and repay borrowings.",
+        ),
+        14: (
+            "Promoter holding before issue 75.25",
+            "Promoter holding after issue 56.44",
+        ),
+        15: (
+            "Total assets 150 (in crore INR)",
+            "Current liabilities 45 (in crore INR)",
+            "Post issue equity shares 60 lakh shares",
+        ),
+        16: (
+            "Peer One Ltd EPS 8.25",
+            "Peer One Ltd P/E 21.40",
+        ),
+    }
+    return tuple(
+        ExtractedPage(
+            page_number=page_number,
+            text="\n".join(lines_by_page.get(page_number, (f"Prospectus page {page_number}",))),
+            tables=(),
+        )
+        for page_number in range(1, 17)
+    )
+
+
+@pytest.fixture(autouse=True)
+def _bounded_pdf_parser_fixture(monkeypatch) -> None:
+    """Keep review tests at the repository boundary with deterministic parsed pages."""
+    monkeypatch.setattr(
+        table_extractor,
+        "extract_document_pages",
+        lambda _path: _verified_parsed_pages(),
+    )
+
+
 def _bound_payload(digest: str, **overrides: Any) -> dict[str, Any]:
     """Attach host-verifiable cited facts to the raw proposal draft."""
     payload = _payload(**overrides)
@@ -272,7 +340,48 @@ def _bound_payload(digest: str, **overrides: Any) -> dict[str, Any]:
             "verification_reasons": ["Matched the exact normalized source span."],
         }
     ]
+    try:
+        proposal = financial_extractor._ProposalModel.model_validate(
+            {
+                name: payload[name]
+                for name in financial_extractor._ProposalModel.model_fields
+            }
+        )
+    except ValueError:
+        # Malformed-payload tests need the public repository validator to own
+        # the stable IpoValidationError conversion.
+        return payload
+    pages = _verified_parsed_pages()
+    cited_facts = financial_extractor._cited_financial_facts(
+        proposal,
+        pages,
+        source_content_sha256=digest,
+        confidence=Confidence.HIGH,
+    )
+    cited_text = financial_extractor._cited_text_evidence(
+        proposal,
+        pages,
+        source_content_sha256=digest,
+        confidence=Confidence.HIGH,
+    )
+    payload = financial_extractor._payload_from_model(
+        proposal,
+        cited_facts,
+        cited_text,
+    )
     return payload
+
+
+def _unrelated_parsed_pages() -> tuple[ExtractedPage, ...]:
+    """Return bounded pages that contain none of the proposal's claimed spans."""
+    return tuple(
+        ExtractedPage(
+            page_number=page_number,
+            text="Unrelated prospectus content.",
+            tables=(),
+        )
+        for page_number in range(1, 17)
+    )
 
 
 def _submit(issue_id: int, document_id: int, digest: str, session_factory, **overrides: Any):
@@ -324,6 +433,29 @@ def test_submit_persists_a_pending_proposal_round_trip(
     )
     assert [row.id for row in listed] == [proposal.id]
     assert dict(listed[0].payload) == _bound_payload(digest)
+
+
+def test_submit_rejects_forged_receipts_absent_from_cached_pages(
+    file_session_factory,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Self-consistent caller receipts cannot replace host source verification."""
+    issue, document, digest = _cached_document(file_session_factory, tmp_path)
+    monkeypatch.setattr(
+        table_extractor,
+        "extract_document_pages",
+        lambda _path: _unrelated_parsed_pages(),
+    )
+
+    with pytest.raises(IpoValidationError, match=r"cached PDF|source pages|receipt"):
+        _submit(
+            issue.id,
+            document.id,
+            digest,
+            file_session_factory,
+            data_dir=tmp_path,
+        )
 
 
 def test_submit_rejects_malformed_payload_and_duplicates(
@@ -719,6 +851,48 @@ def test_approval_revalidates_objects_text_evidence(
         proposal_id = malformed.id
 
     with pytest.raises(IpoValidationError, match=r"text evidence does not match"):
+        approve_extraction_proposal(
+            proposal_id,
+            reviewed_by_email="reviewer@example.com",
+            data_dir=tmp_path,
+            session_factory=file_session_factory,
+        )
+
+
+def test_approval_rejects_forged_receipts_absent_from_cached_pages(
+    file_session_factory,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A stored self-consistent receipt is re-resolved before approval."""
+    issue, document, digest = _cached_document(file_session_factory, tmp_path)
+    payload = _bound_payload(digest)
+    with file_session_factory() as session:
+        forged = insert_ipo_extraction_proposal(
+            session,
+            issue.id,
+            document.id,
+            {
+                "status": "pending",
+                "document_url_snapshot": document.document_url,
+                "payload_json": payload,
+                "evidence_schema_version": "cited-financial-fact/v2",
+                "confidence": "high",
+                "needs_review_reasons_json": [],
+                "model_version": "ipo-010-extractor-v2",
+                "agent_model": "claude-sonnet-4-6",
+                "source_content_sha256": digest,
+                "page_count": 16,
+            },
+        )
+        proposal_id = forged.id
+    monkeypatch.setattr(
+        table_extractor,
+        "extract_document_pages",
+        lambda _path: _unrelated_parsed_pages(),
+    )
+
+    with pytest.raises(IpoValidationError, match=r"cached PDF|source pages|receipt"):
         approve_extraction_proposal(
             proposal_id,
             reviewed_by_email="reviewer@example.com",

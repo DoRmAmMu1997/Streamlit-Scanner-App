@@ -141,7 +141,8 @@ _FIXTURE_PAGES = [
         "Promoter holding before issue 75.25",
         "Promoter holding after issue 56.44",
         "Fresh issue and offer for sale as described.",
-        "Basis for offer price: Peer One Ltd P/E 21.40 EPS 8.25",
+        "Basis for offer price: Peer One Ltd P/E 21.40",
+        "Peer One Ltd EPS 8.25",
     ],
 ]
 
@@ -864,8 +865,8 @@ def test_overlapping_labels_do_not_cross_bind_values() -> None:
     )
 
 
-def test_period_lookup_ignores_preceding_data_rows() -> None:
-    """A year in an earlier fact row is not a header for a later value cell."""
+def test_unrecognized_preceding_data_row_cannot_prove_period_header() -> None:
+    """A year in an unknown data row is not a header for a later value cell."""
     proposal = financial_extractor._ProposalModel.model_validate(
         json.loads(_agent_json())
     )
@@ -877,7 +878,7 @@ def test_period_lookup_ignores_preceding_data_rows() -> None:
                 page_number=1,
                 rows=(
                     ("Metric", "FY2023", "Unit"),
-                    ("EBITDA", "FY2024", "in crore INR"),
+                    ("Other income", "FY2024", "in crore INR"),
                     ("Revenue", "100", "in crore INR"),
                 ),
             ),
@@ -890,6 +891,93 @@ def test_period_lookup_ignores_preceding_data_rows() -> None:
         )
         is None
     )
+
+
+def test_swapped_peer_metrics_are_not_verified() -> None:
+    """A peer metric can only bind to its exact column, not a sibling metric."""
+    proposal = financial_extractor._ProposalModel.model_validate(
+        json.loads(_agent_json())
+    )
+    page = ExtractedPage(
+        page_number=3,
+        text="",
+        tables=(
+            ExtractedTable(
+                page_number=3,
+                rows=(
+                    ("Peer One Ltd", "EPS 8.25", "P/E 21.40"),
+                ),
+            ),
+        ),
+    )
+
+    assert (
+        financial_extractor._matching_numeric_source_for_fact(
+            "peer Peer One Ltd eps", "21.40", page, proposal
+        )
+        is None
+    )
+    assert (
+        financial_extractor._matching_numeric_source_for_fact(
+            "peer Peer One Ltd pe", "8.25", page, proposal
+        )
+        is None
+    )
+
+
+def test_peer_metric_accepts_its_exact_column_header() -> None:
+    """A peer value remains valid when its metric identity is in the header."""
+    proposal = financial_extractor._ProposalModel.model_validate(
+        json.loads(_agent_json())
+    )
+    page = ExtractedPage(
+        page_number=3,
+        text="",
+        tables=(
+            ExtractedTable(
+                page_number=3,
+                rows=(
+                    ("Company", "EPS", "P/E"),
+                    ("Peer One Ltd", "8.25", "21.40"),
+                ),
+            ),
+        ),
+    )
+
+    source = financial_extractor._matching_numeric_source_for_fact(
+        "peer Peer One Ltd eps", "8.25", page, proposal
+    )
+
+    assert source is not None
+    assert source.location == "table:1:row:2:cell:2"
+
+
+def test_mixed_monetary_and_base_share_table_is_verified() -> None:
+    """A monetary scale elsewhere does not erase an exact base-share header."""
+    proposal = financial_extractor._ProposalModel.model_validate(
+        json.loads(_agent_json(equity_share_unit="shares"))
+    )
+    page = ExtractedPage(
+        page_number=2,
+        text="",
+        tables=(
+            ExtractedTable(
+                page_number=2,
+                rows=(
+                    ("Metric", "Amount (INR million)", "Number of shares"),
+                    ("Revenue", "100", ""),
+                    ("Equity shares", "", "50"),
+                ),
+            ),
+        ),
+    )
+
+    source = financial_extractor._matching_numeric_source_for_fact(
+        "equity_shares", "50", page, proposal
+    )
+
+    assert source is not None
+    assert source.location == "table:1:row:3:cell:3"
 
 
 def test_objects_of_issue_requires_exact_source_span() -> None:
