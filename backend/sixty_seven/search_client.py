@@ -17,13 +17,19 @@ around that single endpoint, and it is deliberately careful about two things:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 import requests
 
 from backend.config import get_settings
 from backend.security import redact_text
+
+_MAX_RESPONSE_BYTES: Final = 1024 * 1024
+_RESPONSE_CHUNK_BYTES: Final = 64 * 1024
+_MAX_RESULTS: Final = 10
+_MAX_RESULT_FIELD_CHARS: Final = 2_000
 
 
 class SerpApiSetupError(RuntimeError):
@@ -112,8 +118,11 @@ class SerpApiClient:
         normalized_query = str(query or "").strip()
         if not normalized_query:
             return []
+        result_limit = max(0, min(int(max_results), _MAX_RESULTS))
+        if result_limit == 0:
+            return []
 
-        params = {
+        params: dict[str, str | int] = {
             "engine": "google",
             "q": normalized_query,
             # India-localized, English results: gl = geo-location country,
@@ -122,37 +131,49 @@ class SerpApiClient:
             "hl": "en",
             "api_key": self.api_key,
             "output": "json",
+            "num": result_limit,
         }
         try:
             response = self.session.get(
                 self.ENDPOINT,
                 params=params,
                 timeout=self.TIMEOUT_SECONDS,
+                stream=True,
             )
+        except requests.RequestException as exc:
+            detail = redact_text(str(exc), extra_secrets=[self.api_key])
+            raise SerpApiSearchError(f"SerpAPI request failed: {detail}") from exc
+
+        try:
             response.raise_for_status()
-            payload = response.json()
+            payload = _bounded_json(response)
+            # API-level errors arrive with HTTP 200, so classify them before
+            # cleanup and preserve them if closing the response also fails.
+            if isinstance(payload, dict) and payload.get("error"):
+                detail = redact_text(
+                    str(payload["error"]), extra_secrets=[self.api_key]
+                )
+                raise SerpApiSearchError(detail)
         except requests.RequestException as exc:
             # A requests error can echo the full request URL — including the
             # api_key query param — so scrub through the same utility used by
             # Streamlit errors and scanner failure details.
             detail = redact_text(str(exc), extra_secrets=[self.api_key])
+            _close_response(response, api_key=self.api_key, suppress_errors=True)
             raise SerpApiSearchError(f"SerpAPI request failed: {detail}") from exc
-        except ValueError as exc:
-            # response.json() raises ValueError/JSONDecodeError on a non-JSON body.
-            raise SerpApiSearchError("SerpAPI returned non-JSON data.") from exc
-
-        # SerpAPI reports API-level problems (bad key, quota) in an "error" field
-        # with HTTP 200, so check the body even though raise_for_status() passed.
-        if isinstance(payload, dict) and payload.get("error"):
-            detail = redact_text(str(payload["error"]), extra_secrets=[self.api_key])
-            raise SerpApiSearchError(detail)
+        except BaseException:
+            # Cleanup must never replace a typed/redacted primary failure.
+            _close_response(response, api_key=self.api_key, suppress_errors=True)
+            raise
+        else:
+            _close_response(response, api_key=self.api_key, suppress_errors=False)
 
         organic = payload.get("organic_results", []) if isinstance(payload, dict) else []
         if not isinstance(organic, list):
             return []
 
         results: list[SearchResult] = []
-        for item in organic[: max(0, int(max_results))]:
+        for item in organic[:result_limit]:
             if not isinstance(item, dict):
                 continue
             result = _normalize_result(normalized_query, item)
@@ -164,20 +185,81 @@ class SerpApiClient:
 def _normalize_result(query: str, item: dict[str, Any]) -> SearchResult | None:
     """Coerce one raw SerpAPI organic-result dict into a tidy `SearchResult`.
 
-    SerpAPI fields vary by result, so every field is defensively coerced to a
-    stripped string. A result with neither a title nor a snippet carries no
-    evidence, so it is dropped (returns None).
+    SerpAPI fields vary by result, so only scalar strings cross this trust
+    boundary and each is capped before downstream scanning or persistence. A
+    result with neither a title nor a snippet carries no evidence, so it is
+    dropped (returns None).
     """
-    title = str(item.get("title") or "").strip()
-    link = str(item.get("link") or "").strip()
-    snippet = str(item.get("snippet") or "").strip()
+    title = _bounded_result_field(item.get("title"))
+    link = _bounded_result_field(item.get("link"))
+    snippet = _bounded_result_field(item.get("snippet"))
     if not title and not snippet:
         return None
+    source = _bounded_result_field(item.get("displayed_link"))
+    if not source:
+        source = _bounded_result_field(item.get("source"))
     return SearchResult(
         query=query,
         title=title,
         link=link,
-        source=str(item.get("displayed_link") or item.get("source") or "").strip(),
+        source=source,
         snippet=snippet,
-        date=str(item.get("date") or "").strip(),
+        date=_bounded_result_field(item.get("date")),
     )
+
+
+def _bounded_json(response: requests.Response) -> Any:
+    """Read and decode one response only after enforcing a one-MiB byte cap.
+
+    Beginner note:
+        ``Content-Length`` can be absent or dishonest, so it is only an early
+        rejection. Counting streamed bytes is the authoritative check and also
+        covers transport-decoded content before JSON can expand into objects.
+    """
+    raw_length = response.headers.get("Content-Length")
+    try:
+        advertised_length = int(raw_length) if raw_length is not None else None
+    except (TypeError, ValueError):
+        advertised_length = None
+    if advertised_length is not None and advertised_length > _MAX_RESPONSE_BYTES:
+        raise SerpApiSearchError("SerpAPI response exceeded the 1 MiB limit.")
+
+    body = bytearray()
+    for chunk in response.iter_content(chunk_size=_RESPONSE_CHUNK_BYTES):
+        if not chunk:
+            continue
+        if len(body) + len(chunk) > _MAX_RESPONSE_BYTES:
+            raise SerpApiSearchError("SerpAPI response exceeded the 1 MiB limit.")
+        body.extend(chunk)
+    try:
+        return json.loads(body)
+    except ValueError as exc:
+        raise SerpApiSearchError("SerpAPI returned non-JSON data.") from exc
+
+
+def _bounded_result_field(value: Any) -> str:
+    """Return a stripped, bounded provider string without coercing nested data."""
+    if not isinstance(value, str):
+        return ""
+    return value.strip()[:_MAX_RESULT_FIELD_CHARS]
+
+
+def _close_response(
+    response: requests.Response,
+    *,
+    api_key: str,
+    suppress_errors: bool,
+) -> None:
+    """Close a streamed response without allowing cleanup to mask failures."""
+    try:
+        response.close()
+    except BaseException as exc:
+        if suppress_errors:
+            return
+        # Cancellation remains cancellation when cleanup is the only failure.
+        if not isinstance(exc, Exception):
+            raise
+        detail = redact_text(str(exc), extra_secrets=[api_key])
+        raise SerpApiSearchError(
+            f"SerpAPI response cleanup failed: {detail}"
+        ) from exc

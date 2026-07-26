@@ -29,16 +29,24 @@ from backend.ipo.manual_extraction import (
     IpoPeerValuationData,
     IpoShareUnit,
 )
-from backend.ipo.models import IpoDocumentParseStatus, IpoValidationError
+from backend.ipo.models import (
+    IpoDocumentParseStatus,
+    IpoExtractionProposalRecord,
+    IpoExtractionProposalStatus,
+    IpoValidationError,
+)
 from backend.ipo.repository import (
     IpoNotFoundError,
+    approve_extraction_proposal,
     get_latest_manual_profile,
     list_documents,
+    list_extraction_proposals,
     list_issues,
     list_manual_extractions,
+    reject_extraction_proposal,
     submit_manual_extraction,
 )
-from ui.common import _redact_secrets
+from ui.common import _neutralize_markdown, _redact_secrets
 
 # ``st.data_editor`` only renders columns that already exist in the DataFrame it is
 # handed; ``column_config`` keys with no matching column are silently ignored. Seeding
@@ -256,6 +264,7 @@ def _render_ipo_manual_page(authenticated_user: AuthenticatedUser | None) -> Non
         "Transcribe a complete DRHP/RHP profile with page-level provenance. "
         "Each save creates a new immutable revision."
     )
+    _render_proposal_review(authenticated_user)
     issues = list_issues()
     if not issues:
         st.info(
@@ -267,12 +276,123 @@ def _render_ipo_manual_page(authenticated_user: AuthenticatedUser | None) -> Non
     _render_entry_workflow(authenticated_user, issues)
 
 
+def _proposal_label(proposal: IpoExtractionProposalRecord) -> str:
+    """Build one stable, Markdown-neutral review-queue entry label.
+
+    Beginner note:
+        Issuer names originate outside the UI. Escaping Markdown controls
+        prevents a crafted name from turning a select-box label into an image,
+        link, or misleading formatted instruction.
+    """
+    return _neutralize_markdown(
+        f"{proposal.company_name} - proposal #{proposal.id} "
+        f"({proposal.confidence.value} confidence)"
+    )
+
+
+def _render_proposal_review(authenticated_user: AuthenticatedUser) -> None:
+    """Render the IPO-010 review queue for pending AI extraction proposals.
+
+    Beginner note:
+    This section is the human half of the fail-closed trust model: the agent
+    only ever queues *proposals*, and the buttons below are the sole path that
+    turns one into scoring evidence. Approval re-runs the full manual
+    validation (including re-hashing the cached PDF), so a reviewer's click is
+    an attestation, not a rubber stamp.
+    """
+    pending = list_extraction_proposals(status=IpoExtractionProposalStatus.PENDING)
+    st.markdown("**Review AI extraction proposals**")
+    if not pending:
+        st.caption("No pending AI extraction proposals.")
+        return
+
+    labels = {_proposal_label(proposal): proposal for proposal in pending}
+    selected_label = st.selectbox(
+        "Pending proposal", tuple(labels), key="ipo_proposal_review_select"
+    )
+    proposal = labels[selected_label]
+    st.caption(
+        _neutralize_markdown(
+            f"Document: {proposal.document_url} | pages seen: {proposal.page_count} | "
+            f"agent model: {proposal.agent_model} | extractor: {proposal.model_version} | "
+            f"source SHA-256: {proposal.source_content_sha256}"
+        )
+    )
+    if proposal.needs_review_reasons:
+        st.warning(
+            "Verifier notes:\n"
+            + "\n".join(
+                f"- {_neutralize_markdown(reason)}"
+                for reason in proposal.needs_review_reasons
+            )
+        )
+    with st.expander("Proposed values (with page citations)", expanded=False):
+        st.json(dict(proposal.payload))
+
+    approve_column, reject_column = st.columns(2)
+    with approve_column:
+        approve_clicked = st.button(
+            "Approve as immutable revision",
+            key=f"ipo_proposal_approve_{proposal.id}",
+            type="primary",
+        )
+    with reject_column:
+        reject_reason = st.text_input(
+            "Rejection reason", key=f"ipo_proposal_reject_reason_{proposal.id}"
+        )
+        reject_clicked = st.button(
+            "Reject proposal", key=f"ipo_proposal_reject_{proposal.id}"
+        )
+
+    if approve_clicked:
+        try:
+            revision = approve_extraction_proposal(
+                proposal.id,
+                reviewed_by_email=authenticated_user.email,
+                data_dir=get_settings().data_dir,
+            )
+        except (IpoValidationError, IpoNotFoundError) as exc:
+            st.error(_neutralize_markdown(_redact_secrets(str(exc))))
+        except Exception:  # noqa: BLE001 - UI must fail safely without raw exception text.
+            st.error(
+                "The proposal could not be approved. Check logs for the safe error code."
+            )
+        else:
+            st.success(
+                f"Approved proposal #{proposal.id} as immutable revision #{revision.id}."
+            )
+    if reject_clicked:
+        try:
+            reject_extraction_proposal(
+                proposal.id,
+                reviewed_by_email=authenticated_user.email,
+                reason=reject_reason,
+            )
+        except (IpoValidationError, IpoNotFoundError) as exc:
+            st.error(_neutralize_markdown(_redact_secrets(str(exc))))
+        except Exception:  # noqa: BLE001 - UI must fail safely without raw exception text.
+            st.error(
+                "The proposal could not be rejected. Check logs for the safe error code."
+            )
+        else:
+            st.success(f"Rejected proposal #{proposal.id}.")
+
+
 def _render_entry_workflow(
     authenticated_user: AuthenticatedUser,
     issues: Sequence[Any],
 ) -> None:
-    """Render issue selection, complete entry form, latest profile, and history."""
-    issue_labels = {f"{issue.company_name} (#{issue.id})": issue for issue in issues}
+    """Render issue selection, complete entry form, latest profile, and history.
+
+    Beginner note:
+        Only verified cached DRHP/RHP records are offered. Selecting a source
+        does not trust its metadata forever: the repository re-hashes its bytes
+        during submission before it creates an immutable revision.
+    """
+    issue_labels = {
+        _neutralize_markdown(f"{issue.company_name} (#{issue.id})"): issue
+        for issue in issues
+    }
     selected_label = st.selectbox("IPO issue", tuple(issue_labels))
     selected_issue = issue_labels[selected_label]
     documents = [
@@ -292,8 +412,10 @@ def _render_entry_workflow(
 
     latest = get_latest_manual_profile(selected_issue.id)
     document_labels = {
-        f"{document.document_type.upper()} - {document.filing_date or 'date unknown'} "
-        f"(#{document.id})": document
+        _neutralize_markdown(
+            f"{document.document_type.upper()} - "
+            f"{document.filing_date or 'date unknown'} (#{document.id})"
+        ): document
         for document in documents
     }
     default_document_index = 0
@@ -310,8 +432,10 @@ def _render_entry_workflow(
     )
     selected_document = document_labels[selected_document_label]
     st.caption(
-        f"Source SHA-256: {selected_document.content_sha256} | "
-        f"URL: {selected_document.document_url}"
+        _neutralize_markdown(
+            f"Source SHA-256: {selected_document.content_sha256} | "
+            f"URL: {selected_document.document_url}"
+        )
     )
 
     with st.form(f"ipo_manual_extraction_{selected_issue.id}"):
@@ -341,7 +465,7 @@ def _render_entry_workflow(
                 data_dir=get_settings().data_dir,
             )
         except (IpoValidationError, IpoNotFoundError) as exc:
-            st.error(_redact_secrets(str(exc)))
+            st.error(_neutralize_markdown(_redact_secrets(str(exc))))
         except Exception:  # noqa: BLE001 - UI must fail safely without raw exception text.
             st.error("The IPO revision could not be saved. Check logs for the safe error code.")
         else:

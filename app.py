@@ -155,6 +155,7 @@ from ui.history_page import (  # noqa: F401
     _render_history_run_details,
 )
 from ui.ipo_manual_page import _render_ipo_manual_page
+from ui.ipo_page import _render_ipo_page
 from ui.parameter_controls import (  # noqa: F401
     _apply_param_overrides,
     _param_state_key,
@@ -572,11 +573,15 @@ def main() -> None:
     # file must never prevent an operator from inspecting past runs.
     # "Validation / Signal Performance" is a read-only analytical view (like Scan
     # history) available to every authenticated user, not an admin-only page.
+    # "IPO screener" (IPO-007) is the same kind of read-only analytical view:
+    # every authenticated user can inspect verdicts, while the re-score action
+    # inside the page is additionally gated on MANAGE_IPO_DATA.
     view_options = [
         "Scanner",
         "Scan history",
         "Scan comparison",
         "Validation / Signal Performance",
+        "IPO screener",
     ]
     if role_has_capability(current_role, VIEW_HEALTH):
         # AUTH-003: the admin tier sees the operate-the-system pages — health, the
@@ -614,6 +619,12 @@ def main() -> None:
     if view == "Validation / Signal Performance":
         _render_validation_page(
             can_export=role_has_capability(current_role, EXPORT_RESULTS)
+        )
+        return
+    if view == "IPO screener":
+        _render_ipo_page(
+            can_rescore=role_has_capability(current_role, MANAGE_IPO_DATA),
+            user_email=current_email,
         )
         return
     # AUTH-003 defense in depth: the view list already hides these from non-admins,

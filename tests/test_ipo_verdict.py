@@ -1,4 +1,16 @@
-"""IPO-001 binary verdict and JSON-contract tests."""
+"""IPO-001/IPO-006 binary verdict and public JSON-contract tests.
+
+Beginner note:
+Scoring and recommending are separate steps. The score supplies the normal
+80/65 bands, while critical missing evidence and triggered hard cautions can
+force a fail-closed ``Not Recommended`` result. These tests make that precedence
+explicit and also pin the JSON shape consumed by the dashboard or another API
+client.
+
+The small builders below keep each scenario focused on one rule. They create
+real immutable domain receipts rather than loose dictionaries, so serialization
+tests exercise the same typed contract production code returns.
+"""
 
 from __future__ import annotations
 
@@ -7,13 +19,33 @@ from decimal import Decimal
 
 import pytest
 
-from backend.ipo.models import Confidence, IpoScoreResult, Recommendation
-from backend.ipo.verdict import (
+from backend.ipo.models import (
+    Confidence,
+    IpoCautionFlag,
+    IpoCautionFlagReport,
+    IpoCautionFlagStatus,
+    IpoScoreResult,
+    Recommendation,
+    ScoreBreakdownItem,
+)
+from backend.ipo.scoring.recommendation import (
     APPLY_AND_HOLD,
     APPLY_FOR_LISTING_GAINS,
+    INSUFFICIENT_VERIFIED_DATA,
     SKIP,
     build_recommendation,
 )
+
+
+def _report(*statuses: tuple[str, IpoCautionFlagStatus]) -> IpoCautionFlagReport:
+    """Build a small caution-flag report fixture for verdict scenarios."""
+    return IpoCautionFlagReport(
+        version="ipo-006-flags-v1",
+        flags=tuple(
+            IpoCautionFlag(name=name, status=status, evidence=f"evidence for {name}")
+            for name, status in statuses
+        ),
+    )
 
 
 def _score_result(
@@ -22,6 +54,16 @@ def _score_result(
     missing_data: tuple[str, ...] = (),
 ) -> IpoScoreResult:
     """Build the reusable score result fixture used by the scenarios below."""
+    breakdown = (
+        ScoreBreakdownItem(
+            factor="business_quality",
+            weight=25,
+            normalized_score=Decimal(score),
+            missing=False,
+            weighted_contribution=Decimal(score) * Decimal("0.25"),
+            evidence_reason="Official RHP evidence.",
+        ),
+    )
     return IpoScoreResult(
         company_name="Example Ltd",
         score=Decimal(score),
@@ -29,7 +71,24 @@ def _score_result(
         reasons=("Strong revenue growth", "Reasonable valuation versus peers"),
         missing_data=missing_data,
         source_documents=("https://www.sebi.gov.in/example-rhp.pdf",),
+        breakdown=breakdown,
     )
+
+
+def test_public_json_includes_typed_score_breakdown() -> None:
+    """The additive public contract exposes factor arithmetic and evidence."""
+    result = build_recommendation(_score_result("80"))
+
+    assert result.to_dict()["breakdown"] == [
+        {
+            "factor": "business_quality",
+            "weight": 25,
+            "normalized_score": 80,
+            "missing": False,
+            "weighted_contribution": 20,
+            "evidence_reason": "Official RHP evidence.",
+        }
+    ]
 
 
 @pytest.mark.parametrize(
@@ -66,11 +125,16 @@ def test_verdict_uses_the_exact_pdf_score_bands(
     ],
 )
 def test_missing_critical_data_forces_a_fail_closed_verdict(critical_factor: str) -> None:
-    """Pin missing critical data forces a fail closed verdict as an executable IPO regression contract."""
+    """Pin missing critical data forces a fail closed verdict as an executable IPO regression contract.
+
+    IPO-006 renames this branch's sub-label from ``Skip`` to the dedicated
+    "Insufficient verified data" type so a data-gap rejection is
+    distinguishable from a scored rejection in history and on the dashboard.
+    """
     result = build_recommendation(_score_result("90", missing_data=(critical_factor,)))
 
     assert result.recommendation is Recommendation.NOT_RECOMMENDED
-    assert result.recommendation_type == SKIP
+    assert result.recommendation_type == INSUFFICIENT_VERIFIED_DATA
     assert result.confidence is Confidence.LOW
     assert result.reasons[0].startswith("Missing critical data:")
     assert critical_factor.replace("_", " ") in result.reasons[0]
@@ -106,7 +170,77 @@ def test_json_contract_has_exact_keys_and_json_native_values() -> None:
         "confidence": "high",
         "reasons": ["Strong revenue growth", "Reasonable valuation versus peers"],
         "missing_data": [],
-        "source_documents": ["https://www.sebi.gov.in/example-rhp.pdf"],
-    }
+            "source_documents": ["https://www.sebi.gov.in/example-rhp.pdf"],
+            "caution_flags": [],
+            "breakdown": [
+                {
+                    "factor": "business_quality",
+                    "weight": 25,
+                    "normalized_score": 78,
+                    "missing": False,
+                    "weighted_contribution": 19.5,
+                    "evidence_reason": "Official RHP evidence.",
+                }
+            ],
+        }
+    assert json.loads(json.dumps(payload)) == payload
+
+
+def test_triggered_caution_flag_forces_not_recommended_at_any_score() -> None:
+    """A hard caution flag overrides even a near-perfect numeric score."""
+    report = _report(
+        ("negative_operating_cash_flow_despite_profits", IpoCautionFlagStatus.TRIGGERED),
+        ("very_expensive_valuation", IpoCautionFlagStatus.NOT_TRIGGERED),
+    )
+
+    result = build_recommendation(_score_result("95"), caution_flags=report)
+
+    assert result.recommendation is Recommendation.NOT_RECOMMENDED
+    assert result.recommendation_type == SKIP
+    assert result.reasons[0].startswith("Hard caution flag:")
+    assert "negative_operating_cash_flow_despite_profits" in result.reasons[0]
+    assert result.caution_flags == report.flags
+
+
+def test_missing_critical_data_outranks_a_triggered_flag() -> None:
+    """Insufficient data is the stronger sub-label; flag reasons still appear."""
+    report = _report(("very_expensive_valuation", IpoCautionFlagStatus.TRIGGERED))
+
+    result = build_recommendation(
+        _score_result("90", missing_data=("valuation",)), caution_flags=report
+    )
+
+    assert result.recommendation is Recommendation.NOT_RECOMMENDED
+    assert result.recommendation_type == INSUFFICIENT_VERIFIED_DATA
+    assert any(reason.startswith("Hard caution flag:") for reason in result.reasons)
+
+
+def test_untriggered_report_leaves_the_score_bands_untouched() -> None:
+    """Not-triggered and not-evaluable flags never change the verdict."""
+    report = _report(
+        ("very_expensive_valuation", IpoCautionFlagStatus.NOT_TRIGGERED),
+        ("litigation_or_auditor_red_flag", IpoCautionFlagStatus.NOT_EVALUABLE),
+    )
+
+    result = build_recommendation(_score_result("81"), caution_flags=report)
+
+    assert result.recommendation is Recommendation.RECOMMENDED
+    assert result.recommendation_type == APPLY_AND_HOLD
+    assert result.caution_flags == report.flags
+
+
+def test_to_dict_serializes_caution_flags() -> None:
+    """The JSON contract carries the full flag report for auditability."""
+    report = _report(("loss_making_no_credible_path", IpoCautionFlagStatus.TRIGGERED))
+
+    payload = build_recommendation(_score_result("40"), caution_flags=report).to_dict()
+
+    assert payload["caution_flags"] == [
+        {
+            "name": "loss_making_no_credible_path",
+            "status": "triggered",
+            "evidence": "evidence for loss_making_no_credible_path",
+        }
+    ]
     assert json.loads(json.dumps(payload)) == payload
 
