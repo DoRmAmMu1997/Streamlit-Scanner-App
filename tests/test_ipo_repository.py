@@ -1,4 +1,18 @@
-"""IPO-001 typed repository façade tests."""
+"""IPO repository façade, transaction, and provenance tests.
+
+Beginner note:
+The public repository is the IPO subsystem's database doorway. Callers give it
+typed domain objects and receive detached records; they should never need to
+know which SQLAlchemy rows or transactions were involved. These tests exercise
+that doorway against a file-backed database so parent scoping, rollback,
+download provenance, immutable evaluation history, and concurrent uniqueness
+behave like production rather than like isolated in-memory mocks.
+
+Several scenarios deliberately replace the downloader or force a child-row
+failure. Those are not implementation tricks: they prove that slow network
+work happens outside database locks and that a failed multi-row write leaves no
+half-saved evidence behind.
+"""
 
 from __future__ import annotations
 

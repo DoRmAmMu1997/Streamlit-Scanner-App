@@ -1,4 +1,17 @@
-"""IPO-001 deterministic scorecard tests."""
+"""IPO-001 deterministic seven-factor scorecard tests.
+
+Beginner note:
+The scorecard performs arithmetic only; it does not fetch evidence or ask an AI
+for an opinion. Each normalized factor score is multiplied by its fixed PDF
+weight, and the seven contributions must add up to the displayed total. These
+tests pin the weights, missing-data behavior, rounding rule, reason ordering,
+and public breakdown receipt so a refactor cannot silently change an investor
+recommendation.
+
+Missing factors intentionally receive zero contribution without redistributing
+their weight. That fail-closed rule prevents a company with sparse evidence
+from looking stronger merely because fewer factors could be verified.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,16 @@
-"""IPO-001/IPO-006 binary verdict and JSON-contract tests."""
+"""IPO-001/IPO-006 binary verdict and public JSON-contract tests.
+
+Beginner note:
+Scoring and recommending are separate steps. The score supplies the normal
+80/65 bands, while critical missing evidence and triggered hard cautions can
+force a fail-closed ``Not Recommended`` result. These tests make that precedence
+explicit and also pin the JSON shape consumed by the dashboard or another API
+client.
+
+The small builders below keep each scenario focused on one rule. They create
+real immutable domain receipts rather than loose dictionaries, so serialization
+tests exercise the same typed contract production code returns.
+"""
 
 from __future__ import annotations
 
