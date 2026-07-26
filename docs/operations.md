@@ -189,9 +189,13 @@ or being treated as complete extraction.
 
 Only exact, complete `Decimal` tokens bound to the original page and table cell
 or text span can become cited financial facts. Units must be cited in the same
-table/header or bounded text context, and the three fiscal-year ends must be
-distinct, annual, and oldest-first. Legacy or low-confidence proposals remain
-review-required and cannot silently acquire stronger confidence.
+table/header or bounded text context; the expected financial label must share
+the value row, and a fiscal period must share the value column. Objects of issue
+must equal an original cited line/cell rather than a model paraphrase. The three
+fiscal-year ends must be distinct, annual, and oldest-first. Submission and
+approval both re-resolve v2 receipts from the hash-verified cached PDF. Legacy,
+forged, or low-confidence proposals remain review-required and cannot silently
+acquire stronger confidence.
 
 SerpAPI remains optional. Persisted issuer name and price band are the query
 authority; incompatible caller arguments fail before network access. Results
@@ -200,7 +204,15 @@ All-hostile or malformed batches are `NOT_EVALUABLE`. Web observations are
 advisory: they may provide the bounded five-point GMP factor or request human
 review, but litigation hard cautions require corroborated official or
 approved-manual evidence. Identical observations update `last_seen_at` instead
-of creating duplicate rows.
+of creating duplicate rows. GMP numbers must share the same sentence/clause
+and result field as `GMP`/`grey market premium` and be at most 40 characters
+away. Results are deduplicated and sorted by semantic hash before aggregation,
+so duplicates and provider ordering cannot change influence.
+
+The shared provider client streams at most 1 MiB before JSON decoding and caps
+each string field at 2,000 characters. Missing, malformed, or understated
+`Content-Length` does not bypass the streamed limit. Cleanup is always attempted
+without replacing the primary redacted error or cancellation.
 
 Scoring reads issue, approved profile, ratio receipts, subscription, and
 enrichment as one immutable snapshot. The semantic fingerprint excludes
@@ -209,6 +221,17 @@ duplicate evaluations. Every result exposes all seven factor breakdown rows,
 whose weighted contributions sum to the score. The dashboard performs no
 network work, shows registered DRHP/RHP sources even for unscored issues, and
 marks an evaluation stale when newer evidence is awaiting a re-score.
+
+High leverage remains fail-closed unless the cited objects-of-issue proposition
+affirmatively allocates proceeds to debt repayment. Negative contractions,
+prohibitions, conflicting repayment clauses, ambiguous wording, and missing
+evidence cannot suppress the caution; an unrelated negative clause does not
+taint a separate affirmative repayment proposition.
+
+The IPO dashboard and proposal-review UI neutralize all CommonMark punctuation
+in untrusted issuer names, source URLs/labels, model/verifier text, reasons,
+flags, and validation errors before Markdown-capable widgets. Structured JSON
+and dataframes remain structured, and unsafe HTML is never enabled.
 
 ### Scheduling on Windows (Task Scheduler)
 

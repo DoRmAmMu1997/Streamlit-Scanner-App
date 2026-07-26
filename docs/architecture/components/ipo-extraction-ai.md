@@ -44,7 +44,9 @@ verified cache (IPO-003) -> spawned bounded PDF worker -> parse receipt
 | Locked-down `ClaudeAgentOptions` (`permission_mode="dontAsk"`, `setting_sources=[]`, in-process tools only) | The model can never touch the filesystem, network, or shell; behaviour comes entirely from our prompt. |
 | Values travel as decimal strings | The exact printed digits survive schema validation, host verification, storage, and reconstruction without binary float drift. |
 | Host parses complete tokens in the original table cell/text span | Formatting-equivalent Indian grouping/currency/whitespace/trailing zeros is accepted, but rounding, substring, and cross-cell matches fail. |
-| Unit, value, period, page, cell/span, source token, and document SHA form one typed fact | Independently plausible fields cannot be recombined into false high-confidence evidence. |
+| Field label, unit, value, period header, page, cell/span, source token, and document SHA form one typed fact | A duplicate number in another financial row, fiscal column, peer metric, or unit context cannot be substituted as high-confidence evidence. |
+| `objects_of_issue` uses exact `CitedTextEvidence` | A model paraphrase is useful review context but cannot impersonate an original prospectus line or table cell. |
+| Submission and approval re-resolve receipts from bounded cached-PDF pages | Public callers cannot forge otherwise well-shaped receipt metadata; the current row SHA, cached bytes, and every source location must agree twice. |
 | Exactly three distinct oldest-first annual periods | Duplicate, reversed, or nonannual rows fail before review persistence. |
 | Proposals, never records | The worst outcome of a bad run is a rejected queue item plus an error receipt — scoring only ever consumes human-attested revisions. |
 
@@ -64,7 +66,9 @@ keeps going.
 The parent also terminates and joins a timed-out/crashed child and rejects
 malformed or oversized worker output. Resource exhaustion, empty/scanned PDFs,
 stale source SHA, and legacy-unbound evidence are review-required rather than
-partial success. Raw hostile text is never stored in failure markers.
+partial success. Evidence schema `cited-financial-fact/v1` is legacy; only
+complete v2 numeric facts plus the exact narrative fact can reach a new
+proposal. Raw hostile text is never stored in failure markers.
 
 ## 6. Configuration & dependencies
 
@@ -90,8 +94,10 @@ verification runs against genuinely extracted text. See
 
 Worker tests additionally cover spawn behavior, timeout, crash,
 malformed/oversized responses, cleanup, every object/text budget, and scanned
-PDFs. Verifier tests pin exact token/unit/page/cell binding, period order,
-quarantine, stale SHA, and legacy-confidence downgrade.
+PDFs. Verifier tests pin exact field/metric label, token, unit, period header,
+page, cell/text-span binding, narrative equality, submission/approval
+re-resolution, period order, quarantine, stale SHA, forged receipts, and
+legacy-confidence downgrade.
 
 ## 8. Extension points
 

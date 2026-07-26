@@ -75,9 +75,23 @@ prove a citation. Units must be cited in the same table/header or bounded text
 context. Missing or ambiguous binding is human-review required and cannot
 receive high confidence.
 
+The host also binds meaning, not only digits. A table value must share its row
+with the expected financial-field label, a period fact must share its column
+with the proposed fiscal header, and a peer metric must share its cell/column
+with the exact metric. A duplicate number elsewhere in the page or table is
+not interchangeable evidence. `objects_of_issue` is carried separately as
+`CitedTextEvidence` and must equal one original table cell or text line; a
+model-written paraphrase is never an approved source span.
+
 Exactly three distinct fiscal-year ends are required in strictly oldest-first
 order. Each adjacent pair must be 365 or 366 days apart; duplicate, reversed,
 or nonannual periods are rejected.
+
+AI proposals use evidence schema `cited-financial-fact/v2`. Submission and
+approval independently re-parse the hash-verified cached PDF through the
+bounded worker and re-resolve every receipt against those authoritative pages.
+Legacy v1 receipts and forged caller-supplied receipt metadata remain
+review-required rather than being granted v2 confidence.
 
 ### 3. Encode web authority and quarantine per item
 
@@ -96,11 +110,23 @@ never interpreted as a clean negative result.
 Advisory web evidence may add the existing bounded GMP contribution or request
 review. It cannot directly create a hard caution. Litigation/auditor hard
 cautions require official or approved-manual corroboration. GMP parsing accepts
-a rupee or percent value only within 40 characters of `GMP` or
-`grey market premium`.
+a rupee or percent value only in the same normalized sentence/clause and within
+40 characters of `GMP` or `grey market premium`. Newlines, sentence punctuation,
+title/snippet boundaries, and clause delimiters are authority boundaries; a
+nearby subscription, date, or issue-price number cannot cross one.
 
-Semantically identical observations are upserted by content fingerprint. The
-first and last seen instants are both retained, and freshness uses last seen.
+Semantically identical observations are deduplicated by their server-created
+content fingerprint and sorted by that fingerprint before GMP aggregation or
+persistence. Input order and duplicates therefore cannot change the batch
+identity or overweight a value. The first and last seen instants are both
+retained, and freshness uses last seen.
+
+The shared SerpAPI client streams at most 1 MiB before JSON decoding. An
+advertised `Content-Length` is treated as an early rejection hint, never as a
+trusted bound; missing, invalid, or understated lengths still meet the streamed
+cap. Result fields must be strings and are capped at 2,000 characters each.
+Response cleanup is always attempted, cannot replace an existing typed/redacted
+failure, and preserves primary cancellation exceptions.
 
 ### 4. Make review and scoring transitions atomic and semantic
 
@@ -139,7 +165,17 @@ reconstructed or upgraded into newly verified evidence.
 
 High debt is fail-closed unless a structured, page-cited purpose state is
 affirmatively `AFFIRMATIVE`. Negated, ambiguous, missing, or legacy free
-text cannot suppress the caution.
+text cannot suppress the caution. Classification is proposition-aware,
+normalizes Unicode apostrophes, recognizes negative contractions and
+prohibitions, and aggregates conflicting affirmative/negative propositions as
+`AMBIGUOUS`; an unrelated negative clause does not taint a cited affirmative
+repayment proposition.
+
+Every untrusted IPO value is neutralized before a Markdown-capable Streamlit
+sink. Issuer names, source labels/URLs, model and verifier text, factor reasons,
+hard flags, missing-data labels, and backend validation errors cannot create a
+remote image/link or page structure. `st.json` and `st.dataframe` remain
+structured, and unsafe HTML rendering stays disabled.
 
 ## Alternatives considered
 
@@ -177,10 +213,11 @@ versioned domain records provide the required isolation without a new service.
 ## Verification
 
 The change is accepted only when regression tests demonstrate all eight
-reviewed failure cases no longer reproduce, legitimate cited values and clean
-mixed enrichment still work, proposal/evaluation races are atomic, exact reruns
-are idempotent, the dashboard exposes seven-factor provenance without network
-work, and every repository quality/security/container gate passes.
+original reviewed failure cases and the seven post-review residual boundaries
+no longer reproduce, legitimate cited values and clean mixed enrichment still
+work, proposal/evaluation races are atomic, exact reruns are idempotent, the
+dashboard exposes seven-factor provenance without network work, and every
+repository quality/security/container gate passes.
 
 ## Process note
 
