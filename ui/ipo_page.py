@@ -93,6 +93,11 @@ def _rows_frame(rows: tuple[IpoDashboardRow, ...]) -> pd.DataFrame:
 
     Every cell is plain text so ``_csv_safe`` protects any future export the
     same way the scan-history tables are protected.
+
+    Beginner note:
+        Formatting happens after the backend has assembled one immutable
+        snapshot. Empty strings represent display absence only; they do not
+        rewrite missing-data semantics in the domain receipt.
     """
     return pd.DataFrame(
         [
@@ -138,7 +143,13 @@ def _render_section(title: str, rows: tuple[IpoDashboardRow, ...]) -> None:
 
 
 def _render_breakdowns(rows: tuple[IpoDashboardRow, ...]) -> None:
-    """Render one expander per scored issue with the full verdict receipt."""
+    """Render one expander per scored issue with the full verdict receipt.
+
+    Beginner note:
+        The complete stored seven-factor breakdown is preferred over rebuilding
+        explanations from the total score. Legacy rows without that additive
+        field fall back to their original reason lines.
+    """
     scored = [row for row in rows if row.score is not None]
     if not scored:
         return
@@ -240,6 +251,11 @@ def _render_ipo_page(*, can_rescore: bool, user_email: str | None = None) -> Non
             (MANAGE_IPO_DATA). The button is hidden otherwise; hiding is UX,
             the capability check in ``app.main`` is the boundary.
         user_email: Signed-in identity for the re-score audit trail.
+
+    Beginner note:
+        Rendering is read-only. The one explicit button calls the shared
+        repository-only scoring service, invalidates the short snapshot cache,
+        and records an attributable audit event.
     """
     st.subheader("IPO screener")
     st.caption(

@@ -204,7 +204,14 @@ def _require_page(value: int, field_name: str) -> int:
 
 
 class _PeriodModel(StrictAIModel):
-    """One annual fiscal period exactly as the manual contract expects it."""
+    """Validate one annual fiscal period before host-side evidence binding.
+
+    Beginner note:
+        This model validates only the *shape* of the agent's answer. A valid
+        decimal string and page number are still untrusted until later code
+        finds the exact token, financial label, fiscal-year header, and unit
+        in one bounded source context from the original PDF.
+    """
 
     period_end: str
     revenue: str
@@ -221,7 +228,11 @@ class _PeriodModel(StrictAIModel):
     @field_validator("period_end")
     @classmethod
     def _iso_date(cls, value: str) -> str:
-        """Require an ISO fiscal-year-end date such as 2026-03-31."""
+        """Require an ISO fiscal-year-end date such as ``2026-03-31``.
+
+        Keeping the value as text preserves the JSON contract; parsing it here
+        merely rejects impossible dates before evidence verification starts.
+        """
         dt.date.fromisoformat(value)
         return value
 
@@ -245,7 +256,13 @@ class _PeriodModel(StrictAIModel):
 
 
 class _PeerModel(StrictAIModel):
-    """One prospectus peer row with allowlisted valuation metrics."""
+    """Validate one prospectus peer row against the supported metric vocabulary.
+
+    Beginner note:
+        Allowlisting metric names prevents an agent from inventing a new field
+        that downstream code might accidentally treat as approved evidence.
+        The numeric value is separately rebound to its exact source cell.
+    """
 
     company_name: str
     source_page: int
@@ -280,7 +297,14 @@ class _PeerModel(StrictAIModel):
 
 
 class _ProposalModel(StrictAIModel):
-    """The complete extraction the agent must emit as its final message."""
+    """Describe the complete, strict JSON shape expected from the agent.
+
+    Beginner note:
+        Pydantic rejects missing, extra, or incorrectly typed fields here, but
+        schema validity is not factual validity. The host subsequently checks
+        every claimed page, value, period, label, and unit against the parsed
+        document before a proposal can enter the human-review queue.
+    """
 
     financial_amount_unit: str
     financial_amount_unit_page: int
@@ -649,7 +673,13 @@ def _period_pattern(period_end: dt.date) -> re.Pattern[str]:
 
 
 def _context_contains_unit(context: str, unit: str, *, share_unit: bool) -> bool:
-    """Require a selected scale in one local table-row or text-block context."""
+    """Return whether one local source context proves the selected scale.
+
+    Beginner note:
+        Prospectuses commonly mix rupee amounts and share counts on the same
+        page. Unit proof therefore comes from the candidate value's own table
+        row/header or text block, never from an unrelated page-level mention.
+    """
     patterns = _SHARE_UNIT_PATTERNS if share_unit else _AMOUNT_UNIT_PATTERNS
     if not patterns[unit].search(context):
         return False
@@ -772,7 +802,14 @@ def _peer_metric_matches_cell_or_header(
     column_number: int,
     header_rows: tuple[tuple[str, ...], ...],
 ) -> bool:
-    """Bind a peer value to exactly one named metric in its cell or column."""
+    """Bind a peer value to exactly one named metric in its cell or column.
+
+    Beginner note:
+        Peer tables place several ratios next to each other. Matching only the
+        printed number could turn a P/E value into EPS when the same token
+        appears twice, so the containing cell or its column header must name
+        exactly the metric being verified.
+    """
     peer_match = re.fullmatch(
         r"peer (.+) (eps|pe|nav_book_value|ronw|ev_ebitda|price_sales)",
         label,
@@ -912,7 +949,13 @@ def _citations(proposal: _ProposalModel) -> tuple[tuple[str, str | None, int], .
     """Flatten every (label, numeric value, cited page) triple in the proposal.
 
     ``objects_of_issue`` participates with a ``None`` value: its page must
-    exist, but free text is reviewed by the human, not string-matched.
+    exist, but free text follows the separate exact-span verifier.
+
+    Beginner note:
+        Flattening the nested response in one place gives all numeric fields
+        the same verification path. It also makes omission difficult: adding a
+        supported value field requires updating the central field collections,
+        rather than relying on scattered checks.
     """
     entries: list[tuple[str, str | None, int]] = []
     for index, period in enumerate(proposal.periods, start=1):
@@ -946,7 +989,14 @@ _SHARE_COUNT_FIELDS: Final = {"equity_shares", "post_issue_equity_shares"}
 
 
 def _required_unit_pages(proposal: _ProposalModel) -> tuple[tuple[str, str, bool, set[int]], ...]:
-    """Return each selected unit and every page whose values use that scale."""
+    """Return each selected unit and every page whose values use that scale.
+
+    Beginner note:
+        A model may cite a unit correctly on one page and then cite values from
+        other pages that use a different scale. The host checks every value
+        page, plus the declared unit page, so unit confidence cannot be
+        borrowed across disconnected parts of the prospectus.
+    """
     financial_pages = {
         getattr(period, f"{field}_page")
         for period in proposal.periods
@@ -1084,7 +1134,18 @@ def _fact_identity(
     label: str,
     proposal: _ProposalModel,
 ) -> tuple[str, dt.date | None, str | None, Decimal]:
-    """Map one internal citation label to its typed unit and period identity."""
+    """Map one internal citation label to its typed unit and period identity.
+
+    Returns:
+        A stable field path, optional fiscal period, normalized unit name, and
+        exact ``Decimal`` multiplier used to interpret the printed value.
+
+    Beginner note:
+        The agent supplies human-readable labels and unscaled decimal text.
+        Approved evidence needs a stable machine identity and explicit scale,
+        otherwise two visually identical values such as ``10`` rupees and
+        ``10`` crores would be indistinguishable.
+    """
     period_match = re.fullmatch(r"period (\d+) ([a-z_]+)", label)
     if period_match:
         period_index = int(period_match.group(1)) - 1
@@ -1126,7 +1187,15 @@ def _cited_financial_facts(
     source_content_sha256: str,
     confidence: Confidence,
 ) -> tuple[CitedFinancialFact, ...]:
-    """Create facts only for values the host matched to an original span."""
+    """Create typed facts only for values matched to an original source span.
+
+    Beginner note:
+        This is the trust boundary between agent output and approved financial
+        evidence. A field is omitted unless the deterministic matcher proves
+        its exact token, location, page, semantic label, period, and unit.
+        Downstream scoring therefore consumes host-created facts, not raw model
+        fields.
+    """
     page_by_number = {page.page_number: page for page in pages}
     facts: list[CitedFinancialFact] = []
     for label, value, page_number in _citations(proposal):
@@ -1166,7 +1235,13 @@ def _cited_text_evidence(
     source_content_sha256: str,
     confidence: Confidence,
 ) -> CitedTextEvidence:
-    """Create the objects evidence only from one exact original source span."""
+    """Create objects-of-issue evidence from one exact original source span.
+
+    Beginner note:
+        Free text cannot use numeric equality, so the normalized proposal text
+        must still resolve to one bounded source span on the cited page. The
+        returned record preserves that source text and location for a reviewer.
+    """
     page_by_number = {page.page_number: page for page in pages}
     source = _matching_text_source(
         proposal.objects_of_issue,
@@ -1330,7 +1405,14 @@ def _build_user_prompt(
 
 
 def _quarantined_tool_text(text: str) -> tuple[dict[str, Any], bool]:
-    """Scan one tool response; hand the model blocked content on a hit."""
+    """Scan one tool response and replace hostile content with a safe marker.
+
+    Beginner note:
+        PDF text is data, not instructions. If it resembles prompt injection,
+        the agent receives only a fixed blocked marker; the original text is
+        retained in process solely to make the proposal fail review safely and
+        is never copied into logs or persistent error messages.
+    """
     if contains_injection(text):
         collector = _EVIDENCE_COLLECTOR.get()
         if collector is not None:
@@ -1344,7 +1426,13 @@ def _quarantined_tool_text(text: str) -> tuple[dict[str, Any], bool]:
 
 
 def _section_chunks(section: ClassifiedSection, pages: tuple[ExtractedPage, ...]) -> list[str]:
-    """Split pages independently and repeat their marker on every bounded chunk."""
+    """Split pages independently and repeat their marker on every bounded chunk.
+
+    Beginner note:
+        Chunk boundaries are an implementation detail, but page numbers are
+        evidence. Restarting the marker in every chunk means the agent cannot
+        lose provenance when a long page is split across several tool calls.
+    """
     by_number = {page.page_number: page for page in pages}
     chunks: list[str] = []
     for number in section.page_numbers:
@@ -1376,6 +1464,12 @@ def _default_run_agent(
     Mirrors the fundamentals agent's locked-down runner: lazy SDK import,
     in-process tools only, ``permission_mode="dontAsk"`` so nothing outside
     ``allowed_tools`` can ever run, and no user/project settings loaded.
+
+    Beginner note:
+        The model cannot browse the filesystem or network. It can request only
+        the bounded sections and tables already produced by the contained PDF
+        parser. Every tool response is scanned again for prompt injection
+        before the model sees it.
     """
     try:
         from claude_agent_sdk import (  # type: ignore[import-not-found, unused-ignore]
@@ -1574,7 +1668,30 @@ def _propose_extraction_inner(
     force_extract: bool,
     session_factory: SessionFactory,
 ) -> IpoExtractionProposalRecord:
-    """Run the full extract -> classify -> agent -> verify -> persist pipeline."""
+    """Run the full parse, classify, propose, verify, and persist pipeline.
+
+    Args:
+        issue_id: Parent IPO issue identifier.
+        document_id: Cached DRHP/RHP identifier.
+        data_dir: Optional cache-root override used by tests.
+        model: Optional agent model override.
+        run_agent: Optional deterministic agent seam used by tests.
+        force_extract: Whether reviewed history may be reprocessed.
+        session_factory: Caller-visible database transaction factory.
+
+    Returns:
+        The newly persisted, still-pending extraction proposal.
+
+    Raises:
+        IpoExtractionError: If the document, history, agent output, evidence,
+            or persistence rules reject the attempt.
+
+    Beginner note:
+        The order is deliberate. Cheap database/history checks happen before
+        PDF or AI work; cached bytes are verified before parsing; and no
+        proposal is persisted until deterministic host code has rebound the
+        output to the exact source document.
+    """
     issue = get_issue(issue_id, session_factory=session_factory)
     if issue is None:
         raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
@@ -1653,7 +1770,13 @@ def _propose_extraction_inner(
     verified_result: dict[str, Any] = {}
 
     def _parse_once(text: str) -> _ProposalModel:
-        """Parse, schema-validate, and independently verify one final message."""
+        """Parse, schema-validate, and independently verify one final message.
+
+        ``parse_with_retry`` may call this more than once for formatting or
+        schema errors. Evidence failures are intentionally outside its retry
+        set because asking the same model again must not convert unverified
+        content into trusted data.
+        """
         payload = extract_json_object(text)
         if payload is None:
             raise _ExtractionOutputError("The final message contained no JSON object.")

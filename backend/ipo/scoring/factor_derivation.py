@@ -345,6 +345,11 @@ def _factor(
     all; optional sub-inputs join the average only when they scored. The
     reason string always names each contribution so the persisted receipt can
     be audited without re-running the derivation.
+
+    Beginner note:
+        This function never rescales around a missing core input. Returning
+        ``None`` preserves the evidence gap so recommendation policy can fail
+        closed instead of awarding a deceptively complete-looking score.
     """
     missing_core = [sub for sub in core if sub.score is None]
     if missing_core or not core:
@@ -408,7 +413,13 @@ def _premium_subscore(
     *,
     label: str,
 ) -> _SubScore:
-    """Score one valuation multiple as a premium over its peer median."""
+    """Score one valuation multiple as a premium over its peer median.
+
+    Beginner note:
+        Peer comparisons use only positive, allowlisted metrics from the
+        approved manual profile. A missing median remains missing evidence;
+        the issuer is never rewarded merely because no peer data was supplied.
+    """
     receipt = _receipt(ratios, name)
     if receipt is None or receipt.status is IpoRatioStatus.MISSING_INPUTS:
         return _SubScore(
@@ -443,7 +454,13 @@ def _premium_subscore(
 
 
 def _promoter_quality(profile: IpoManualExtractionRecord | None) -> FactorAssessment:
-    """Judge promoter alignment from post-issue holding and the OFS share."""
+    """Judge promoter alignment from post-issue holding and the OFS share.
+
+    Beginner note:
+        The factor uses approved pre/post holding and fresh-versus-OFS values,
+        not promoter-reputation search snippets. External commentary remains
+        advisory and cannot overwrite prospectus facts.
+    """
     if profile is None:
         return FactorAssessment(
             score=None,
@@ -503,7 +520,13 @@ def _promoter_quality(profile: IpoManualExtractionRecord | None) -> FactorAssess
 
 
 def _qib_subscription(subscription: IpoSubscriptionRecord | None) -> FactorAssessment:
-    """Judge institutional demand from the latest official snapshot."""
+    """Judge institutional demand from the latest official snapshot.
+
+    Beginner note:
+        No snapshot means ``None``, while a real zero multiple means weak demand
+        and scores zero. Keeping those states separate is essential near issue
+        close, where missing demand can also trigger a hard caution.
+    """
     if subscription is None:
         return FactorAssessment(
             score=None,

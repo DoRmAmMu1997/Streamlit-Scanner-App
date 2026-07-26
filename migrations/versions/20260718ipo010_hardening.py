@@ -27,7 +27,13 @@ _FK_NAMING = {
 
 
 def _document_fk_name() -> str:
-    """Return the reflected document FK name on SQLite or PostgreSQL."""
+    """Return the reflected document FK name on SQLite or PostgreSQL.
+
+    Beginner note:
+        SQLite may expose an unnamed foreign key while PostgreSQL preserves its
+        explicit name. Batch migration needs one deterministic name so it can
+        replace ``CASCADE`` retention with ``SET NULL`` on both backends.
+    """
     foreign_keys = sa.inspect(op.get_bind()).get_foreign_keys(
         "ipo_extraction_proposals"
     )
@@ -41,7 +47,13 @@ def _document_fk_name() -> str:
 
 
 def upgrade() -> None:
-    """Add versioned evidence, semantic identity, and retention constraints."""
+    """Add versioned evidence, semantic identity, and retention constraints.
+
+    Beginner note:
+        Columns are added nullable or with conservative legacy defaults first,
+        existing rows are backfilled, and only then are stricter constraints
+        enabled. That sequence keeps upgrades safe for populated databases.
+    """
     document_fk_name = _document_fk_name()
     with op.batch_alter_table(
         "ipo_extraction_proposals",
@@ -220,7 +232,14 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Remove hardening columns only when document retention can be restored."""
+    """Remove hardening only when document retention can be restored safely.
+
+    Beginner note:
+        A reviewed proposal whose document was deleted now has a null foreign
+        key by design. Downgrading would make that column required again and
+        destroy provenance, so this migration refuses the lossy operation
+        rather than guessing a replacement document.
+    """
     null_document_rows = op.get_bind().execute(
         sa.text(
             "SELECT COUNT(*) FROM ipo_extraction_proposals "

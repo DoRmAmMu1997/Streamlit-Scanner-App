@@ -98,7 +98,14 @@ class CitedFinancialFact:
     verification_reasons: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        """Validate the immutable evidence anchor and normalize enum fields."""
+        """Validate and normalize the immutable numeric evidence anchor.
+
+        Beginner note:
+            Construction is the last opportunity to reject contradictory
+            provenance before a fact is stored. A finite value, positive scale,
+            valid document digest, positive page, and concrete source location
+            are required together.
+        """
         if not self.field_name.strip():
             raise IpoValidationError("Cited financial fact field_name is required.")
         if not self.value.is_finite() or not self.unit_multiplier.is_finite():
@@ -125,7 +132,13 @@ class CitedFinancialFact:
         )
 
     def to_payload(self) -> dict[str, Any]:
-        """Return a JSON-safe, versioned proposal representation."""
+        """Return a JSON-safe, lossless proposal representation.
+
+        Beginner note:
+            ``Decimal`` and ``date`` are encoded as strings so database JSON
+            storage never introduces binary floating-point rounding or
+            locale-dependent date formatting.
+        """
         return {
             "field_name": self.field_name,
             "value": str(self.value),
@@ -160,7 +173,13 @@ class CitedTextEvidence:
     verification_reasons: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        """Validate and normalize the immutable source-span identity."""
+        """Validate and normalize the immutable narrative source identity.
+
+        Beginner note:
+            Narrative evidence has no numeric equality check, so its document
+            digest, page, location, and original source text must all survive as
+            one inseparable record.
+        """
         if not self.field_name.strip():
             raise IpoValidationError("Cited text evidence field_name is required.")
         digest = self.document_sha256.strip().lower()
@@ -183,7 +202,13 @@ class CitedTextEvidence:
         )
 
     def to_payload(self) -> dict[str, Any]:
-        """Return the JSON-safe proposal representation."""
+        """Return the JSON-safe, provenance-preserving representation.
+
+        Beginner note:
+            The original source span is serialized with its citation rather
+            than replaced by model-written prose, enabling approval-time
+            revalidation against cached PDF bytes.
+        """
         return {
             "field_name": self.field_name,
             "document_sha256": self.document_sha256,
@@ -196,7 +221,13 @@ class CitedTextEvidence:
 
 
 class DebtReductionPurposeStatus(enum.StrEnum):
-    """Typed conclusion about whether issue proceeds reduce borrowings."""
+    """Type the conclusion about whether issue proceeds reduce borrowings.
+
+    Beginner note:
+        Four states prevent missing or unclear text from being interpreted as
+        affirmative debt repayment. Only ``AFFIRMATIVE`` can suppress the
+        high-debt caution, and it additionally requires a complete citation.
+    """
 
     AFFIRMATIVE = "affirmative"
     NEGATIVE = "negative"
@@ -222,7 +253,14 @@ class DebtReductionPurposeEvidence:
     verification_reasons: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        """Normalize the conclusion and enforce citations for affirmative use."""
+        """Normalize the conclusion and enforce citations for affirmative use.
+
+        Beginner note:
+            Non-affirmative states may retain partial context for review, but an
+            affirmative claim must be fully bound. This asymmetry is
+            intentional because only affirmative evidence changes the
+            high-debt caution outcome.
+        """
         object.__setattr__(
             self,
             "status",
@@ -277,14 +315,26 @@ class DebtReductionPurposeEvidence:
 
 
 class FinancialPeriodType(enum.StrEnum):
-    """Supported financial statement periods."""
+    """Name the financial statement periods supported by manual records.
+
+    Beginner note:
+        Automated IPO-010 evidence accepts annual history for scoring; the
+        broader domain enum retains quarterly support for existing manually
+        entered financial records.
+    """
 
     ANNUAL = "annual"
     QUARTERLY = "quarterly"
 
 
 class Recommendation(enum.StrEnum):
-    """The deliberately binary IPO decision contract."""
+    """Define the deliberately binary public IPO decision contract.
+
+    Beginner note:
+        Nuance belongs in ``recommendation_type``, confidence, cautions, and the
+        seven-factor breakdown. Keeping this top-level verdict binary prevents
+        ambiguous “maybe” states in filters and automation.
+    """
 
     RECOMMENDED = "Recommended"
     NOT_RECOMMENDED = "Not Recommended"
@@ -309,7 +359,14 @@ class IpoEnrichmentSignalType(enum.StrEnum):
 
 
 class IpoEvidenceAuthority(enum.StrEnum):
-    """Authority tiers used by the central enrichment precedence policy."""
+    """Name the tiers used by the central enrichment precedence policy.
+
+    Beginner note:
+        Authority describes what a source may influence, not how persuasive
+        its wording sounds. Search results remain advisory even when confident;
+        official or approved-manual evidence has the stronger role required
+        for hard cautions.
+    """
 
     ADVISORY = "advisory"
     OFFICIAL = "official"
@@ -317,7 +374,13 @@ class IpoEvidenceAuthority(enum.StrEnum):
 
 
 class IpoEnrichmentBatchUsability(enum.StrEnum):
-    """Whether a web-result batch is safe for advisory consumption."""
+    """Describe whether a web-result batch remains safe after quarantine.
+
+    Beginner note:
+        A mixed batch can be ``PARTIAL`` so clean siblings survive one hostile
+        result. ``NOT_EVALUABLE`` means no safe evidence remained and must not
+        be silently interpreted as an absence of risk.
+    """
 
     USABLE = "usable"
     PARTIAL = "partial"
@@ -355,7 +418,13 @@ class IpoCautionFlagStatus(enum.StrEnum):
 
 @dataclass(frozen=True)
 class IpoCautionFlag:
-    """One hard caution flag's outcome with its deterministic evidence line."""
+    """Hold one hard caution outcome and its deterministic evidence line.
+
+    Beginner note:
+        Every rule returns a record, including rules that did not trigger or
+        lacked enough evidence. This makes a historical verdict auditable and
+        avoids storing only the alarming outcomes.
+    """
 
     name: str
     status: IpoCautionFlagStatus
@@ -390,7 +459,12 @@ class IpoCautionFlagReport:
 
     @property
     def triggered(self) -> tuple[IpoCautionFlag, ...]:
-        """Return only the flags that actually fired, preserving catalog order."""
+        """Return fired flags while preserving fixed policy-catalog order.
+
+        Beginner note:
+            This is a display convenience over the complete report; it does
+            not erase ``NOT_EVALUABLE`` outcomes from the stored audit receipt.
+        """
         return tuple(
             flag for flag in self.flags if flag.status is IpoCautionFlagStatus.TRIGGERED
         )
@@ -500,6 +574,11 @@ class FactorAssessment:
     ``None`` means the factor is genuinely unavailable. A known weak factor is
     represented by score ``0`` instead, preserving the distinction between
     negative evidence and missing evidence.
+
+    Beginner note:
+        This distinction flows all the way to recommendation policy. Missing
+        critical evidence fails closed, whereas a verified zero participates
+        in weighted arithmetic as an intentionally weak factor.
     """
 
     score: Decimal | None
@@ -522,6 +601,11 @@ class IpoScoreInput:
     This DTO is the complete, database-independent input to deterministic
     scoring. Missing evidence is represented inside each ``FactorAssessment``
     rather than by omitting a field, keeping the 100-point contract stable.
+
+    Beginner note:
+        This object is a pure scoring DTO: it contains no database identifiers
+        or mutable ORM rows. The same value always produces the same arithmetic
+        receipt.
     """
 
     company_name: str
@@ -553,7 +637,13 @@ class IpoScoreInput:
 
 @dataclass(frozen=True)
 class ScoreBreakdownItem:
-    """One factor's normalized score, weight, contribution, and evidence."""
+    """Record one factor's score, weight, contribution, and evidence.
+
+    Beginner note:
+        All seven rows are stored even when a factor is missing. That makes the
+        displayed total reproducible: known contributions sum exactly to the
+        score, while a missing factor is explicit rather than disappearing.
+    """
 
     factor: str
     weight: int
@@ -563,7 +653,14 @@ class ScoreBreakdownItem:
     evidence_reason: str | None
 
     def __post_init__(self) -> None:
-        """Normalize arithmetic and prevent internally contradictory rows."""
+        """Normalize arithmetic and reject internally contradictory rows.
+
+        Beginner note:
+            ``missing`` must agree with the absence of a normalized score, and
+            a contribution cannot exceed its weight. Enforcing those relations
+            here protects every serializer and UI consumer from malformed
+            receipts.
+        """
         factor = str(self.factor).strip()
         if not factor:
             raise IpoValidationError("Score breakdown factor is required.")
@@ -611,7 +708,13 @@ class ScoreBreakdownItem:
         object.__setattr__(self, "evidence_reason", reason or None)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-native additive public receipt."""
+        """Return the additive public JSON receipt for this factor.
+
+        Beginner note:
+            Whole-number decimals remain JSON integers for backward-friendly
+            output, while fractional values are retained when scoring produces
+            them.
+        """
 
         def _number(value: Decimal | None) -> int | float | None:
             """Preserve whole numbers while keeping fractional JSON values."""
@@ -971,7 +1074,13 @@ class IpoFinancialData:
 
 @dataclass(frozen=True)
 class IpoFinancialRecord:
-    """Detached financial-period row."""
+    """Expose one detached, immutable financial-period row.
+
+    Beginner note:
+        ``metrics`` may contain provider data. Freezing the top-level mapping
+        after the SQLAlchemy session closes prevents callers from accidentally
+        rewriting the repository's detached read model.
+    """
 
     id: int
     issue_id: int
@@ -985,13 +1094,23 @@ class IpoFinancialRecord:
     updated_at: dt.datetime
 
     def __post_init__(self) -> None:
-        """Prevent mutation of metrics returned from a closed ORM session."""
+        """Prevent mutation of metrics returned from a closed ORM session.
+
+        The copy severs any reference to the ORM JSON value before it is
+        wrapped in a read-only mapping proxy.
+        """
         object.__setattr__(self, "metrics", MappingProxyType(dict(self.metrics)))
 
 
 @dataclass(frozen=True)
 class IpoSubscriptionData:
-    """Validated create/update payload for a subscription snapshot."""
+    """Validate a point-in-time subscription-demand snapshot.
+
+    Beginner note:
+        Demand multiples are observations that change during the offer window.
+        Each capture is append-only, timezone-aware, and exact to two decimal
+        places so scoring can select the newest record deterministically.
+    """
 
     captured_at: dt.datetime
     source_confidence: Confidence
@@ -1002,7 +1121,11 @@ class IpoSubscriptionData:
     source_url: str | None = None
 
     def __post_init__(self) -> None:
-        """Normalize UTC capture time and non-negative demand multiples."""
+        """Normalize UTC capture time and non-negative demand multiples.
+
+        ``None`` remains distinct from numeric zero: the former means the
+        provider omitted a category, while the latter is known weak demand.
+        """
         if not isinstance(self.captured_at, dt.datetime) or self.captured_at.tzinfo is None:
             raise IpoValidationError("captured_at must be a timezone-aware datetime.")
         object.__setattr__(self, "captured_at", self.captured_at.astimezone(dt.UTC))
@@ -1036,7 +1159,12 @@ class IpoSubscriptionData:
 
 @dataclass(frozen=True)
 class IpoSubscriptionRecord:
-    """Detached subscription snapshot row."""
+    """Expose one detached, immutable subscription snapshot.
+
+    Beginner note:
+        A record preserves its capture time and source confidence so factor
+        derivation never needs a live network request or a mutable ORM session.
+    """
 
     id: int
     issue_id: int
@@ -1078,7 +1206,14 @@ class IpoEnrichmentSignalData:
     semantic_hash: str | None = None
 
     def __post_init__(self) -> None:
-        """Normalize enums, bound text fields, and quantize the parsed value."""
+        """Normalize, bound, and freeze one enrichment insert payload.
+
+        Beginner note:
+            Search data crosses an external-input boundary. Normalizing enums,
+            bounding text, freezing payload items, and validating semantic
+            hashes here ensures every persistence caller receives the same
+            authority and size rules.
+        """
         object.__setattr__(
             self,
             "signal_type",
@@ -1171,7 +1306,13 @@ class IpoEnrichmentSignalRecord:
     last_seen_at: dt.datetime | None = None
 
     def __post_init__(self) -> None:
-        """Freeze payload entries so a detached record stays read-only."""
+        """Freeze payload entries and normalize persisted policy enums.
+
+        Beginner note:
+            SQLAlchemy rows are mutable session objects. The repository exposes
+            this detached immutable shape instead, so callers cannot rewrite
+            stored evidence by mutating a nested result dictionary.
+        """
         object.__setattr__(
             self,
             "payload",
@@ -1238,6 +1379,12 @@ class IpoEvaluationRecord:
     scoring service consumed; legacy ipo-001-v1 rows carry ``None``.
     ``contributions`` restores the per-factor weighted points from the stored
     receipt so the dashboard can rank strengths and risks without re-scoring.
+
+    Beginner note:
+        The semantic input fingerprint links a verdict to the exact evidence
+        snapshot it consumed. Concurrent jobs can reuse one winning immutable
+        evaluation, while the dashboard independently reports newer evidence
+        as stale.
     """
 
     issue_id: int
@@ -1250,7 +1397,13 @@ class IpoEvaluationRecord:
     contributions: Mapping[str, Decimal] = dataclasses.field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Freeze the contribution mapping so a detached record stays read-only."""
+        """Freeze the contribution mapping so the audit receipt stays read-only.
+
+        Beginner note:
+            A frozen dataclass does not recursively freeze a normal dictionary.
+            Copying it into a mapping proxy prevents later UI or job code from
+            altering the arithmetic attached to a historical evaluation.
+        """
         object.__setattr__(
             self, "contributions", MappingProxyType(dict(self.contributions))
         )

@@ -50,7 +50,15 @@ _TOP_N = 3
 
 @dataclass(frozen=True)
 class IpoDashboardRow:
-    """Everything one dashboard card/table row needs, already denormalized."""
+    """Hold everything one dashboard card or table row needs.
+
+    Beginner note:
+        This deliberately denormalized record keeps Streamlit simple and
+        read-only. The UI does not need to know how documents, proposals,
+        enrichment, or evaluations relate in the database, and therefore
+        cannot accidentally perform network work or recompute a verdict while
+        rendering.
+    """
 
     issue_id: int
     company_name: str
@@ -76,7 +84,13 @@ class IpoDashboardRow:
 
 @dataclass(frozen=True)
 class IpoDashboardSnapshot:
-    """One consistent, timestamped read of every scanned IPO filing."""
+    """Represent one timestamped, immutable dashboard read model.
+
+    Beginner note:
+        Section helpers filter this same tuple instead of independently
+        querying storage. A user therefore sees one coherent view even if a
+        background screening job writes newer evidence while the page is open.
+    """
 
     generated_at: dt.datetime
     rows: tuple[IpoDashboardRow, ...]
@@ -121,7 +135,14 @@ def top_positive_and_risk_reasons(
 def _row_for_issue(
     issue: Any, *, session_factory: SessionFactory
 ) -> IpoDashboardRow:
-    """Denormalize one issue's stored state into a display-ready row."""
+    """Denormalize one issue's stored state into a display-ready row.
+
+    Beginner note:
+        ``last_updated`` considers every evidence source, while
+        ``evaluation_stale`` asks the narrower question: did any evidence
+        change after the displayed score was computed? Keeping both concepts
+        explicit prevents a fresh-looking timestamp from hiding an old verdict.
+    """
     documents = [
         document
         for document in list_documents(issue.id, session_factory=session_factory)
@@ -292,31 +313,57 @@ def build_dashboard_snapshot(
 
 
 def section_available_filings(snapshot: IpoDashboardSnapshot) -> tuple[IpoDashboardRow, ...]:
-    """Every scanned filing: the complete inventory, whatever its state."""
+    """Return the complete filing inventory, whatever each row's state.
+
+    Beginner note:
+        This is the unfiltered source-of-truth view; rows are not dropped merely
+        because extraction or scoring has not completed.
+    """
     return snapshot.rows
 
 
 def section_open(snapshot: IpoDashboardSnapshot) -> tuple[IpoDashboardRow, ...]:
-    """Issues whose subscription book is open right now."""
+    """Return issues whose persisted lifecycle status says the book is open.
+
+    Beginner note:
+        The function does not infer dates during rendering. Lifecycle updates
+        belong to ingestion jobs, which keeps dashboard output deterministic.
+    """
     return tuple(row for row in snapshot.rows if row.issue_status is IpoStatus.OPEN)
 
 
 def section_upcoming(snapshot: IpoDashboardSnapshot) -> tuple[IpoDashboardRow, ...]:
-    """RHP-stage issues expected to open next."""
+    """Return RHP-stage issues expected to open next.
+
+    Beginner note:
+        An RHP is the later filing stage used here as the explicit signal for
+        “upcoming”; this helper does not guess from issuer text or web results.
+    """
     return tuple(
         row for row in snapshot.rows if row.issue_status is IpoStatus.RHP_FILED
     )
 
 
 def section_drhp_watchlist(snapshot: IpoDashboardSnapshot) -> tuple[IpoDashboardRow, ...]:
-    """Early DRHP-stage filings worth tracking before an RHP lands."""
+    """Return early DRHP-stage filings worth tracking before an RHP lands.
+
+    Beginner note:
+        Keeping this stage separate prevents early, incomplete filings from
+        being presented as open or immediately upcoming issues.
+    """
     return tuple(
         row for row in snapshot.rows if row.issue_status is IpoStatus.DRHP_FILED
     )
 
 
 def section_recommended(snapshot: IpoDashboardSnapshot) -> tuple[IpoDashboardRow, ...]:
-    """Issues whose latest verdict is the binary Recommended."""
+    """Return issues whose latest stored verdict is binary Recommended.
+
+    Beginner note:
+        Filtering uses the stored evaluation only. It never recalculates a
+        score, so stale evaluations stay visible and are also routed to the
+        review queue for an explicit re-score.
+    """
     return tuple(
         row
         for row in snapshot.rows
@@ -325,7 +372,13 @@ def section_recommended(snapshot: IpoDashboardSnapshot) -> tuple[IpoDashboardRow
 
 
 def section_not_recommended(snapshot: IpoDashboardSnapshot) -> tuple[IpoDashboardRow, ...]:
-    """Issues whose latest verdict is the binary Not Recommended."""
+    """Return issues whose latest stored verdict is binary Not Recommended.
+
+    Beginner note:
+        Unscored issues are intentionally absent rather than being treated as
+        negative recommendations; “unknown” and “not recommended” are distinct
+        states.
+    """
     return tuple(
         row
         for row in snapshot.rows

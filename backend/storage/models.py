@@ -1325,6 +1325,11 @@ class IpoScore(Base):
     Nullable factor columns preserve missing evidence, while JSON contributions,
     reasons, and missing labels reproduce the exact deterministic score receipt.
     Corrections append a new row instead of editing this one.
+
+    Beginner note:
+        The partial semantic unique index applies only to newer rows with a
+        fingerprint, preserving legacy history while ensuring concurrent
+        re-scores of the same evidence produce one immutable winner.
     """
 
     __tablename__ = "ipo_scores"
@@ -1404,6 +1409,11 @@ class IpoRecommendation(Base):
     The unique score foreign key prevents conflicting recommendations for the
     same calculation; deleting that score cascades to this dependent half of the
     evaluation pair.
+
+    Beginner note:
+        Recommendation policy is stored separately from arithmetic so auditors
+        can see when missing critical evidence or a hard caution overrode an
+        otherwise high numeric score.
     """
 
     __tablename__ = "ipo_recommendations"

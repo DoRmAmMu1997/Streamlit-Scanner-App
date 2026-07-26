@@ -20,7 +20,12 @@ from typing import Any
 
 
 class _WorkerParseError(RuntimeError):
-    """Carry one stable code without retaining hostile parser text."""
+    """Carry one stable code without retaining hostile parser text.
+
+    This exception never crosses the process boundary. It is converted into a
+    primitive review payload inside the child, keeping parser-controlled text
+    out of logs, persistence, and parent exceptions.
+    """
 
     def __init__(self, code: str) -> None:
         """Store only the parent-safe failure code."""
@@ -29,7 +34,13 @@ class _WorkerParseError(RuntimeError):
 
 
 def _review_payload(code: str) -> dict[str, Any]:
-    """Return one payload-free review-required result."""
+    """Return one payload-free review-required result.
+
+    Beginner note:
+        The worker intentionally drops partial pages when any limit fails.
+        Returning only a stable code prevents downstream code from treating
+        truncated extraction as complete evidence.
+    """
     return {"status": "review_required", "error_code": code, "pages": []}
 
 
@@ -49,7 +60,18 @@ def _raw_tables(
     page: Any,
     budget: Mapping[str, int | float],
 ) -> list[Any]:
-    """Extract only the selected table objects when the parser exposes that seam."""
+    """Extract only the selected table objects when the parser exposes that seam.
+
+    ``find_tables`` lets us count candidates before expanding every table into
+    rows. Older/test-compatible page objects expose only ``extract_tables``;
+    that fallback is still checked immediately after extraction.
+
+    Beginner note:
+        Counting table objects before materializing their rows is the earliest
+        containment point supported by current ``pdfplumber``. The fallback
+        exists for compatibility, but its output is rejected before cells are
+        normalized or serialized.
+    """
     maximum = _limit(budget, "max_tables_per_page")
     finder = getattr(page, "find_tables", None)
     if callable(finder):
@@ -71,7 +93,13 @@ def _bounded_tables(
     *,
     cells_seen: int,
 ) -> tuple[list[dict[str, Any]], int]:
-    """Normalize candidate tables while enforcing every retained dimension."""
+    """Normalize candidate tables while enforcing every retained dimension.
+
+    Beginner note:
+        Per-table row and column limits stop one pathological table, while the
+        cumulative cell counter stops a document from distributing excessive
+        work across many individually valid tables.
+    """
     tables: list[dict[str, Any]] = []
     for raw_table in _raw_tables(page, budget):
         if len(raw_table) > _limit(budget, "max_rows_per_table"):
@@ -105,6 +133,20 @@ def extract_payload(
     ``open_pdf`` preserves the deterministic in-process seam used by unit tests.
     Production leaves it unset so pdfplumber is imported after resource policy
     is active in :func:`worker_entry`.
+
+    Args:
+        pdf_path: Parent-selected path to the verified cached PDF.
+        budget: Primitive copy of the parent-owned resource budget.
+        open_pdf: Optional deterministic parser seam for unit tests.
+
+    Returns:
+        A JSON-compatible success payload containing bounded pages, or a
+        review-required payload containing one stable error code.
+
+    Beginner note:
+        Counts are checked as soon as their corresponding parser objects become
+        visible. This is different from extracting everything and truncating
+        afterward, which would spend the memory we are trying to protect.
     """
     opener = open_pdf if open_pdf is not None else _default_open_pdf
     pages: list[dict[str, Any]] = []
@@ -117,6 +159,8 @@ def extract_payload(
             if len(pdf_pages) > _limit(budget, "max_pages"):
                 raise _WorkerParseError("page_limit_exceeded")
             for index, page in enumerate(pdf_pages, start=1):
+                # pdfminer exposes characters before text/table expansion.
+                # Bounding glyphs first limits work at the earliest useful seam.
                 glyph_count = len(getattr(page, "chars", ()))
                 if glyph_count > _limit(budget, "max_glyphs_per_page"):
                     raise _WorkerParseError("page_glyph_limit_exceeded")
@@ -150,7 +194,14 @@ def extract_payload(
 
 
 def _apply_linux_memory_limit(budget: Mapping[str, int | float]) -> None:
-    """Apply the child-only address-space limit before importing pdfplumber."""
+    """Apply the child-only address-space limit before importing pdfplumber.
+
+    Beginner note:
+        The limit belongs in this lightweight module because a spawned process
+        imports its target module before calling the target function. Importing
+        the broad IPO facade first would load unrelated libraries and consume
+        much of the budget before the PDF parser starts.
+    """
     if sys.platform != "linux":
         return
     import resource
@@ -160,7 +211,11 @@ def _apply_linux_memory_limit(budget: Mapping[str, int | float]) -> None:
 
 
 def _encode_payload(payload: Mapping[str, Any]) -> bytes:
-    """Encode only primitive JSON so no pickle-controlled object crosses back."""
+    """Encode only primitive JSON so no executable object crosses back.
+
+    JSON costs a little more encoding work than pickle, but it gives the parent
+    a small data-only format that can be decoded and validated independently.
+    """
     return json.dumps(
         payload,
         separators=(",", ":"),
@@ -173,7 +228,18 @@ def worker_entry(
     budget: Mapping[str, int | float],
     send_connection: Any,
 ) -> None:
-    """Contain parser state and emit one bounded byte message to the parent."""
+    """Contain parser state and emit one bounded byte message to the parent.
+
+    Args:
+        pdf_path: Verified cache path selected by the parent.
+        budget: Primitive resource limits supplied by the parent.
+        send_connection: One-way pipe endpoint owned by this child.
+
+    Beginner note:
+        This is a multiprocessing entrypoint, so it must stay at module scope
+        and accept spawn-serializable arguments. Cleanup lives in ``finally`` so
+        the parent can reliably detect EOF after success, failure, or timeout.
+    """
     try:
         _apply_linux_memory_limit(budget)
         encoded = _encode_payload(extract_payload(pdf_path, budget))

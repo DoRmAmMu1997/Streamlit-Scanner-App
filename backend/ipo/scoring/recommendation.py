@@ -1,4 +1,11 @@
-"""Fail-closed IPO recommendation policy built on the deterministic scorecard."""
+"""Apply fail-closed recommendation policy to the deterministic IPO scorecard.
+
+Beginner note:
+    Scoring and recommendation are separate on purpose. The score records
+    weighted arithmetic, while this module applies safety policy: missing
+    critical evidence and triggered hard cautions override ordinary score
+    bands without rewriting the numeric receipt.
+"""
 
 from __future__ import annotations
 

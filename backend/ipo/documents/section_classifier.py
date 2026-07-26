@@ -25,7 +25,13 @@ from backend.ipo.documents.table_extractor import ExtractedPage
 
 
 class IpoSectionType(enum.StrEnum):
-    """The prospectus section families the extraction agent understands."""
+    """The prospectus section families the extraction agent understands.
+
+    Beginner note:
+        These values are navigation hints, not evidence. Classification helps
+        the agent request a smaller relevant excerpt, but host-side citation
+        verification still decides whether any extracted fact is trustworthy.
+    """
 
     FINANCIAL_STATEMENTS = "financial_statements"
     OBJECTS_OF_ISSUE = "objects_of_issue"
@@ -97,7 +103,13 @@ _SECTION_ANCHORS: Final[tuple[tuple[IpoSectionType, tuple[str, ...]], ...]] = (
 
 @dataclass(frozen=True)
 class ClassifiedSection:
-    """One section's assigned pages and the anchor phrases that earned them."""
+    """One section's assigned pages and the anchor phrases that earned them.
+
+    Beginner note:
+        Page numbers remain attached to the classification receipt so chunking
+        and tool responses cannot erase provenance. ``keyword_hits`` also makes
+        the deterministic classification explainable to a reviewer.
+    """
 
     section: IpoSectionType
     page_numbers: tuple[int, ...]
@@ -130,6 +142,12 @@ def classify_pages(pages: Sequence[ExtractedPage]) -> tuple[ClassifiedSection, .
         (including ``OTHER``), ordered by the fixed catalog order with
         ``OTHER`` last. Keyword hits are the sorted union of every matched
         anchor across the section's pages.
+
+    Beginner note:
+        A heading normally appears only on the first page of a multi-page
+        chapter. Once a recognized heading is seen, unheaded continuation pages
+        remain in that section until another recognized heading appears. Pages
+        before the first heading stay ``OTHER`` instead of being guessed.
     """
     assigned: dict[IpoSectionType, list[int]] = {}
     hits_by_section: dict[IpoSectionType, set[str]] = {}

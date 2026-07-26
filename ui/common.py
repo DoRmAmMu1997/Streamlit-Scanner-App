@@ -1,5 +1,10 @@
 """Shared display helpers used by multiple UI pages (REF-001).
 
+Beginner note:
+    Display helpers are also output-security boundaries. Values from scanners,
+    issuers, and external sources are redacted, CSV-escaped, or
+    Markdown-neutralized here before Streamlit interprets them.
+
 These helpers existed in app.py first; they moved here because both the main
 scanner page and the scan-history page need them, and pages must not import
 each other (or app.py) without creating cycles.

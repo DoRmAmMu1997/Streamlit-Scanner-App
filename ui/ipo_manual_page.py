@@ -277,7 +277,13 @@ def _render_ipo_manual_page(authenticated_user: AuthenticatedUser | None) -> Non
 
 
 def _proposal_label(proposal: IpoExtractionProposalRecord) -> str:
-    """Build one stable, human-scannable review-queue entry label."""
+    """Build one stable, Markdown-neutral review-queue entry label.
+
+    Beginner note:
+        Issuer names originate outside the UI. Escaping Markdown controls
+        prevents a crafted name from turning a select-box label into an image,
+        link, or misleading formatted instruction.
+    """
     return _neutralize_markdown(
         f"{proposal.company_name} - proposal #{proposal.id} "
         f"({proposal.confidence.value} confidence)"
@@ -376,7 +382,13 @@ def _render_entry_workflow(
     authenticated_user: AuthenticatedUser,
     issues: Sequence[Any],
 ) -> None:
-    """Render issue selection, complete entry form, latest profile, and history."""
+    """Render issue selection, complete entry form, latest profile, and history.
+
+    Beginner note:
+        Only verified cached DRHP/RHP records are offered. Selecting a source
+        does not trust its metadata forever: the repository re-hashes its bytes
+        during submission before it creates an immutable revision.
+    """
     issue_labels = {
         _neutralize_markdown(f"{issue.company_name} (#{issue.id})"): issue
         for issue in issues

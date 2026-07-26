@@ -64,6 +64,11 @@ class IpoRescoreOutcome:
     ``insufficient_inputs`` writes nothing: an issue without a verified manual
     profile belongs in the dashboard's missing-data queue, not in evaluation
     history with a fabricated all-missing score.
+
+    Beginner note:
+        Batch jobs need to distinguish “new evaluation”, “same evidence”, and
+        “not enough evidence” without parsing logs. This small typed outcome is
+        the stable orchestration contract for all three paths.
     """
 
     issue_id: int

@@ -3,6 +3,11 @@
 This module performs arithmetic only: it does not fetch evidence, decide whether
 an IPO is investable, or talk to the database. Keeping scoring pure makes every
 result reproducible from the seven frozen factor assessments stored with it.
+
+Beginner note:
+    This module never decides whether an IPO should be recommended. It emits a
+    complete seven-row arithmetic receipt; the recommendation layer separately
+    applies missing-data, hard-caution, and score-band policy.
 """
 
 from __future__ import annotations
@@ -36,6 +41,11 @@ def score_ipo(score_input: IpoScoreInput) -> IpoScoreResult:
     Decimal arithmetic and ``ROUND_HALF_UP`` make the persisted two-decimal
     receipt stable and familiar to financial users; binary floating-point and
     Python's default half-even rounding could otherwise shift boundary values.
+
+    Beginner note:
+        The ordered ``PDF_WEIGHTS`` mapping is the single scoring catalog. One
+        loop creates contributions, missing-data labels, reasons, and breakdown
+        rows together, preventing those public receipts from drifting apart.
     """
     contributions: dict[str, Decimal] = {}
     breakdown: list[ScoreBreakdownItem] = []

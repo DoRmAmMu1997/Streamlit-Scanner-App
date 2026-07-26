@@ -154,7 +154,14 @@ class IpoNotFoundError(LookupError):
 
 
 class IpoProposalConflictError(IpoValidationError):
-    """Stable idempotency outcome for pending or identical proposal races."""
+    """Represent a stable idempotency outcome for proposal races.
+
+    Beginner note:
+        A uniqueness conflict is an expected concurrent outcome, not a broken
+        database. The short code lets batch orchestration report “already
+        pending” or “identical proposal” without parsing backend-specific
+        integrity-error text.
+    """
 
     def __init__(self, code: str, message: str) -> None:
         """Store a batch-safe code while retaining validation-error compatibility."""
@@ -1320,7 +1327,13 @@ def delete_subscription(
 
 
 def _enrichment_signal_record(row: Any) -> IpoEnrichmentSignalRecord:
-    """Reassemble one enrichment ORM row into a detached typed record."""
+    """Reassemble one enrichment ORM row into a detached typed record.
+
+    Beginner note:
+        The storage layer returns a mutable SQLAlchemy row. Converting it at the
+        repository boundary normalizes timestamps and authority enums, then the
+        domain dataclass freezes the nested payload for safe use elsewhere.
+    """
     return IpoEnrichmentSignalRecord(
         id=row.id,
         issue_id=row.issue_id,
@@ -1344,7 +1357,14 @@ def _enrichment_signal_record(row: Any) -> IpoEnrichmentSignalRecord:
 
 
 def _enrichment_semantic_hash(signal: IpoEnrichmentSignalData) -> str:
-    """Hash stable advisory evidence while excluding observation timestamps."""
+    """Hash stable advisory evidence while excluding observation timestamps.
+
+    Beginner note:
+        Seeing the same search result tomorrow should refresh its
+        ``last_seen_at`` value, not create another vote in scoring. The hash
+        therefore includes semantic content and policy but excludes volatile
+        capture time.
+    """
     payload = {
         "signal_type": signal.signal_type.value,
         "query_text": signal.query_text,
@@ -1423,6 +1443,11 @@ def list_enrichment_signals(
 
     ``since`` bounds staleness in SQL (the GMP factor only trusts recent
     observations) instead of loading dead history into memory.
+
+    Beginner note:
+        Callers receive both usable and quarantined records because the latter
+        are part of the audit trail. The central authority policy decides what
+        may influence scoring; list operations do not silently erase evidence.
     """
     with session_factory() as session:
         if get_ipo_issue(session, issue_id) is None:
@@ -1554,7 +1579,14 @@ _SHARE_FACT_FIELDS = {"equity_shares", "post_issue_equity_shares"}
 def _expected_cited_facts(
     payload: Mapping[str, Any],
 ) -> dict[str, tuple[Decimal, int, dt.date | None, str | None, Decimal]]:
-    """Derive the exact facts that must bind every approvable numeric field."""
+    """Derive the exact facts that must bind every approvable numeric field.
+
+    Beginner note:
+        The proposal draft and its cited-fact receipt are independent inputs.
+        Rebuilding the expected map from the draft lets approval prove that
+        every value, page, period, unit, and multiplier agrees exactly, with no
+        extra or missing facts.
+    """
     expected: dict[
         str, tuple[Decimal, int, dt.date | None, str | None, Decimal]
     ] = {}
@@ -1629,7 +1661,21 @@ def _validate_cited_fact_binding(
     source_content_sha256: str,
     require_complete: bool = True,
 ) -> str:
-    """Require complete typed evidence before raw draft values can be approved."""
+    """Require complete typed evidence before draft values can be approved.
+
+    Args:
+        payload: Proposed manual-extraction-shaped data plus typed receipts.
+        source_content_sha256: Digest of the document the proposal claims.
+        require_complete: Whether every expected numeric fact must be present.
+
+    Returns:
+        The validated evidence schema version.
+
+    Beginner note:
+        This checks internal consistency only. A second approval-time step
+        reparses the verified PDF and re-resolves each receipt, so an attacker
+        cannot approve a self-consistent but fabricated payload.
+    """
     schema_version = str(payload.get("evidence_schema_version", "")).strip()
     if schema_version != _CITED_FACT_SCHEMA_VERSION:
         raise IpoValidationError(
@@ -1749,7 +1795,13 @@ def _verify_cited_receipts_from_cached_pdf(
     cache_root: Path,
     file_path: str,
 ) -> None:
-    """Parse verified bytes and re-resolve every caller-supplied source receipt."""
+    """Reparse verified bytes and re-resolve every source receipt.
+
+    Beginner note:
+        Receipts are claims until checked against the immutable cached PDF.
+        Running this at both submission and approval closes the time gap in
+        which a document row or cache file could change after extraction.
+    """
     # Lazy imports avoid the existing extractor -> repository cycle while
     # keeping this authority check at both public persistence boundaries.
     from backend.ipo.agents.financial_extractor import (
@@ -1784,7 +1836,13 @@ def _proposal_semantic_fingerprint(
     model_version: str,
     agent_model: str,
 ) -> str:
-    """Hash normalized semantic evidence without volatile database row ids."""
+    """Hash normalized semantic evidence without volatile row identifiers.
+
+    Beginner note:
+        Ordering differences in peer rows or cited facts do not create a new
+        proposal, but a changed source digest, schema, model, or value does.
+        This produces content-based idempotency across retries and databases.
+    """
     normalized_value = normalize_secret_safe_json(dict(payload))
     if not isinstance(normalized_value, dict):  # pragma: no cover - input is a mapping
         raise IpoValidationError("Proposal payload normalization failed.")
@@ -1821,7 +1879,13 @@ def _proposal_semantic_fingerprint(
 
 
 def _extraction_proposal_record(row: Any) -> IpoExtractionProposalRecord:
-    """Reassemble one proposal ORM row into a detached typed record."""
+    """Reassemble one proposal ORM row into a detached typed record.
+
+    Beginner note:
+        Reviewed proposals may outlive a deleted document, so the document
+        identifier is intentionally nullable while the snapshotted URL and SHA
+        remain available for audit.
+    """
     return IpoExtractionProposalRecord(
         id=row.id,
         issue_id=row.issue_id,
@@ -1989,7 +2053,13 @@ def list_extraction_proposals(
     status: IpoExtractionProposalStatus | None = None,
     session_factory: SessionFactory = session_scope,
 ) -> list[IpoExtractionProposalRecord]:
-    """List proposals newest-first, optionally narrowed by issue or status."""
+    """List proposals newest-first, optionally narrowed by issue or status.
+
+    Beginner note:
+        This includes legacy and reviewed history as well as pending work. The
+        UI can therefore show why a document was rejected or why an older
+        proposal now requires manual re-entry.
+    """
     with session_factory() as session:
         rows = list_ipo_extraction_proposal_rows(
             session,
@@ -2180,7 +2250,13 @@ def reject_extraction_proposal(
     audit_recorder: AuditRecorder = record_audit_event,
     session_factory: SessionFactory = session_scope,
 ) -> IpoExtractionProposalRecord:
-    """Reject one pending proposal, keeping it as attributable audit history."""
+    """Reject one pending proposal while keeping attributable audit history.
+
+    Beginner note:
+        Rejection changes only lifecycle metadata; it never deletes or mutates
+        the original draft. The compare-and-set update also prevents two
+        reviewers from recording conflicting decisions.
+    """
     reviewer = _manual_email(reviewed_by_email)
     note = str(reason).strip()
     if not note:
@@ -2222,7 +2298,13 @@ def reject_extraction_proposal(
 
 
 def _evaluation_record(score_row: Any, recommendation_row: Any) -> IpoEvaluationRecord:
-    """Reassemble two immutable ORM rows into one detached public evaluation."""
+    """Reassemble two ORM rows into one detached public evaluation.
+
+    Beginner note:
+        Score arithmetic and recommendation policy are stored one-to-one but in
+        separate tables. This adapter reconstructs their complete breakdown and
+        caution receipts before the database session closes.
+    """
     breakdown = tuple(
         ScoreBreakdownItem(
             factor=str(entry["factor"]),
@@ -2390,6 +2472,11 @@ def evaluate_issue(
     Identical versioned fingerprints are idempotent at the database boundary:
     concurrent callers receive the winning immutable evaluation instead of an
     integrity error or a duplicate score.
+
+    Beginner note:
+        The unique index is the final concurrency guard. A read-before-write
+        check alone could race; delegating the winner selection to the database
+        guarantees one score/recommendation pair for one semantic snapshot.
     """
     evaluation, _inserted = _evaluate_issue_once(
         issue_id,
@@ -2435,6 +2522,11 @@ def get_latest_evaluation(
     The IPO-006 scoring service compares its freshly computed inputs
     fingerprint against this record to decide whether a re-score would be a
     byte-identical no-op, which is what makes ``run_ipo_screener`` idempotent.
+
+    Beginner note:
+        “Latest” is a display convenience, not an in-place update: every
+        evaluation remains append-only, so earlier recommendations can still
+        be audited against their own evidence fingerprints.
     """
     with session_factory() as session:
         if get_ipo_issue(session, issue_id) is None:
@@ -2446,7 +2538,12 @@ def get_latest_evaluation(
 def get_latest_subscription(
     issue_id: int, *, session_factory: SessionFactory = session_scope
 ) -> IpoSubscriptionRecord | None:
-    """Return only the newest demand snapshot for one issue, if any."""
+    """Return only the newest demand snapshot for one issue, if any.
+
+    Beginner note:
+        Subscription demand changes during the offer window. Scoring uses one
+        newest immutable snapshot instead of blending historical multiples.
+    """
     with session_factory() as session:
         if get_ipo_issue(session, issue_id) is None:
             raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")

@@ -1,5 +1,11 @@
 """SQLAlchemy operations for IPO persistence.
 
+Beginner note:
+    Every function receives a caller-owned ``Session`` and may flush, but does
+    not commit or open another transaction. The domain repository can therefore
+    combine parent checks, child inserts, and compare-and-set transitions into
+    one atomic unit of work.
+
 All SQL construction stays in ``backend.storage`` so the IPO domain façade can
 remain framework-independent and the repository-boundary CI guard stays true.
 """
@@ -436,6 +442,10 @@ def get_latest_ipo_subscription(
     Factor derivation scores QIB demand from the most recent capture, so this
     read mirrors :func:`get_latest_ipo_evaluation_rows`: deterministic ordering
     plus ``LIMIT 1`` instead of materializing the whole capture history.
+
+    Beginner note:
+        The identifier breaks ties when two captures share a timestamp, making
+        “latest” stable on both SQLite and PostgreSQL.
     """
     stmt = (
         select(IpoSubscription)
@@ -449,7 +459,15 @@ def get_latest_ipo_subscription(
 def insert_ipo_extraction_proposal(
     session: Session, issue_id: int, document_id: int, values: dict[str, Any]
 ) -> IpoExtractionProposal:
-    """Stage one pending AI extraction proposal under its issue and document."""
+    """Stage one pending AI proposal under its issue and source document.
+
+    The caller supplies already validated values; database checks and partial
+    unique indexes remain the final lifecycle and concurrency guards.
+
+    Beginner note:
+        ``flush`` obtains the generated identifier and runs constraints without
+        committing; the caller still owns rollback of the whole workflow.
+    """
     row = IpoExtractionProposal(issue_id=issue_id, document_id=document_id, **values)
     session.add(row)
     session.flush()
@@ -459,7 +477,13 @@ def insert_ipo_extraction_proposal(
 def try_insert_ipo_extraction_proposal(
     session: Session, issue_id: int, document_id: int, values: dict[str, Any]
 ) -> IpoExtractionProposal | None:
-    """Insert under a savepoint and return ``None`` on a uniqueness race."""
+    """Insert under a savepoint and return ``None`` on a uniqueness race.
+
+    Beginner note:
+        A nested transaction rolls back only the losing insert. The surrounding
+        caller-owned transaction remains usable and can query the row that won
+        the pending/fingerprint race.
+    """
     try:
         with session.begin_nested():
             return insert_ipo_extraction_proposal(
@@ -477,6 +501,10 @@ def get_ipo_extraction_proposal(
     Both parents are many-to-one, so the joined loads add no row fan-out; they
     let the domain layer build a detached record (company name, document URL)
     without lazy loads after the session closes.
+
+    Beginner note:
+        The document relationship is optional for reviewed retained history,
+        while the issue relationship remains required.
     """
     stmt = (
         select(IpoExtractionProposal)
@@ -500,6 +528,10 @@ def list_ipo_extraction_proposal_rows(
     The dashboard's review queue asks for ``status='pending'`` across all
     issues, while the admin page narrows to one issue; both filters are
     optional so the two callers share one reviewed query.
+
+    Beginner note:
+        Eager loading avoids hidden SQL after the repository returns and keeps
+        the domain layer independent from SQLAlchemy session lifetime.
     """
     stmt = (
         select(IpoExtractionProposal)
@@ -523,9 +555,14 @@ def get_pending_ipo_extraction_proposal_for_document(
 ) -> IpoExtractionProposal | None:
     """Find the single pending proposal already queued for one document.
 
-    The "one pending proposal per document" rule lives here rather than in a
-    partial unique index because SQLite batch migrations make partial indexes
-    brittle; the domain layer checks this read inside the insert transaction.
+    This read provides a friendly preflight/idempotency result. The partial
+    unique index is still authoritative because two callers can both pass a
+    read-before-write check; :func:`try_insert_ipo_extraction_proposal` converts
+    that database race into a stable domain outcome.
+
+    Beginner note:
+        Deterministic ordering is defensive for legacy databases; the current
+        schema guarantees at most one matching pending row.
     """
     stmt = (
         select(IpoExtractionProposal)
@@ -544,7 +581,13 @@ def get_ipo_extraction_proposal_by_semantic_fingerprint(
     document_id: int,
     semantic_fingerprint: str,
 ) -> IpoExtractionProposal | None:
-    """Find an identical historical proposal for deterministic idempotency."""
+    """Find an identical historical proposal for deterministic idempotency.
+
+    Beginner note:
+        Reviewed history remains relevant: even after approval or rejection,
+        regenerating the same source/model/payload should not create a second
+        semantically identical review record.
+    """
     stmt = (
         select(IpoExtractionProposal)
         .where(
@@ -568,6 +611,12 @@ def mark_ipo_extraction_proposal_reviewed(
     Returning ``None`` both for a missing row and for an already-reviewed row
     makes double-review attempts fail loudly in the domain layer instead of
     silently overwriting the first reviewer's decision.
+
+    Beginner note:
+        The ``WHERE status = 'pending'`` clause is a compare-and-set operation.
+        Only one concurrent reviewer can change the row, and the caller can
+        roll back any manual revision inserted in the same transaction if it
+        loses.
     """
     stmt = (
         update(IpoExtractionProposal)
@@ -595,6 +644,11 @@ def insert_ipo_enrichment_signals(
     A SerpAPI collection run produces several signal types at one capture
     instant; inserting them together keeps a partially-persisted batch from
     masquerading as a complete observation set.
+
+    Beginner note:
+        This older batch helper remains for compatibility. New collection code
+        uses semantic upsert so repeated observations refresh rather than
+        accumulate.
     """
     rows = [IpoEnrichmentSignal(issue_id=issue_id, **values) for values in values_list]
     session.add_all(rows)
@@ -608,7 +662,11 @@ def _get_ipo_enrichment_signal_by_semantic_hash(
     signal_type: str,
     semantic_hash: str,
 ) -> IpoEnrichmentSignal | None:
-    """Load one semantically identical enrichment observation."""
+    """Load one semantically identical enrichment observation.
+
+    The identity is scoped by issue and signal type so the same headline can
+    independently appear for different issuers or discovery topics.
+    """
     stmt = select(IpoEnrichmentSignal).where(
         IpoEnrichmentSignal.issue_id == issue_id,
         IpoEnrichmentSignal.signal_type == signal_type,
@@ -622,7 +680,13 @@ def upsert_ipo_enrichment_signal(
     issue_id: int,
     values: dict[str, Any],
 ) -> IpoEnrichmentSignal:
-    """Preserve first-seen identity and refresh last-seen on identical evidence."""
+    """Preserve first-seen identity and refresh last-seen on identical evidence.
+
+    Beginner note:
+        The preflight read is an optimization, not a concurrency guarantee.
+        When two collectors race, the unique semantic index selects one row and
+        the losing savepoint reloads it before refreshing freshness timestamps.
+    """
     semantic_hash = str(values["semantic_hash"])
     signal_type = str(values["signal_type"])
     existing = _get_ipo_enrichment_signal_by_semantic_hash(
@@ -665,6 +729,11 @@ def list_ipo_enrichment_signal_rows(
 
     Factor derivation only trusts recent GMP observations, so ``since`` lets
     the caller bound staleness in SQL instead of loading dead history.
+
+    Beginner note:
+        Rows are observations, not votes. Semantic upsert prevents repeated
+        provider results from gaining extra weight, while this query preserves
+        their refreshed recency.
     """
     stmt = (
         select(IpoEnrichmentSignal)
@@ -691,6 +760,11 @@ def insert_ipo_evaluation(
     The partial unique index is the final race boundary. A savepoint keeps a
     losing insert from aborting the caller-owned transaction, after which the
     already-committed winner is loaded as the stable result.
+
+    Beginner note:
+        Score and recommendation are flushed together through their ORM
+        relationship. A failed child insert or lost fingerprint race cannot
+        leave an orphan score committed.
     """
     score = IpoScore(issue_id=issue_id, **score_values)
     recommendation = IpoRecommendation(score=score, **recommendation_values)
@@ -722,7 +796,13 @@ def get_ipo_evaluation_rows_by_fingerprint(
     model_version: str,
     inputs_fingerprint: str,
 ) -> tuple[IpoScore, IpoRecommendation] | None:
-    """Load the unique complete evaluation for one semantic input snapshot."""
+    """Load the unique complete evaluation for one semantic input snapshot.
+
+    Beginner note:
+        A score without its one-to-one recommendation is not a valid public
+        evaluation, so the inner join deliberately ignores orphaned partial
+        history.
+    """
     stmt = (
         select(IpoScore, IpoRecommendation)
         .join(IpoRecommendation, IpoRecommendation.score_id == IpoScore.id)

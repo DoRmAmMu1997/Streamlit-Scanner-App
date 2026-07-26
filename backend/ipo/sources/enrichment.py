@@ -142,17 +142,33 @@ class SupportsIpoSearch(Protocol):
     """
 
     def ensure_ready(self) -> None:
-        """Raise ``SerpApiSetupError`` when the API key is not configured."""
+        """Raise ``SerpApiSetupError`` when search is not configured.
+
+        Beginner note:
+            The collector checks readiness before issuing any query so
+            no-key operation is one explicit, graceful batch outcome.
+        """
         ...
 
     def search(self, query: str, *, max_results: int = 5) -> list[SearchResult]:
-        """Return normalized organic results for one query."""
+        """Return a bounded list of normalized organic search results.
+
+        The concrete client owns response-size and field-length containment;
+        this protocol records that expectation for fakes and alternate clients.
+        """
         ...
 
 
 @dataclass(frozen=True)
 class IpoEnrichmentOutcome:
-    """What one collection run observed, skipped, or failed to fetch."""
+    """Summarize what one enrichment run observed, skipped, or failed.
+
+    Beginner note:
+        Optional search failure must not abort official-document screening.
+        This typed receipt lets orchestration distinguish no-key operation,
+        partial provider failure, quarantined evidence, and successful
+        advisory observations without inspecting logs.
+    """
 
     issue_id: int
     signals: tuple[IpoEnrichmentSignalRecord, ...]
@@ -173,7 +189,14 @@ def _semantic_item_hash(entry: dict[str, Any]) -> str:
 
 
 def _red_flag_observations(text: str) -> list[dict[str, str]]:
-    """Classify keyword mentions with nearby negation and preserved context."""
+    """Classify keyword mentions with nearby negation and preserved context.
+
+    Beginner note:
+        A bare keyword match loses meaning: “no litigation” and “litigation
+        pending” point in opposite directions. Each observation therefore
+        retains a bounded context and an explicit affirmative/negated status;
+        it remains advisory until stronger evidence corroborates it.
+    """
     normalized = normalize_external_text(text)
     folded = normalized.casefold()
     observations: list[dict[str, str]] = []

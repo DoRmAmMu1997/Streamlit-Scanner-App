@@ -1,3 +1,12 @@
+"""Regression tests for the bounded, secret-safe SerpAPI transport.
+
+Beginner note:
+    The fakes below model streaming, malformed metadata, cleanup failures, and
+    process-control exceptions without making network calls. These tests lock
+    down two separate boundaries: provider bytes are bounded before JSON
+    decoding, and response cleanup never hides the primary failure.
+"""
+
 from __future__ import annotations
 
 import json
@@ -15,6 +24,8 @@ _ONE_MIB = 1024 * 1024
 
 
 class _FakeResponse:
+    """Provide the small streamed-response surface exercised by the client."""
+
     def __init__(
         self,
         payload: dict | None = None,
@@ -27,6 +38,7 @@ class _FakeResponse:
         stream_error: Exception | None = None,
         close_error: BaseException | None = None,
     ):
+        """Configure body chunks and independently injectable failure points."""
         self._payload = payload
         self._body = (
             json.dumps(payload).encode("utf-8") if body is None else body
@@ -43,16 +55,19 @@ class _FakeResponse:
         self.closed = False
 
     def raise_for_status(self):
+        """Raise the configured status failure or emulate an HTTP error."""
         if self._status_error is not None:
             raise self._status_error
         if self.status_code >= 400:
             raise requests.HTTPError(f"HTTP {self.status_code}")
 
     def json(self):
+        """Record accidental use of the unbounded convenience decoder."""
         self.json_called = True
         return self._payload
 
     def iter_content(self, chunk_size: int):
+        """Yield configured chunks or split the encoded body like requests."""
         self.iterated = True
         if self._stream_error is not None:
             raise self._stream_error
@@ -63,17 +78,22 @@ class _FakeResponse:
             yield self._body[offset : offset + chunk_size]
 
     def close(self):
+        """Record cleanup and optionally raise its configured failure."""
         self.closed = True
         if self._close_error is not None:
             raise self._close_error
 
 
 class _FakeSession:
+    """Record request arguments and return one configured fake response."""
+
     def __init__(self, response: _FakeResponse | Exception):
+        """Store either a response or a transport exception for ``get``."""
         self.response = response
         self.calls: list[dict] = []
 
     def get(self, url, *, params, timeout, stream):
+        """Capture the call and emulate ``requests.Session.get``."""
         self.calls.append(
             {
                 "url": url,
@@ -88,6 +108,7 @@ class _FakeSession:
 
 
 def test_serpapi_client_normalizes_organic_results():
+    """The client returns only the requested count in its typed result shape."""
     session = _FakeSession(
         _FakeResponse(
             {
@@ -129,6 +150,7 @@ def test_serpapi_client_normalizes_organic_results():
 
 
 def test_serpapi_client_requires_api_key(monkeypatch):
+    """A missing key fails before any provider request can be attempted."""
     monkeypatch.delenv("SERPAPI_API_KEY", raising=False)
 
     with pytest.raises(SerpApiSetupError):
@@ -136,6 +158,7 @@ def test_serpapi_client_requires_api_key(monkeypatch):
 
 
 def test_serpapi_client_raises_on_api_error_payload():
+    """HTTP-200 provider error payloads still become typed search failures."""
     session = _FakeSession(_FakeResponse({"error": "Invalid API key"}))
 
     with pytest.raises(SerpApiSearchError, match="Invalid API key"):
@@ -143,6 +166,7 @@ def test_serpapi_client_raises_on_api_error_payload():
 
 
 def test_serpapi_client_raises_on_network_error():
+    """Transport errors cross the adapter as stable ``SerpApiSearchError``."""
     session = _FakeSession(requests.Timeout("slow"))
 
     with pytest.raises(SerpApiSearchError, match="slow"):
@@ -166,12 +190,14 @@ def test_serpapi_client_redacts_api_key_from_network_error():
 
 
 def test_serpapi_client_returns_empty_list_when_no_results():
+    """A valid empty organic-result collection remains an ordinary empty list."""
     session = _FakeSession(_FakeResponse({"organic_results": []}))
 
     assert SerpApiClient(api_key="secret", session=session).search("DEMO") == []
 
 
 def test_serpapi_client_rejects_advertised_oversized_response_before_reading():
+    """An oversized credible header is rejected before streaming or decoding."""
     response = _FakeResponse(
         {"organic_results": []},
         headers={"Content-Length": str(_ONE_MIB + 1)},
@@ -192,6 +218,7 @@ def test_serpapi_client_rejects_advertised_oversized_response_before_reading():
     [{}, {"Content-Length": "unknown"}, {"Content-Length": "-1"}],
 )
 def test_serpapi_client_streams_when_content_length_is_missing_or_invalid(headers):
+    """Absent or unusable length metadata falls back to authoritative byte counting."""
     response = _FakeResponse({"organic_results": []}, headers=headers)
 
     assert (
@@ -205,6 +232,7 @@ def test_serpapi_client_streams_when_content_length_is_missing_or_invalid(header
 
 
 def test_serpapi_client_rejects_streamed_body_crossing_one_mib_before_decode():
+    """Dishonest length metadata cannot bypass the streamed one-MiB cap."""
     response = _FakeResponse(
         body=b"",
         chunks=[b"x" * _ONE_MIB, b"x"],
@@ -221,6 +249,7 @@ def test_serpapi_client_rejects_streamed_body_crossing_one_mib_before_decode():
 
 
 def test_serpapi_client_clamps_result_count_sent_to_provider():
+    """User-supplied result counts are capped before reaching the provider."""
     session = _FakeSession(_FakeResponse({"organic_results": []}))
 
     SerpApiClient(api_key="secret", session=session).search(
@@ -231,6 +260,7 @@ def test_serpapi_client_clamps_result_count_sent_to_provider():
 
 
 def test_serpapi_client_accepts_only_strings_and_caps_each_result_field():
+    """Nested provider values are dropped and scalar fields are length-bounded."""
     long_text = "x" * 2_001
     session = _FakeSession(
         _FakeResponse(
@@ -262,6 +292,7 @@ def test_serpapi_client_accepts_only_strings_and_caps_each_result_field():
 
 
 def test_serpapi_client_reports_redacted_cleanup_error_after_successful_decode():
+    """A sole cleanup failure is reported without exposing the API key."""
     secret = "serp-secret"
     response = _FakeResponse(
         {"organic_results": []},
@@ -279,6 +310,7 @@ def test_serpapi_client_reports_redacted_cleanup_error_after_successful_decode()
 
 
 def test_cleanup_failure_does_not_override_redacted_streaming_error():
+    """Cleanup cannot replace the earlier redacted streaming failure."""
     secret = "serp-secret"
     response = _FakeResponse(
         {"organic_results": []},
@@ -299,6 +331,7 @@ def test_cleanup_failure_does_not_override_redacted_streaming_error():
 
 
 def test_cleanup_failure_does_not_override_primary_response_limit_error():
+    """Cleanup cannot replace the security-relevant response-limit failure."""
     response = _FakeResponse(
         body=b"",
         chunks=[b"x" * _ONE_MIB, b"x"],
@@ -315,6 +348,7 @@ def test_cleanup_failure_does_not_override_primary_response_limit_error():
 
 
 def test_cleanup_is_attempted_without_overriding_cancellation():
+    """Status cancellation stays primary even when cleanup also fails."""
     response = _FakeResponse(
         {"organic_results": []},
         status_error=KeyboardInterrupt(),
@@ -341,6 +375,7 @@ def test_cleanup_base_exception_never_replaces_primary_cancellation(
     primary: BaseException,
     cleanup: BaseException,
 ) -> None:
+    """Every process-control exception retains identity across failed cleanup."""
     response = _FakeResponse(
         {"organic_results": []},
         status_error=primary,
@@ -370,6 +405,7 @@ def test_cleanup_base_exception_never_replaces_primary_cancellation(
 def test_close_only_cancellation_propagates_unchanged(
     cleanup: BaseException,
 ) -> None:
+    """A process-control exception raised only by close propagates unchanged."""
     response = _FakeResponse(
         {"organic_results": []},
         close_error=cleanup,

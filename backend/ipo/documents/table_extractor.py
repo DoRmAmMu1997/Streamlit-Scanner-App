@@ -32,7 +32,13 @@ _MAX_TABLES_PER_PAGE: Final = 20
 
 
 class IpoDocumentParseError(RuntimeError):
-    """Raise one stable, secret-safe parser failure to facade callers."""
+    """Raise one stable, secret-safe parser failure to facade callers.
+
+    Beginner note:
+        Parser exceptions may echo hostile PDF text or local cache paths. The
+        public facade therefore exposes a small machine-readable ``code`` and a
+        fixed human message instead of forwarding the original exception.
+    """
 
     def __init__(self, code: str, message: str) -> None:
         """Store the stable code alongside a payload-free summary."""
@@ -41,7 +47,14 @@ class IpoDocumentParseError(RuntimeError):
 
 
 class PdfParseStatus(enum.StrEnum):
-    """State of one bounded parse attempt."""
+    """State of one bounded parse attempt.
+
+    Beginner note:
+        A parse is deliberately all-or-review: callers either receive a
+        complete bounded page set or a reason to send the document to a human.
+        There is no "partially trusted" page collection that could later be
+        mistaken for a complete prospectus.
+    """
 
     SUCCESS = "success"
     REVIEW_REQUIRED = "review_required"
@@ -54,6 +67,11 @@ class PdfExtractionBudget:
     The defaults are intentionally conservative for an offline prospectus
     workflow. Tests can lower one limit to exercise a boundary without
     manufacturing a destructive document.
+
+    Beginner note:
+        A time limit alone is not enough for hostile documents. A parser can
+        finish quickly while creating millions of cells or characters, so each
+        attacker-controlled dimension has its own explicit ceiling.
     """
 
     wall_time_seconds: float = 60.0
@@ -79,7 +97,13 @@ class PdfExtractionBudget:
 
 @dataclass(frozen=True)
 class ExtractedTable:
-    """One candidate table with its page number as the provenance anchor."""
+    """One candidate table with its page number as the provenance anchor.
+
+    Beginner note:
+        Rows are immutable tuples because later evidence verification must
+        compare against exactly what the bounded parser returned. Keeping the
+        page beside the rows prevents a table from losing its citation context.
+    """
 
     page_number: int
     rows: tuple[tuple[str, ...], ...]
@@ -87,7 +111,13 @@ class ExtractedTable:
 
 @dataclass(frozen=True)
 class ExtractedPage:
-    """One bounded page receipt, numbered from one."""
+    """One bounded page receipt, numbered from one.
+
+    Beginner note:
+        Prospectuses and human reviewers use 1-based page citations. The parser
+        preserves that convention at the boundary so downstream code never has
+        to guess whether a citation needs an offset.
+    """
 
     page_number: int
     text: str
@@ -96,14 +126,25 @@ class ExtractedPage:
 
 @dataclass(frozen=True)
 class PdfParseReceipt:
-    """Serializable outcome of one bounded parse attempt."""
+    """Serializable outcome of one bounded parse attempt.
+
+    Beginner note:
+        This receipt is the only information the long-lived parent accepts from
+        the short-lived parser. Success contains pages and no error; review
+        contains one safe code and no pages. The invariant blocks accidental
+        use of truncated output.
+    """
 
     status: PdfParseStatus
     pages: tuple[ExtractedPage, ...] = ()
     error_code: str | None = None
 
     def __post_init__(self) -> None:
-        """Keep success and review-required states mutually exclusive."""
+        """Keep success and review-required states mutually exclusive.
+
+        Raises:
+            ValueError: If a success lacks pages or any failure carries pages.
+        """
         if self.status is PdfParseStatus.SUCCESS:
             if not self.pages or self.error_code is not None:
                 raise ValueError("A successful PDF receipt needs pages and no error code.")
@@ -115,7 +156,11 @@ WorkerRunner = Callable[[Path, PdfExtractionBudget], bytes]
 
 
 def _review(code: str) -> PdfParseReceipt:
-    """Build one payload-free review receipt."""
+    """Build one payload-free review receipt.
+
+    The helper is intentionally unable to accept raw parser text. That makes
+    secret-safe, prompt-safe failure reporting the easiest call-site behavior.
+    """
     return PdfParseReceipt(status=PdfParseStatus.REVIEW_REQUIRED, error_code=code)
 
 
@@ -125,7 +170,14 @@ def _extract_in_process(
     *,
     open_pdf: Callable[[str], Any] | None = None,
 ) -> PdfParseReceipt:
-    """Run pdfplumber under explicit object limits and return a typed receipt."""
+    """Run the shared parser primitive through an injected in-process seam.
+
+    Beginner note:
+        Production parsing always uses a child process. Unit tests inject a fake
+        ``open_pdf`` implementation here so they can exercise every object
+        limit deterministically without launching a process or parsing hostile
+        binary fixtures.
+    """
     payload = extract_payload(
         str(pdf_path),
         vars(budget),
@@ -140,7 +192,18 @@ def _extract_in_process(
 
 
 def _receipt_from_bytes(data: bytes) -> PdfParseReceipt:
-    """Strictly rebuild the parent-owned result from a child JSON message."""
+    """Strictly rebuild the parent-owned result from a child JSON message.
+
+    Beginner note:
+        A process boundary is also a trust boundary. Even though our own worker
+        produced the bytes, the parent treats the message as untrusted: JSON is
+        decoded into fresh immutable domain objects instead of unpickling
+        executable Python objects.
+
+    Raises:
+        ValueError: If the worker response is not valid UTF-8 JSON or does not
+            match the expected receipt shape.
+    """
     try:
         payload = json.loads(data.decode("utf-8"))
         if not isinstance(payload, dict):
@@ -150,6 +213,8 @@ def _receipt_from_bytes(data: bytes) -> PdfParseReceipt:
         raw_pages = payload.get("pages")
         if not isinstance(raw_pages, list):
             raise TypeError
+        # Reconstruct every nested value explicitly. This keeps the worker from
+        # smuggling arbitrary object types across the process boundary.
         pages: list[ExtractedPage] = []
         for raw_page in raw_pages:
             if not isinstance(raw_page, dict):
@@ -187,7 +252,13 @@ def _receipt_fits_budget(
     receipt: PdfParseReceipt,
     budget: PdfExtractionBudget,
 ) -> bool:
-    """Re-check every child-controlled object dimension in the parent."""
+    """Re-check every child-controlled object dimension in the parent.
+
+    Beginner note:
+        Limits are enforced twice on purpose. The worker stops expensive parser
+        work early; this parent-side pass ensures a buggy, stale, or compromised
+        worker cannot return an oversized result that bypasses policy.
+    """
     if receipt.status is PdfParseStatus.REVIEW_REQUIRED:
         return True
     if len(receipt.pages) > budget.max_pages:
@@ -224,7 +295,26 @@ def _receipt_fits_budget(
 
 
 def _run_worker(pdf_path: Path, budget: PdfExtractionBudget) -> bytes:
-    """Spawn one parser child and terminate it when its wall time expires."""
+    """Spawn one parser child and return its bounded serialized receipt.
+
+    Args:
+        pdf_path: Verified local cache path. The child never chooses this path.
+        budget: Parent-owned limits copied into primitive spawn arguments.
+
+    Returns:
+        Raw JSON bytes emitted by the worker.
+
+    Raises:
+        TimeoutError: If the worker exceeds its wall-time budget.
+        ChildProcessError: If the worker exits abnormally or cannot finish
+            cleanup.
+        OverflowError: If the pipe message exceeds the serialized-result limit.
+
+    Beginner note:
+        ``spawn`` starts a fresh interpreter on every platform. That is slower
+        than ``fork`` but avoids inheriting parser state and matches Windows,
+        which makes timeout and cleanup behavior consistent in production.
+    """
     context = multiprocessing.get_context("spawn")
     receive_connection, send_connection = context.Pipe(duplex=False)
     process = context.Process(
@@ -233,6 +323,9 @@ def _run_worker(pdf_path: Path, budget: PdfExtractionBudget) -> bytes:
         name="ipo-pdf-parser",
     )
     process.start()
+    # Only the child should own the sending endpoint after start. Closing the
+    # parent's duplicate lets EOF/crash detection work instead of waiting for a
+    # writer that the parent accidentally kept alive.
     send_connection.close()
     deadline = time.monotonic() + budget.wall_time_seconds
     try:
@@ -241,6 +334,8 @@ def _run_worker(pdf_path: Path, budget: PdfExtractionBudget) -> bytes:
                 process.join()
                 raise ChildProcessError
             if time.monotonic() >= deadline:
+                # Terminate first so normal process cleanup can run. ``kill`` is
+                # the last resort for a parser that ignores termination.
                 process.terminate()
                 process.join(timeout=2)
                 if process.is_alive():
@@ -280,6 +375,12 @@ def parse_document_pages(
     Supplying it intentionally keeps that fake in-process; production omits it
     and always uses the killable worker. ``run_worker`` tests parent failure
     mapping without starting destructive child fixtures.
+
+    Beginner note:
+        This is the non-raising API used by batch orchestration. A damaged,
+        scanned, timed-out, or oversized prospectus becomes a review receipt,
+        allowing other IPOs in the job to continue without treating the failed
+        document as successfully extracted.
     """
     active_budget = budget or PdfExtractionBudget()
     path = Path(pdf_path)
@@ -314,7 +415,25 @@ def extract_document_pages(
     budget: PdfExtractionBudget | None = None,
     open_pdf: Callable[[str], Any] | None = None,
 ) -> tuple[ExtractedPage, ...]:
-    """Compatibility facade returning pages or the existing typed exception."""
+    """Return complete extracted pages or raise the legacy typed exception.
+
+    Args:
+        pdf_path: Path to a verified cached PDF.
+        max_pages: Backward-compatible override for only the page limit.
+        budget: Optional complete extraction budget.
+        open_pdf: Test seam; production callers leave this unset.
+
+    Returns:
+        A complete immutable collection of 1-based page receipts.
+
+    Raises:
+        IpoDocumentParseError: If parsing requires human review.
+
+    Beginner note:
+        Older callers expect exceptions, while newer orchestration consumes
+        receipts. This small facade preserves the old contract without
+        duplicating the security policy.
+    """
     active_budget = budget or PdfExtractionBudget()
     if max_pages is not None and active_budget.max_pages != max_pages:
         active_budget = replace(active_budget, max_pages=max_pages)

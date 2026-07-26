@@ -91,7 +91,13 @@ def _flag(name: str, status: IpoCautionFlagStatus, evidence: str) -> IpoCautionF
 
 
 def _entirely_ofs_weak_growth(inputs: IpoFactorInputs) -> IpoCautionFlag:
-    """Trigger when a pure offer-for-sale rides on a weak revenue story."""
+    """Trigger when a pure offer-for-sale rides on a weak revenue story.
+
+    Beginner note:
+        A zero fresh-issue component means no offer proceeds enter the company.
+        The flag still requires a weak or undefined revenue trend; a pure OFS
+        alone is reported but is not automatically treated as a hard veto.
+    """
     profile = inputs.profile
     if profile is None:
         return _flag(
@@ -140,7 +146,13 @@ def _entirely_ofs_weak_growth(inputs: IpoFactorInputs) -> IpoCautionFlag:
 
 
 def _very_expensive_valuation(inputs: IpoFactorInputs) -> IpoCautionFlag:
-    """Trigger when the issue's P/E premium exceeds 1.5x the peer median."""
+    """Trigger when the issue's P/E premium exceeds 1.5 times peer median.
+
+    Beginner note:
+        Both sides must be computed, positive, prospectus-derived evidence.
+        Missing issue earnings or usable peer values yields
+        ``NOT_EVALUABLE`` instead of an invented valuation conclusion.
+    """
     receipt = _receipt(inputs.ratios, IpoRatioName.PRICE_TO_EARNINGS)
     if (
         receipt is None
@@ -226,7 +238,13 @@ def _weak_qib_demand_near_close(inputs: IpoFactorInputs) -> IpoCautionFlag:
 
 
 def _negative_cfo_despite_profits(inputs: IpoFactorInputs) -> IpoCautionFlag:
-    """Trigger when reported profit is not backed by operating cash flow."""
+    """Trigger when reported profit is not backed by operating cash flow.
+
+    Beginner note:
+        Accounting profit and operating cash flow answer different questions.
+        A positive latest PAT alongside negative CFO is the exact divergence
+        this rule detects; ordinary weak profit belongs to other score factors.
+    """
     profile = inputs.profile
     if profile is None:
         return _flag(
@@ -260,7 +278,13 @@ def _negative_cfo_despite_profits(inputs: IpoFactorInputs) -> IpoCautionFlag:
 
 
 def _high_debt_without_reduction_use(inputs: IpoFactorInputs) -> IpoCautionFlag:
-    """Trigger on high leverage when the objects of issue skip debt repayment."""
+    """Trigger on high leverage without cited affirmative debt repayment.
+
+    Beginner note:
+        The rule is deliberately fail-closed after a leverage breach. A keyword
+        such as “repay” is insufficient: only typed ``AFFIRMATIVE`` evidence
+        with document SHA, page, and span identity may suppress the caution.
+    """
     debt_receipts = [
         receipt
         for receipt in (
@@ -420,7 +444,13 @@ def _litigation_red_flag(inputs: IpoFactorInputs) -> IpoCautionFlag:
 
 
 def _loss_making_no_path(inputs: IpoFactorInputs) -> IpoCautionFlag:
-    """Trigger when the latest year is a loss and the loss is not narrowing."""
+    """Trigger when the latest year is a loss and the loss is not narrowing.
+
+    Beginner note:
+        A current loss is not automatically a hard veto when the verified
+        history shows improvement. Comparing the two newest ordered fiscal
+        periods makes the “credible path” criterion deterministic.
+    """
     profile = inputs.profile
     if profile is None:
         return _flag(
@@ -459,6 +489,11 @@ def _loss_making_no_path(inputs: IpoFactorInputs) -> IpoCautionFlag:
 
 def evaluate_caution_flags(inputs: IpoFactorInputs) -> IpoCautionFlagReport:
     """Evaluate all seven hard caution flags in their fixed catalog order.
+
+    Beginner note:
+        The tuple order is part of the audit contract. New evaluations always
+        record the same seven decisions, so UI ordering and historical
+        comparisons do not depend on which flags happened to trigger.
 
     Args:
         inputs: The same frozen evidence bundle factor derivation consumes, so

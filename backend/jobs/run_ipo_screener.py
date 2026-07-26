@@ -82,7 +82,14 @@ _ACTIVE_STATUSES = (
 
 @dataclass(frozen=True)
 class IpoScreenerIssueOutcome:
-    """One issue's sanitized outcome across the scoring stage."""
+    """Hold one issue's sanitized, printable scoring-stage outcome.
+
+    Beginner note:
+        The CLI deliberately carries only stable verdict fields and exception
+        type names. Prospectus text, search snippets, and exception messages
+        never enter terminal output where secrets or hostile Markdown could
+        leak.
+    """
 
     issue_id: int
     company_name: str
@@ -104,6 +111,11 @@ class IpoScreenerJobOutcome:
     the screener is fully functional without SerpAPI. Every genuine stage
     failure keeps its unit isolated but still drives the exit code nonzero so
     schedulers notice.
+
+    Beginner note:
+        Counters make partial progress visible. A job may successfully inventory
+        and score most issues while one download fails; the nonzero exit code
+        alerts automation without discarding the completed work.
     """
 
     filings: IpoFilingJobOutcome | None = None
@@ -120,7 +132,13 @@ class IpoScreenerJobOutcome:
 
     @property
     def exit_code(self) -> int:
-        """Return nonzero when any stage or issue genuinely failed."""
+        """Return nonzero when any stage or issue genuinely failed.
+
+        Beginner note:
+            Missing optional SerpAPI configuration and insufficient verified
+            IPO data are expected states, so neither is counted as a process
+            failure.
+        """
         return int(
             self.fatal
             or (self.filings is not None and self.filings.exit_code != 0)
@@ -132,7 +150,13 @@ class IpoScreenerJobOutcome:
 
 
 def _print_issue(out: TextIO, outcome: IpoScreenerIssueOutcome) -> None:
-    """Write one bounded, evidence-free summary line for one issue."""
+    """Write one bounded, evidence-free summary line for one issue.
+
+    Beginner note:
+        One line per issue is easy for schedulers to capture and avoids dumping
+        untrusted evidence. Human-facing detail remains in the reviewed
+        dashboard and immutable evaluation receipt.
+    """
     if outcome.status == "failed":
         print(
             f"[ipo-screener] failed issue_id={outcome.issue_id} "
@@ -167,7 +191,12 @@ def _print_issue(out: TextIO, outcome: IpoScreenerIssueOutcome) -> None:
 
 
 def _issue_outcome_from_rescore(outcome: IpoRescoreOutcome) -> IpoScreenerIssueOutcome:
-    """Flatten one scoring-service outcome into the printable job shape."""
+    """Flatten one scoring-service outcome into the printable job shape.
+
+    Beginner note:
+        Orchestration does not reinterpret the verdict; it copies the persisted
+        result and selects only fields safe for terminal output.
+    """
     evaluation = outcome.evaluation
     if evaluation is None:
         return IpoScreenerIssueOutcome(
@@ -457,6 +486,12 @@ def main(
     Dependency injection keeps argument parsing testable without SEBI,
     SerpAPI, the Claude SDK, or a database; the production module entry point
     supplies the real runner.
+
+    Beginner note:
+        ``--extract`` is opt-in because it can spend model credit.
+        ``--force-extract`` broadens only reviewed-history processing; pending
+        and semantically identical proposals remain protected by repository
+        and database idempotency rules.
     """
     parser = argparse.ArgumentParser(
         description=(
