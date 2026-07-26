@@ -15,6 +15,8 @@ import datetime as dt
 from decimal import Decimal
 from typing import Any
 
+import pytest
+
 from backend.ipo.dashboard import IpoDashboardRow, IpoDashboardSnapshot
 from backend.ipo.models import IpoStatus, ScoreBreakdownItem
 from backend.ipo.scoring.recommendation import (
@@ -89,6 +91,17 @@ def test_label_map_covers_every_stored_recommendation_type() -> None:
         == "Not Recommended - insufficient verified data"
     )
     assert ipo_page._verdict_label(_row(recommendation_type=None)) == "Not scored yet"
+
+
+@pytest.mark.parametrize(
+    "control",
+    tuple("""!"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"""),
+)
+def test_markdown_neutralizer_escapes_every_commonmark_control(control: str) -> None:
+    """Removing any punctuation escape would reopen a Markdown parsing edge."""
+    assert ipo_page._neutralize_markdown(f"left{control}right") == (
+        f"left\\{control}right"
+    )
 
 
 def test_verdict_filter_passes_unscored_rows_only_through_all() -> None:
@@ -169,6 +182,7 @@ class _FakeStreamlit:
         self.radio_options: tuple[str, ...] | None = None
         self.button_keys: list[str] = []
         self.expander_labels: list[str] = []
+        self.markdown_capable_kwargs: list[dict[str, Any]] = []
 
     def subheader(self, *_args: Any, **_kwargs: Any) -> None:
         """Accept the page heading."""
@@ -176,10 +190,12 @@ class _FakeStreamlit:
     def caption(self, text: str, **_kwargs: Any) -> None:
         """Record explanatory copy for the empty-section assertions."""
         self.captions.append(str(text))
+        self.markdown_capable_kwargs.append(dict(_kwargs))
 
     def markdown(self, text: str, **_kwargs: Any) -> None:
         """Record section headings."""
         self.markdowns.append(str(text))
+        self.markdown_capable_kwargs.append(dict(_kwargs))
 
     def dataframe(self, frame: Any, **_kwargs: Any) -> None:
         """Record each rendered section table."""
@@ -198,14 +214,17 @@ class _FakeStreamlit:
     def success(self, text: str, **_kwargs: Any) -> None:
         """Record the re-score confirmation."""
         self.successes.append(str(text))
+        self.markdown_capable_kwargs.append(dict(_kwargs))
 
     def warning(self, text: str, **_kwargs: Any) -> None:
         """Record hard-caution callouts in breakdowns."""
         self.warnings.append(str(text))
+        self.markdown_capable_kwargs.append(dict(_kwargs))
 
     def expander(self, label: str, **_kwargs: Any) -> Any:
         """Provide the context-manager shape of a real expander."""
         self.expander_labels.append(str(label))
+        self.markdown_capable_kwargs.append(dict(_kwargs))
         return contextlib.nullcontext()
 
 
@@ -228,19 +247,39 @@ def test_breakdown_render_contains_all_seven_factors() -> None:
 
 
 def test_untrusted_markdown_cannot_create_remote_image_syntax() -> None:
-    """Issuer, reason, evidence, and source labels are escaped at display sinks."""
+    """All untrusted dashboard callouts are inert at Markdown-capable sinks."""
     hostile = "Bad ![tracker](https://evil.invalid/pixel) **issuer**"
-    row = _row(
+    reason_row = _row(
         company_name=hostile,
+        top_positives=(hostile,),
+        top_risks=(hostile,),
         reasons=(hostile,),
         source_documents=(hostile,),
         breakdown=(),
+    )
+    evidence_row = _row(
+        issue_id=2,
+        company_name=hostile,
+        triggered_flags=(hostile,),
+        missing_data=(hostile,),
+        source_documents=(hostile,),
+        breakdown=(
+            ScoreBreakdownItem(
+                factor="business_quality",
+                weight=25,
+                normalized_score=Decimal("80"),
+                missing=False,
+                weighted_contribution=Decimal("20"),
+                evidence_reason=hostile,
+            ),
+        ),
     )
     fake_st = _FakeStreamlit()
     original = ipo_page.st
     try:
         ipo_page.st = fake_st
-        ipo_page._render_breakdowns((row,))
+        ipo_page._render_section("Hostile evidence", (reason_row,))
+        ipo_page._render_breakdowns((reason_row, evidence_row))
     finally:
         ipo_page.st = original
 
@@ -249,11 +288,20 @@ def test_untrusted_markdown_cannot_create_remote_image_syntax() -> None:
             *fake_st.markdowns,
             *fake_st.captions,
             *fake_st.expander_labels,
+            *fake_st.warnings,
         )
     )
     assert "![" not in rendered
     assert "](" not in rendered
     assert "**issuer**" not in rendered
+    assert all(
+        kwargs.get("unsafe_allow_html") is not True
+        for kwargs in fake_st.markdown_capable_kwargs
+    )
+    # Dataframes are structured widgets, so their source values are not turned
+    # into Markdown merely to make them displayable.
+    assert fake_st.frames[0].iloc[0]["Top positives"] == hostile
+    assert fake_st.frames[1].iloc[0]["Evidence"] == hostile
 
 
 class _FakeLoader:

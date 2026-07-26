@@ -7,6 +7,7 @@ each other (or app.py) without creating cycles.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any, cast
 
@@ -18,6 +19,27 @@ from backend.auth.session import auth_secret_values
 from backend.scanner_base import PROVENANCE_COLUMN
 from backend.scoring import sort_by_final_score
 from backend.security import redact_text
+
+_MARKDOWN_CONTROL = re.compile(
+    r'''([!"#$%&'()*+,\-./:;<=>?@\[\]\^_`{|}~])'''
+)
+
+
+def _neutralize_markdown(value: object) -> str:
+    """Escape untrusted text before a Markdown-capable Streamlit sink.
+
+    Streamlit interprets Markdown in labels, warnings, captions, and Markdown
+    bodies. CommonMark permits a backslash escape for every ASCII punctuation
+    character, so escaping that complete set makes remote-image/link syntax and
+    structural formatting inert while preserving the visible plain text.
+
+    Beginner note:
+        Structured widgets such as ``st.json`` and ``st.dataframe`` do not use
+        this helper. Their values stay structured instead of being flattened
+        into a Markdown string.
+    """
+    text = str(value).replace("\\", "\\\\")
+    return _MARKDOWN_CONTROL.sub(r"\\\1", text)
 
 
 def _drop_provenance(results: pd.DataFrame) -> pd.DataFrame:

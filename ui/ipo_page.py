@@ -10,8 +10,6 @@ same repository-only scoring service the job uses.
 
 from __future__ import annotations
 
-import re
-
 import pandas as pd
 import streamlit as st
 
@@ -36,7 +34,7 @@ from backend.ipo.scoring.recommendation import (
 )
 from backend.ipo.scoring.service import rescore_issue
 from backend.observability import EVENT_IPO_RESCORE_TRIGGERED
-from ui.common import _csv_safe
+from ui.common import _csv_safe, _neutralize_markdown
 
 # Pure display mapping (IPO-006 decision): the database keeps its four stable
 # recommendation_type strings; the dashboard shows the sprint's friendlier
@@ -60,19 +58,6 @@ _SECTIONS = (
 )
 
 _VERDICT_FILTERS = ("All", "Recommended", "Not Recommended")
-_MARKDOWN_CONTROL = re.compile(r"([`*_{}\[\]()#+\-.!|><~$^])")
-
-
-def _neutralize_markdown(value: object) -> str:
-    """Escape untrusted text before sending it to a Markdown-capable widget.
-
-    Streamlit interprets Markdown in labels, warnings, captions, and markdown
-    bodies. Escaping the complete control set prevents an issuer name or model
-    evidence string such as ``![x](https://tracker)`` from creating a remote
-    image request or changing the page structure.
-    """
-    text = str(value).replace("\\", "\\\\")
-    return _MARKDOWN_CONTROL.sub(r"\\\1", text)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -161,7 +146,8 @@ def _render_breakdowns(rows: tuple[IpoDashboardRow, ...]) -> None:
     for row in scored:
         company = _neutralize_markdown(row.company_name)
         with st.expander(
-            f"{company} - {row.score}/100 ({_verdict_label(row)})"
+            f"{company} - {row.score}/100 "
+            f"({_neutralize_markdown(_verdict_label(row))})"
         ):
             if row.triggered_flags:
                 st.warning(
@@ -186,7 +172,7 @@ def _render_breakdowns(rows: tuple[IpoDashboardRow, ...]) -> None:
                                 "Contribution": str(
                                     item.weighted_contribution
                                 ),
-                                "Evidence": _neutralize_markdown(
+                                "Evidence": (
                                     item.evidence_reason or "No evidence supplied"
                                 ),
                             }

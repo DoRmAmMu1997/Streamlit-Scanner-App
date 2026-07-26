@@ -46,7 +46,7 @@ from backend.ipo.repository import (
     reject_extraction_proposal,
     submit_manual_extraction,
 )
-from ui.common import _redact_secrets
+from ui.common import _neutralize_markdown, _redact_secrets
 
 # ``st.data_editor`` only renders columns that already exist in the DataFrame it is
 # handed; ``column_config`` keys with no matching column are silently ignored. Seeding
@@ -278,7 +278,7 @@ def _render_ipo_manual_page(authenticated_user: AuthenticatedUser | None) -> Non
 
 def _proposal_label(proposal: IpoExtractionProposalRecord) -> str:
     """Build one stable, human-scannable review-queue entry label."""
-    return (
+    return _neutralize_markdown(
         f"{proposal.company_name} - proposal #{proposal.id} "
         f"({proposal.confidence.value} confidence)"
     )
@@ -306,14 +306,19 @@ def _render_proposal_review(authenticated_user: AuthenticatedUser) -> None:
     )
     proposal = labels[selected_label]
     st.caption(
-        f"Document: {proposal.document_url} | pages seen: {proposal.page_count} | "
-        f"agent model: {proposal.agent_model} | extractor: {proposal.model_version} | "
-        f"source SHA-256: {proposal.source_content_sha256}"
+        _neutralize_markdown(
+            f"Document: {proposal.document_url} | pages seen: {proposal.page_count} | "
+            f"agent model: {proposal.agent_model} | extractor: {proposal.model_version} | "
+            f"source SHA-256: {proposal.source_content_sha256}"
+        )
     )
     if proposal.needs_review_reasons:
         st.warning(
             "Verifier notes:\n"
-            + "\n".join(f"- {reason}" for reason in proposal.needs_review_reasons)
+            + "\n".join(
+                f"- {_neutralize_markdown(reason)}"
+                for reason in proposal.needs_review_reasons
+            )
         )
     with st.expander("Proposed values (with page citations)", expanded=False):
         st.json(dict(proposal.payload))
@@ -341,7 +346,7 @@ def _render_proposal_review(authenticated_user: AuthenticatedUser) -> None:
                 data_dir=get_settings().data_dir,
             )
         except (IpoValidationError, IpoNotFoundError) as exc:
-            st.error(_redact_secrets(str(exc)))
+            st.error(_neutralize_markdown(_redact_secrets(str(exc))))
         except Exception:  # noqa: BLE001 - UI must fail safely without raw exception text.
             st.error(
                 "The proposal could not be approved. Check logs for the safe error code."
@@ -358,7 +363,7 @@ def _render_proposal_review(authenticated_user: AuthenticatedUser) -> None:
                 reason=reject_reason,
             )
         except (IpoValidationError, IpoNotFoundError) as exc:
-            st.error(_redact_secrets(str(exc)))
+            st.error(_neutralize_markdown(_redact_secrets(str(exc))))
         except Exception:  # noqa: BLE001 - UI must fail safely without raw exception text.
             st.error(
                 "The proposal could not be rejected. Check logs for the safe error code."
@@ -372,7 +377,10 @@ def _render_entry_workflow(
     issues: Sequence[Any],
 ) -> None:
     """Render issue selection, complete entry form, latest profile, and history."""
-    issue_labels = {f"{issue.company_name} (#{issue.id})": issue for issue in issues}
+    issue_labels = {
+        _neutralize_markdown(f"{issue.company_name} (#{issue.id})"): issue
+        for issue in issues
+    }
     selected_label = st.selectbox("IPO issue", tuple(issue_labels))
     selected_issue = issue_labels[selected_label]
     documents = [
@@ -392,8 +400,10 @@ def _render_entry_workflow(
 
     latest = get_latest_manual_profile(selected_issue.id)
     document_labels = {
-        f"{document.document_type.upper()} - {document.filing_date or 'date unknown'} "
-        f"(#{document.id})": document
+        _neutralize_markdown(
+            f"{document.document_type.upper()} - "
+            f"{document.filing_date or 'date unknown'} (#{document.id})"
+        ): document
         for document in documents
     }
     default_document_index = 0
@@ -410,8 +420,10 @@ def _render_entry_workflow(
     )
     selected_document = document_labels[selected_document_label]
     st.caption(
-        f"Source SHA-256: {selected_document.content_sha256} | "
-        f"URL: {selected_document.document_url}"
+        _neutralize_markdown(
+            f"Source SHA-256: {selected_document.content_sha256} | "
+            f"URL: {selected_document.document_url}"
+        )
     )
 
     with st.form(f"ipo_manual_extraction_{selected_issue.id}"):
@@ -441,7 +453,7 @@ def _render_entry_workflow(
                 data_dir=get_settings().data_dir,
             )
         except (IpoValidationError, IpoNotFoundError) as exc:
-            st.error(_redact_secrets(str(exc)))
+            st.error(_neutralize_markdown(_redact_secrets(str(exc))))
         except Exception:  # noqa: BLE001 - UI must fail safely without raw exception text.
             st.error("The IPO revision could not be saved. Check logs for the safe error code.")
         else:
