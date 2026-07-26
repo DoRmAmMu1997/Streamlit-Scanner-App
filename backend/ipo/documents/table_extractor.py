@@ -17,12 +17,13 @@ from __future__ import annotations
 import enum
 import json
 import multiprocessing
-import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final
+
+from backend.ipo_pdf_worker import extract_payload, worker_entry
 
 MAX_PAGES_DEFAULT: Final = 800
 _MAX_CELL_CHARS: Final = 200
@@ -118,76 +119,6 @@ def _review(code: str) -> PdfParseReceipt:
     return PdfParseReceipt(status=PdfParseStatus.REVIEW_REQUIRED, error_code=code)
 
 
-def _default_open_pdf(path: str) -> Any:
-    """Open one local PDF with pdfplumber, importing it only in the parser process."""
-    import pdfplumber  # type: ignore[import-untyped, unused-ignore]
-
-    return pdfplumber.open(path)
-
-
-def _raw_tables(page: Any, budget: PdfExtractionBudget) -> list[Any]:
-    """Extract only the selected table objects when the parser exposes that seam."""
-    finder = getattr(page, "find_tables", None)
-    if callable(finder):
-        located = list(finder())
-        if len(located) > budget.max_tables_per_page:
-            raise IpoDocumentParseError(
-                "page_table_limit_exceeded",
-                "A PDF page exceeded the candidate-table limit.",
-            )
-        return [table.extract() for table in located]
-
-    extracted = list(page.extract_tables())
-    if len(extracted) > budget.max_tables_per_page:
-        raise IpoDocumentParseError(
-            "page_table_limit_exceeded",
-            "A PDF page exceeded the candidate-table limit.",
-        )
-    return extracted
-
-
-def _bounded_tables(
-    page: Any,
-    page_number: int,
-    budget: PdfExtractionBudget,
-    *,
-    cells_seen: int,
-) -> tuple[tuple[ExtractedTable, ...], int]:
-    """Normalize candidate tables while enforcing every retained dimension."""
-    tables: list[ExtractedTable] = []
-    for raw_table in _raw_tables(page, budget):
-        if len(raw_table) > budget.max_rows_per_table:
-            raise IpoDocumentParseError(
-                "table_row_limit_exceeded",
-                "A candidate table exceeded the row limit.",
-            )
-        rows: list[tuple[str, ...]] = []
-        for raw_row in raw_table:
-            if len(raw_row) > budget.max_columns_per_row:
-                raise IpoDocumentParseError(
-                    "table_column_limit_exceeded",
-                    "A candidate table exceeded the column limit.",
-                )
-            normalized: list[str] = []
-            for cell in raw_row:
-                text = str(cell or "").strip()
-                if len(text) > budget.max_cell_chars:
-                    raise IpoDocumentParseError(
-                        "cell_text_limit_exceeded",
-                        "A candidate-table cell exceeded the text limit.",
-                    )
-                cells_seen += 1
-                if cells_seen > budget.max_cells_per_document:
-                    raise IpoDocumentParseError(
-                        "document_cell_limit_exceeded",
-                        "The PDF exceeded the document cell limit.",
-                    )
-                normalized.append(text)
-            rows.append(tuple(normalized))
-        tables.append(ExtractedTable(page_number=page_number, rows=tuple(rows)))
-    return tuple(tables), cells_seen
-
-
 def _extract_in_process(
     pdf_path: Path,
     budget: PdfExtractionBudget,
@@ -195,83 +126,17 @@ def _extract_in_process(
     open_pdf: Callable[[str], Any] | None = None,
 ) -> PdfParseReceipt:
     """Run pdfplumber under explicit object limits and return a typed receipt."""
-    opener = open_pdf if open_pdf is not None else _default_open_pdf
-    pages: list[ExtractedPage] = []
-    cells_seen = 0
-    text_seen = 0
-    glyphs_seen = 0
-    try:
-        with opener(str(pdf_path)) as pdf:
-            pdf_pages = pdf.pages
-            if len(pdf_pages) > budget.max_pages:
-                raise IpoDocumentParseError(
-                    "page_limit_exceeded",
-                    "The PDF exceeded the page limit.",
-                )
-            for index, page in enumerate(pdf_pages, start=1):
-                page_glyphs = getattr(page, "chars", ())
-                glyph_count = len(page_glyphs)
-                if glyph_count > budget.max_glyphs_per_page:
-                    raise IpoDocumentParseError(
-                        "page_glyph_limit_exceeded",
-                        "A PDF page exceeded the glyph limit.",
-                    )
-                glyphs_seen += glyph_count
-                if glyphs_seen > budget.max_glyphs_per_document:
-                    raise IpoDocumentParseError(
-                        "document_glyph_limit_exceeded",
-                        "The PDF exceeded the document glyph limit.",
-                    )
-
-                text = page.extract_text(x_tolerance=2, y_tolerance=2) or ""
-                if len(text) > budget.max_page_text_chars:
-                    raise IpoDocumentParseError(
-                        "page_text_limit_exceeded",
-                        "A PDF page exceeded the text limit.",
-                    )
-                text_seen += len(text)
-                if text_seen > budget.max_document_text_chars:
-                    raise IpoDocumentParseError(
-                        "document_text_limit_exceeded",
-                        "The PDF exceeded the document text limit.",
-                    )
-                tables, cells_seen = _bounded_tables(
-                    page,
-                    index,
-                    budget,
-                    cells_seen=cells_seen,
-                )
-                pages.append(
-                    ExtractedPage(page_number=index, text=text, tables=tables)
-                )
-    except IpoDocumentParseError as exc:
-        return _review(exc.code)
-    except Exception:  # noqa: BLE001 - parser messages may contain hostile content
-        return _review("unreadable_pdf")
-
-    if not pages or all(not page.text.strip() for page in pages):
-        return _review("empty_document")
-    return PdfParseReceipt(status=PdfParseStatus.SUCCESS, pages=tuple(pages))
-
-
-def _receipt_to_bytes(receipt: PdfParseReceipt) -> bytes:
-    """Encode one bounded child result as plain JSON rather than pickle."""
-    payload = {
-        "status": receipt.status.value,
-        "error_code": receipt.error_code,
-        "pages": [
-            {
-                "page_number": page.page_number,
-                "text": page.text,
-                "tables": [
-                    {"page_number": table.page_number, "rows": table.rows}
-                    for table in page.tables
-                ],
-            }
-            for page in receipt.pages
-        ],
-    }
-    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    payload = extract_payload(
+        str(pdf_path),
+        vars(budget),
+        open_pdf=open_pdf,
+    )
+    encoded = json.dumps(
+        payload,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return _receipt_from_bytes(encoded)
 
 
 def _receipt_from_bytes(data: bytes) -> PdfParseReceipt:
@@ -358,42 +223,13 @@ def _receipt_fits_budget(
     return any(page.text.strip() for page in receipt.pages)
 
 
-def _apply_linux_memory_limit(budget: PdfExtractionBudget) -> None:
-    """Apply the ADR's child-only address-space limit where Python supports it."""
-    if sys.platform != "linux":
-        return
-    import resource
-
-    resource.setrlimit(
-        resource.RLIMIT_AS,
-        (budget.linux_address_space_bytes, budget.linux_address_space_bytes),
-    )
-
-
-def _worker_entry(
-    pdf_path: str,
-    budget: PdfExtractionBudget,
-    send_connection: Any,
-) -> None:
-    """Child entrypoint: contain parser state and emit one bounded byte message."""
-    try:
-        _apply_linux_memory_limit(budget)
-        receipt = _extract_in_process(Path(pdf_path), budget)
-        encoded = _receipt_to_bytes(receipt)
-        if len(encoded) > budget.max_serialized_result_bytes:
-            encoded = _receipt_to_bytes(_review("worker_result_limit_exceeded"))
-        send_connection.send_bytes(encoded)
-    finally:
-        send_connection.close()
-
-
 def _run_worker(pdf_path: Path, budget: PdfExtractionBudget) -> bytes:
     """Spawn one parser child and terminate it when its wall time expires."""
     context = multiprocessing.get_context("spawn")
     receive_connection, send_connection = context.Pipe(duplex=False)
     process = context.Process(
-        target=_worker_entry,
-        args=(str(pdf_path), budget, send_connection),
+        target=worker_entry,
+        args=(str(pdf_path), vars(budget), send_connection),
         name="ipo-pdf-parser",
     )
     process.start()

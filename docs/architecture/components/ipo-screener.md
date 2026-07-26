@@ -107,7 +107,8 @@ network or model stages. All persistence still routes through `backend/storage`.
 | `backend/ipo/scoring/factor_derivation.py` | Pure seven-factor derivation plus typed, negation-aware debt-purpose evidence. | `models`, `ratio_engine`, `manual_extraction` |
 | `backend/ipo/scoring/caution_flags.py` | Seven fixed-order hard cautions over typed evidence authority. | `models`, `factor_derivation`, `ratio_engine` |
 | `backend/ipo/scoring/service.py` | One-transaction input snapshot, semantic fingerprint, idempotent evaluation orchestration. | `repository`, pure scoring modules |
-| `backend/ipo/documents/table_extractor.py` | Spawn-safe PDF worker, object/text/time/result budgets, typed parse receipts. | stdlib, lazy `pdfplumber` |
+| `backend/ipo/documents/table_extractor.py` | Parent-owned PDF facade, worker supervision, result-budget validation, typed parse receipts. | stdlib, `backend/ipo_pdf_worker.py` |
+| `backend/ipo_pdf_worker.py` | Dependency-light spawn entrypoint; applies Linux address-space policy before lazy pdfplumber import and emits primitive JSON only. | stdlib, lazy `pdfplumber` |
 | `backend/ipo/documents/section_classifier.py` | Page/span-preserving heading ownership and safe chunks. | `table_extractor` |
 | `backend/ipo/agents/financial_extractor.py` | Locked-down AI draft, host citation binding, proposal lifecycle outcomes. | `documents`, `models`, AI runtime |
 | `backend/ipo/sources/enrichment.py` | Persisted-identity queries, per-item quarantine, GMP proximity parsing, central advisory authority. | shared search client, `security`, `repository` |

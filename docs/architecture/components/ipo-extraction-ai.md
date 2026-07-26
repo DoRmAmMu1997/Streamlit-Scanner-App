@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Component** | IPO financial-extraction agent |
-| **Source** | `backend/ipo/agents/financial_extractor.py`, `backend/ipo/documents/table_extractor.py`, `backend/ipo/documents/section_classifier.py` |
+| **Source** | `backend/ipo/agents/financial_extractor.py`, `backend/ipo/documents/table_extractor.py`, `backend/ipo_pdf_worker.py`, `backend/ipo/documents/section_classifier.py` |
 | **Layer** | backend (agent adapter over the Claude Agent SDK) |
 | **Status** | Implemented (IPO-010) |
 | **Related** | [ipo-010-ai-extraction-proposals.md](../ipo-010-ai-extraction-proposals.md) · [fundamentals-ai.md](fundamentals-ai.md) (shared runtime patterns) · [security.md](security.md) (TEST-003 quarantine) |
@@ -84,6 +84,9 @@ rows/table, 50 columns/row, 100,000 cells/document, 200 characters/cell,
 20,000 text characters/page, 2,000,000/document, and 16 MiB serialized output.
 Linux applies a 512 MiB child address-space limit. Windows uses
 wall/object/text/result containment without a new `psutil` dependency.
+The spawn target lives in dependency-light `backend/ipo_pdf_worker.py`, so a
+fresh Linux child applies its limit before importing pdfplumber rather than
+first executing the broad `backend.ipo` facade and unrelated dependencies.
 
 ## 7. Testing
 

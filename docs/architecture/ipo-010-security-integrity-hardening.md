@@ -58,6 +58,9 @@ Linux applies the address-space limit before opening the PDF. Windows has no
 new runtime dependency: wall time plus object/text/result limits are the
 portable containment boundary. The absence of a Windows hard RSS limit is an
 accepted residual risk, not a reason to leave parsing in the parent.
+The spawn target lives in a dependency-light top-level backend module, so a
+fresh Linux child does not load the broad IPO facade or unrelated data-science
+dependencies before applying the 512 MiB limit.
 
 ### 2. Make citations atomic evidence
 

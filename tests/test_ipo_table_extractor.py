@@ -177,6 +177,20 @@ def test_worker_failures_and_oversized_wire_results_are_typed(tmp_path: Path) ->
     assert oversized.error_code == "worker_result_limit_exceeded"
 
 
+def test_spawn_worker_entrypoint_avoids_the_heavy_ipo_facade() -> None:
+    """A fresh child must apply its 512 MiB cap before importing the IPO facade.
+
+    Beginner note:
+        ``multiprocessing`` imports the target function's module in the child.
+        Putting that target below ``backend.ipo`` first executes the package's
+        broad public re-export facade, which loads data-science dependencies and
+        consumes most of the Linux address-space budget before pdfplumber starts.
+    """
+    from backend import ipo_pdf_worker
+
+    assert ipo_pdf_worker.worker_entry.__module__ == "backend.ipo_pdf_worker"
+
+
 def test_parent_revalidates_worker_object_budgets(tmp_path: Path) -> None:
     """A compromised/mismatched child cannot return objects beyond policy."""
     oversized_success = json.dumps(
