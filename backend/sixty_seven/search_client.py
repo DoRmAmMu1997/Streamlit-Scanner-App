@@ -122,7 +122,7 @@ class SerpApiClient:
         if result_limit == 0:
             return []
 
-        params = {
+        params: dict[str, str | int] = {
             "engine": "google",
             "q": normalized_query,
             # India-localized, English results: gl = geo-location country,

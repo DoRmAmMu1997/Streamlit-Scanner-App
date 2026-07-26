@@ -228,15 +228,13 @@ class _FakeStreamlit:
         return contextlib.nullcontext()
 
 
-def test_breakdown_render_contains_all_seven_factors() -> None:
+def test_breakdown_render_contains_all_seven_factors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The expander renders the complete receipt rather than only reasons."""
     fake_st = _FakeStreamlit()
-    original = ipo_page.st
-    try:
-        ipo_page.st = fake_st
-        ipo_page._render_breakdowns((_row(breakdown=_breakdown()),))
-    finally:
-        ipo_page.st = original
+    monkeypatch.setattr(ipo_page, "st", fake_st)
+    ipo_page._render_breakdowns((_row(breakdown=_breakdown()),))
 
     assert len(fake_st.frames) == 1
     frame = fake_st.frames[0]
@@ -246,7 +244,9 @@ def test_breakdown_render_contains_all_seven_factors() -> None:
     assert len(frame) == 7
 
 
-def test_untrusted_markdown_cannot_create_remote_image_syntax() -> None:
+def test_untrusted_markdown_cannot_create_remote_image_syntax(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """All untrusted dashboard callouts are inert at Markdown-capable sinks."""
     hostile = "Bad ![tracker](https://evil.invalid/pixel) **issuer**"
     reason_row = _row(
@@ -275,13 +275,9 @@ def test_untrusted_markdown_cannot_create_remote_image_syntax() -> None:
         ),
     )
     fake_st = _FakeStreamlit()
-    original = ipo_page.st
-    try:
-        ipo_page.st = fake_st
-        ipo_page._render_section("Hostile evidence", (reason_row,))
-        ipo_page._render_breakdowns((reason_row, evidence_row))
-    finally:
-        ipo_page.st = original
+    monkeypatch.setattr(ipo_page, "st", fake_st)
+    ipo_page._render_section("Hostile evidence", (reason_row,))
+    ipo_page._render_breakdowns((reason_row, evidence_row))
 
     rendered = " ".join(
         (
