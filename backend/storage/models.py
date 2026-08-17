@@ -1629,7 +1629,8 @@ class IpoEnrichmentSignal(Base):
         ),
         CheckConstraint(
             "signal_type IN ('gmp', 'news', 'promoter_reputation', 'litigation_red_flag', "
-            "'anchor_commentary', 'brokerage_review', 'peer_discovery')",
+            "'anchor_commentary', 'brokerage_review', 'peer_discovery', "
+            "'subscription_demand')",
             name="ck_ipo_enrichment_signals_signal_type",
         ),
         CheckConstraint(

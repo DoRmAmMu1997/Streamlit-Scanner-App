@@ -62,6 +62,7 @@ SHARED_DOCUMENTATION_TARGETS: dict[Path, frozenset[str]] = {
             "test_ipo003_downgrade_refuses_to_discard_download_provenance",
             "test_ipo004_downgrade_refuses_to_discard_manual_revisions",
             "test_ipo006_downgrade_refuses_to_discard_screener_artifacts",
+            "test_ipo011_accepts_subscription_demand_and_guards_its_downgrade",
         }
     ),
     ROOT / "tests" / "test_app_orchestration.py": frozenset(
