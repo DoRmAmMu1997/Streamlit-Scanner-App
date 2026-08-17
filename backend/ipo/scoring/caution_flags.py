@@ -26,6 +26,7 @@ from backend.ipo.financials.ratio_engine import (
 )
 from backend.ipo.manual_extraction import IpoPeerMetric
 from backend.ipo.models import (
+    Confidence,
     DebtReductionPurposeStatus,
     IpoCautionFlag,
     IpoCautionFlagReport,
@@ -37,7 +38,10 @@ from backend.ipo.models import (
 )
 from backend.ipo.scoring.factor_derivation import IpoFactorInputs, _peer_median
 
-CAUTION_FLAGS_VERSION: Final = "ipo-006-flags-v2"
+# v3 (IPO-011): the near-close QIB caution now refuses to fire on a
+# low-confidence web-sourced snapshot. Stored verdicts stay attributable to
+# the exact rule set that produced them, so this bump is mandatory.
+CAUTION_FLAGS_VERSION: Final = "ipo-006-flags-v3"
 
 FLAG_ENTIRELY_OFS_WEAK_GROWTH: Final = "entirely_ofs_weak_growth"
 FLAG_VERY_EXPENSIVE_VALUATION: Final = "very_expensive_valuation"
@@ -199,6 +203,13 @@ def _weak_qib_demand_near_close(inputs: IpoFactorInputs) -> IpoCautionFlag:
         rule only judges from one day before the close date onward and only
         while the issue is open or closed. Inside that window an *absent*
         snapshot is itself the warning the spec asks for.
+
+        IPO-011 added a low-confidence, web-sourced demand snapshot. This hard
+        caution forces ``Not Recommended`` outright, so it deliberately refuses
+        to judge on that evidence: a scraped headline must never be able to
+        reject an issue. A low-confidence-only snapshot is reported as
+        ``not_evaluable`` — the same answer as having no snapshot before the
+        window opens — while the optional QIB *factor* may still use it.
     """
     issue = inputs.issue
     if issue.status not in (IpoStatus.OPEN, IpoStatus.CLOSED) or issue.close_date is None:
@@ -215,6 +226,15 @@ def _weak_qib_demand_near_close(inputs: IpoFactorInputs) -> IpoCautionFlag:
             f"Book closes {issue.close_date.isoformat()}; too early to judge demand.",
         )
     subscription = inputs.subscription
+    if subscription is not None and subscription.source_confidence is Confidence.LOW:
+        return _flag(
+            FLAG_WEAK_QIB_DEMAND_NEAR_CLOSE,
+            IpoCautionFlagStatus.NOT_EVALUABLE,
+            (
+                "Only a low-confidence web-sourced demand snapshot is available; "
+                "this hard caution requires official subscription evidence."
+            ),
+        )
     if subscription is None or subscription.qib_multiple is None:
         return _flag(
             FLAG_WEAK_QIB_DEMAND_NEAR_CLOSE,

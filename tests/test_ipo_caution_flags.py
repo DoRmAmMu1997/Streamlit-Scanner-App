@@ -189,7 +189,11 @@ def _ratios(*receipts: IpoRatioReceipt, price_band_high: str | None = "100") -> 
     )
 
 
-def _subscription(qib: str | None) -> IpoSubscriptionRecord:
+def _subscription(
+    qib: str | None,
+    *,
+    source_confidence: Confidence = Confidence.HIGH,
+) -> IpoSubscriptionRecord:
     """Build one detached demand snapshot with only the QIB column populated."""
     return IpoSubscriptionRecord(
         id=1,
@@ -200,7 +204,7 @@ def _subscription(qib: str | None) -> IpoSubscriptionRecord:
         retail_multiple=None,
         total_multiple=None,
         source_url=None,
-        source_confidence=Confidence.HIGH,
+        source_confidence=source_confidence,
         created_at=_AS_OF,
     )
 
@@ -338,6 +342,39 @@ def test_very_expensive_valuation_uses_peer_pe_median() -> None:
     assert (
         _flag(evaluate_caution_flags(no_pe), FLAG_VERY_EXPENSIVE_VALUATION).status
         is IpoCautionFlagStatus.NOT_EVALUABLE
+    )
+
+
+def test_low_confidence_demand_can_never_fire_the_hard_qib_caution() -> None:
+    """A web-sourced snapshot must not be able to reject an issue (IPO-011).
+
+    Beginner note:
+        This flag forces ``Not Recommended`` regardless of score, so it is the
+        one place a scraped headline could do real damage. Inside the
+        near-close window a low-confidence snapshot is reported as
+        ``not_evaluable`` whether its number looks weak or strong -- the
+        optional QIB *factor* may still use it, but the hard caution waits for
+        official evidence.
+    """
+    weak_web_reading = _inputs(
+        issue=_issue(status=IpoStatus.OPEN, close_date=dt.date(2026, 7, 14)),
+        subscription=_subscription("0.60", source_confidence=Confidence.LOW),
+    )
+    flag = _flag(
+        evaluate_caution_flags(weak_web_reading), FLAG_WEAK_QIB_DEMAND_NEAR_CLOSE
+    )
+    assert flag.status is IpoCautionFlagStatus.NOT_EVALUABLE
+    assert "low-confidence" in flag.evidence
+
+    # The identical scenario with official evidence still triggers, proving the
+    # containment is about provenance and not about the number itself.
+    official = _inputs(
+        issue=_issue(status=IpoStatus.OPEN, close_date=dt.date(2026, 7, 14)),
+        subscription=_subscription("0.60", source_confidence=Confidence.HIGH),
+    )
+    assert (
+        _flag(evaluate_caution_flags(official), FLAG_WEAK_QIB_DEMAND_NEAR_CLOSE).status
+        is IpoCautionFlagStatus.TRIGGERED
     )
 
 

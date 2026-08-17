@@ -344,9 +344,17 @@ class IpoEnrichmentSignalType(enum.StrEnum):
     """Topics the IPO-009 web-enrichment collector may observe.
 
     Beginner note:
-    These are sentiment and red-flag topics only. There is deliberately no
-    member for revenue, profit, or any other financial-statement figure: web
-    search results must never be able to masquerade as document evidence.
+    These are sentiment, demand, and red-flag topics only. There is
+    deliberately no member for revenue, profit, or any other
+    financial-statement figure: web search results must never be able to
+    masquerade as document evidence.
+
+    ``SUBSCRIPTION_DEMAND`` (IPO-011) is the single numeric exception and it
+    is deliberately fenced in. A reported subscription multiple may feed the
+    optional ten-point QIB factor, but a web-sourced snapshot can never fire
+    the ``weak_qib_demand_near_close`` hard caution, because that flag forces
+    ``Not Recommended`` and must rest on official evidence. See
+    :func:`backend.ipo.scoring.caution_flags._weak_qib_demand_near_close`.
     """
 
     GMP = "gmp"
@@ -356,6 +364,7 @@ class IpoEnrichmentSignalType(enum.StrEnum):
     ANCHOR_COMMENTARY = "anchor_commentary"
     BROKERAGE_REVIEW = "brokerage_review"
     PEER_DISCOVERY = "peer_discovery"
+    SUBSCRIPTION_DEMAND = "subscription_demand"
 
 
 class IpoEvidenceAuthority(enum.StrEnum):

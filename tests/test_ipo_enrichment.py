@@ -23,12 +23,16 @@ from backend.ipo.models import (
     IpoIssueData,
     IpoIssueType,
     IpoStatus,
+    IpoSubscriptionData,
     IpoValidationError,
 )
 from backend.ipo.repository import (
     IpoNotFoundError,
     create_issue,
+    create_subscription,
+    get_latest_subscription,
     list_enrichment_signals,
+    list_subscriptions,
 )
 from backend.ipo.sources.enrichment import (
     ENRICHMENT_SOURCE_POLICY,
@@ -612,3 +616,148 @@ def test_missing_issue_raises_typed_not_found(file_session_factory) -> None:
             captured_at=_CAPTURED_AT,
             session_factory=file_session_factory,
         )
+
+
+def _subscription_client(snippet: str, *, title: str = "Example Ltd IPO subscription") -> _FakeClient:
+    """Build a fake client that answers only the subscription-demand query."""
+    return _FakeClient({"subscription": [_result(title, snippet)]})
+
+
+def _collect(issue_id: int, client: _FakeClient, session_factory: Any, **overrides: Any):
+    """Run one collection with the fixtures' standard arguments."""
+    values: dict[str, Any] = {
+        "company_name": "Example Ltd",
+        "price_band_high": Decimal("100.00"),
+        "client": client,
+        "captured_at": _CAPTURED_AT,
+        "session_factory": session_factory,
+    }
+    values.update(overrides)
+    return collect_enrichment_signals(issue_id, **values)
+
+
+@pytest.mark.parametrize(
+    ("snippet", "expected"),
+    [
+        ("QIB portion subscribed 22.5 times on day three", "22.50"),
+        ("QIB 3x subscribed near close", "3.00"),
+        ("Qualified institutional buyers subscribed 1.4 times", "1.40"),
+        # Retail-only demand must never be read as QIB demand.
+        ("Retail portion subscribed 12 times", None),
+        # A multiple with no institutional anchor anywhere is ambiguous.
+        ("The issue was subscribed 5 times overall", None),
+        # No number at all.
+        ("QIB demand was reported as healthy", None),
+    ],
+)
+def test_subscription_demand_parsing_requires_an_institutional_anchor(
+    file_session_factory, snippet: str, expected: str | None
+) -> None:
+    """A demand multiple is only trusted when bound to an explicit QIB term.
+
+    Beginner note:
+        This number feeds a scored factor, so the parser refuses anything
+        ambiguous. Retail or overall subscription figures are common in the
+        same headlines and would badly misstate institutional demand.
+    """
+    issue = create_issue(_issue_data(), session_factory=file_session_factory)
+
+    outcome = _collect(
+        issue.id, _subscription_client(snippet), file_session_factory
+    )
+
+    signal = next(
+        item
+        for item in outcome.signals
+        if item.signal_type is IpoEnrichmentSignalType.SUBSCRIPTION_DEMAND
+    )
+    if expected is None:
+        assert signal.parsed_value is None
+    else:
+        assert signal.parsed_value == Decimal(expected)
+
+
+def test_parsed_demand_becomes_a_low_confidence_subscription_snapshot(
+    file_session_factory,
+) -> None:
+    """The web reading lands as an explicitly low-confidence snapshot."""
+    issue = create_issue(_issue_data(), session_factory=file_session_factory)
+
+    _collect(
+        issue.id,
+        _subscription_client("QIB portion subscribed 22.5 times"),
+        file_session_factory,
+    )
+
+    latest = get_latest_subscription(issue.id, session_factory=file_session_factory)
+    assert latest is not None
+    assert latest.qib_multiple == Decimal("22.50")
+    assert latest.source_confidence is Confidence.LOW
+
+
+def test_web_demand_never_shadows_an_official_snapshot(file_session_factory) -> None:
+    """Advisory data must not overwrite or outrank official demand evidence.
+
+    Beginner note:
+        Scoring reads the newest snapshot, so appending a web-sourced row
+        after an official one would silently demote real evidence. The
+        collector therefore writes nothing at all once any non-low-confidence
+        snapshot exists for the issue.
+    """
+    issue = create_issue(_issue_data(), session_factory=file_session_factory)
+    create_subscription(
+        issue.id,
+        IpoSubscriptionData(
+            captured_at=_CAPTURED_AT - dt.timedelta(hours=1),
+            qib_multiple=Decimal("40.00"),
+            source_confidence=Confidence.HIGH,
+        ),
+        session_factory=file_session_factory,
+    )
+
+    _collect(
+        issue.id,
+        _subscription_client("QIB portion subscribed 22.5 times"),
+        file_session_factory,
+    )
+
+    snapshots = list_subscriptions(issue.id, session_factory=file_session_factory)
+    assert len(snapshots) == 1
+    assert snapshots[0].source_confidence is Confidence.HIGH
+    assert snapshots[0].qib_multiple == Decimal("40.00")
+
+
+def test_unchanged_web_demand_does_not_append_a_duplicate_snapshot(
+    file_session_factory,
+) -> None:
+    """Re-running with the same reading keeps the scoring fingerprint stable.
+
+    Beginner note:
+        The scoring fingerprint includes the latest snapshot's identity. If
+        every run appended a new row, no issue would ever report
+        ``skipped_unchanged`` and the one-button screener would re-score the
+        whole book forever.
+    """
+    issue = create_issue(_issue_data(), session_factory=file_session_factory)
+    snippet = "QIB portion subscribed 22.5 times"
+
+    _collect(issue.id, _subscription_client(snippet), file_session_factory)
+    _collect(
+        issue.id,
+        _subscription_client(snippet),
+        file_session_factory,
+        captured_at=_CAPTURED_AT + dt.timedelta(hours=2),
+    )
+
+    assert len(list_subscriptions(issue.id, session_factory=file_session_factory)) == 1
+
+    # A genuinely different reading is still recorded.
+    _collect(
+        issue.id,
+        _subscription_client("QIB portion subscribed 31 times"),
+        file_session_factory,
+        captured_at=_CAPTURED_AT + dt.timedelta(hours=4),
+    )
+    snapshots = list_subscriptions(issue.id, session_factory=file_session_factory)
+    assert len(snapshots) == 2
+    assert snapshots[0].qib_multiple == Decimal("31.00")
