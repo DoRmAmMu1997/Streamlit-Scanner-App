@@ -589,6 +589,27 @@ def dhan_rate_limit_retry_delays() -> list[float]:
     return delays
 
 
+def get_ipo_auto_approve_high_confidence() -> bool:
+    """Return True when fully verified IPO extractions may approve themselves.
+
+    IPO-011: the one-button screener can only be end-to-end autonomous if some
+    proposals convert without a human. This switch is **off by default**, so
+    the shipped behaviour is exactly the reviewed one: every proposal waits in
+    the queue for an administrator.
+
+    Beginner note:
+        Turning it on only affects proposals the host already proved correct —
+        ``HIGH`` confidence means every cited value was independently
+        re-resolved from the hash-verified PDF. ``MEDIUM`` and anything weaker
+        still require a person. The approval is attributed to a reserved
+        automation identity and audit-logged, so an autonomous approval is
+        never mistaken for a human attestation.
+    """
+    load_environment()
+    raw = _clean_env_value(os.getenv("IPO_AUTO_APPROVE_HIGH_CONFIDENCE")).lower()
+    return raw in _TRUE_VALUES
+
+
 def get_ai_max_attempts() -> int:
     """Total parse attempts for one AI verdict, defaulting to 2 (i.e. one retry).
 
