@@ -573,7 +573,7 @@ def main() -> None:
     # file must never prevent an operator from inspecting past runs.
     # "Validation / Signal Performance" is a read-only analytical view (like Scan
     # history) available to every authenticated user, not an admin-only page.
-    # "IPO screener" (IPO-007) is the same kind of read-only analytical view:
+    # "IPO dashboard" (IPO-007) is the same kind of read-only analytical view:
     # every authenticated user can inspect verdicts, while the re-score action
     # inside the page is additionally gated on MANAGE_IPO_DATA.
     view_options = [
@@ -581,7 +581,7 @@ def main() -> None:
         "Scan history",
         "Scan comparison",
         "Validation / Signal Performance",
-        "IPO screener",
+        "IPO dashboard",
     ]
     if role_has_capability(current_role, VIEW_HEALTH):
         # AUTH-003: the admin tier sees the operate-the-system pages — health, the
@@ -621,7 +621,7 @@ def main() -> None:
             can_export=role_has_capability(current_role, EXPORT_RESULTS)
         )
         return
-    if view == "IPO screener":
+    if view == "IPO dashboard":
         _render_ipo_page(
             can_rescore=role_has_capability(current_role, MANAGE_IPO_DATA),
             user_email=current_email,

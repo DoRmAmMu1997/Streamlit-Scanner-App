@@ -151,6 +151,30 @@ technology issuers remain unsupported.
 
 ## Running the complete IPO screener
 
+### From the UI (IPO-011)
+
+Pick **IPO Screener** in the screener dropdown and press **Run screener**. It
+runs the same pipeline as the CLI below, needs no Dhan credentials or stock
+universe, and reports one row per IPO issue. The sidebar's *Tune parameters*
+expander maps one checkbox to each stage: `run_ingestion`,
+`download_documents`, `collect_enrichment`, `draft_ai_extractions`,
+`only_active_issues`, `max_issues`.
+
+`draft_ai_extractions` is **off by default** because the button is
+analyst-accessible and AI extraction spends Claude plan credit. The run blocks
+the browser tab for its duration, so keep `max_issues` modest in the UI and
+use the CLI for bulk runs.
+
+Set `IPO_AUTO_APPROVE_HIGH_CONFIDENCE=true` to let fully verified
+(`HIGH`-confidence) proposals convert without a human. It is off by default;
+`MEDIUM` and weaker always wait for review. Autonomous approvals are recorded
+against `ipo-automation@screener.local` so they are never mistaken for a human
+attestation. **Until IPO-011's price-band follow-up lands, issues with no
+price band still resolve to "Insufficient verified data"** — valuation is a
+critical factor.
+
+### From the CLI
+
 IPO-008 provides the idempotent backend-only pipeline:
 
 ```bash

@@ -245,7 +245,8 @@ allowlist gate. Full details and the **accepted residual risks**:
   [ipo-007 dashboard](docs/architecture/ipo-007-dashboard.md) ·
   [ipo-008 orchestration](docs/architecture/ipo-008-screener-orchestration.md) ·
   [ipo-009 enrichment](docs/architecture/ipo-009-serpapi-enrichment.md) ·
-  [ipo-010 AI extraction](docs/architecture/ipo-010-ai-extraction-proposals.md)
+  [ipo-010 AI extraction](docs/architecture/ipo-010-ai-extraction-proposals.md) ·
+  [ipo-011 one-button screener](docs/architecture/ipo-011-one-button-screener.md)
 - **Observability / audit / config:** [observability](docs/architecture/components/observability.md) ·
   [audit-log](docs/architecture/components/audit-log.md) ·
   [obs-003 design](docs/architecture/obs-003-audit-log.md) ·

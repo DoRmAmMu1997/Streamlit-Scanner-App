@@ -88,6 +88,20 @@ matches. The registry does not validate the universe key; choose a key from
 broken screener file produces a clear sidebar error instead of taking down the
 app.
 
+### Screeners that do not scan candles
+
+A screener that owns its own data sources (the IPO pipeline is the first) adds
+`"requires_candles": False` to its `SCREENER` dict. The UI then skips the Dhan
+credential check, the universe load, and the `DailyDataLoader`, and calls
+`run(None, None, params)`. The `universe` key becomes a display/history label
+only, so it does not need to exist in `UNIVERSE_CONFIG`.
+
+Such a screener must still accept the three positional parameters (the
+registry checks their names) and still implement `compute_signal`, because
+`BaseScanner` is abstract and the registry instantiates the class.
+`screeners/ipo_screener.py` is the reference example. The default is `True`,
+so omitting the key keeps the normal candle behaviour.
+
 ## 2. Annotate class attributes with ClassVar
 
 `SCREENER` and `EXTRA_RESULT_COLUMNS` are class-level constants; annotate them

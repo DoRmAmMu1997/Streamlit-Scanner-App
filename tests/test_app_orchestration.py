@@ -615,7 +615,7 @@ def test_admin_health_view_is_available_and_returns_before_screener_discovery(
             "Scan history",
             "Scan comparison",
             "Validation / Signal Performance",
-            "IPO screener",
+            "IPO dashboard",
             "Admin health",
             "Admin settings",
             "Admin IPO extraction",
@@ -911,7 +911,7 @@ def test_non_admin_cannot_select_admin_health(monkeypatch):
             "Scan history",
             "Scan comparison",
             "Validation / Signal Performance",
-            "IPO screener",
+            "IPO dashboard",
         )
         return "Scanner"
 
