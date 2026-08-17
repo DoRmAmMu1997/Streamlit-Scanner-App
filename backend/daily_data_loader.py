@@ -415,6 +415,42 @@ class DailyDataLoader:
             candles.to_parquet(path, index=False)
         return self._slice_to_range(candles, start_date, end_date), False
 
+    def fetch_window(
+        self,
+        instrument: Mapping[str, object] | pd.Series,
+        start_date: date | datetime | str,
+        end_date: date | datetime | str,
+    ) -> pd.DataFrame:
+        """Fetch one date window from Dhan **without touching the cache file**.
+
+        Every other fetch path here writes what it downloads straight to the
+        symbol's parquet. That is exactly wrong for the DATA-002 repair, which
+        needs to pull a bounded window (say, the day around a corrupt bar) and
+        merge it *over* ten years of otherwise-good history — writing the window
+        directly would truncate the file to those few days.
+
+        So this method deliberately does the network half only: the same
+        rate-limit pacing, DH-904 backoff, and optional timeout as every other
+        fetch, but the caller owns what happens to the result. An empty frame
+        means the vendor genuinely has no rows for that window (a real holiday
+        stretch, or history that predates the listing) — not an error.
+        """
+        row = dict(instrument)
+        symbol = str(row.get("symbol", "")).strip().upper()
+        security_id = str(row.get("security_id", "")).strip()
+        if not symbol:
+            raise ValueError("Instrument row is missing symbol")
+        if not security_id:
+            raise ValueError(f"{symbol} is missing security_id")
+
+        return self._fetch_with_rate_limit_retries(
+            security_id=security_id,
+            exchange_segment=str(row.get("exchange_segment", "NSE_EQ") or "NSE_EQ").strip(),
+            instrument_type=str(row.get("instrument_type", "EQUITY") or "EQUITY").strip(),
+            from_date=start_date,
+            to_date=end_date,
+        )
+
     def ensure_daily_history(
         self,
         instrument: Mapping[str, object] | pd.Series,
@@ -1130,32 +1166,39 @@ class DailyDataLoader:
         max_age_days: int,
         now: datetime | None = None,
     ) -> int:
-        """Remove old parquet cache files and orphan `.checked` markers.
+        """Remove old parquet cache files and orphan sidecar markers.
 
         Daily cache files can grow stale when symbols leave a universe or a
         security ID changes. This helper is intentionally explicit: callers
         choose the age threshold, and only daily parquet files plus their
         sidecar markers are touched.
+
+        Two sidecar kinds travel with a parquet: `.checked` (the empty-increment
+        marker written here) and `.repaired` (the DATA-002 repair cooldown). Both
+        are meaningless without their parquet, so an orphan of either is removed
+        regardless of age.
         """
         if not self.cache_dir.exists():
             return 0
         now = now or datetime.now()
         cutoff = now - timedelta(days=max(1, int(max_age_days)))
         targets: set[Path] = set()
+        sidecar_suffixes = (".checked", ".repaired")
 
         for parquet in self.cache_dir.glob("*.parquet"):
             modified = datetime.fromtimestamp(parquet.stat().st_mtime)
             if modified < cutoff:
                 targets.add(parquet)
-                checked = parquet.with_suffix(".checked")
-                if checked.exists():
-                    targets.add(checked)
+                for suffix in sidecar_suffixes:
+                    sidecar = parquet.with_suffix(suffix)
+                    if sidecar.exists():
+                        targets.add(sidecar)
 
-        for checked in self.cache_dir.glob("*.checked"):
-            # A checked marker without a parquet owner can never be used again,
-            # so remove it regardless of age.
-            if not checked.with_suffix(".parquet").exists():
-                targets.add(checked)
+        for suffix in sidecar_suffixes:
+            for sidecar in self.cache_dir.glob(f"*{suffix}"):
+                # A marker without a parquet owner can never be used again.
+                if not sidecar.with_suffix(".parquet").exists():
+                    targets.add(sidecar)
 
         deleted = 0
         for path in sorted(targets):

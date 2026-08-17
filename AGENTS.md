@@ -75,7 +75,7 @@ review → `/code-review` + `/security-review`; everything → `/using-superpowe
 | `config/` | Typed runtime settings from env (`get_settings`, `AppSettings`, `SettingsError`). |
 | `fundamentals/`, `technical/`, `sixty_seven/` | The three AI-assisted subsystems. |
 | `ipo/` | IPO domain: SEBI filing ingestion, verified content-addressed document cache, manual extraction records, deterministic ratio engine, immutable score/recommendation history, factor derivation + hard caution flags (`scoring/`), read-only dashboard builder, quarantined SerpAPI enrichment (`sources/enrichment.py`), and the fail-closed AI extraction agent (`agents/`, `documents/table_extractor.py`, `documents/section_classifier.py`) (IPO-001…010). |
-| `jobs/` | Headless CLIs (daily scan, forward-return computation, IPO filing ingestion, and the idempotent IPO scan/download/enrich/extract/score pipeline). |
+| `jobs/` | Headless CLIs (daily scan, forward-return computation, candle cache repair, IPO filing ingestion, and the idempotent IPO scan/download/enrich/extract/score pipeline). |
 | `admin/`, `auth/`, `notifications/`, `data_quality/` | Config overrides, OIDC gate, alerts, candle-quality receipts. |
 | `screener_registry.py`, `scanner_base.py`, `indicators.py`, `daily_data_loader.py`, `universe_*` | Screener framework, indicators, candle cache, universe management. |
 
@@ -230,6 +230,7 @@ allowlist gate. Full details and the **accepted residual risks**:
   [valid-002 handoff](docs/architecture/valid-002-handoff.md) ·
   [validation LLD](docs/architecture/components/validation.md)
 - **Data quality / acquisition:** [data-quality](docs/architecture/components/data-quality.md) ·
+  [data-002 cache repair](docs/architecture/data-002-candle-cache-repair.md) ·
   [data-acquisition](docs/architecture/components/data-acquisition.md)
 - **AI subsystems:** [fundamentals-ai](docs/architecture/components/fundamentals-ai.md) ·
   [technical-analysis-ai](docs/architecture/components/technical-analysis-ai.md) ·
@@ -273,6 +274,10 @@ python -m backend.jobs.run_daily_scan
 
 # Forward-return validation job
 python -m backend.jobs.compute_forward_returns
+
+# Repair dirty cached candles (also runs automatically at the end of `python app.py`)
+python -m backend.jobs.repair_candle_cache --dry-run
+python -m backend.jobs.repair_candle_cache
 
 # IPO filing ingestion (SEBI listings -> filing inventory)
 python -m backend.jobs.scan_ipo_filings

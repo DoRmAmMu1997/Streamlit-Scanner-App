@@ -28,6 +28,7 @@ from backend.storage.models import (
     AIEvaluation,
     AppConfig,
     AuditLog,
+    CandleRepairRun,
     ForwardReturnStatus,
     ScanResult,
     ScanRun,
@@ -763,6 +764,72 @@ def create_audit_log_entry(
     session.add(entry)
     session.flush()
     return entry
+
+
+def create_candle_repair_run(
+    session: Session,
+    *,
+    trigger: str,
+) -> CandleRepairRun:
+    """Open a DATA-002 repair-run header row and return it.
+
+    Called *before* the pass starts, so a crash mid-repair still leaves a row with
+    ``finished_at IS NULL`` — which is exactly the evidence an operator wants when
+    the morning cleanup died halfway through. ``flush`` assigns ``run.id`` without
+    ending the caller's transaction (the caller owns it, per REFACTOR-002).
+    """
+    run = CandleRepairRun(trigger=str(trigger))
+    session.add(run)
+    session.flush()
+    return run
+
+
+def finish_candle_repair_run(
+    session: Session,
+    run: CandleRepairRun,
+    *,
+    symbols_checked: int,
+    symbols_repaired: int,
+    symbols_unrepairable: int,
+    rows_removed: int,
+    refetch_count: int,
+    receipt: Mapping[str, Any] | None = None,
+) -> None:
+    """Stamp the finishing counts and receipt onto an open repair run.
+
+    ``receipt`` goes through ``normalize_secret_safe_json`` for the same reason
+    ``audit_logs.metadata_json`` does: the builder already redacts, and this is the
+    defence-in-depth hop that guarantees whatever lands in the JSON column is
+    strict, secret-free JSON.
+    """
+    from backend.scanning.result_contract import normalize_secret_safe_json
+
+    run.finished_at = dt.datetime.now(dt.UTC)
+    run.symbols_checked = int(symbols_checked)
+    run.symbols_repaired = int(symbols_repaired)
+    run.symbols_unrepairable = int(symbols_unrepairable)
+    run.rows_removed = int(rows_removed)
+    run.refetch_count = int(refetch_count)
+    run.receipt_json = cast(
+        dict[str, Any] | None,
+        normalize_secret_safe_json(dict(receipt)) if receipt else None,
+    )
+    session.add(run)
+    session.flush()
+
+
+def get_latest_candle_repair_run(session: Session) -> CandleRepairRun | None:
+    """Return the newest repair pass, or None when none has run yet.
+
+    Admin health calls this. The primary-key tie-breaker keeps the order
+    deterministic when two passes start in the same millisecond.
+    """
+    stmt = (
+        select(CandleRepairRun)
+        .order_by(CandleRepairRun.started_at.desc(), CandleRepairRun.id.desc())
+        .limit(1)
+    )
+    return session.scalars(stmt).first()
 
 
 def get_recent_audit_logs(

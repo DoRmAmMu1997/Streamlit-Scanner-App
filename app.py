@@ -31,7 +31,7 @@ import logging
 import sys
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import streamlit as st
 from streamlit.runtime.scriptrunner import get_script_run_ctx
@@ -67,9 +67,15 @@ from backend.daily_data_loader import (
     DailyDataLoader,
     history_start_date,
 )
+from backend.data_quality.cache_repair import CacheRepairSummary, repair_universe
 from backend.dhan_client import DhanDataClient
+from backend.jobs.repair_candle_cache import (
+    persist_repair_summary,
+    print_repair_summary,
+)
 from backend.observability import (
     EVENT_ADMIN_PAGE_ACCESSED,
+    EVENT_CANDLE_CACHE_REPAIR_FAILED,
     EVENT_DATA_REFRESH_COMPLETED,
     EVENT_DATA_REFRESH_STARTED,
     EVENT_LOGIN_SUCCESS,
@@ -139,6 +145,7 @@ from ui.health_page import (  # noqa: F401
     _format_health_time,
     _health_scan_context,
     _render_admin_health_page,
+    _render_candle_repair_summary,
 )
 from ui.history_page import (  # noqa: F401
     _HISTORY_ERROR_PREVIEW_CHARS,
@@ -325,6 +332,11 @@ def prefetch_data_assets() -> None:
 
     total = len(union)
     status_counts: dict[str, int] = {}
+    # Remember each symbol's top-up result. The DATA-002 repair below uses it to
+    # tell "this cache is stale because Dhan has nothing newer" (nothing to fix)
+    # apart from "this cache is stale because its top-up failed" (worth retrying),
+    # which is what stops the repair re-requesting the tail for every symbol.
+    prefetch_statuses: dict[str, str] = {}
     # The loader streams outcomes in input order; with SCANNER_DHAN_FETCH_WORKERS
     # above 1 it overlaps Dhan latency and parquet I/O behind the scenes
     # (PERF-001) while this loop's terminal output stays identical.
@@ -332,6 +344,7 @@ def prefetch_data_assets() -> None:
         union.to_dict("records"), years_back=_PREFETCH_YEARS_BACK
     )
     for index, outcome in enumerate(outcomes, start=1):
+        prefetch_statuses[outcome.symbol.strip().upper()] = outcome.status
         if outcome.status == "failed":
             status_counts["failed"] = status_counts.get("failed", 0) + 1
             print(
@@ -348,6 +361,19 @@ def prefetch_data_assets() -> None:
 
     summary = ", ".join(f"{key}={value}" for key, value in sorted(status_counts.items()))
     print(f"[prefetch] Candle prefetch complete: {summary}.", flush=True)
+
+    # DATA-002: now that every candle file is as up to date as Dhan allows, try to
+    # CLEAN the ones that are malformed. Doing it here — after the update, before
+    # Streamlit boots — means the app always starts against the best cache we can
+    # produce, instead of silently dropping corrupt symbols from every scan.
+    repair_summary = repair_candle_cache_assets(
+        loader,
+        # ``to_dict("records")`` is typed with ``Hashable`` keys; a universe
+        # frame's columns are always plain strings.
+        cast(list[dict[str, Any]], union.to_dict("records")),
+        prefetch_statuses,
+    )
+
     print("[prefetch] Done. Launching Streamlit UI...", flush=True)
     # OBS-001: report the candle outcome so a boot-time/scheduled refresh can be
     # monitored. status_counts are counts (downloaded/appended/failed), not secrets.
@@ -357,7 +383,51 @@ def prefetch_data_assets() -> None:
         status="ok",
         mapped_symbols=total,
         candle_status_counts=dict(status_counts),
+        candles_repaired=(
+            repair_summary.symbols_repaired if repair_summary is not None else 0
+        ),
     )
+
+
+def repair_candle_cache_assets(
+    loader: DailyDataLoader,
+    rows: list[dict[str, Any]],
+    prefetch_statuses: dict[str, str],
+) -> CacheRepairSummary | None:
+    """Run the DATA-002 cache repair as the last step of the prefetch.
+
+    Returns the summary, or ``None`` when the pass could not run at all.
+
+    Deliberately swallows every exception: a repair is an *improvement* step, so a
+    failure here must never stop the user reaching their app. The same posture the
+    universe-refresh path above takes — report it to the terminal and the logs,
+    then carry on booting Streamlit against whatever cache we have.
+    """
+    try:
+        summary = repair_universe(
+            loader,
+            rows,
+            today=date.today(),
+            years_back=_PREFETCH_YEARS_BACK,
+            prefetch_statuses=prefetch_statuses,
+        )
+        print_repair_summary(summary)
+        persist_repair_summary(summary, trigger="prefetch")
+        return summary
+    except Exception as exc:
+        logger.exception("Candle cache repair failed during prefetch")
+        print(
+            f"[repair] WARNING: cache repair failed: {_redact_secrets(str(exc))}",
+            flush=True,
+        )
+        log_event(
+            logger,
+            EVENT_CANDLE_CACHE_REPAIR_FAILED,
+            level=logging.ERROR,
+            phase="prefetch",
+            error_type=type(exc).__name__,
+        )
+        return None
 
 
 def launch_streamlit_from_plain_python() -> None:

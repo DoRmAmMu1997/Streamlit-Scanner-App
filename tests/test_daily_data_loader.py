@@ -788,6 +788,44 @@ def test_cleanup_stale_cache_files_removes_old_parquets_and_orphan_markers(tmp_p
     assert recent_parquet.exists()
 
 
+def test_cleanup_stale_cache_files_also_handles_repair_sidecars(tmp_path):
+    """DATA-002 `.repaired` markers travel with their parquet, like `.checked`."""
+    old_parquet = tmp_path / "OLD_1.parquet"
+    old_repaired = tmp_path / "OLD_1.repaired"
+    recent_parquet = tmp_path / "RECENT_2.parquet"
+    recent_repaired = tmp_path / "RECENT_2.repaired"
+    orphan_repaired = tmp_path / "ORPHAN_3.repaired"
+    for path in (
+        old_parquet,
+        old_repaired,
+        recent_parquet,
+        recent_repaired,
+        orphan_repaired,
+    ):
+        path.write_bytes(b"x")
+
+    old_time = datetime(2026, 1, 1).timestamp()
+    recent_time = datetime(2026, 6, 1).timestamp()
+    os.utime(old_parquet, (old_time, old_time))
+    os.utime(old_repaired, (old_time, old_time))
+    for path in (recent_parquet, recent_repaired, orphan_repaired):
+        os.utime(path, (recent_time, recent_time))
+
+    loader = DailyDataLoader(FakeDhanClient(), cache_dir=tmp_path, request_delay_seconds=0.0)
+    removed = loader.cleanup_stale_cache_files(
+        max_age_days=30,
+        now=datetime(2026, 6, 2),
+    )
+
+    assert removed == 3
+    assert not old_parquet.exists()
+    assert not old_repaired.exists()
+    assert not orphan_repaired.exists()
+    # A marker whose parquet is still current must survive.
+    assert recent_parquet.exists()
+    assert recent_repaired.exists()
+
+
 # ---------------------------------------------------------------------------
 # PERF-001: parallel fetching, the shared request pacer, and prefetch streaming
 # ---------------------------------------------------------------------------

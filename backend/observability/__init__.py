@@ -101,6 +101,14 @@ EVENT_EXTERNAL_API_FAILED = "external_api_failed"
 # *codes* only, never raw prices.
 EVENT_CANDLE_DATA_QUALITY_WARNING = "candle_data_quality_warning"
 EVENT_CANDLE_DATA_QUALITY_FAILED = "candle_data_quality_failed"
+# DATA-002 candle cache-repair events. Where the DATA-001 events above only
+# *report* dirty data, these record the attempt to fix it: one pair around the
+# whole pass, one per repaired symbol, and one for an error. Like their DATA-001
+# siblings they carry finding/action codes and counts only, never prices.
+EVENT_CANDLE_CACHE_REPAIR_STARTED = "candle_cache_repair_started"
+EVENT_CANDLE_CACHE_REPAIR_COMPLETED = "candle_cache_repair_completed"
+EVENT_CANDLE_CACHE_SYMBOL_REPAIRED = "candle_cache_symbol_repaired"
+EVENT_CANDLE_CACHE_REPAIR_FAILED = "candle_cache_repair_failed"
 EVENT_AUTH_DENIED = "auth_denied"
 EVENT_DATA_REFRESH_STARTED = "data_refresh_started"
 EVENT_DATA_REFRESH_COMPLETED = "data_refresh_completed"
@@ -138,6 +146,10 @@ ExceptionInfo = tuple[type[BaseException], BaseException, TracebackType]
 __all__ = [
     "EVENT_ADMIN_PAGE_ACCESSED",
     "EVENT_AUTH_DENIED",
+    "EVENT_CANDLE_CACHE_REPAIR_COMPLETED",
+    "EVENT_CANDLE_CACHE_REPAIR_FAILED",
+    "EVENT_CANDLE_CACHE_REPAIR_STARTED",
+    "EVENT_CANDLE_CACHE_SYMBOL_REPAIRED",
     "EVENT_CANDLE_DATA_QUALITY_FAILED",
     "EVENT_CANDLE_DATA_QUALITY_WARNING",
     "EVENT_CONFIG_CHANGED",

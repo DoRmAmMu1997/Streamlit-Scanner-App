@@ -28,7 +28,12 @@ import pyarrow.parquet as pq
 
 from backend.config.settings import AppSettings, get_settings
 from backend.security import redact_text
-from backend.storage import ScanStatus, get_latest_scan_runs, session_scope
+from backend.storage import (
+    ScanStatus,
+    get_latest_candle_repair_run,
+    get_latest_scan_runs,
+    session_scope,
+)
 
 
 @dataclass(frozen=True)
@@ -96,12 +101,49 @@ class DataQualityRunHealth:
 
 
 @dataclass(frozen=True)
+class CandleRepairOutcomeHealth:
+    """One per-symbol repair outcome copied out of the persisted receipt."""
+
+    symbol: str
+    status: str
+    before_codes: tuple[str, ...]
+    after_codes: tuple[str, ...]
+    actions: tuple[str, ...]
+    rows_removed: int
+    message: str | None
+
+
+@dataclass(frozen=True)
+class CandleRepairRunHealth:
+    """Detached summary of the newest DATA-002 candle cache-repair pass.
+
+    Mirrors ``DataQualityRunHealth`` above: plain scalars only, copied while the
+    session is open so the snapshot stays safe to cache for the health page's
+    60-second window.
+    """
+
+    run_id: int
+    started_at: dt.datetime
+    finished_at: dt.datetime | None
+    trigger: str
+    symbols_checked: int
+    symbols_repaired: int
+    symbols_unrepairable: int
+    rows_removed: int
+    refetch_count: int
+    total_outcomes: int
+    outcomes_truncated: bool
+    outcomes: tuple[CandleRepairOutcomeHealth, ...]
+
+
+@dataclass(frozen=True)
 class AdminHealthSnapshot:
     """One immutable, cacheable view of local application readiness."""
 
     last_successful_scan: ScanRunHealth | None
     last_failed_scan: ScanRunHealth | None
     latest_data_quality_run: DataQualityRunHealth | None
+    latest_candle_repair_run: CandleRepairRunHealth | None
     last_data_refresh: dt.datetime | None
     cached_symbol_count: int
     latest_candle_date: dt.date | None
@@ -151,6 +193,7 @@ def collect_admin_health(settings: AppSettings | None = None) -> AdminHealthSnap
     successful_scan: ScanRunHealth | None = None
     failed_scan: ScanRunHealth | None = None
     latest_quality_run: DataQualityRunHealth | None = None
+    latest_repair_run: CandleRepairRunHealth | None = None
     try:
         with session_scope() as session:
             successful_runs = get_latest_scan_runs(
@@ -175,6 +218,12 @@ def collect_admin_health(settings: AppSettings | None = None) -> AdminHealthSnap
                 latest_quality_run = _copy_data_quality_run(run)
                 if latest_quality_run is not None:
                     break
+            # DATA-002: the newest cache-repair pass. Unlike the quality receipt
+            # above there is no scanning to do — the repair table holds one row
+            # per pass, so the newest row is always the one we want.
+            latest_repair_run = _copy_candle_repair_run(
+                get_latest_candle_repair_run(session)
+            )
         database_health = ServiceHealth(
             "Database",
             "ready",
@@ -191,6 +240,7 @@ def collect_admin_health(settings: AppSettings | None = None) -> AdminHealthSnap
         last_successful_scan=successful_scan,
         last_failed_scan=failed_scan,
         latest_data_quality_run=latest_quality_run,
+        latest_candle_repair_run=latest_repair_run,
         last_data_refresh=last_data_refresh,
         cached_symbol_count=cache.cached_symbol_count,
         latest_candle_date=cache.latest_candle_date,
@@ -268,6 +318,73 @@ def _copy_data_quality_run(run: Any) -> DataQualityRunHealth | None:
         findings_truncated=bool(receipt.get("findings_truncated", False)),
         findings=tuple(findings),
     )
+
+
+def _copy_candle_repair_run(run: Any) -> CandleRepairRunHealth | None:
+    """Copy a persisted DATA-002 repair receipt into a detached, render-ready value.
+
+    Read just as defensively as ``_copy_data_quality_run`` above and for the same
+    reason: the receipt is JSON written by whichever app version ran the repair, so
+    no key or type is assumed. A run whose receipt is missing or malformed still
+    yields a value here — unlike the quality receipt, the header row's *counts* are
+    real columns, so an operator can see that a pass happened even if its detail
+    list cannot be parsed.
+    """
+    if run is None:
+        return None
+
+    receipt = getattr(run, "receipt_json", None)
+    mapping: Mapping[str, Any] = receipt if isinstance(receipt, Mapping) else {}
+
+    outcomes: list[CandleRepairOutcomeHealth] = []
+    raw_outcomes = mapping.get("outcomes", [])
+    if isinstance(raw_outcomes, list):
+        for raw_outcome in raw_outcomes:
+            # Skip anything that isn't a dict-like row rather than trusting the shape.
+            if not isinstance(raw_outcome, Mapping):
+                continue
+            outcomes.append(
+                CandleRepairOutcomeHealth(
+                    symbol=str(raw_outcome.get("symbol") or "UNKNOWN"),
+                    status=str(raw_outcome.get("status") or "unknown"),
+                    before_codes=_as_code_tuple(raw_outcome.get("before_codes")),
+                    after_codes=_as_code_tuple(raw_outcome.get("after_codes")),
+                    actions=_as_code_tuple(raw_outcome.get("actions")),
+                    rows_removed=max(
+                        0,
+                        _as_int(raw_outcome.get("rows_before"))
+                        - _as_int(raw_outcome.get("rows_after")),
+                    ),
+                    # Belt and braces: the builder already redacted this.
+                    message=(
+                        redact_text(str(raw_outcome.get("message")))
+                        if raw_outcome.get("message")
+                        else None
+                    ),
+                )
+            )
+
+    return CandleRepairRunHealth(
+        run_id=int(run.id),
+        started_at=run.started_at,
+        finished_at=run.finished_at,
+        trigger=str(getattr(run, "trigger", "") or "unknown"),
+        symbols_checked=_as_int(getattr(run, "symbols_checked", 0)),
+        symbols_repaired=_as_int(getattr(run, "symbols_repaired", 0)),
+        symbols_unrepairable=_as_int(getattr(run, "symbols_unrepairable", 0)),
+        rows_removed=_as_int(getattr(run, "rows_removed", 0)),
+        refetch_count=_as_int(getattr(run, "refetch_count", 0)),
+        total_outcomes=_as_int(mapping.get("total_outcomes", len(outcomes))),
+        outcomes_truncated=bool(mapping.get("outcomes_truncated", False)),
+        outcomes=tuple(outcomes),
+    )
+
+
+def _as_code_tuple(value: Any) -> tuple[str, ...]:
+    """Coerce a receipt's code list into a tuple of strings, tolerating junk."""
+    if not isinstance(value, list):
+        return ()
+    return tuple(str(item) for item in value if item is not None)
 
 
 def _inspect_candle_cache(cache_dir: Path) -> _CacheInspection:
