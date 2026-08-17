@@ -215,6 +215,128 @@ def test_execute_screener_uses_ten_year_data_window_independent_of_lookback(monk
     assert captured_params["start_date"] == real_date(2016, 6, 2)
 
 
+def test_execute_screener_skips_candle_setup_when_screener_declares_no_candles(monkeypatch):
+    """An event-driven screener runs without Dhan credentials or a universe CSV.
+
+    Beginner note:
+        Every screener before IPO-011 scanned stock candles, so the dispatcher
+        always demanded credentials, a universe file, and a data loader. The
+        IPO pipeline owns its own sources, so it declares
+        ``requires_candles: False``. This test proves the dispatcher skips all
+        three instead of aborting -- the credential and universe fakes below
+        raise if they are consulted at all.
+    """
+    captured: dict = {}
+
+    def fake_run_scan(
+        *, screener_key, universe_key, run_callable, universe_df, data_loader,
+        params, triggered_by="ui",
+    ):
+        """Capture what the dispatcher forwarded to the scan service."""
+        captured.update(
+            {
+                "universe_key": universe_key,
+                "universe_df": universe_df,
+                "data_loader": data_loader,
+            }
+        )
+        return ScanRunResult(status=ScanStatus.SUCCESS, results=pd.DataFrame())
+
+    selected = ScreenerDefinition(
+        key="ipo_screener",
+        name="IPO Screener",
+        description="Test-only event-driven screener",
+        universe="ipo_filings",
+        timeframe="event-driven",
+        lookback_days=0,
+        default_params={},
+        module_name="screeners.ipo_screener",
+        run=lambda *_args, **_kwargs: pd.DataFrame(),
+        requires_candles=False,
+    )
+
+    def _must_not_be_called(*_args, **_kwargs):
+        """Fail loudly if candle-only setup runs for an event-driven screener."""
+        raise AssertionError("candle setup must be skipped when requires_candles is False")
+
+    monkeypatch.setattr(app, "date", _FixedDate)
+    monkeypatch.setattr(app, "credential_status", _must_not_be_called)
+    monkeypatch.setattr(app, "load_universe", _must_not_be_called)
+    monkeypatch.setattr(app, "DailyDataLoader", _must_not_be_called)
+    monkeypatch.setattr(app, "run_scan", fake_run_scan)
+    monkeypatch.setattr(
+        app,
+        "st",
+        SimpleNamespace(
+            progress=lambda _value: _FakeProgress(),
+            empty=lambda: _FakeEmpty(),
+            error=lambda message: (_ for _ in ()).throw(AssertionError(message)),
+        ),
+    )
+
+    cache = app._execute_screener(selected)
+
+    assert cache is not None
+    # The scan service tolerates a None universe; symbols_scanned becomes NULL.
+    assert captured["universe_df"] is None
+    assert captured["data_loader"] is None
+    assert captured["universe_key"] == "ipo_filings"
+
+
+def test_execute_screener_still_requires_credentials_for_candle_screeners(monkeypatch):
+    """The opt-out must not weaken the guard for ordinary candle screeners."""
+    errors: list[str] = []
+
+    selected = ScreenerDefinition(
+        key="demo",
+        name="Demo",
+        description="Test-only screener",
+        universe="demo_universe",
+        timeframe="daily",
+        lookback_days=30,
+        default_params={},
+        module_name="screeners.demo",
+        run=lambda *_args, **_kwargs: pd.DataFrame(),
+    )
+
+    monkeypatch.setattr(app, "date", _FixedDate)
+    monkeypatch.setattr(app, "credential_status", lambda: {"ready": False})
+    monkeypatch.setattr(
+        app,
+        "run_scan",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not run")),
+    )
+    monkeypatch.setattr(
+        app,
+        "st",
+        SimpleNamespace(
+            progress=lambda _value: _FakeProgress(),
+            empty=lambda: _FakeEmpty(),
+            error=errors.append,
+        ),
+    )
+
+    assert app._execute_screener(selected) is None
+    assert any("Dhan credentials" in message for message in errors)
+
+
+def test_screener_definition_defaults_to_requiring_candles():
+    """Screeners that omit the flag keep the pre-IPO-011 behaviour."""
+    definition = ScreenerDefinition(
+        key="demo",
+        name="Demo",
+        description="Test-only screener",
+        universe="demo_universe",
+        timeframe="daily",
+        lookback_days=30,
+        default_params={},
+        module_name="screeners.demo",
+        run=lambda *_args, **_kwargs: pd.DataFrame(),
+    )
+
+    assert definition.requires_candles is True
+
+
 def test_redact_secrets_masks_serpapi_and_agent_keys(monkeypatch):
     monkeypatch.setenv("SERPAPI_API_KEY", "serp-secret")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-secret")

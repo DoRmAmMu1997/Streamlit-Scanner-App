@@ -67,7 +67,13 @@ logger = logging.getLogger(__name__)
 
 
 # A "run callable" is any screener's ``run(universe_df, data_loader, params)``.
-RunCallable = Callable[[pd.DataFrame, Any, dict[str, Any]], pd.DataFrame]
+#
+# Beginner note:
+# ``universe_df`` is optional because IPO-011 introduced event-driven screeners
+# that own their own data sources and never receive a stock universe. The
+# service already tolerated ``None`` (``symbols_scanned`` becomes NULL); this
+# annotation just tells the truth about that.
+RunCallable = Callable[[pd.DataFrame | None, Any, dict[str, Any]], pd.DataFrame]
 # A session factory returns a transactional Session context manager (commit on
 # success, rollback on error). Defaults to the real database; tests pass a factory
 # bound to a temporary database.
@@ -110,7 +116,7 @@ def run_scan(
     universe_key: str,
     scan_name: str | None = None,
     run_callable: RunCallable,
-    universe_df: pd.DataFrame,
+    universe_df: pd.DataFrame | None,
     data_loader: Any,
     params: dict[str, Any],
     triggered_by: str | None = "ui",
@@ -529,7 +535,7 @@ def _score_results_safely(
     scan_name: str | None,
     screener_key: str,
     universe_key: str,
-    universe_df: pd.DataFrame,
+    universe_df: pd.DataFrame | None,
     data_loader: Any,
     data_snapshot_date: dt.date | None,
 ) -> pd.DataFrame:
@@ -557,7 +563,11 @@ def _score_results_safely(
             results,
             context=ScoringContext(
                 universe_key=universe_key,
-                universe_df=universe_df,
+                # An event-driven screener (IPO-011) has no stock universe. An
+                # empty frame keeps RANK-002's contract unchanged and means
+                # "no symbol maps to a security id", which is already the
+                # scorer's documented path to a null final_score.
+                universe_df=universe_df if universe_df is not None else pd.DataFrame(),
                 data_loader=data_loader,
                 data_snapshot_date=data_snapshot_date,
                 config=load_scoring_config(),
