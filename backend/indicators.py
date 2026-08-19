@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Hashable
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -976,7 +976,10 @@ def bullish_knoxville_divergences(
         # Iterate backward so the stored comparison pair is the nearest prior
         # pivot, matching the legacy single-divergence function's choice.
         for prior_index in reversed(prior_pivots.index.tolist()):
-            prior = enriched.loc[int(prior_index)]
+            # pandas-stubs types ``.loc[scalar]`` as possibly returning a
+            # DataFrame (a duplicated index would), so narrow to the single
+            # row this lookup always produces before reading its columns.
+            prior = cast("pd.Series[Any]", enriched.loc[int(prior_index)])
             price_made_lower_low = float(latest["low"]) < float(prior["low"])
             momentum_made_higher_low = float(latest["momentum"]) > float(prior["momentum"])
             if price_made_lower_low and momentum_made_higher_low:

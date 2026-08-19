@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
+from typing import Any, cast
 
 import pandas as pd
 
@@ -94,7 +95,9 @@ def shortlist_candidate(
     # idxmax ignores NaN and returns the FIRST bar that reached the highest high.
     ath_index = highs.idxmax()
     latest = frame.iloc[-1]
-    ath_row = frame.loc[ath_index]
+    # pandas-stubs types ``.loc[scalar]`` as possibly returning a DataFrame
+    # (a duplicated index would), so narrow to the single row idxmax names.
+    ath_row = cast("pd.Series[Any]", frame.loc[ath_index])
     ath_price = float(ath_row["high"])
     latest_close = float(latest["close"])
     # Guard against zero/garbage prices before we divide by them.
