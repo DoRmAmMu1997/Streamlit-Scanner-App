@@ -1549,7 +1549,16 @@ def _proposal_payload_to_manual_data(
         ) from exc
 
 
-_CITED_FACT_SCHEMA_VERSION = "cited-financial-fact/v2"
+_CITED_FACT_SCHEMA_VERSION = "cited-financial-fact/v3"
+# v2 proposals stay approvable so review queues in flight are not invalidated
+# by the upgrade. They simply carry no issue terms, which leaves the issue
+# unpriced exactly as before (IPO-011).
+_ACCEPTED_CITED_FACT_SCHEMA_VERSIONS = frozenset(
+    {"cited-financial-fact/v2", _CITED_FACT_SCHEMA_VERSION}
+)
+# Optional cited facts that describe the OFFER rather than the accounts. They
+# are applied to the issue row on approval instead of the manual revision.
+_ISSUE_TERM_FACT_FIELDS = ("price_band_high",)
 _AMOUNT_UNIT_MULTIPLIERS = {
     IpoAmountUnit.INR.value: Decimal("1"),
     IpoAmountUnit.THOUSAND_INR.value: Decimal("1000"),
@@ -1629,6 +1638,18 @@ def _expected_cited_facts(
             unit,
             multiplier,
         )
+    # Issue terms are optional: a DRHP is filed before pricing. When the draft
+    # does carry one it must be bound exactly like any other numeric fact.
+    for field in _ISSUE_TERM_FACT_FIELDS:
+        if payload.get(field) is None:
+            continue
+        expected[field] = (
+            Decimal(str(payload[field])),
+            int(payload[f"{field}_page"]),
+            None,
+            None,
+            Decimal("1"),
+        )
     for raw_peer in payload["peers"]:
         peer = dict(raw_peer)
         for metric, value in dict(peer["metrics"]).items():
@@ -1677,7 +1698,7 @@ def _validate_cited_fact_binding(
         cannot approve a self-consistent but fabricated payload.
     """
     schema_version = str(payload.get("evidence_schema_version", "")).strip()
-    if schema_version != _CITED_FACT_SCHEMA_VERSION:
+    if schema_version not in _ACCEPTED_CITED_FACT_SCHEMA_VERSIONS:
         raise IpoValidationError(
             "This legacy proposal lacks citation-bound evidence and requires "
             "manual review/re-entry; it cannot be approved directly."
@@ -1685,6 +1706,13 @@ def _validate_cited_fact_binding(
     raw_facts = payload.get("cited_financial_facts")
     if not isinstance(raw_facts, list):
         raise IpoValidationError("Citation-bound financial facts are required.")
+    if schema_version == "cited-financial-fact/v2" and any(
+        payload.get(field) is not None for field in _ISSUE_TERM_FACT_FIELDS
+    ):
+        raise IpoValidationError(
+            "Issue terms require the current evidence schema; this proposal "
+            "must be regenerated before approval."
+        )
     raw_text_evidence = payload.get("cited_text_evidence")
     if not isinstance(raw_text_evidence, list) or len(raw_text_evidence) != 1:
         raise IpoValidationError(
@@ -2112,7 +2140,7 @@ def approve_extraction_proposal(
         raise IpoValidationError(
             f"Extraction proposal {proposal_id} was already {record.status.value}."
         )
-    if record.evidence_schema_version != _CITED_FACT_SCHEMA_VERSION:
+    if record.evidence_schema_version not in _ACCEPTED_CITED_FACT_SCHEMA_VERSIONS:
         raise IpoValidationError(
             "This legacy proposal requires manual review/re-entry and cannot be "
             "approved directly."
@@ -2180,6 +2208,17 @@ def approve_extraction_proposal(
             _manual_period_values(data),
             _manual_peer_values(data),
         )
+        # Issue terms live on the issue row, not the manual revision, but they
+        # were verified by the same citation machinery. Applying them here
+        # keeps the revision, the issue update, and the proposal transition in
+        # one transaction, so a concurrent-review rollback undoes all three.
+        issue_term_values = {
+            field: Decimal(str(record.payload[field]))
+            for field in _ISSUE_TERM_FACT_FIELDS
+            if record.payload.get(field) is not None
+        }
+        if issue_term_values:
+            update_ipo_issue_row(session, record.issue_id, issue_term_values)
         marked = mark_ipo_extraction_proposal_reviewed(
             session,
             proposal_id,

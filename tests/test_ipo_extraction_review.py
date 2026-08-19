@@ -39,6 +39,7 @@ from backend.ipo.repository import (
     create_document,
     create_issue,
     delete_document,
+    get_issue,
     get_latest_manual_profile,
     list_extraction_proposals,
     reject_extraction_proposal,
@@ -53,13 +54,17 @@ from backend.storage.ipo_repository import (
 _NOW = dt.datetime(2026, 7, 13, 10, 0, tzinfo=dt.UTC)
 
 
-def _cached_document(file_session_factory, data_dir: Path):
+def _cached_document(file_session_factory, data_dir: Path, *, priced: bool = True):
     """Create an issue and document row backed by verified local PDF bytes.
 
     Beginner note:
         Approval re-verifies the cached bytes exactly like a hand submission,
         so the fixture must write real hash-addressed bytes; metadata alone
         would make the approve path fail its source verification.
+
+        ``priced=False`` models a freshly ingested issue whose price band is
+        still unknown, which is the state the IPO-011 cap-price extraction
+        exists to resolve.
     """
     issue = create_issue(
         IpoIssueData(
@@ -67,8 +72,8 @@ def _cached_document(file_session_factory, data_dir: Path):
             issue_type=IpoIssueType.MAINBOARD,
             status=IpoStatus.RHP_FILED,
             source_confidence=Confidence.HIGH,
-            price_band_low=Decimal("230"),
-            price_band_high=Decimal("242"),
+            price_band_low=Decimal("230") if priced else None,
+            price_band_high=Decimal("242") if priced else None,
         ),
         session_factory=file_session_factory,
     )
@@ -219,6 +224,8 @@ def _verified_parsed_pages() -> tuple[ExtractedPage, ...]:
             "Peer One Ltd EPS 8.25",
             "Peer One Ltd P/E 21.40",
         ),
+        # IPO-011: a cover-page band naming both bounds, as an RHP prints it.
+        1: ("Price Band: Rs 230 to Rs 242 per equity share",),
     }
     return tuple(
         ExtractedPage(
@@ -327,7 +334,13 @@ def _bound_payload(digest: str, **overrides: Any) -> dict[str, Any]:
                 str(value),
                 int(peer["source_page"]),
             )
-    payload["evidence_schema_version"] = "cited-financial-fact/v2"
+    if payload.get("price_band_high") is not None:
+        _fact(
+            "price_band_high",
+            str(payload["price_band_high"]),
+            int(payload["price_band_high_page"]),
+        )
+    payload["evidence_schema_version"] = "cited-financial-fact/v3"
     payload["cited_financial_facts"] = facts
     payload["cited_text_evidence"] = [
         {
@@ -343,8 +356,11 @@ def _bound_payload(digest: str, **overrides: Any) -> dict[str, Any]:
     try:
         proposal = financial_extractor._ProposalModel.model_validate(
             {
+                # Optional fields (the IPO-011 cap price) may be absent from a
+                # fixture payload; only pass through what it actually carries.
                 name: payload[name]
                 for name in financial_extractor._ProposalModel.model_fields
+                if name in payload
             }
         )
     except ValueError:
@@ -560,6 +576,70 @@ def test_v1_proposal_is_legacy_and_cannot_be_submitted(
             data_dir=tmp_path,
             session_factory=file_session_factory,
         )
+
+
+def test_approval_writes_the_verified_cap_price_onto_the_issue(
+    file_session_factory, tmp_path: Path
+) -> None:
+    """The cap price reaches the issue only through a verified approval.
+
+    Beginner note:
+        Price band lives on the issue row, not the manual revision, but it is
+        evidence like any other: the model cites it, the host re-resolves that
+        citation against the cached PDF, and only approval writes it. Without
+        it the valuation factor is missing, and valuation is critical -- so
+        this is the step that lets an issue reach a real verdict at all.
+    """
+    issue, document, digest = _cached_document(
+        file_session_factory, tmp_path, priced=False
+    )
+    assert issue.price_band_high is None
+
+    proposal = _submit(
+        issue.id,
+        document.id,
+        digest,
+        file_session_factory,
+        data_dir=tmp_path,
+        payload_overrides={"price_band_high": "242", "price_band_high_page": 1},
+    )
+    assert proposal.payload["price_band_high"] == "242"
+
+    approve_extraction_proposal(
+        proposal.id,
+        reviewed_by_email="reviewer@example.com",
+        data_dir=tmp_path,
+        now=lambda: _NOW,
+        session_factory=file_session_factory,
+    )
+
+    priced = get_issue(issue.id, session_factory=file_session_factory)
+    assert priced is not None
+    assert priced.price_band_high == Decimal("242")
+
+
+def test_unpriced_drhp_proposal_still_approves_and_leaves_the_issue_unpriced(
+    file_session_factory, tmp_path: Path
+) -> None:
+    """A DRHP is filed before pricing, so the cap price must stay optional."""
+    issue, document, digest = _cached_document(
+        file_session_factory, tmp_path, priced=False
+    )
+
+    proposal = _submit(
+        issue.id, document.id, digest, file_session_factory, data_dir=tmp_path
+    )
+    approve_extraction_proposal(
+        proposal.id,
+        reviewed_by_email="reviewer@example.com",
+        data_dir=tmp_path,
+        now=lambda: _NOW,
+        session_factory=file_session_factory,
+    )
+
+    unpriced = get_issue(issue.id, session_factory=file_session_factory)
+    assert unpriced is not None
+    assert unpriced.price_band_high is None
 
 
 def test_approve_converts_the_proposal_into_a_manual_revision(
