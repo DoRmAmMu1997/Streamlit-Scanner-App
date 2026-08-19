@@ -12,6 +12,7 @@ from backend.ipo.models import IpoIssueType, IpoStatus, SebiFilingCategory
 from backend.ipo.sources.sebi import (
     AJAX_URL,
     MAX_PAGES,
+    SebiBlockedError,
     SebiParseError,
     SebiSourceError,
     build_filing_data,
@@ -247,6 +248,58 @@ def test_fetch_retries_timeout_and_429_then_closes_every_response() -> None:
     assert sleeps == [2.0, 5.0]
     assert throttled.closed
     assert all(call[2]["timeout"] == (5.0, 20.0) for call in session.calls)
+
+
+def test_fetch_fails_fast_when_sebi_blocks_the_request() -> None:
+    """A WAF refusal must not be retried like a transient outage.
+
+    Beginner note:
+        SEBI answers a blocked scrape with HTTP 530, which sits inside the 5xx
+        range and used to run the full backoff ladder -- about 17 seconds per
+        category, three categories per run, for a block that can never clear.
+        Failing immediately keeps a UI run responsive and stops us hammering an
+        edge that already refused.
+    """
+    blocked = FakeResponse(status_code=530)
+    session = FakeSession([blocked])
+    sleeps: list[float] = []
+
+    with pytest.raises(SebiBlockedError) as excinfo:
+        fetch_sebi_filings(
+            SebiFilingCategory.DRHP,
+            dt.date(2026, 6, 1),
+            dt.date(2026, 6, 30),
+            session=session,
+            sleeper=sleeps.append,
+        )
+
+    # The distinct type is what the job logs, so an operator can tell a block
+    # apart from an outage without the message ever leaking upstream HTML.
+    assert isinstance(excinfo.value, SebiSourceError)
+    assert "530" in str(excinfo.value)
+    assert sleeps == []
+    assert len(session.calls) == 1
+    assert blocked.closed
+
+
+def test_exhausted_retries_report_the_last_status_code() -> None:
+    """A genuine outage still retries, and names the status it gave up on."""
+    responses = [FakeResponse(status_code=503) for _ in range(4)]
+    session = FakeSession(list(responses))
+    sleeps: list[float] = []
+
+    with pytest.raises(SebiSourceError) as excinfo:
+        fetch_sebi_filings(
+            SebiFilingCategory.DRHP,
+            dt.date(2026, 6, 1),
+            dt.date(2026, 6, 30),
+            session=session,
+            sleeper=sleeps.append,
+        )
+
+    assert not isinstance(excinfo.value, SebiBlockedError)
+    assert "503" in str(excinfo.value)
+    assert sleeps == [2.0, 5.0, 10.0]
 
 
 def test_fetch_rejects_cross_host_redirect_and_closes_response() -> None:

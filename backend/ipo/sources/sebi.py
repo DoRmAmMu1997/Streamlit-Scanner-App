@@ -38,6 +38,12 @@ READ_TIMEOUT_SECONDS = 20.0
 POLITE_DELAY_SECONDS = 0.5
 RETRY_DELAYS_SECONDS = (2.0, 5.0, 10.0)
 MAX_REDIRECTS = 3
+# Statuses that mean "the edge refused this request", not "the origin is busy".
+# SEBI's WAF answers a blocked scrape with 530 ("Unauthorized Request
+# Blocked"), which lands inside the 5xx range and would otherwise be retried
+# through the full backoff ladder. Retrying a block cannot succeed: it just
+# spends ~17s per category and keeps hammering an edge that already said no.
+BLOCKED_STATUS_CODES = frozenset({530})
 ALLOWED_HOSTS = frozenset({"sebi.gov.in", "www.sebi.gov.in"})
 
 _CATEGORY_SETTINGS: dict[SebiFilingCategory, tuple[str, str]] = {
@@ -49,6 +55,17 @@ _CATEGORY_SETTINGS: dict[SebiFilingCategory, tuple[str, str]] = {
 
 class SebiSourceError(RuntimeError):
     """Raised when the bounded SEBI fetch cannot produce a trusted response."""
+
+
+class SebiBlockedError(SebiSourceError):
+    """Raised when SEBI's edge refuses the request outright (bot protection).
+
+    Beginner note:
+        This is deliberately its own type. The job logs only an exception's
+        class name (never its message, because upstream HTML is untrusted), so
+        a distinct name is what tells an operator "the source blocked us,
+        re-running will not help" instead of the ambiguous "SEBI is down".
+    """
 
 
 class SebiParseError(SebiSourceError):
@@ -360,9 +377,19 @@ def _fetch_page(
                 url=AJAX_URL,
                 data=payload,
             )
+            if response.status_code in BLOCKED_STATUS_CODES:
+                # A refusal, not an outage. Fail immediately so the caller sees
+                # the real reason and no further requests are sent.
+                raise SebiBlockedError(
+                    f"SEBI refused the request with HTTP {response.status_code}; "
+                    "retrying cannot succeed."
+                )
             if response.status_code == 429 or 500 <= response.status_code <= 599:
                 if attempt == len(RETRY_DELAYS_SECONDS):
-                    raise SebiSourceError("SEBI remained unavailable after bounded retries.")
+                    raise SebiSourceError(
+                        "SEBI remained unavailable after bounded retries "
+                        f"(last status HTTP {response.status_code})."
+                    )
                 response.close()
                 response = None
                 sleeper(RETRY_DELAYS_SECONDS[attempt])
