@@ -134,8 +134,9 @@ def _render_candle_repair_summary(run: CandleRepairRunHealth | None) -> None:
     repair pass already recorded — it never re-validates or re-repairs anything, so
     opening the health page stays cheap and passive.
 
-    The one number worth an operator's attention is "still dirty": those symbols
-    were not fixable automatically and are being dropped from every scan.
+    The number worth an operator's attention is "unrepairable": nothing could be
+    done for those symbols automatically, so any fatal findings they carry keep
+    them out of every scan until a human looks.
     """
     st.markdown("### Candle cache repair")
     if run is None:
@@ -149,13 +150,20 @@ def _render_candle_repair_summary(run: CandleRepairRunHealth | None) -> None:
     repair_columns = st.columns(3)
     repair_columns[0].metric("Repair checked symbols", run.symbols_checked)
     repair_columns[1].metric("Repaired symbols", run.symbols_repaired)
-    repair_columns[2].metric("Still dirty symbols", run.symbols_unrepairable)
+    # Deliberately "Unrepairable", not "Still dirty": a partially repaired symbol
+    # also still has findings, but its *fatal* ones are usually gone, so it is
+    # scannable again. Conflating the two would either hide real failures or
+    # raise false alarms. The partial count is surfaced separately below.
+    repair_columns[2].metric("Unrepairable symbols", run.symbols_unrepairable)
     repair_columns[0].caption(
         f"Run #{run.run_id} · {run.trigger} · {_format_health_time(run.finished_at)}"
     )
     # Rows removed and refetch count are the two "was this pass expensive or
     # destructive?" numbers, so they get their own caption rather than a metric.
-    repair_columns[1].caption(f"{run.rows_removed} row(s) removed")
+    repaired_caption = f"{run.rows_removed} row(s) removed"
+    if run.symbols_partially_repaired:
+        repaired_caption += f" · {run.symbols_partially_repaired} partial"
+    repair_columns[1].caption(repaired_caption)
     repair_columns[2].caption(f"{run.refetch_count} re-download(s)")
 
     if not run.outcomes:

@@ -113,7 +113,7 @@ and lets the caller own the result.
 | Guard | Why |
 |---|---|
 | **Drop budget measured in trading days, not rows** (`MAX_DROPPED_DATE_RATIO = 0.02`, floor `MAX_DROPPED_DATES_FLOOR = 3`) | De-duplicating 1 238 redundant rows costs zero days and must always be allowed; discarding real days must not. The floor keeps a single bad bar fixable in a short history, where one day can exceed 2%. Tripping the budget leaves the file untouched — a known-dirty file an operator can inspect beats a hollowed-out one. |
-| **Write only on genuine improvement** (`_is_improvement`) | A frame that got re-sorted while staying just as broken is churn: it bumps the mtime, invalidating chart caches, and buys nothing. This makes "unrepairable means untouched" a real invariant. Judged on *fatal* count first, because a legitimate repair can trade a fatal finding for a warning (dropping a bar leaves a one-day hole). |
+| **Write only on genuine improvement** (`_is_improvement`) | A frame that got re-sorted while staying just as broken is churn: it bumps the mtime, invalidating chart caches, and buys nothing. This makes "unrepairable means untouched" a real invariant. Compares a `(fatal findings, total findings, total affected rows)` profile — fatal first, because a legitimate repair can trade a fatal finding for a warning (dropping a bar leaves a one-day hole); affected rows last, because `validate_candles` reports *all* calendar gaps as one finding with the count in `affected_rows`, so filling one of three holes leaves the finding count unchanged and would otherwise look like a no-op. |
 | **Atomic write** (temp file + `os.replace`) | An interrupted repair can never leave a half-written cache file. |
 | **Stale guard** | The prefetch passes its per-symbol top-up statuses in, so a symbol Dhan just answered is not asked again. Standalone runs fall back to the loader's existing `.checked` marker. Without this a full universe would spend one pointless request per symbol — 577 of them. |
 | **`.repaired` sidecar** (`REPAIR_RETRY_AFTER_DAYS = 7`) | A symbol whose dirt lives in the vendor's own data would otherwise re-download its whole history on every app launch, forever. |
@@ -131,6 +131,9 @@ and lets the caller own the result.
   happened and must not be undone by a database hiccup.
 - Repair raises during prefetch → caught in `app.repair_candle_cache_assets`,
   reported, and Streamlit still launches.
+- **No Dhan credentials at all** → the prefetch skips fetching but still runs the
+  repair with a cache-only loader, because de-duplication and impossible-bar
+  drops need no client and are exactly what quarantines whole symbols.
 
 ## 8. Verified behaviour
 
@@ -146,6 +149,20 @@ Run against a copy of the real 577-file cache, with no network available:
 | Stray `.tmp` files | None |
 
 ## 9. Persistence
+
+The header row is created **and committed before the pass starts**, so a process
+that dies mid-repair leaves a row with `finished_at IS NULL` — the documented
+marker of an interrupted pass. Creating and finishing it together afterwards
+would mean a crashed repair left no trace, indistinguishable from one that never
+ran.
+
+`symbols_repaired` counts fully *and* partially repaired symbols, because both
+rewrote the cache file. `symbols_unrepairable` stays strictly the symbols nothing
+could be done for, and Admin health labels it "Unrepairable" rather than "still
+dirty": a partially repaired symbol also still has findings, but its *fatal* ones
+are usually gone, so it is scannable again. Conflating the two would either hide
+real failures or raise false alarms; the partial count is surfaced separately
+from the receipt.
 
 `candle_repair_runs` (migration `20260817data002`) holds one row per pass:
 counts, plus a bounded, redacted `receipt_json` (`schema_version=1`, capped at

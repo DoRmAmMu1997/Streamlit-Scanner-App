@@ -39,6 +39,7 @@ from backend.observability import (
 )
 from backend.security import install_secret_redaction_filter, redact_text
 from backend.storage import (
+    CandleRepairRun,
     create_candle_repair_run,
     ensure_database_schema,
     finish_candle_repair_run,
@@ -122,6 +123,10 @@ def run_repair_candle_cache(
         flush=True,
     )
 
+    # Header first, so a crash during the pass still leaves a row with
+    # finished_at IS NULL. A dry run writes nothing at all.
+    run_id = None if dry_run else open_repair_run(trigger=trigger, stream=stream)
+
     summary = repair_universe(
         loader,
         rows,
@@ -133,7 +138,9 @@ def run_repair_candle_cache(
     print_repair_summary(summary, out=stream, dry_run=dry_run)
 
     if not dry_run:
-        persist_repair_summary(summary, trigger=trigger, stream=stream)
+        persist_repair_summary(
+            summary, trigger=trigger, run_id=run_id, stream=stream
+        )
 
     log_event(
         logger,
@@ -213,23 +220,65 @@ def _build_loader(stream: TextIO) -> DailyDataLoader:
         return DailyDataLoader(client=None)
 
 
-def persist_repair_summary(
-    summary: CacheRepairSummary, *, trigger: str, stream: TextIO | None = None
-) -> None:
-    """Record the pass in ``candle_repair_runs`` for Admin health.
+def open_repair_run(*, trigger: str, stream: TextIO | None = None) -> int | None:
+    """Open (and commit) the ``candle_repair_runs`` header before the pass starts.
 
-    Best-effort by design: the repair itself already happened on disk, so a
-    database hiccup must not turn a successful cleanup into a failed job.
+    Committing up front is the whole point: the model and migration document
+    ``finished_at IS NULL`` as the marker of a pass that died mid-flight, and that
+    evidence only exists if the row is written *before* the work begins. Creating
+    and finishing the row together afterwards would mean a crashed repair left no
+    trace at all — indistinguishable from one that never ran.
 
-    Note ``symbols_repaired`` counts fully *and* partially repaired symbols: both
-    rewrote the cache file, which is what the column means. The receipt keeps the
-    two apart for anyone who needs the distinction.
+    Returns the new run id, or ``None`` when the database is unavailable (in which
+    case the repair still proceeds; a receipt is a nice-to-have, not a gate).
     """
     output = stream if stream is not None else sys.stdout
     try:
         ensure_database_schema()
         with session_scope() as session:
             run = create_candle_repair_run(session, trigger=trigger)
+            return int(run.id)
+    except Exception as exc:  # noqa: BLE001 - never block a repair over a receipt
+        logger.exception("Could not open the candle repair run")
+        print(
+            f"[repair] WARNING: could not open the repair receipt "
+            f"({type(exc).__name__}).",
+            file=output,
+            flush=True,
+        )
+        return None
+
+
+def persist_repair_summary(
+    summary: CacheRepairSummary,
+    *,
+    trigger: str,
+    run_id: int | None = None,
+    stream: TextIO | None = None,
+) -> None:
+    """Stamp the finishing counts onto the pass's ``candle_repair_runs`` row.
+
+    Best-effort by design: the repair itself already happened on disk, so a
+    database hiccup must not turn a successful cleanup into a failed job. When
+    ``run_id`` is ``None`` (the header could not be opened) a row is created here
+    instead, so the receipt is not lost entirely.
+
+    Note ``symbols_repaired`` counts fully *and* partially repaired symbols: both
+    rewrote the cache file, which is what the column means. ``symbols_unrepairable``
+    stays strictly the symbols nothing could be done for; the receipt keeps the
+    partial count for anyone who needs the distinction.
+    """
+    output = stream if stream is not None else sys.stdout
+    try:
+        ensure_database_schema()
+        with session_scope() as session:
+            run = (
+                session.get(CandleRepairRun, run_id)
+                if run_id is not None
+                else None
+            )
+            if run is None:
+                run = create_candle_repair_run(session, trigger=trigger)
             finish_candle_repair_run(
                 session,
                 run,

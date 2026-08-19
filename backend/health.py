@@ -128,6 +128,7 @@ class CandleRepairRunHealth:
     trigger: str
     symbols_checked: int
     symbols_repaired: int
+    symbols_partially_repaired: int
     symbols_unrepairable: int
     rows_removed: int
     refetch_count: int
@@ -371,6 +372,9 @@ def _copy_candle_repair_run(run: Any) -> CandleRepairRunHealth | None:
         trigger=str(getattr(run, "trigger", "") or "unknown"),
         symbols_checked=_as_int(getattr(run, "symbols_checked", 0)),
         symbols_repaired=_as_int(getattr(run, "symbols_repaired", 0)),
+        # Only the receipt distinguishes a partial repair from a full one; the
+        # column deliberately counts both as "repaired" (both rewrote the file).
+        symbols_partially_repaired=_as_int(mapping.get("symbols_partially_repaired")),
         symbols_unrepairable=_as_int(getattr(run, "symbols_unrepairable", 0)),
         rows_removed=_as_int(getattr(run, "rows_removed", 0)),
         refetch_count=_as_int(getattr(run, "refetch_count", 0)),

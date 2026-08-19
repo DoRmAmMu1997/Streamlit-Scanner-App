@@ -239,3 +239,61 @@ def test_main_rejects_a_malformed_as_of_date(monkeypatch):
 
     with pytest.raises(SystemExit):
         job.main(["--as-of", "17-08-2026"])
+
+
+def test_header_row_is_opened_before_the_pass_starts(monkeypatch):
+    """A crash mid-pass must still leave a row with finished_at IS NULL.
+
+    The model and migration document that as the marker of an interrupted repair,
+    which is only true if the header is committed before the work begins.
+    """
+    monkeypatch.setattr(job, "union_of_mapped_universes", lambda: _universe("A"))
+    monkeypatch.setattr(job, "_build_loader", lambda _stream: object())
+    order: list[str] = []
+
+    def fake_open(**_kwargs) -> int:
+        order.append("open")
+        return 7
+
+    monkeypatch.setattr(job, "open_repair_run", fake_open)
+
+    def exploding_repair(*_a, **_k):
+        order.append("pass")
+        raise RuntimeError("crash mid-pass")
+
+    monkeypatch.setattr(job, "repair_universe", exploding_repair)
+
+    with pytest.raises(RuntimeError):
+        job.run_repair_candle_cache(out=io.StringIO())
+
+    # The header was opened first, so the interrupted pass is visible.
+    assert order == ["open", "pass"]
+
+
+def test_finishing_reuses_the_header_opened_at_the_start(monkeypatch):
+    monkeypatch.setattr(job, "union_of_mapped_universes", lambda: _universe("A"))
+    monkeypatch.setattr(job, "_build_loader", lambda _stream: object())
+    monkeypatch.setattr(job, "open_repair_run", lambda **_k: 42)
+    monkeypatch.setattr(job, "repair_universe", lambda *_a, **_k: _summary())
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(
+        job,
+        "persist_repair_summary",
+        lambda _s, **kwargs: seen.update(kwargs),
+    )
+
+    job.run_repair_candle_cache(out=io.StringIO())
+
+    assert seen["run_id"] == 42
+
+
+def test_dry_run_opens_no_header_row(monkeypatch):
+    monkeypatch.setattr(job, "union_of_mapped_universes", lambda: _universe("A"))
+    monkeypatch.setattr(job, "_build_loader", lambda _stream: object())
+    monkeypatch.setattr(job, "repair_universe", lambda *_a, **_k: _summary())
+    opened: list[str] = []
+    monkeypatch.setattr(job, "open_repair_run", lambda **_k: opened.append("x"))
+
+    job.run_repair_candle_cache(dry_run=True, out=io.StringIO())
+
+    assert opened == []

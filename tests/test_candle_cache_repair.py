@@ -672,3 +672,54 @@ def test_repair_uses_a_datetime_free_sidecar_timestamp(tmp_path: Path):
     payload = json.loads(sidecar.read_text(encoding="utf-8"))
     assert date.fromisoformat(payload["attempted_on"]) == TODAY
     assert not isinstance(payload["attempted_on"], datetime)
+
+
+# ---------------------------------------------------------------------------
+# Codex review follow-ups (PR #110)
+# ---------------------------------------------------------------------------
+
+
+def test_filling_one_of_several_gaps_counts_as_an_improvement(tmp_path: Path):
+    """`validate_candles` reports all calendar gaps as ONE finding.
+
+    The gap count lives in ``affected_rows``, so a repair that fills one of three
+    holes leaves the finding *count* unchanged. Judging improvement on the number
+    of finding objects alone would reject that repair and throw away candles Dhan
+    just supplied.
+    """
+    # Three ~30-day holes, all inside a frame that is otherwise current.
+    dates = ["2026-01-05", "2026-02-10", "2026-03-16", "2026-04-20", *_recent_dates(4)]
+    dirty = _candles(dates)
+    # The vendor can supply the bars bridging the first hole only.
+    bridge = _candles(
+        [
+            (date(2026, 1, 5) + timedelta(days=offset)).isoformat()
+            for offset in range(1, 36, 5)
+        ]
+    )
+    client = RecordingClient(bridge)
+    loader = _loader(tmp_path, client)
+    path = _write_cache(loader, dirty)
+    rows_before = len(pd.read_parquet(path).index)
+
+    outcome = repair_symbol(loader, ROW, today=TODAY)
+
+    assert outcome.status == "partially_repaired"
+    # The recovered candles must actually be persisted, not discarded.
+    assert len(pd.read_parquet(path).index) > rows_before
+
+
+def test_improvement_still_rejects_a_repair_that_changes_nothing(tmp_path: Path):
+    """The looser rule must not start accepting no-op repairs."""
+    dates = ["2026-01-05", "2026-02-10", *_recent_dates(3)]
+    dirty = _candles(dates)
+    # Dhan has nothing for the hole, so the gap count cannot go down.
+    client = RecordingClient()
+    loader = _loader(tmp_path, client)
+    path = _write_cache(loader, dirty)
+    before = pd.read_parquet(path)
+
+    outcome = repair_symbol(loader, ROW, today=TODAY)
+
+    assert outcome.status in {"unrepairable", "vendor_data"}
+    pd.testing.assert_frame_equal(pd.read_parquet(path), before)

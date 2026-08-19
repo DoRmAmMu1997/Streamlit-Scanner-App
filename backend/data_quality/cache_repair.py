@@ -748,27 +748,31 @@ def _distinct_date_count(frame: pd.DataFrame) -> int:
     return len(set(parsed.dropna()))
 
 
-def _is_improvement(before: CandleQualityReport, after: CandleQualityReport) -> bool:
-    """True when the repaired frame is genuinely healthier than the original.
+def _health_profile(report: CandleQualityReport) -> tuple[int, int, int]:
+    """Rank a quality verdict so two reports can be compared; lower is healthier.
 
-    Judged on *fatal* findings first, because those are what stop a symbol being
-    scanned at all. Note that a legitimate repair can trade a fatal finding for a
-    warning — dropping one impossible bar leaves a one-day hole, which may raise
-    ``CALENDAR_DATE_GAP`` — so a plain "fewer codes than before" test would wrongly
-    reject it.
+    ``(fatal findings, total findings, total affected rows)``, compared
+    lexicographically:
+
+    - **fatal first**, because those are what stop a symbol being scanned at all.
+      This also lets a legitimate repair trade a fatal finding for a warning —
+      dropping one impossible bar leaves a one-day hole, which may raise
+      ``CALENDAR_DATE_GAP`` — without being judged a regression.
+    - **affected rows last**, and this tie-breaker is load-bearing:
+      ``validate_candles`` reports *all* calendar gaps as a single
+      ``CALENDAR_DATE_GAP`` finding and keeps the gap count in ``affected_rows``.
+      So filling one of three holes leaves the finding *count* unchanged at 1.
+      Without this term the repair would look like a no-op and the candles Dhan
+      just supplied would be thrown away.
     """
-    if not after.findings:
-        return True
+    fatal = sum(1 for finding in report.findings if finding.severity == "fatal")
+    affected = sum(finding.affected_rows for finding in report.findings)
+    return (fatal, len(report.findings), affected)
 
-    fatal_before = sum(1 for finding in before.findings if finding.severity == "fatal")
-    fatal_after = sum(1 for finding in after.findings if finding.severity == "fatal")
-    if fatal_after < fatal_before:
-        return True
-    if fatal_after > fatal_before:
-        # Never accept a "repair" that introduced a new structural problem.
-        return False
-    # No change in fatal status: only count it as progress if warnings shrank.
-    return fatal_after == 0 and len(after.findings) < len(before.findings)
+
+def _is_improvement(before: CandleQualityReport, after: CandleQualityReport) -> bool:
+    """True when the repaired frame is genuinely healthier than the original."""
+    return _health_profile(after) < _health_profile(before)
 
 
 def _frames_equal(left: pd.DataFrame, right: pd.DataFrame) -> bool:

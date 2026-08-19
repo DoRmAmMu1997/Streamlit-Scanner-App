@@ -106,6 +106,7 @@ def _quality_run(
 def _repair_run(
     *,
     symbols_unrepairable: int = 1,
+    symbols_partially_repaired: int = 0,
     total_outcomes: int = 1,
     outcomes_truncated: bool = False,
     message: str | None = None,
@@ -118,6 +119,7 @@ def _repair_run(
         trigger="prefetch",
         symbols_checked=577,
         symbols_repaired=14,
+        symbols_partially_repaired=symbols_partially_repaired,
         symbols_unrepairable=symbols_unrepairable,
         rows_removed=1_238,
         refetch_count=5,
@@ -305,8 +307,8 @@ def test_health_renderer_shows_latest_candle_repair_summary(monkeypatch):
     metrics = dict(fake_st.metrics)
     assert metrics["Repair checked symbols"] == 577
     assert metrics["Repaired symbols"] == 14
-    # The number an operator actually needs: symbols still dropped from scans.
-    assert metrics["Still dirty symbols"] == 5
+    # Named precisely: "unrepairable" is not the same as "partially repaired".
+    assert metrics["Unrepairable symbols"] == 5
     table_text = " ".join(
         str(row)
         for dataframe in fake_st.dataframes
@@ -365,3 +367,27 @@ def test_health_renderer_explains_how_to_run_a_repair_when_none_has(monkeypatch)
     infos = " ".join(fake_st.infos)
     assert "python app.py" in infos
     assert "backend.jobs.repair_candle_cache" in infos
+
+
+def test_health_renderer_surfaces_partially_repaired_symbols(monkeypatch):
+    """Partial repairs must stay visible without being called "unrepairable".
+
+    A partially repaired symbol still has findings, but usually only warnings —
+    its fatal ones cleared, so it is scannable again. Counting it as unrepairable
+    would raise a false alarm; omitting it entirely would hide it. It gets its own
+    figure instead.
+    """
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(health_page, "st", fake_st)
+
+    app._render_admin_health_page(
+        AuthenticatedUser("admin@example.com", "Admin", role=Role.ADMIN),
+        snapshot_loader=lambda: _snapshot(
+            repair_run=_repair_run(symbols_unrepairable=0, symbols_partially_repaired=3)
+        ),
+    )
+
+    metrics = dict(fake_st.metrics)
+    assert metrics["Unrepairable symbols"] == 0
+    captions = " ".join(str(value) for _label, value in fake_st.metrics)
+    assert "3 partial" in captions

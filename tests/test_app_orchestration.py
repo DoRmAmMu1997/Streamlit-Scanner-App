@@ -327,7 +327,8 @@ def _prefetch_ready(monkeypatch, *, statuses=("fresh",)):
 
     class _Loader:
         def __init__(self, client=None):
-            pass
+            # Recorded so a test can assert the cache-only (client=None) path.
+            self.client = client
 
         def cleanup_legacy_cache_files(self):
             return 0
@@ -1419,3 +1420,34 @@ def test_format_data_freshness_falls_back_to_raw_text():
 
 def test_format_data_freshness_handles_missing_value():
     assert app._format_data_freshness("") == "unknown"
+
+
+def test_prefetch_runs_offline_repairs_when_credentials_are_missing(monkeypatch, capsys):
+    """No Dhan token blocks fetching, not de-duplication.
+
+    Exact-duplicate and impossible-bar repairs need no client at all, and those
+    are what quarantine whole symbols from every scan — so they must still run.
+    """
+    _prefetch_ready(monkeypatch)
+    monkeypatch.setattr(
+        app,
+        "DhanDataClient",
+        SimpleNamespace(
+            from_env=lambda: (_ for _ in ()).throw(RuntimeError("no credentials"))
+        ),
+    )
+    called: dict[str, object] = {}
+
+    def fake_repair(loader, rows, **kwargs):
+        called["client"] = getattr(loader, "client", "missing")
+        called["rows"] = len(rows)
+        return app.CacheRepairSummary(symbols_checked=1, symbols_repaired=1)
+
+    monkeypatch.setattr(app, "repair_universe", fake_repair)
+
+    app.prefetch_data_assets()
+
+    # The repair ran, with a deliberately cache-only loader.
+    assert called["client"] is None
+    assert called["rows"] == 1
+    assert "Launching Streamlit UI" in capsys.readouterr().out

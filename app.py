@@ -70,6 +70,7 @@ from backend.daily_data_loader import (
 from backend.data_quality.cache_repair import CacheRepairSummary, repair_universe
 from backend.dhan_client import DhanDataClient
 from backend.jobs.repair_candle_cache import (
+    open_repair_run,
     persist_repair_summary,
     print_repair_summary,
 )
@@ -320,6 +321,16 @@ def prefetch_data_assets() -> None:
             f"({_redact_secrets(str(exc))}). Skipping.",
             flush=True,
         )
+        # DATA-002: no credentials blocks *fetching*, not repairing. Exact
+        # de-duplication and dropping impossible bars need no client at all, and
+        # those are what currently quarantine whole symbols from every scan — so
+        # run the offline half rather than leaving known-bad caches untouched
+        # until the token is fixed.
+        repair_candle_cache_assets(
+            DailyDataLoader(client=None),
+            cast(list[dict[str, Any]], union.to_dict("records")),
+            {},
+        )
         print("[prefetch] Done. Launching Streamlit UI...", flush=True)
         log_event(
             logger,
@@ -403,6 +414,9 @@ def repair_candle_cache_assets(
     universe-refresh path above takes — report it to the terminal and the logs,
     then carry on booting Streamlit against whatever cache we have.
     """
+    # Open the receipt header before the pass so a crash mid-repair still leaves a
+    # row with finished_at IS NULL, matching the documented model contract.
+    run_id = open_repair_run(trigger="prefetch")
     try:
         summary = repair_universe(
             loader,
@@ -412,7 +426,7 @@ def repair_candle_cache_assets(
             prefetch_statuses=prefetch_statuses,
         )
         print_repair_summary(summary)
-        persist_repair_summary(summary, trigger="prefetch")
+        persist_repair_summary(summary, trigger="prefetch", run_id=run_id)
         return summary
     except Exception as exc:
         logger.exception("Candle cache repair failed during prefetch")
