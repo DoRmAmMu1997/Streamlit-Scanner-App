@@ -1,7 +1,7 @@
 """Allow the IPO-011 web-sourced subscription-demand enrichment signal.
 
-Revision ID: 20260720ipo011
-Revises: 20260718ipo010
+Revision ID: 20260820ipo011
+Revises: 20260817data002
 
 Beginner note:
 The only schema change the one-button screener needs is one more allowed
@@ -20,8 +20,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "20260720ipo011"
-down_revision = "20260718ipo010"
+revision = "20260820ipo011"
+down_revision = "20260817data002"
 branch_labels = None
 depends_on = None
 
