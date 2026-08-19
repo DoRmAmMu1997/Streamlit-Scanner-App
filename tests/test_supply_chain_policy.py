@@ -52,7 +52,7 @@ QUAL_007_IGNORE_ERRORS_BASELINE = frozenset(
 )
 CI_COMMANDS = (
     "python -m pre_commit validate-config .pre-commit-config.yaml",
-    "python -m pytest -q --cov=backend --cov=screeners --cov=ui --cov-fail-under=87",
+    "python -m pytest -q --cov=backend --cov=screeners --cov=ui --cov-fail-under=89",
     "python -m compileall -q app.py backend screeners ui tests",
     "python -m ruff check app.py backend screeners ui Dependencies tests",
     "python -m mypy",
@@ -125,7 +125,7 @@ def test_ci_workflow_runs_quality_and_dependency_security_checks():
     assert "python -m pre_commit validate-config .pre-commit-config.yaml" in text
     assert (
         "python -m pytest -q --cov=backend --cov=screeners --cov=ui "
-        "--cov-fail-under=87"
+        "--cov-fail-under=89"
         in text
     )
     assert "python -m compileall -q app.py backend screeners ui tests" in text
@@ -228,7 +228,7 @@ def test_readme_documents_local_quality_and_security_commands():
     assert "pip install -r requirements-dev.txt -c constraints.txt" in text
     assert (
         "python -m pytest -q --cov=backend --cov=screeners --cov=ui "
-        "--cov-fail-under=87"
+        "--cov-fail-under=89"
         in text
     )
     assert "python -m compileall -q app.py backend screeners ui tests" in text

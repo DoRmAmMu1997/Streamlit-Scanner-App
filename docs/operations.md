@@ -169,9 +169,14 @@ Set `IPO_AUTO_APPROVE_HIGH_CONFIDENCE=true` to let fully verified
 (`HIGH`-confidence) proposals convert without a human. It is off by default;
 `MEDIUM` and weaker always wait for review. Autonomous approvals are recorded
 against `ipo-automation@screener.local` so they are never mistaken for a human
-attestation. **Until IPO-011's price-band follow-up lands, issues with no
-price band still resolve to "Insufficient verified data"** — valuation is a
-critical factor.
+attestation.
+
+A verified RHP proposal now also carries the **cap price**, which approval
+writes onto the issue. That is what lets an autonomous run reach a real
+verdict: valuation is a critical factor, so an issue that never gets a price
+band can only ever resolve to "Insufficient verified data". A DRHP is filed
+before pricing and legitimately carries none, so those issues stay unpriced
+until their RHP is extracted.
 
 ### From the CLI
 
@@ -923,7 +928,7 @@ The "Quality and security" workflow runs the same gates you can run locally:
 
 ```bash
 python -m pre_commit validate-config .pre-commit-config.yaml
-python -m pytest -q --cov=backend --cov=screeners --cov=ui --cov-fail-under=87
+python -m pytest -q --cov=backend --cov=screeners --cov=ui --cov-fail-under=89
 python -m compileall -q app.py backend screeners ui tests
 python -m ruff check app.py backend screeners ui Dependencies tests
 python -m mypy
