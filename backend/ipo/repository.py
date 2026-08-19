@@ -1549,7 +1549,16 @@ def _proposal_payload_to_manual_data(
         ) from exc
 
 
-_CITED_FACT_SCHEMA_VERSION = "cited-financial-fact/v2"
+_CITED_FACT_SCHEMA_VERSION = "cited-financial-fact/v3"
+# v2 proposals stay approvable so review queues in flight are not invalidated
+# by the upgrade. They simply carry no issue terms, which leaves the issue
+# unpriced exactly as before (IPO-011).
+_ACCEPTED_CITED_FACT_SCHEMA_VERSIONS = frozenset(
+    {"cited-financial-fact/v2", _CITED_FACT_SCHEMA_VERSION}
+)
+# Optional cited facts that describe the OFFER rather than the accounts. They
+# are applied to the issue row on approval instead of the manual revision.
+_ISSUE_TERM_FACT_FIELDS = ("price_band_high",)
 _AMOUNT_UNIT_MULTIPLIERS = {
     IpoAmountUnit.INR.value: Decimal("1"),
     IpoAmountUnit.THOUSAND_INR.value: Decimal("1000"),
@@ -1629,6 +1638,28 @@ def _expected_cited_facts(
             unit,
             multiplier,
         )
+    # Issue terms are optional: a DRHP is filed before pricing. When the draft
+    # does carry one it must be bound exactly like any other numeric fact.
+    for field in _ISSUE_TERM_FACT_FIELDS:
+        if payload.get(field) is None:
+            continue
+        page = payload.get(f"{field}_page")
+        if page is None:
+            # This function runs outside the caller's KeyError-to-validation
+            # conversion, so a half-written payload must be rejected in the
+            # project's own error vocabulary rather than escaping as a bare
+            # KeyError from an admin page or an unattended approval pass.
+            raise IpoValidationError(
+                f"Proposal payload carries {field} without {field}_page; "
+                "the citation is incomplete."
+            )
+        expected[field] = (
+            Decimal(str(payload[field])),
+            int(page),
+            None,
+            None,
+            Decimal("1"),
+        )
     for raw_peer in payload["peers"]:
         peer = dict(raw_peer)
         for metric, value in dict(peer["metrics"]).items():
@@ -1677,7 +1708,7 @@ def _validate_cited_fact_binding(
         cannot approve a self-consistent but fabricated payload.
     """
     schema_version = str(payload.get("evidence_schema_version", "")).strip()
-    if schema_version != _CITED_FACT_SCHEMA_VERSION:
+    if schema_version not in _ACCEPTED_CITED_FACT_SCHEMA_VERSIONS:
         raise IpoValidationError(
             "This legacy proposal lacks citation-bound evidence and requires "
             "manual review/re-entry; it cannot be approved directly."
@@ -1685,6 +1716,13 @@ def _validate_cited_fact_binding(
     raw_facts = payload.get("cited_financial_facts")
     if not isinstance(raw_facts, list):
         raise IpoValidationError("Citation-bound financial facts are required.")
+    if schema_version == "cited-financial-fact/v2" and any(
+        payload.get(field) is not None for field in _ISSUE_TERM_FACT_FIELDS
+    ):
+        raise IpoValidationError(
+            "Issue terms require the current evidence schema; this proposal "
+            "must be regenerated before approval."
+        )
     raw_text_evidence = payload.get("cited_text_evidence")
     if not isinstance(raw_text_evidence, list) or len(raw_text_evidence) != 1:
         raise IpoValidationError(
@@ -2112,7 +2150,7 @@ def approve_extraction_proposal(
         raise IpoValidationError(
             f"Extraction proposal {proposal_id} was already {record.status.value}."
         )
-    if record.evidence_schema_version != _CITED_FACT_SCHEMA_VERSION:
+    if record.evidence_schema_version not in _ACCEPTED_CITED_FACT_SCHEMA_VERSIONS:
         raise IpoValidationError(
             "This legacy proposal requires manual review/re-entry and cannot be "
             "approved directly."
@@ -2180,6 +2218,35 @@ def approve_extraction_proposal(
             _manual_period_values(data),
             _manual_peer_values(data),
         )
+        # Issue terms live on the issue row, not the manual revision, but they
+        # were verified by the same citation machinery. Applying them here
+        # keeps the revision, the issue update, and the proposal transition in
+        # one transaction, so a concurrent-review rollback undoes all three.
+        issue_term_values = {
+            field: Decimal(str(record.payload[field]))
+            for field in _ISSUE_TERM_FACT_FIELDS
+            if record.payload.get(field) is not None
+        }
+        if issue_term_values:
+            # The issue row carries a CHECK requiring the cap to sit at or
+            # above a stored floor. Comparing here turns a genuine conflict
+            # into the same typed "needs review" error every other approval
+            # failure raises, instead of an IntegrityError surfacing as a raw
+            # traceback in the admin page and aborting an autonomous run.
+            issue_row = get_ipo_issue(session, record.issue_id)
+            stored_low = getattr(issue_row, "price_band_low", None)
+            proposed_high = issue_term_values.get("price_band_high")
+            if (
+                stored_low is not None
+                and proposed_high is not None
+                and proposed_high < Decimal(str(stored_low))
+            ):
+                raise IpoValidationError(
+                    f"Extraction proposal {proposal_id} claims a cap price below "
+                    "the price-band floor already recorded on the issue; it "
+                    "needs human review rather than automatic approval."
+                )
+            update_ipo_issue_row(session, record.issue_id, issue_term_values)
         marked = mark_ipo_extraction_proposal_reviewed(
             session,
             proposal_id,
@@ -2543,11 +2610,21 @@ def get_latest_subscription(
     Beginner note:
         Subscription demand changes during the offer window. Scoring uses one
         newest immutable snapshot instead of blending historical multiples.
+
+        Official evidence outranks the IPO-011 web-sourced snapshot even when
+        the web row was captured more recently. Recency alone would let an
+        advisory reading shadow a filing: an exchange snapshot is stamped with
+        its own publication time, so recording it after an evening scrape can
+        legitimately give it the *earlier* timestamp. Preferring official
+        evidence here makes "advisory never shadows official" true of the read
+        itself rather than only of the write that created the row.
     """
     with session_factory() as session:
         if get_ipo_issue(session, issue_id) is None:
             raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
-        row = get_latest_ipo_subscription(session, issue_id)
+        row = get_latest_ipo_subscription(session, issue_id, official_only=True)
+        if row is None:
+            row = get_latest_ipo_subscription(session, issue_id)
         return _subscription_record(row) if row is not None else None
 
 

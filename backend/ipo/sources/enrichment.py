@@ -36,12 +36,15 @@ from backend.ipo.models import (
     IpoEnrichmentSignalRecord,
     IpoEnrichmentSignalType,
     IpoEvidenceAuthority,
+    IpoSubscriptionData,
     IpoValidationError,
 )
 from backend.ipo.repository import (
     IpoNotFoundError,
     SessionFactory,
+    create_subscription,
     get_issue,
+    get_latest_subscription,
     record_enrichment_signals,
 )
 from backend.observability import (
@@ -80,6 +83,9 @@ _QUERY_TEMPLATES: Final[dict[IpoEnrichmentSignalType, str]] = {
     IpoEnrichmentSignalType.ANCHOR_COMMENTARY: "{company} IPO anchor investors",
     IpoEnrichmentSignalType.BROKERAGE_REVIEW: "{company} IPO review recommendation brokerage",
     IpoEnrichmentSignalType.PEER_DISCOVERY: "{company} listed peers comparison",
+    IpoEnrichmentSignalType.SUBSCRIPTION_DEMAND: (
+        "{company} IPO subscription status QIB subscribed times"
+    ),
 }
 
 # Case-folded fragments that count as litigation/reputation red flags. Only
@@ -102,6 +108,24 @@ RED_FLAG_KEYWORDS: Final = (
 _GMP_TERM_PATTERN: Final = re.compile(
     r"\b(?:gmp|grey\s+market\s+premium)\b", re.IGNORECASE
 )
+# IPO-011: the QIB demand anchor. Requiring an explicit QIB/institutional term
+# keeps a retail or overall subscription figure from being read as QIB demand.
+_QIB_TERM_PATTERN: Final = re.compile(
+    r"\b(?:qib|qibs|qualified\s+institutional(?:\s+buyers?)?)\b", re.IGNORECASE
+)
+# IPO-011 hardening: the other subscription categories a status headline prints
+# alongside QIB. A multiple counts as institutional demand only when the QIB
+# anchor is strictly closer to it than every one of these, which is what stops
+# "Retail 25.6 times, QIB 1.2 times" being recorded as a 25.6x QIB book.
+_COMPETING_CATEGORY_PATTERN: Final = re.compile(
+    r"\b(?:retail|rii|nii|hni|non[-\s]?institutional|employee|shareholder|"
+    r"overall|total|anchor)\b",
+    re.IGNORECASE,
+)
+# "2.5x", "2.5 times", "subscribed 2.5 time(s)".
+_SUBSCRIPTION_MULTIPLE_PATTERN: Final = re.compile(
+    r"(\d{1,4}(?:\.\d+)?)\s*(?:x\b|times?\b)", re.IGNORECASE
+)
 _PERCENT_PATTERN: Final = re.compile(r"(-?\d{1,3}(?:\.\d+)?)\s*%")
 _RUPEE_PATTERN: Final = re.compile(
     r"(?:₹|rs\.?|inr)\s*(-?\d{1,4}(?:\.\d+)?)", re.IGNORECASE
@@ -110,6 +134,10 @@ _RUPEE_ABBREVIATION_PATTERN: Final = re.compile(
     r"\b(rs)\.(?=\s*-?\d)", re.IGNORECASE
 )
 _CLAUSE_SPLIT_PATTERN: Final = re.compile(r"[;\n!?]+|(?<!\d)\.|\.(?!\d)")
+# A subscription-status headline lists its categories comma- or pipe-separated
+# ("Retail 25.6 times, QIB 1.2 times"), so those punctuation marks end a clause
+# here even though they do not for the GMP prose the original splitter serves.
+_CATEGORY_SPLIT_PATTERN: Final = re.compile(r"[;,\n!?|/]+|(?<!\d)\.|\.(?!\d)")
 _NEGATION_PATTERN: Final = re.compile(
     r"\b(?:no|not|never|without|den(?:y|ies|ied)|dismiss(?:ed|al)?|"
     r"clear(?:ed)?|exonerat(?:ed|ion)|withdrawn)\b",
@@ -330,10 +358,7 @@ def _match_distance(left: re.Match[str], right: re.Match[str]) -> int:
     return 0
 
 
-def _near_gmp_value(
-    text: str,
-    pattern: re.Pattern[str],
-) -> Decimal | None:
+def _near_gmp_value(text: str, pattern: re.Pattern[str]) -> Decimal | None:
     """Return the first value bound to a GMP term in the same short clause."""
     # Protect only the standalone currency abbreviation when it introduces a
     # numeric amount. Ordinary words ending in "rs." remain sentence endings.
@@ -344,6 +369,98 @@ def _near_gmp_value(
             if any(_match_distance(match, term) <= 40 for term in terms):
                 return Decimal(match.group(1))
     return None
+
+
+def _qib_bound_multiple(text: str) -> Decimal | None:
+    """Return the subscription multiple that demonstrably belongs to QIB.
+
+    Beginner note:
+        A subscription-status headline prints every category at once -- "Retail
+        25.6 times, QIB 1.2 times, NII 40 times". Merely sitting *near* the QIB
+        anchor therefore proves nothing, because the retail figure sits near it
+        too; the first attempt at this rule read that headline as a 25.6x
+        institutional book when the real one was 1.2x, which inverts the signal
+        in the dangerous direction.
+
+        So two things are required. The clause is split on the punctuation
+        those headlines actually use (commas and pipes, not just sentence
+        ends), and within a clause the QIB anchor must be *strictly closer* to
+        the number than any competing category word. Anything ambiguous returns
+        ``None`` -- no reading at all is safer than the wrong category.
+    """
+    clause_text = _RUPEE_ABBREVIATION_PATTERN.sub(r"\1 ", text)
+    for clause in _CATEGORY_SPLIT_PATTERN.split(clause_text):
+        qib_terms = list(_QIB_TERM_PATTERN.finditer(clause))
+        if not qib_terms:
+            continue
+        competitors = list(_COMPETING_CATEGORY_PATTERN.finditer(clause))
+        for match in _SUBSCRIPTION_MULTIPLE_PATTERN.finditer(clause):
+            nearest_qib = min(_match_distance(match, term) for term in qib_terms)
+            if nearest_qib > 40:
+                continue
+            if competitors and min(
+                _match_distance(match, other) for other in competitors
+            ) <= nearest_qib:
+                # Another category owns this number, or the clause cannot say
+                # which one does. Either way it is not QIB evidence.
+                continue
+            return Decimal(match.group(1))
+    return None
+
+
+def _median_reading(readings: list[Decimal]) -> Decimal:
+    """Return the two-place median of one batch of provider readings.
+
+    Beginner note:
+        The median is what stops a single outlier headline from setting an
+        observation on its own. Both parsers share this one implementation so
+        their rounding can never drift apart -- they previously carried
+        byte-identical copies, which is exactly how such a drift starts.
+    """
+    readings.sort()
+    middle = len(readings) // 2
+    median = (
+        readings[middle]
+        if len(readings) % 2 == 1
+        else (readings[middle - 1] + readings[middle]) / Decimal(2)
+    )
+    return median.quantize(_TWO_PLACES, rounding=ROUND_HALF_UP)
+
+
+def _parse_subscription_demand(
+    entries: tuple[dict[str, Any], ...],
+) -> Decimal | None:
+    """Extract one conservative QIB subscription multiple, else ``None``.
+
+    Beginner note:
+        This follows :func:`_parse_gmp`'s shape -- title and snippet stay
+        separate provider claims, and the median across entries prevents one
+        outlier headline from setting the observation -- but the binding rule
+        is stricter. GMP prose names one quantity; a subscription headline
+        names every category at once, so :func:`_qib_bound_multiple` requires
+        the number to be attributable to QIB rather than merely adjacent to it.
+        Anything ambiguous returns ``None`` rather than guessing, because an
+        invented demand multiple would feed a scored factor.
+    """
+    readings: list[Decimal] = []
+    for entry in entries:
+        source_fields = tuple(
+            normalize_external_text(str(entry[field]))
+            for field in ("title", "snippet")
+        )
+        multiple = next(
+            (
+                value
+                for text in source_fields
+                if (value := _qib_bound_multiple(text)) is not None
+            ),
+            None,
+        )
+        if multiple is not None:
+            readings.append(multiple)
+    if not readings:
+        return None
+    return _median_reading(readings)
 
 
 def _parse_gmp(
@@ -390,14 +507,63 @@ def _parse_gmp(
             readings.append(rupees / price_band_high * Decimal(100))
     if not readings:
         return None
-    readings.sort()
-    middle = len(readings) // 2
-    median = (
-        readings[middle]
-        if len(readings) % 2 == 1
-        else (readings[middle - 1] + readings[middle]) / Decimal(2)
+    return _median_reading(readings)
+
+
+def _record_web_subscription_snapshot(
+    issue_id: int,
+    signals: list[IpoEnrichmentSignalData],
+    captured_at: dt.datetime,
+    *,
+    session_factory: SessionFactory,
+) -> None:
+    """Persist a parsed QIB multiple as a low-confidence demand snapshot.
+
+    Beginner note:
+        Two guards keep this web-sourced number from doing damage it was never
+        trusted to do.
+
+        First, it never shadows better evidence. ``get_latest_subscription``
+        prefers an official snapshot over any web-sourced one regardless of
+        capture time, so when official evidence exists this sees it and writes
+        nothing at all -- and, just as importantly, a web row already on file
+        cannot outrank an official snapshot recorded later.
+
+        Second, it never breaks idempotency: an unchanged reading is skipped
+        instead of appending a new row every run, because the scoring
+        fingerprint includes the snapshot identity and a fresh row each run
+        would re-score the issue forever.
+    """
+    parsed = next(
+        (
+            signal.parsed_value
+            for signal in signals
+            if signal.signal_type is IpoEnrichmentSignalType.SUBSCRIPTION_DEMAND
+            and signal.parsed_value is not None
+            and not signal.quarantined
+        ),
+        None,
     )
-    return median.quantize(_TWO_PLACES, rounding=ROUND_HALF_UP)
+    if parsed is None:
+        return
+
+    latest = get_latest_subscription(issue_id, session_factory=session_factory)
+    if latest is not None and latest.source_confidence is not Confidence.LOW:
+        # Official demand evidence wins; advisory data must not overwrite it.
+        return
+    if latest is not None and latest.qib_multiple == parsed:
+        # Same reading as last time: appending would only churn the fingerprint.
+        return
+
+    create_subscription(
+        issue_id,
+        IpoSubscriptionData(
+            captured_at=captured_at,
+            qib_multiple=parsed,
+            source_confidence=Confidence.LOW,
+        ),
+        session_factory=session_factory,
+    )
 
 
 def collect_enrichment_signals(
@@ -484,11 +650,12 @@ def collect_enrichment_signals(
             for entry in entries
             if entry.get("quarantine_status") == "clean"
         )
-        parsed_value = (
-            _parse_gmp(clean_entries, persisted_price_band_high)
-            if signal_type is IpoEnrichmentSignalType.GMP
-            else None
-        )
+        if signal_type is IpoEnrichmentSignalType.GMP:
+            parsed_value = _parse_gmp(clean_entries, persisted_price_band_high)
+        elif signal_type is IpoEnrichmentSignalType.SUBSCRIPTION_DEMAND:
+            parsed_value = _parse_subscription_demand(clean_entries)
+        else:
+            parsed_value = None
         signals.append(
             IpoEnrichmentSignalData(
                 signal_type=signal_type,
@@ -509,6 +676,9 @@ def collect_enrichment_signals(
 
     records = record_enrichment_signals(
         issue_id, signals, session_factory=session_factory
+    )
+    _record_web_subscription_snapshot(
+        issue_id, signals, when, session_factory=session_factory
     )
     log_event(
         logger,

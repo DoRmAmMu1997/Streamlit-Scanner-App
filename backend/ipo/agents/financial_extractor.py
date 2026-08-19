@@ -36,7 +36,7 @@ from itertools import pairwise
 from pathlib import Path
 from typing import Any, Final
 
-from pydantic import ValidationError, field_validator
+from pydantic import ValidationError, field_validator, model_validator
 
 from backend.ai_runtime import extract_json_object, run_agent_coroutine
 from backend.ai_validation import StrictAIModel, parse_with_retry
@@ -78,7 +78,7 @@ from backend.storage import session_scope
 
 logger = logging.getLogger(__name__)
 
-EXTRACTOR_MODEL_VERSION: Final = "ipo-010-extractor-v2"
+EXTRACTOR_MODEL_VERSION: Final = "ipo-010-extractor-v3"
 
 _MAX_TURNS: Final = 8
 # One tool response stays well under the model's context budget; a section is
@@ -88,7 +88,7 @@ _SECTION_CHUNK_CHARS: Final = 12_000
 # all core values verified -> medium (with reviewer notes); anything less is a
 # fail-closed run that persists nothing.
 _MEDIUM_CONFIDENCE_MIN_VERIFIED: Final = 0.9
-_CITED_FACT_SCHEMA_VERSION: Final = "cited-financial-fact/v2"
+_CITED_FACT_SCHEMA_VERSION: Final = "cited-financial-fact/v3"
 
 # Request-local collector for raw text that tripped the injection scanner.
 # The model only ever sees the blocked-evidence marker; the run is failed
@@ -344,6 +344,38 @@ class _ProposalModel(StrictAIModel):
     post_issue_equity_shares: str
     post_issue_equity_shares_page: int
     peers: list[_PeerModel]
+    # IPO-011: the RHP cover-page cap price, in rupees per equity share.
+    #
+    # Beginner note:
+    # Optional on purpose. A DRHP is filed before pricing, so demanding it
+    # would make every DRHP proposal fail; omitting it simply leaves the issue
+    # unpriced, which is the honest state. Only the cap is collected because it
+    # is the bound every ratio uses, and one field per line keeps the
+    # "exactly one semantic field" verification rule usable.
+    price_band_high: str | None = None
+    price_band_high_page: int | None = None
+
+    @model_validator(mode="after")
+    def _price_band_is_complete_or_absent(self) -> _ProposalModel:
+        """Require the cap price and its citation together, or neither."""
+        has_value = self.price_band_high is not None
+        has_page = self.price_band_high_page is not None
+        if has_value != has_page:
+            raise ValueError(
+                "price_band_high requires both a value and its source page."
+            )
+        if has_value:
+            # Keep the normalized text, exactly as the _decimal_text field
+            # validator does for every other value field. Discarding it would
+            # leave this the one field stored with the model's raw spacing.
+            normalized = _require_decimal_text(
+                str(self.price_band_high), "price_band_high"
+            )
+            _require_page(int(self.price_band_high_page or 0), "price_band_high_page")
+            if Decimal(normalized) <= 0:
+                raise ValueError("price_band_high must be a positive rupee amount.")
+            object.__setattr__(self, "price_band_high", normalized)
+        return self
 
     @field_validator("financial_amount_unit", "issue_amount_unit")
     @classmethod
@@ -617,6 +649,24 @@ def _citation_field_name(label: str) -> str:
     return peer_match.group(2) if peer_match else label
 
 
+# IPO-011: the cap price is recognised by these constructs rather than by an
+# entry in _FIELD_LABEL_PATTERNS. Registering it there would have added a
+# second semantic field to every span mentioning a price band -- including the
+# standard "Basis for the Offer Price" rows that state EPS or NAV "in relation
+# to the Price Band" -- and the "exactly one semantic field" rule would then
+# have rejected facts that verified cleanly before this ticket.
+_PRICE_BAND_RANGE_PATTERN: Final = re.compile(
+    r"(?:price\s+band|band\s+of)\D{0,40}?"
+    r"(?P<low>\d[\d,]*(?:\.\d+)?)\s*(?:to|through|[-–—])\s*"
+    r"(?:rs\.?|₹|inr)?\s*(?P<high>\d[\d,]*(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_CAP_PRICE_PATTERN: Final = re.compile(
+    r"cap\s+price\D{0,40}?(?P<cap>\d[\d,]*(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+
+
 def _semantic_field_labels(span: str) -> set[str]:
     """Return unambiguous field meanings named in one source span."""
     matched = {
@@ -642,12 +692,65 @@ def _span_matches_field_label(label: str, span: str) -> bool:
         normalized_company = " ".join(peer_match.group(1).casefold().split())
         normalized_span = " ".join(span.casefold().split())
         return normalized_company in normalized_span
+    if field_name == "price_band_high":
+        # Identity comes from the price construct itself, and the exact bound
+        # is then pinned by _cap_price_binds_to_a_stated_band. Keeping this
+        # field out of the shared table means a span may name a price band
+        # *and* another fact without either becoming unverifiable.
+        return bool(_stated_cap_prices(span))
     if field_name not in semantic_fields:
         return False
     # A compact row containing multiple facts does not prove which number
     # belongs to which label without column-span metadata. Reject it rather
     # than borrowing a sibling field's value from elsewhere in the row.
     return len(semantic_fields) == 1
+
+
+def _stated_cap_prices(span: str) -> list[Decimal]:
+    """Return every cap price this span states as part of a price construct.
+
+    Beginner note:
+        The cap is read from the *construct that names it* rather than from
+        loose numbers on the line. A band prints as a range ("Price Band: Rs 95
+        to Rs 100"), whose cap is the larger of the two bounds; a cap price can
+        also be named outright ("at the Cap Price of Rs 100"). Anything else on
+        the row -- a bid lot, a share count, a fiscal year -- is not part of
+        either construct and so cannot be mistaken for a price.
+    """
+    caps: list[Decimal] = []
+    for match in _PRICE_BAND_RANGE_PATTERN.finditer(span):
+        low = _parse_printed_number(match.group("low"))
+        high = _parse_printed_number(match.group("high"))
+        if low is None or high is None:
+            continue
+        caps.append(max(low, high))
+    for match in _CAP_PRICE_PATTERN.finditer(span):
+        stated = _parse_printed_number(match.group("cap"))
+        if stated is not None:
+            caps.append(stated)
+    return caps
+
+
+def _cap_price_binds_to_a_stated_band(label: str, value: str, span: str) -> bool:
+    """Require a claimed cap price to be a cap the span actually states.
+
+    Beginner note:
+        A price-band line names both bounds, and a plain token match would bind
+        the floor as readily as the cap. That error runs in the unsafe
+        direction -- a lower price makes the issue look cheaper, inflating the
+        valuation factor -- so the claim must equal the upper bound of a band
+        the span really prints, or a cap price it names outright.
+
+        An earlier version of this rule instead demanded the claim be the
+        largest number anywhere on the span. That rejected perfectly good
+        citations, because a cover-page row also carries a bid lot ("150 Equity
+        Shares") or a fiscal year, either of which exceeds a two-digit share
+        price. Binding to the construct is both stricter about what counts as
+        evidence and free of that false rejection.
+    """
+    if label != "price_band_high":
+        return True
+    return Decimal(value) in _stated_cap_prices(span)
 
 
 def _span_numeric_token(value: str, span: str) -> str | None:
@@ -862,6 +965,8 @@ def _matching_numeric_source_for_fact(
                     header_rows,
                 ):
                     continue
+                if not _cap_price_binds_to_a_stated_band(label, value, row_text):
+                    continue
                 if period_end is not None:
                     header_text = " ".join(
                         header_row[column_number - 1]
@@ -897,6 +1002,8 @@ def _matching_numeric_source_for_fact(
             continue
         source_token = _span_numeric_token(value, line)
         if source_token is None:
+            continue
+        if not _cap_price_binds_to_a_stated_band(label, value, line):
             continue
         if period_end is not None and not _period_pattern(period_end).search(line):
             continue
@@ -970,6 +1077,10 @@ def _citations(proposal: _ProposalModel) -> tuple[tuple[str, str | None, int], .
     for name in _VALUE_FIELDS:
         entries.append((name, getattr(proposal, name), getattr(proposal, f"{name}_page")))
     entries.append(("objects_of_issue", None, proposal.objects_of_issue_page))
+    if proposal.price_band_high is not None and proposal.price_band_high_page is not None:
+        entries.append(
+            ("price_band_high", proposal.price_band_high, proposal.price_band_high_page)
+        )
     for peer in proposal.peers:
         for metric, text in peer.metrics.items():
             entries.append((f"peer {peer.company_name} {metric}", text, peer.source_page))
@@ -1279,7 +1390,17 @@ def verify_cited_receipts_against_pages(
     """
     try:
         proposal = _ProposalModel.model_validate(
-            {name: payload[name] for name in _ProposalModel.model_fields}
+            # Optional fields are absent from older payloads by design: a
+            # cited-financial-fact/v2 proposal predates the cap price entirely.
+            # Subscripting unconditionally would raise KeyError here, be caught
+            # below, and report a genuine queued proposal as failing receipt
+            # verification -- silently voiding the v2 back-compatibility this
+            # module and the approval path deliberately preserve.
+            {
+                name: payload[name]
+                for name in _ProposalModel.model_fields
+                if name in payload
+            }
         )
         raw_facts = payload["cited_financial_facts"]
         raw_text_evidence = payload["cited_text_evidence"]
@@ -1378,6 +1499,11 @@ _SYSTEM_PROMPT: Final = (
     "pe, nav_book_value, ronw, ev_ebitda, price_sales.\n"
     "- objects_of_issue must be one exact, complete line or table-cell excerpt "
     "from the cited page; do not summarize or combine spans.\n"
+    "- price_band_high is OPTIONAL: include it only for an RHP that prints "
+    "a price band or cap price, giving the UPPER bound in rupees per equity "
+    "share exactly as printed, plus the page you read it from. A DRHP is "
+    "filed before pricing, so omit both fields entirely rather than "
+    "guessing or copying the floor price.\n"
     "- NEVER guess or compute a value. If you cannot find a required value "
     "verbatim in the document, stop and emit exactly "
     '{"error": "value_not_found", "field": "<field name>"} instead of the '

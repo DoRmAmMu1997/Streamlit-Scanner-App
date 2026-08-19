@@ -358,7 +358,7 @@ def _inputs(**overrides: Any) -> IpoFactorInputs:
 
 def test_model_version_constant_is_stable() -> None:
     """Pin the version string so silent threshold edits fail loudly in review."""
-    assert FACTOR_MODEL_VERSION == "ipo-006-factors-v2"
+    assert FACTOR_MODEL_VERSION == "ipo-006-factors-v3"
 
 
 @pytest.mark.parametrize(

@@ -26,6 +26,7 @@ from backend.ipo.financials.ratio_engine import (
 )
 from backend.ipo.manual_extraction import IpoPeerMetric
 from backend.ipo.models import (
+    Confidence,
     DebtReductionPurposeStatus,
     IpoCautionFlag,
     IpoCautionFlagReport,
@@ -37,7 +38,10 @@ from backend.ipo.models import (
 )
 from backend.ipo.scoring.factor_derivation import IpoFactorInputs, _peer_median
 
-CAUTION_FLAGS_VERSION: Final = "ipo-006-flags-v2"
+# v3 (IPO-011): the near-close QIB caution now refuses to fire on a
+# low-confidence web-sourced snapshot. Stored verdicts stay attributable to
+# the exact rule set that produced them, so this bump is mandatory.
+CAUTION_FLAGS_VERSION: Final = "ipo-006-flags-v3"
 
 FLAG_ENTIRELY_OFS_WEAK_GROWTH: Final = "entirely_ofs_weak_growth"
 FLAG_VERY_EXPENSIVE_VALUATION: Final = "very_expensive_valuation"
@@ -199,6 +203,19 @@ def _weak_qib_demand_near_close(inputs: IpoFactorInputs) -> IpoCautionFlag:
         rule only judges from one day before the close date onward and only
         while the issue is open or closed. Inside that window an *absent*
         snapshot is itself the warning the spec asks for.
+
+        IPO-011 added a low-confidence, web-sourced demand snapshot. This hard
+        caution forces ``Not Recommended`` outright, so a scraped headline must
+        have **no influence on it in either direction**. The rule therefore
+        treats a low-confidence snapshot as if it were absent: the answer is
+        byte-identical to what it would have been had the scraper never run.
+
+        Reading that guard as "skip the rule when a scrape exists" was the
+        original mistake. Because the collector writes a snapshot for exactly
+        the issues that have no official evidence, it would have converted the
+        ``triggered`` answer into ``not_evaluable`` for precisely the issues
+        this caution exists to reject. The optional QIB *factor* may still
+        consume the reading; this hard override may not.
     """
     issue = inputs.issue
     if issue.status not in (IpoStatus.OPEN, IpoStatus.CLOSED) or issue.close_date is None:
@@ -215,11 +232,25 @@ def _weak_qib_demand_near_close(inputs: IpoFactorInputs) -> IpoCautionFlag:
             f"Book closes {issue.close_date.isoformat()}; too early to judge demand.",
         )
     subscription = inputs.subscription
+    # Discard low-confidence evidence *before* any decision is taken, so this
+    # rule behaves exactly as if the web collector had never run.
+    web_sourced_only = (
+        subscription is not None and subscription.source_confidence is Confidence.LOW
+    )
+    if web_sourced_only:
+        subscription = None
     if subscription is None or subscription.qib_multiple is None:
+        reason = (
+            "Only a low-confidence web-sourced demand snapshot exists, which this "
+            "hard caution ignores; no official QIB demand evidence is available "
+            "this close to the book closing."
+            if web_sourced_only
+            else "No QIB demand snapshot available this close to the book closing."
+        )
         return _flag(
             FLAG_WEAK_QIB_DEMAND_NEAR_CLOSE,
             IpoCautionFlagStatus.TRIGGERED,
-            "No QIB demand snapshot available this close to the book closing.",
+            reason,
         )
     if subscription.qib_multiple < QIB_WEAK_MULTIPLE:
         return _flag(

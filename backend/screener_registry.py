@@ -67,6 +67,16 @@ class ScreenerDefinition:
     # cache keys on it so a strategy bump invalidates cached renders (UI-001);
     # legacy module-based screeners fall back to the BaseScanner default.
     version: str = "1.0.0"
+    # IPO-011: does this screener need the Dhan-backed candle stack?
+    #
+    # Beginner note:
+    # Every screener until now scanned stock candles, so the UI always loaded
+    # credentials, a universe CSV, and a data loader before dispatching. An
+    # event-driven screener (the IPO pipeline) needs none of those. Declaring
+    # ``requires_candles: False`` in the SCREENER dict lets the UI skip that
+    # setup instead of aborting on missing credentials. The default is True so
+    # every existing screener keeps its exact behaviour.
+    requires_candles: bool = True
 
 
 def _find_scanner_class(module: ModuleType) -> type[BaseScanner] | None:
@@ -188,6 +198,9 @@ def validate_screener_module(module: ModuleType) -> ScreenerDefinition:
         run=run_func,
         build_chart=build_chart_func,
         version=version,
+        # Absent metadata means "this screener scans candles", which is what
+        # every screener written before IPO-011 does.
+        requires_candles=bool(metadata.get("requires_candles", True)),
     )
 
 

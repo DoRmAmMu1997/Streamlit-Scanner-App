@@ -143,6 +143,8 @@ _FIXTURE_PAGES = [
         "Fresh issue and offer for sale as described.",
         "Basis for offer price: Peer One Ltd P/E 21.40",
         "Peer One Ltd EPS 8.25",
+        # IPO-011: a realistic cover-page band naming BOTH bounds on one line.
+        "Price Band: Rs 95 to Rs 100 per equity share",
     ],
 ]
 
@@ -287,7 +289,7 @@ def test_verified_draft_becomes_a_pending_high_confidence_proposal(
     assert result.source_content_sha256 == digest
     assert result.page_count == 3
     assert result.payload["net_worth"] == "90"
-    assert result.payload["evidence_schema_version"] == "cited-financial-fact/v2"
+    assert result.payload["evidence_schema_version"] == "cited-financial-fact/v3"
     cited_net_worth = next(
         fact
         for fact in result.payload["cited_financial_facts"]

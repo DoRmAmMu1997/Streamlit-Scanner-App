@@ -657,7 +657,7 @@ def main() -> None:
     # file must never prevent an operator from inspecting past runs.
     # "Validation / Signal Performance" is a read-only analytical view (like Scan
     # history) available to every authenticated user, not an admin-only page.
-    # "IPO screener" (IPO-007) is the same kind of read-only analytical view:
+    # "IPO dashboard" (IPO-007) is the same kind of read-only analytical view:
     # every authenticated user can inspect verdicts, while the re-score action
     # inside the page is additionally gated on MANAGE_IPO_DATA.
     view_options = [
@@ -665,7 +665,7 @@ def main() -> None:
         "Scan history",
         "Scan comparison",
         "Validation / Signal Performance",
-        "IPO screener",
+        "IPO dashboard",
     ]
     if role_has_capability(current_role, VIEW_HEALTH):
         # AUTH-003: the admin tier sees the operate-the-system pages — health, the
@@ -705,7 +705,7 @@ def main() -> None:
             can_export=role_has_capability(current_role, EXPORT_RESULTS)
         )
         return
-    if view == "IPO screener":
+    if view == "IPO dashboard":
         _render_ipo_page(
             can_rescore=role_has_capability(current_role, MANAGE_IPO_DATA),
             user_email=current_email,
@@ -762,8 +762,14 @@ def main() -> None:
         screeners, can_run=role_has_capability(current_role, RUN_SCAN)
     )
 
-    show_status_panel(selected)
-    render_universe_table()
+    # The system-status card and the universe-file table are candle-data health
+    # checks: Dhan credentials, the universe CSV's symbol count and mtime, and
+    # the daily candle cache. None of that applies to an event-driven screener,
+    # and `universe_status` would raise KeyError on a `universe` value that is a
+    # display label rather than a UNIVERSE_CONFIG entry (IPO-011).
+    if selected.requires_candles:
+        show_status_panel(selected)
+        render_universe_table()
 
     st.subheader(selected.name)
     st.write(selected.description)
@@ -909,37 +915,43 @@ def _execute_screener(
     end_date = date.today()
     start_date = _scan_history_start_date(end_date)
 
-    creds = credential_status()
-    if not creds["ready"]:
-        st.error("Dhan credentials are missing. Set up Dependencies/.env before running.")
-        return None
+    # IPO-011: an event-driven screener (the IPO pipeline) declares
+    # ``requires_candles: False`` and owns its own data sources. Skipping the
+    # credential/universe/loader setup for those screeners keeps this helper as
+    # the single dispatch path instead of forcing a parallel one.
+    universe_df: Any | None = None
+    if selected.requires_candles:
+        creds = credential_status()
+        if not creds["ready"]:
+            st.error("Dhan credentials are missing. Set up Dependencies/.env before running.")
+            return None
 
-    try:
-        # The screener decides which universe it owns. The UI does not ask the
-        # user to choose NIFTY 100 vs F&O, because that would let users run a
-        # strategy against the wrong stock list by accident.
-        universe_df = load_universe(selected.universe)
-    except Exception as exc:
-        logger.exception("Universe load failed for %s", selected.universe)
-        st.error(
-            f"Could not load universe `{selected.universe}`: {_redact_secrets(str(exc))}"
-        )
-        return None
+        try:
+            # The screener decides which universe it owns. The UI does not ask the
+            # user to choose NIFTY 100 vs F&O, because that would let users run a
+            # strategy against the wrong stock list by accident.
+            universe_df = load_universe(selected.universe)
+        except Exception as exc:
+            logger.exception("Universe load failed for %s", selected.universe)
+            st.error(
+                f"Could not load universe `{selected.universe}`: {_redact_secrets(str(exc))}"
+            )
+            return None
 
     # Live progress widgets. We build them ONCE before the scan and update them
     # from within the per-symbol callback so the user sees motion immediately.
     progress_bar = st.progress(0.0)
     progress_status = st.empty()
 
-    def progress_callback(completed: int, total: int, symbol: str) -> None:
+    def progress_callback(completed: int, total: int, label: str) -> None:
+        # ``label`` is a symbol for candle screeners and a pipeline stage name
+        # for event-driven ones (IPO-011), so the wording stays unit-free.
         if total <= 0:
             progress_bar.progress(1.0)
             return
         fraction = max(0.0, min(1.0, completed / total))
         progress_bar.progress(fraction)
-        progress_status.markdown(
-            f"Scanning **{symbol}** &mdash; {completed} / {total} symbols processed."
-        )
+        progress_status.markdown(f"**{label}** &mdash; {completed} / {total} complete.")
 
     # `params` carries callbacks into the screener. We keep a separate
     # `params_for_chart` without callbacks so `build_chart` later never
@@ -959,7 +971,9 @@ def _execute_screener(
         # triggered_by value is the only auth detail the service sees, which keeps
         # the backend reusable for a future scheduled job that will not have a
         # Streamlit user session.
-        data_loader = DailyDataLoader(DhanDataClient.from_env())
+        data_loader = (
+            DailyDataLoader(DhanDataClient.from_env()) if selected.requires_candles else None
+        )
         result = run_scan(
             screener_key=selected.key,
             universe_key=selected.universe,
@@ -989,16 +1003,18 @@ def _execute_screener(
         )
         return None
 
+    # An event-driven screener has no data loader, so its candle-cache stats are
+    # reported as an empty/zero baseline rather than crashing the cache payload.
     return {
         "screener_key": selected.key,
         "results": result.results,
-        "failures": list(data_loader.last_failures),
+        "failures": list(data_loader.last_failures) if data_loader is not None else [],
         "compute_failures": result.compute_failures,
         "stats": {
-            "cache_hits": data_loader.last_cache_hits,
-            "cache_misses": data_loader.last_cache_misses,
-            "api_attempts": data_loader.last_api_attempts,
-            "rate_limit_retries": data_loader.last_rate_limit_retries,
+            "cache_hits": getattr(data_loader, "last_cache_hits", 0),
+            "cache_misses": getattr(data_loader, "last_cache_misses", 0),
+            "api_attempts": getattr(data_loader, "last_api_attempts", 0),
+            "rate_limit_retries": getattr(data_loader, "last_rate_limit_retries", 0),
         },
         "universe_df": universe_df,
         "params_for_chart": params_for_chart,

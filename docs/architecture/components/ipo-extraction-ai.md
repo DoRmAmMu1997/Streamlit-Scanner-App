@@ -33,7 +33,7 @@ verified cache (IPO-003) -> spawned bounded PDF worker -> parse receipt
 | `PdfExtractionBudget` | Wall-time, page/table/row/column/cell/text/glyph/serialization/address-space limits. |
 | `force_extract=True` | Revisits reviewed history but cannot bypass one-pending-per-document or semantic-payload uniqueness. |
 | `propose_extraction(issue_id, document_id, *, data_dir=None, model=None, run_agent=None, session_factory=...)` | Returns `IpoExtractionProposalRecord` on success or a typed `IpoExtractionErrorReceipt`; never raises to batch callers. `run_agent` is the CI/test seam — the SDK is only touched when it is `None`. |
-| `EXTRACTOR_MODEL_VERSION` | `"ipo-010-extractor-v2"`, stamped on every proposal. |
+| `EXTRACTOR_MODEL_VERSION` | `"ipo-010-extractor-v3"`, stamped on every proposal. |
 | `IpoExtractionError` | Typed failure with a stable `code` (`unsupported_document`, `pending_proposal_exists`, `value_not_found`, ...). |
 
 ## 4. Key design decisions
@@ -67,8 +67,11 @@ The parent also terminates and joins a timed-out/crashed child and rejects
 malformed or oversized worker output. Resource exhaustion, empty/scanned PDFs,
 stale source SHA, and legacy-unbound evidence are review-required rather than
 partial success. Evidence schema `cited-financial-fact/v1` is legacy; only
-complete v2 numeric facts plus the exact narrative fact can reach a new
-proposal. Raw hostile text is never stored in failure markers.
+complete v2/v3 numeric facts plus the exact narrative fact can reach a new
+proposal. New proposals are written as `v3`, which adds the optional cap price
+(IPO-011); v2 is still accepted at approval so queued reviews stay valid, but a
+v2 payload carrying issue terms is refused rather than approved unbound. Raw
+hostile text is never stored in failure markers.
 
 ## 6. Configuration & dependencies
 

@@ -257,7 +257,7 @@ def _render_ipo_page(*, can_rescore: bool, user_email: str | None = None) -> Non
         repository-only scoring service, invalidates the short snapshot cache,
         and records an attributable audit event.
     """
-    st.subheader("IPO screener")
+    st.subheader("IPO dashboard")
     st.caption(
         "Read-only view of scanned SEBI filings and their deterministic "
         "verdicts. Evidence and scores are produced by the screener job; "

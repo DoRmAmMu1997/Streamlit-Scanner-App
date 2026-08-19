@@ -13,6 +13,8 @@ import datetime as dt
 from decimal import Decimal
 from typing import Any
 
+import pytest
+
 from backend.ipo.financials.ratio_engine import (
     IpoPerShareReconciliation,
     IpoRatioAnalysis,
@@ -189,7 +191,11 @@ def _ratios(*receipts: IpoRatioReceipt, price_band_high: str | None = "100") -> 
     )
 
 
-def _subscription(qib: str | None) -> IpoSubscriptionRecord:
+def _subscription(
+    qib: str | None,
+    *,
+    source_confidence: Confidence = Confidence.HIGH,
+) -> IpoSubscriptionRecord:
     """Build one detached demand snapshot with only the QIB column populated."""
     return IpoSubscriptionRecord(
         id=1,
@@ -200,7 +206,7 @@ def _subscription(qib: str | None) -> IpoSubscriptionRecord:
         retail_multiple=None,
         total_multiple=None,
         source_url=None,
-        source_confidence=Confidence.HIGH,
+        source_confidence=source_confidence,
         created_at=_AS_OF,
     )
 
@@ -338,6 +344,73 @@ def test_very_expensive_valuation_uses_peer_pe_median() -> None:
     assert (
         _flag(evaluate_caution_flags(no_pe), FLAG_VERY_EXPENSIVE_VALUATION).status
         is IpoCautionFlagStatus.NOT_EVALUABLE
+    )
+
+
+@pytest.mark.parametrize("multiple", ["0.60", "25.00"])
+def test_a_web_sourced_snapshot_cannot_move_the_hard_qib_caution(
+    multiple: str,
+) -> None:
+    """A scraped reading must leave this flag exactly as it found it (IPO-011).
+
+    Beginner note:
+        This flag forces ``Not Recommended`` regardless of score, so it is the
+        one place a scraped headline could do real damage -- in *either*
+        direction. Rejecting an issue on a scrape would be unfair; rescuing one
+        from rejection would be worse, because the collector writes a snapshot
+        precisely for the issues that have no official evidence, which is
+        exactly when this caution is supposed to fire.
+
+        The invariant is therefore stated as an equivalence rather than as a
+        specific status: the answer with a low-confidence snapshot must equal
+        the answer with no snapshot at all, whether the scraped number looks
+        weak (0.60x) or strong (25x).
+    """
+    issue = _issue(status=IpoStatus.OPEN, close_date=dt.date(2026, 7, 14))
+    web_reading = _flag(
+        evaluate_caution_flags(
+            _inputs(
+                issue=issue,
+                subscription=_subscription(multiple, source_confidence=Confidence.LOW),
+            )
+        ),
+        FLAG_WEAK_QIB_DEMAND_NEAR_CLOSE,
+    )
+    no_snapshot = _flag(
+        evaluate_caution_flags(_inputs(issue=issue, subscription=None)),
+        FLAG_WEAK_QIB_DEMAND_NEAR_CLOSE,
+    )
+    assert web_reading.status is no_snapshot.status
+    assert web_reading.status is IpoCautionFlagStatus.TRIGGERED
+    # The evidence still says which of the two situations produced it, so an
+    # operator can tell "nothing was found" from "only a scrape was found".
+    assert "low-confidence" in web_reading.evidence
+    assert "low-confidence" not in no_snapshot.evidence
+
+
+def test_official_evidence_still_decides_the_hard_qib_caution() -> None:
+    """Containment is about provenance, never about the number itself."""
+    issue = _issue(status=IpoStatus.OPEN, close_date=dt.date(2026, 7, 14))
+    weak_official = _inputs(
+        issue=issue,
+        subscription=_subscription("0.60", source_confidence=Confidence.HIGH),
+    )
+    assert (
+        _flag(
+            evaluate_caution_flags(weak_official), FLAG_WEAK_QIB_DEMAND_NEAR_CLOSE
+        ).status
+        is IpoCautionFlagStatus.TRIGGERED
+    )
+
+    strong_official = _inputs(
+        issue=issue,
+        subscription=_subscription("25.00", source_confidence=Confidence.HIGH),
+    )
+    assert (
+        _flag(
+            evaluate_caution_flags(strong_official), FLAG_WEAK_QIB_DEMAND_NEAR_CLOSE
+        ).status
+        is IpoCautionFlagStatus.NOT_TRIGGERED
     )
 
 

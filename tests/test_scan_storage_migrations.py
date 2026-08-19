@@ -687,6 +687,62 @@ def test_ipo006_downgrade_refuses_to_discard_screener_artifacts(
     engine.dispose()
 
 
+def test_ipo011_accepts_subscription_demand_and_guards_its_downgrade(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """The widened signal vocabulary accepts the new value and protects it.
+
+    Beginner note:
+        Widening a CHECK is backward compatible, but narrowing it again would
+        make stored rows illegal. This test proves both halves: the new value
+        inserts at head, and the downgrade refuses rather than silently
+        destroying the row or failing mid-rebuild.
+    """
+    db_path = tmp_path / "ipo011-signal.db"
+    database_url = f"sqlite:///{db_path.as_posix()}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = Config("alembic.ini")
+    command.upgrade(config, "head")
+
+    engine = create_engine(database_url, future=True)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO ipo_issues "
+                "(company_name, issue_type, status, source_confidence, created_at, updated_at) "
+                "VALUES ('Example Limited', 'mainboard', 'open', 'high', "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            )
+        )
+        # The legacy vocabulary would reject this row; the widened CHECK accepts it.
+        connection.execute(
+            text(
+                "INSERT INTO ipo_enrichment_signals "
+                "(issue_id, signal_type, captured_at, query_text, payload_json, "
+                "quarantined, confidence, source_policy, created_at, authority_level, "
+                "authority_policy_version, batch_usability, first_seen_at, last_seen_at) "
+                "VALUES (1, 'subscription_demand', CURRENT_TIMESTAMP, 'Example Limited "
+                "IPO subscription', '[]', 0, 'low', 'serpapi-low-confidence-v1', "
+                "CURRENT_TIMESTAMP, 'advisory', 'ipo-enrichment-authority-v2', "
+                "'usable', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            )
+        )
+    engine.dispose()
+
+    with pytest.raises(RuntimeError, match="discard IPO-011 subscription-demand signals"):
+        command.downgrade(config, "20260718ipo010")
+
+    engine = create_engine(database_url, future=True)
+    with engine.connect() as connection:
+        assert connection.scalar(
+            text(
+                "SELECT COUNT(*) FROM ipo_enrichment_signals "
+                "WHERE signal_type = 'subscription_demand'"
+            )
+        ) == 1
+    engine.dispose()
+
+
 def test_ensure_database_schema_creates_tables_and_short_circuits(monkeypatch, tmp_path: Path):
     """The runtime bootstrap applies migrations once, then skips on later calls.
 

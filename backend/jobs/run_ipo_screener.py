@@ -72,7 +72,7 @@ _TYPE_TOKENS = {
 
 # Issues in these states can still change (new filings, demand, listings), so
 # enrichment queries and re-scores target them; listed issues stay archived.
-_ACTIVE_STATUSES = (
+ACTIVE_ISSUE_STATUSES = (
     IpoStatus.DRHP_FILED,
     IpoStatus.RHP_FILED,
     IpoStatus.OPEN,
@@ -226,6 +226,7 @@ def run_ipo_screener(
     skip_scan: bool = False,
     skip_download: bool = False,
     skip_enrich: bool = False,
+    skip_score: bool = False,
     extract: bool = False,
     force_extract: bool = False,
     issue_ids: Sequence[int] | None = None,
@@ -245,6 +246,11 @@ def run_ipo_screener(
 
     Every collaborator is injectable so the command is testable without SEBI,
     SerpAPI, the Claude SDK, or a real database; production uses the defaults.
+
+    ``skip_score`` exists for a caller that must ingest filings *before* it can
+    decide which issues to work on: it runs the scan, leaves scoring alone, and
+    lets that caller invoke the pipeline again with the selection it could only
+    compute once the new filings existed.
 
     Beginner note:
         Stage isolation is per unit of work (one document, one issue, one
@@ -274,6 +280,7 @@ def run_ipo_screener(
         skip_scan=skip_scan,
         skip_download=skip_download,
         skip_enrich=skip_enrich,
+        skip_score=skip_score,
         extract=extract,
         force_extract=force_extract,
     )
@@ -321,7 +328,7 @@ def run_ipo_screener(
     enrichment_skipped_no_key = False
     if not skip_enrich:
         for issue in issues:
-            if issue.status not in _ACTIVE_STATUSES:
+            if issue.status not in ACTIVE_ISSUE_STATUSES:
                 continue
             # One issue's search failure must not stop the sibling batches.
             try:
@@ -402,7 +409,7 @@ def run_ipo_screener(
                     )
 
     issue_outcomes: list[IpoScreenerIssueOutcome] = []
-    for issue in issues:
+    for issue in issues if not skip_score else ():
         # One issue's scoring failure must not stop the sibling issues.
         try:
             outcome = _issue_outcome_from_rescore(

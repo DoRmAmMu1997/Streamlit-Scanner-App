@@ -87,6 +87,9 @@ EVENT_IPO_ENRICHMENT_SKIPPED = "ipo_enrichment_skipped"
 EVENT_IPO_EXTRACTION_PROPOSED = "ipo_extraction_proposed"
 EVENT_IPO_EXTRACTION_PROPOSAL_FAILED = "ipo_extraction_proposal_failed"
 EVENT_IPO_EXTRACTION_PROPOSAL_REVIEWED = "ipo_extraction_proposal_reviewed"
+# IPO-011: an opt-in autonomous approval of a fully verified proposal. Carries
+# ids, the confidence tier, and an outcome discriminator only.
+EVENT_IPO_PROPOSAL_AUTO_APPROVED = "ipo_proposal_auto_approved"
 # IPO-008 one-command screener lifecycle plus the per-issue scoring event the
 # service emits. All fields are ids, counts, and enum values — never evidence.
 EVENT_IPO_SCREENER_STARTED = "ipo_screener_started"
@@ -178,6 +181,7 @@ __all__ = [
     "EVENT_IPO_FILING_SCAN_STARTED",
     "EVENT_IPO_ISSUE_SCORED",
     "EVENT_IPO_MANUAL_EXTRACTION_SUBMITTED",
+    "EVENT_IPO_PROPOSAL_AUTO_APPROVED",
     "EVENT_IPO_RESCORE_TRIGGERED",
     "EVENT_IPO_SCREENER_COMPLETED",
     "EVENT_IPO_SCREENER_STARTED",
