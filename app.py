@@ -678,8 +678,14 @@ def main() -> None:
         screeners, can_run=role_has_capability(current_role, RUN_SCAN)
     )
 
-    show_status_panel(selected)
-    render_universe_table()
+    # The system-status card and the universe-file table are candle-data health
+    # checks: Dhan credentials, the universe CSV's symbol count and mtime, and
+    # the daily candle cache. None of that applies to an event-driven screener,
+    # and `universe_status` would raise KeyError on a `universe` value that is a
+    # display label rather than a UNIVERSE_CONFIG entry (IPO-011).
+    if selected.requires_candles:
+        show_status_panel(selected)
+        render_universe_table()
 
     st.subheader(selected.name)
     st.write(selected.description)
