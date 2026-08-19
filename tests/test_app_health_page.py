@@ -11,6 +11,8 @@ from backend.auth.roles import Role
 from backend.auth.session import AuthenticatedUser
 from backend.health import (
     AdminHealthSnapshot,
+    CandleRepairOutcomeHealth,
+    CandleRepairRunHealth,
     DataQualityFindingHealth,
     DataQualityRunHealth,
     ScanRunHealth,
@@ -43,6 +45,8 @@ class _FakeStreamlit:
         self.warnings: list[str] = []
         self.captions: list[str] = []
         self.metrics: list[tuple[str, object]] = []
+        # Recorded (not swallowed) so empty-state copy can be asserted on.
+        self.infos: list[str] = []
         # DataFrame-typed so assertions may call .to_dict on captured tables.
         self.dataframes: list[pd.DataFrame] = []
 
@@ -67,8 +71,8 @@ class _FakeStreamlit:
     def warning(self, text, **_kwargs):
         self.warnings.append(str(text))
 
-    def info(self, *_args, **_kwargs):
-        pass
+    def info(self, text="", **_kwargs):
+        self.infos.append(str(text))
 
 
 def _quality_run(
@@ -99,8 +103,47 @@ def _quality_run(
     )
 
 
+def _repair_run(
+    *,
+    symbols_unrepairable: int = 1,
+    symbols_partially_repaired: int = 0,
+    total_outcomes: int = 1,
+    outcomes_truncated: bool = False,
+    message: str | None = None,
+) -> CandleRepairRunHealth:
+    """A compact DATA-002 repair receipt for the renderer tests."""
+    return CandleRepairRunHealth(
+        run_id=4,
+        started_at=dt.datetime(2026, 6, 11, 8, 0, tzinfo=dt.UTC),
+        finished_at=dt.datetime(2026, 6, 11, 8, 5, tzinfo=dt.UTC),
+        trigger="prefetch",
+        symbols_checked=577,
+        symbols_repaired=14,
+        symbols_partially_repaired=symbols_partially_repaired,
+        symbols_unrepairable=symbols_unrepairable,
+        rows_removed=1_238,
+        refetch_count=5,
+        total_outcomes=total_outcomes,
+        outcomes_truncated=outcomes_truncated,
+        outcomes=(
+            CandleRepairOutcomeHealth(
+                symbol="POONAWALLA",
+                status="repaired",
+                before_codes=("DUPLICATE_DATE",),
+                after_codes=(),
+                actions=("DEDUPE_EXACT_ROWS",),
+                rows_removed=1_238,
+                message=message,
+            ),
+        ),
+    )
+
+
 def _snapshot(
-    *, failure_message: str | None = None, quality_run: DataQualityRunHealth | None = None
+    *,
+    failure_message: str | None = None,
+    quality_run: DataQualityRunHealth | None = None,
+    repair_run: CandleRepairRunHealth | None = None,
 ) -> AdminHealthSnapshot:
     """Return a compact deterministic snapshot for renderer tests."""
     failed = (
@@ -128,6 +171,7 @@ def _snapshot(
         data_size_bytes=0,
         disk_free_bytes=1024,
         latest_data_quality_run=quality_run,
+        latest_candle_repair_run=repair_run,
         services=(
             ServiceHealth("Database", "ready", "Scan-history queries succeeded."),
         ),
@@ -248,3 +292,102 @@ def test_health_renderer_notes_when_findings_are_truncated(monkeypatch):
 
     captions = " ".join(fake_st.captions)
     assert "Showing 1 of 120 findings" in captions
+
+
+def test_health_renderer_shows_latest_candle_repair_summary(monkeypatch):
+    """DATA-002: the repair panel reports what the last pass fixed and missed."""
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(health_page, "st", fake_st)
+
+    app._render_admin_health_page(
+        AuthenticatedUser("admin@example.com", "Admin", role=Role.ADMIN),
+        snapshot_loader=lambda: _snapshot(repair_run=_repair_run(symbols_unrepairable=5)),
+    )
+
+    metrics = dict(fake_st.metrics)
+    assert metrics["Repair checked symbols"] == 577
+    assert metrics["Repaired symbols"] == 14
+    # Named precisely: "unrepairable" is not the same as "partially repaired".
+    assert metrics["Unrepairable symbols"] == 5
+    table_text = " ".join(
+        str(row)
+        for dataframe in fake_st.dataframes
+        for row in dataframe.to_dict("records")
+    )
+    assert "POONAWALLA" in table_text
+    assert "DEDUPE_EXACT_ROWS" in table_text
+
+
+def test_health_renderer_redacts_repair_receipt_messages(monkeypatch):
+    """Defence in depth at the render boundary, as with the quality panel."""
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(health_page, "st", fake_st)
+
+    app._render_admin_health_page(
+        AuthenticatedUser("admin@example.com", "Admin", role=Role.ADMIN),
+        snapshot_loader=lambda: _snapshot(
+            repair_run=_repair_run(message="refetch failed: token=repair-secret")
+        ),
+    )
+
+    rendered = " ".join(
+        str(row)
+        for dataframe in fake_st.dataframes
+        for row in dataframe.to_dict("records")
+    )
+    assert "repair-secret" not in rendered
+    assert "***REDACTED***" in rendered
+
+
+def test_health_renderer_notes_when_repair_outcomes_are_truncated(monkeypatch):
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(health_page, "st", fake_st)
+
+    app._render_admin_health_page(
+        AuthenticatedUser("admin@example.com", "Admin", role=Role.ADMIN),
+        snapshot_loader=lambda: _snapshot(
+            repair_run=_repair_run(total_outcomes=90, outcomes_truncated=True)
+        ),
+    )
+
+    captions = " ".join(fake_st.captions)
+    assert "Showing 1 of 90 symbols" in captions
+
+
+def test_health_renderer_explains_how_to_run_a_repair_when_none_has(monkeypatch):
+    """The empty state must tell an operator where the repair comes from."""
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(health_page, "st", fake_st)
+
+    app._render_admin_health_page(
+        AuthenticatedUser("admin@example.com", "Admin", role=Role.ADMIN),
+        snapshot_loader=lambda: _snapshot(repair_run=None),
+    )
+
+    infos = " ".join(fake_st.infos)
+    assert "python app.py" in infos
+    assert "backend.jobs.repair_candle_cache" in infos
+
+
+def test_health_renderer_surfaces_partially_repaired_symbols(monkeypatch):
+    """Partial repairs must stay visible without being called "unrepairable".
+
+    A partially repaired symbol still has findings, but usually only warnings —
+    its fatal ones cleared, so it is scannable again. Counting it as unrepairable
+    would raise a false alarm; omitting it entirely would hide it. It gets its own
+    figure instead.
+    """
+    fake_st = _FakeStreamlit()
+    monkeypatch.setattr(health_page, "st", fake_st)
+
+    app._render_admin_health_page(
+        AuthenticatedUser("admin@example.com", "Admin", role=Role.ADMIN),
+        snapshot_loader=lambda: _snapshot(
+            repair_run=_repair_run(symbols_unrepairable=0, symbols_partially_repaired=3)
+        ),
+    )
+
+    metrics = dict(fake_st.metrics)
+    assert metrics["Unrepairable symbols"] == 0
+    captions = " ".join(str(value) for _label, value in fake_st.metrics)
+    assert "3 partial" in captions

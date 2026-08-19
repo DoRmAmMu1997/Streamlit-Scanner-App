@@ -204,13 +204,39 @@ def test_constraints_pin_direct_runtime_and_developer_dependencies():
         assert re.search(rf"^{re.escape(name)}==", text, flags=re.IGNORECASE | re.MULTILINE), name
 
 
+# Minimum safe versions for pins that were bumped to escape a known advisory.
+# These are *floors*, not exact pins: a maintenance PR may move any of them
+# forward, but never back below the version where the issue was fixed.
+SECURITY_FLOOR_PINS = {
+    "python-dotenv": (1, 2, 2),
+    "lxml": (6, 1, 0),
+    "pytest": (9, 0, 3),
+}
+
+
+def _pinned_version(text: str, name: str) -> tuple[int, ...]:
+    """Return a constraints.txt pin as a comparable integer tuple.
+
+    Deliberately hand-rolled rather than using ``packaging``: this module is the
+    supply-chain guard, so it should not itself depend on a distribution that is
+    not in ``constraints.txt``. Only the leading numeric components are compared,
+    which is all these floors need (a date-suffixed stub pin like
+    ``2.3.3.260113`` still parses fine).
+    """
+    match = re.search(rf"^{re.escape(name)}==([0-9][0-9.]*)", text, flags=re.MULTILINE)
+    assert match, f"{name} must be pinned in constraints.txt"
+    return tuple(int(part) for part in match.group(1).rstrip(".").split("."))
+
+
 def test_constraints_use_security_reviewed_dependency_versions():
     """Known-vulnerable direct pins must not re-enter the installed environment."""
     text = (ROOT / "constraints.txt").read_text(encoding="utf-8")
 
-    assert re.search(r"^python-dotenv==1\.2\.2$", text, flags=re.MULTILINE)
-    assert re.search(r"^lxml==6\.1\.0$", text, flags=re.MULTILINE)
-    assert re.search(r"^pytest==9\.0\.3$", text, flags=re.MULTILINE)
+    for name, floor in SECURITY_FLOOR_PINS.items():
+        pinned = _pinned_version(text, name)
+        assert pinned >= floor, (
+            f"{name} is pinned at {pinned}, below the security floor {floor}"
+        )
 
 
 def test_runtime_requirements_install_the_documented_postgres_driver():

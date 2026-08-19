@@ -48,6 +48,49 @@ pending and insufficient rows are normal validation states, not scheduler
 failures. Exit code `1` means setup or the batch boundary failed (for example,
 credentials, schema, or database/session setup), and the scheduler should alert.
 
+## Repairing dirty candle data (DATA-002)
+
+`python app.py` runs a repair pass automatically once it has finished topping the
+candle cache up, so the app always starts against the cleanest cache available.
+Run it standalone when you want to inspect or force it:
+
+```bash
+python -m backend.jobs.repair_candle_cache --dry-run
+```
+
+```bash
+python -m backend.jobs.repair_candle_cache
+```
+
+Useful options:
+
+```bash
+python -m backend.jobs.repair_candle_cache --force --symbol MOTHERSON --symbol LTF
+```
+
+Reading the summary line:
+
+- `repaired` / `partial` — the cache file was rewritten and re-validated.
+- `vendor_data` — findings we deliberately never auto-fix (a possible unadjusted
+  split, or staleness Dhan cannot improve). Not a problem to chase.
+- `unrepairable` — still dirty after the attempt; these symbols are being dropped
+  from every scan and are the ones worth a human look. They are named individually
+  as `STILL DIRTY (<codes>)`.
+- `skipped` — no cache file yet, a recent attempt already failed on the same
+  findings (a 7-day cooldown sidecar), or the repair needed credentials it did not
+  have.
+
+Exit code `0` means the pass ran; **symbols left dirty do not fail the job**,
+because "the vendor's data is still bad" is a reported condition, not an
+operational failure. Exit code `1` means a real error (an unreadable cache file,
+or a write that could not complete).
+
+If the summary reports a large `skipped` count with "repair needs Dhan
+credentials", or the pass gives up on re-downloads after a few failures, check the
+access token first — an expired `DHAN_ACCESS_TOKEN` produces exactly that, and
+also silently freezes the candle cache at the date the token expired. Re-run
+`python Dependencies/dhan_token_setup.py` to refresh it.
+
 The command bootstraps the database schema, builds the same Dhan-backed
 `DailyDataLoader` used by scans, calls the idempotent
 `compute_pending_forward_returns()` service, and prints a secret-safe summary.

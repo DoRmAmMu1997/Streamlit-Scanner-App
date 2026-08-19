@@ -7,19 +7,22 @@
 # maintenance PRs.
 
 # Runtime application dependencies.
-streamlit==1.55.0
+# streamlit 1.58 is the floor for pandas 3.x: 1.55 caps pandas<3, so the two
+# pins move together. 1.58 also makes starlette/uvicorn required rather than
+# optional extras, and drops tornado.
+streamlit==1.58.0
 authlib==1.7.2
-pandas==2.3.3
-numpy==2.2.6
+pandas==3.0.5
+numpy==2.4.6
 pyarrow==23.0.1
-requests==2.33.1
+requests==2.34.2
 python-dotenv==1.2.2
 dhanhq==2.2.0
 PyYAML==6.0.3
 beautifulsoup4==4.14.3
 lxml==6.1.0
 pdfplumber==0.11.9
-claude-agent-sdk==0.2.87
+claude-agent-sdk==0.2.137
 SQLAlchemy==2.0.50
 # Keep Alembic pinned with SQLAlchemy so local migrations and CI use the same
 # migration behavior every time.
@@ -30,16 +33,16 @@ psycopg==3.3.4
 psycopg-binary==3.3.4
 
 # Developer and CI verification tools.
-pytest==9.0.3
-ruff==0.15.1
+pytest==9.1.1
+ruff==0.16.3
 bandit==1.9.4
-pip-audit==2.10.0
-mypy==1.19.1
-types-requests==2.33.0.20260518
+pip-audit==2.10.1
+mypy==1.20.2
+types-requests==2.33.0.20260712
 types-PyYAML==6.0.12.20260518
-# pandas-stubs tracks the pinned pandas 2.3.3 series (QUAL-006); types-pytz is
+# pandas-stubs tracks the pinned pandas 3.0.5 series (QUAL-006); types-pytz is
 # its declared dependency.
-pandas-stubs==2.3.3.260113
+pandas-stubs==3.0.5.260730
 types-pytz==2026.2.0.20260518
 pytest-cov==7.1.0
-pre-commit==4.6.0
+pre-commit==4.6.2

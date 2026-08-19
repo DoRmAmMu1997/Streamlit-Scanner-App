@@ -154,6 +154,99 @@ def test_collect_admin_health_copies_latest_data_quality_receipt(
     assert "quality-secret" not in repr(snapshot.latest_data_quality_run)
 
 
+def test_collect_admin_health_copies_latest_candle_repair_receipt(monkeypatch, tmp_path):
+    """DATA-002: health shows the newest repair pass without re-repairing anything."""
+    repair_run = SimpleNamespace(
+        id=7,
+        started_at=dt.datetime(2026, 8, 17, 6, 0, tzinfo=dt.UTC),
+        finished_at=dt.datetime(2026, 8, 17, 6, 4, tzinfo=dt.UTC),
+        trigger="prefetch",
+        symbols_checked=577,
+        symbols_repaired=14,
+        symbols_unrepairable=5,
+        rows_removed=1_238,
+        refetch_count=5,
+        receipt_json={
+            "schema_version": 1,
+            "total_outcomes": 19,
+            "outcomes_truncated": True,
+            "outcomes": [
+                {
+                    "symbol": "POONAWALLA",
+                    "status": "repaired",
+                    "before_codes": ["DUPLICATE_DATE"],
+                    "after_codes": [],
+                    "actions": ["DEDUPE_EXACT_ROWS"],
+                    "rows_before": 3_714,
+                    "rows_after": 2_476,
+                    "message": "token=repair-secret",
+                },
+                "not-a-mapping",
+            ],
+        },
+    )
+
+    monkeypatch.setattr(health, "session_scope", _fake_session_scope)
+    monkeypatch.setattr(health, "get_latest_scan_runs", lambda *_a, **_k: [])
+    monkeypatch.setattr(health, "get_latest_candle_repair_run", lambda _session: repair_run)
+
+    snapshot = health.collect_admin_health(_settings(tmp_path))
+
+    run = snapshot.latest_candle_repair_run
+    assert run is not None
+    assert run.run_id == 7
+    assert run.trigger == "prefetch"
+    assert run.symbols_unrepairable == 5
+    assert run.outcomes_truncated is True
+    assert run.total_outcomes == 19
+    # The junk entry is skipped rather than trusted.
+    assert len(run.outcomes) == 1
+    assert run.outcomes[0].rows_removed == 1_238
+    assert "repair-secret" not in repr(run)
+
+
+def test_collect_admin_health_tolerates_a_malformed_repair_receipt(monkeypatch, tmp_path):
+    """A receipt written by another app version must not break the page.
+
+    The header counts are real columns, so a pass still shows up even when its
+    detail blob cannot be parsed.
+    """
+    repair_run = SimpleNamespace(
+        id=8,
+        started_at=dt.datetime(2026, 8, 17, 6, 0, tzinfo=dt.UTC),
+        finished_at=None,
+        trigger="cli",
+        symbols_checked=3,
+        symbols_repaired=0,
+        symbols_unrepairable=0,
+        rows_removed=0,
+        refetch_count=0,
+        receipt_json="this is not a mapping",
+    )
+
+    monkeypatch.setattr(health, "session_scope", _fake_session_scope)
+    monkeypatch.setattr(health, "get_latest_scan_runs", lambda *_a, **_k: [])
+    monkeypatch.setattr(health, "get_latest_candle_repair_run", lambda _session: repair_run)
+
+    run = health.collect_admin_health(_settings(tmp_path)).latest_candle_repair_run
+
+    assert run is not None
+    assert run.symbols_checked == 3
+    assert run.outcomes == ()
+
+
+def test_collect_admin_health_has_no_repair_run_before_the_first_pass(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(health, "session_scope", _fake_session_scope)
+    monkeypatch.setattr(health, "get_latest_scan_runs", lambda *_a, **_k: [])
+    monkeypatch.setattr(health, "get_latest_candle_repair_run", lambda _session: None)
+
+    snapshot = health.collect_admin_health(_settings(tmp_path))
+
+    assert snapshot.latest_candle_repair_run is None
+
+
 def test_collect_admin_health_reads_latest_candle_date_from_parquet_metadata(
     monkeypatch, tmp_path
 ):

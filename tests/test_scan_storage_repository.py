@@ -844,3 +844,91 @@ def test_get_forward_return_metric_records_excludes_non_success_runs(db_session)
 
     # FAILED (aborted) and RUNNING (in-flight) runs never colour the metrics.
     assert sorted(row.symbol for row in rows) == ["OKAY", "PART"]
+
+
+# ---------------------------------------------------------------------------
+# DATA-002 — candle cache-repair runs
+# ---------------------------------------------------------------------------
+
+
+def test_repository_records_a_candle_repair_run(db_session):
+    """A repair pass opens a header row, then stamps its counts and receipt."""
+    from backend.storage.repository import (
+        create_candle_repair_run,
+        finish_candle_repair_run,
+        get_latest_candle_repair_run,
+    )
+
+    run = create_candle_repair_run(db_session, trigger="prefetch")
+    # The header exists before the pass finishes, so a crash mid-repair still
+    # leaves evidence that it started.
+    assert run.id is not None
+    assert run.finished_at is None
+
+    finish_candle_repair_run(
+        db_session,
+        run,
+        symbols_checked=577,
+        symbols_repaired=14,
+        symbols_unrepairable=5,
+        rows_removed=1_238,
+        refetch_count=5,
+        receipt={"schema_version": 1, "outcomes": [{"symbol": "POONAWALLA"}]},
+    )
+    db_session.commit()
+
+    stored = get_latest_candle_repair_run(db_session)
+    assert stored is not None
+    assert stored.trigger == "prefetch"
+    assert stored.symbols_checked == 577
+    assert stored.symbols_repaired == 14
+    assert stored.symbols_unrepairable == 5
+    assert stored.rows_removed == 1_238
+    assert stored.refetch_count == 5
+    assert stored.finished_at is not None
+    assert stored.receipt_json["outcomes"][0]["symbol"] == "POONAWALLA"
+
+
+def test_candle_repair_receipt_is_secret_safe(db_session):
+    """The receipt goes through the same redaction hop as audit metadata."""
+    from backend.storage.repository import (
+        create_candle_repair_run,
+        finish_candle_repair_run,
+    )
+
+    run = create_candle_repair_run(db_session, trigger="cli")
+    finish_candle_repair_run(
+        db_session,
+        run,
+        symbols_checked=1,
+        symbols_repaired=0,
+        symbols_unrepairable=1,
+        rows_removed=0,
+        refetch_count=1,
+        receipt={"access_token": "repo-secret", "note": "token=repo-secret"},
+    )
+    db_session.commit()
+
+    assert "repo-secret" not in str(run.receipt_json)
+
+
+def test_latest_candle_repair_run_is_the_newest(db_session):
+    """Admin health always shows the most recent pass."""
+    from backend.storage.repository import (
+        create_candle_repair_run,
+        get_latest_candle_repair_run,
+    )
+
+    first = create_candle_repair_run(db_session, trigger="cli")
+    second = create_candle_repair_run(db_session, trigger="prefetch")
+    db_session.commit()
+
+    latest = get_latest_candle_repair_run(db_session)
+    assert latest is not None
+    assert latest.id == max(first.id, second.id)
+
+
+def test_no_candle_repair_run_yet_returns_none(db_session):
+    from backend.storage.repository import get_latest_candle_repair_run
+
+    assert get_latest_candle_repair_run(db_session) is None

@@ -59,6 +59,7 @@ Indexes: `scan_runs(status, screener_key, universe_key)`, `scan_results(run_id, 
 
 **OBS-003 standalone tables** (no FK to `scan_runs`):
 - `audit_logs` (user-action trail): `id`, `created_at` (tz-aware UTC), `event` (String), `user_email` (nullable — NULL for system actions), `metadata_json` (redacted). Indexes on `created_at`, `event`, `user_email`.
+- `candle_repair_runs` (DATA-002 cache-repair audit header): `id`, `started_at` (tz-aware UTC, indexed), `finished_at` (nullable — NULL means the pass never finished, which is itself evidence), `trigger` (`prefetch`|`cli`), `symbols_checked`, `symbols_repaired`, `symbols_unrepairable`, `rows_removed`, `refetch_count`, `receipt_json` (bounded + redacted). Separate from `scan_runs` because a repair runs during the prefetch, before any screener executes.
 - `app_config` (admin runtime overrides): `key` (PK env-var name), `value` (Text), `updated_at`, `updated_by`.
 
 **AUTH-003 standalone table** (no FK):
@@ -130,6 +131,9 @@ Full design: [ipo-005-ratio-engine.md](../ipo-005-ratio-engine.md).
 | `get_forward_return_metric_records(session, *, screener_key, universe_key, horizon_days, signal_date_from, signal_date_to)` | VALID-003A read-only join across `scan_runs`, `scan_results`, and `signal_forward_returns` (`SUCCESS`/`PARTIAL` runs only); date filters are inclusive over `scan_results.signal_date`. |
 | `create_audit_log_entry(session, *, event, user_email, metadata)` | Insert one `audit_logs` row; metadata routed through `normalize_secret_safe_json` (OBS-003). |
 | `get_recent_audit_logs(session, limit=100, *, event, user_email)` | Newest-first audit rows; optional event + case-insensitive email filters; `(created_at desc, id desc)` order. |
+| `create_candle_repair_run(session, *, trigger)` | Open a DATA-002 repair header before the pass starts, so a crash mid-repair still leaves a row. |
+| `finish_candle_repair_run(session, run, *, counts..., receipt)` | Stamp finishing counts + receipt; receipt routed through `normalize_secret_safe_json`. |
+| `get_latest_candle_repair_run(session)` | Newest repair pass for Admin health; `(started_at desc, id desc)` order. |
 | `list_distinct_audit_events(session)` | Distinct event names for the audit viewer's filter. |
 | `get_config_overrides(session)` / `set_config_override(session, *, key, value, updated_by)` | Read all overrides as `{key: value}`; upsert one and return the previous value (OBS-003). |
 | `get_user_role` / `set_user_role` / `delete_user_role` / `list_user_roles` / `count_user_role_admins` / `list_user_role_admins_for_update` | AUTH-003 `user_roles` access: email-normalized read; upsert/delete returning the previous role; list (email-sorted); and a transactional `SELECT … FOR UPDATE` of admin assignments used before evaluating the last-admin invariant. |
