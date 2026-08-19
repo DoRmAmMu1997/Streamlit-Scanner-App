@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 from collections.abc import Iterator
+from typing import cast
 
 import pytest
 import requests
@@ -16,6 +17,7 @@ from backend.ipo.sources.sebi import (
     SebiParseError,
     SebiSourceError,
     build_filing_data,
+    category_listing_url,
     fetch_sebi_filings,
     normalize_company_identity,
     parse_listing_page,
@@ -248,6 +250,120 @@ def test_fetch_retries_timeout_and_429_then_closes_every_response() -> None:
     assert sleeps == [2.0, 5.0]
     assert throttled.closed
     assert all(call[2]["timeout"] == (5.0, 20.0) for call in session.calls)
+
+
+def _live_shape_page(*rows: str, total_pages: int, next_value: int = 1) -> str:
+    """Build a page in the shape SEBI actually returns today.
+
+    Beginner note:
+        The older fixture put pagination *after* the ``#@#`` separator using
+        ``id`` attributes. Real responses put unquoted ``name`` inputs
+        *before* it and leave only breadcrumbs after. That mismatch is why the
+        suite stayed green while production silently read one page.
+    """
+    return (
+        f"<input type='hidden' name='totalpage' value={total_pages} />"
+        "<input type='hidden' name='nextDel' value='25'/>"
+        f"<input type='hidden' name='nextValue' value='{next_value}'/>"
+        "<div class='pagination'><div class='pagination_inner'>"
+        "<p>&nbsp;1 to 25 of 400</p></div></div>"
+        "<table>" + "".join(rows) + "</table>"
+        "#@#<li><a href='https://www.sebi.gov.in/index.html'>Home</a></li>"
+    )
+
+
+def test_pagination_is_read_from_the_live_response_shape() -> None:
+    """Hidden inputs before the separator must drive pagination.
+
+    Beginner note:
+        Reading ``total_pages`` as 1 does not raise -- it silently truncates a
+        scan to the newest 25 filings. This test pins the real markup so that
+        failure mode cannot come back unnoticed.
+    """
+    parsed = parse_listing_page(
+        _live_shape_page(
+            _row("Aug 19, 2026", "Example Ltd - DRHP"), total_pages=16, next_value=2
+        ),
+        category=SebiFilingCategory.DRHP,
+        source_url=category_listing_url(SebiFilingCategory.DRHP),
+    )
+
+    assert parsed.total_pages == 16
+    assert parsed.next_value == 2
+    assert len(parsed.filings) == 1
+
+
+def test_fetch_walks_every_page_of_a_live_shape_response() -> None:
+    """The fetcher must follow pagination instead of stopping at page one."""
+    session = FakeSession(
+        [
+            FakeResponse(
+                _live_shape_page(
+                    _row("Aug 19, 2026", "First Ltd - DRHP"), total_pages=3, next_value=2
+                )
+            ),
+            FakeResponse(
+                _live_shape_page(
+                    _row("Aug 18, 2026", "Second Ltd - DRHP"), total_pages=3, next_value=3
+                )
+            ),
+            FakeResponse(
+                _live_shape_page(
+                    _row("Aug 17, 2026", "Third Ltd - DRHP"), total_pages=3, next_value=3
+                )
+            ),
+        ]
+    )
+
+    filings = fetch_sebi_filings(
+        SebiFilingCategory.DRHP,
+        dt.date(2026, 8, 1),
+        dt.date(2026, 8, 19),
+        session=session,
+        sleeper=lambda _seconds: None,
+    )
+
+    assert [filing.title for filing in filings] == [
+        "First Ltd - DRHP",
+        "Second Ltd - DRHP",
+        "Third Ltd - DRHP",
+    ]
+    assert len(session.calls) == 3
+
+
+def test_fetch_sends_the_category_listing_page_as_referer() -> None:
+    """SEBI's edge rejects the AJAX feed without the originating page.
+
+    Beginner note:
+        Without this header the endpoint answers HTTP 530 and every scan
+        fails. The value is not a disguise: it is the listing page this feed
+        actually belongs to, and it differs per category. The User-Agent stays
+        the honest project identifier.
+    """
+    session = FakeSession([FakeResponse(_page())])
+
+    fetch_sebi_filings(
+        SebiFilingCategory.RHP,
+        dt.date(2026, 6, 1),
+        dt.date(2026, 6, 30),
+        session=session,
+        sleeper=lambda _seconds: None,
+    )
+
+    headers = cast("dict[str, str]", session.calls[0][2]["headers"])
+    assert headers["Referer"] == category_listing_url(SebiFilingCategory.RHP)
+    assert headers["User-Agent"] == "Streamlit-Scanner-App/IPO-002"
+    # A different category must cite its own listing page, not a shared one.
+    other = FakeSession([FakeResponse(_page())])
+    fetch_sebi_filings(
+        SebiFilingCategory.DRHP,
+        dt.date(2026, 6, 1),
+        dt.date(2026, 6, 30),
+        session=other,
+        sleeper=lambda _seconds: None,
+    )
+    other_headers = cast("dict[str, str]", other.calls[0][2]["headers"])
+    assert other_headers["Referer"] == category_listing_url(SebiFilingCategory.DRHP)
 
 
 def test_fetch_fails_fast_when_sebi_blocks_the_request() -> None:

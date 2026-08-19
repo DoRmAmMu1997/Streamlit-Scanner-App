@@ -178,7 +178,13 @@ def _pagination_value(soup: BeautifulSoup, name: str, default: int) -> int:
     values in surrounding text. A malformed explicit value fails closed instead
     of silently resetting the scan to page one.
     """
-    element = soup.find(id=lambda value: isinstance(value, str) and value.casefold() == name.casefold())
+    # SEBI labels these hidden inputs with ``name``; older fragments used
+    # ``id``. Accept either so one markup revision cannot break pagination.
+    def _matches(value: object) -> bool:
+        """Report whether an attribute identifies the wanted pagination field."""
+        return isinstance(value, str) and value.casefold() == name.casefold()
+
+    element = soup.find(id=_matches) or soup.find(attrs={"name": _matches})
     raw = element.get("value") if element is not None else None
     if raw is None:
         pattern = re.compile(rf"{re.escape(name)}[^0-9]{{0,40}}([0-9]+)", re.IGNORECASE)
@@ -202,9 +208,13 @@ def parse_listing_page(
     """Parse one AJAX page and fail closed if any filing-like row is malformed."""
     category = SebiFilingCategory(category)
     source_url = _canonical_sebi_url(source_url)
-    html, _separator, metadata = body.partition("#@#")
+    html, _separator, _metadata = body.partition("#@#")
     soup = BeautifulSoup(html, "html.parser")
-    pagination_soup = BeautifulSoup(metadata or html, "html.parser")
+    # Pagination lives in hidden inputs BEFORE the "#@#" separator, while the
+    # trailing metadata fragment holds only breadcrumbs. Parsing the whole body
+    # finds them in either position, so a response-shape change cannot silently
+    # reset the scan to a single page (IPO-011).
+    pagination_soup = BeautifulSoup(body, "html.parser")
     filings: list[SebiFiling] = []
     malformed_rows = 0
 
@@ -320,12 +330,20 @@ def _request_following_redirects(
     method: str,
     url: str,
     data: dict[str, str] | None,
+    referer: str,
 ) -> Any:
     """Follow at most three redirects while revalidating every destination.
 
     Automatic redirects are disabled so a trusted SEBI URL cannot bounce the
     process to another host. Each intermediate response is closed before the
     next request, and 301/302/303 switch to GET according to browser semantics.
+
+    Beginner note:
+        ``referer`` names the SEBI listing page this AJAX feed belongs to.
+        SEBI's edge rejects the feed request without it (HTTP 530), which is
+        reasonable: the header is simply the truth about where the request
+        originates. The User-Agent stays honest and identifying rather than
+        impersonating a browser.
     """
     current_method = method
     current_url = _canonical_sebi_url(url)
@@ -338,7 +356,11 @@ def _request_following_redirects(
             timeout=(CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_SECONDS),
             allow_redirects=False,
             stream=True,
-            headers={"User-Agent": "Streamlit-Scanner-App/IPO-002"},
+            headers={
+                "User-Agent": "Streamlit-Scanner-App/IPO-002",
+                "Referer": referer,
+                "X-Requested-With": "XMLHttpRequest",
+            },
         )
         if response.status_code not in {301, 302, 303, 307, 308}:
             return response
@@ -361,6 +383,7 @@ def _fetch_page(
     session: Any,
     payload: dict[str, str],
     sleeper: Callable[[float], None],
+    referer: str,
 ) -> str:
     """Fetch one AJAX page with bounded retries and guaranteed response closure.
 
@@ -376,6 +399,7 @@ def _fetch_page(
                 method="POST",
                 url=AJAX_URL,
                 data=payload,
+                referer=referer,
             )
             if response.status_code in BLOCKED_STATUS_CODES:
                 # A refusal, not an outage. Fail immediately so the caller sees
@@ -442,7 +466,7 @@ def fetch_sebi_filings(
                 "doDirect": "0" if page_number == 1 else "1",
             }
             parsed = parse_listing_page(
-                _fetch_page(active_session, payload, sleeper),
+                _fetch_page(active_session, payload, sleeper, source_url),
                 category=category,
                 source_url=source_url,
             )
