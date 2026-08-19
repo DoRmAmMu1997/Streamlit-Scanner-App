@@ -18,6 +18,7 @@ import streamlit as st
 from backend.auth.session import AuthenticatedUser
 from backend.health import (
     AdminHealthSnapshot,
+    CandleRepairRunHealth,
     DataQualityRunHealth,
     ScanRunHealth,
     collect_admin_health,
@@ -126,6 +127,69 @@ def _render_data_quality_summary(run: DataQualityRunHealth | None) -> None:
         )
 
 
+def _render_candle_repair_summary(run: CandleRepairRunHealth | None) -> None:
+    """Render the newest persisted DATA-002 cache-repair receipt.
+
+    Like the quality panel above this is purely a *display* of what an earlier
+    repair pass already recorded — it never re-validates or re-repairs anything, so
+    opening the health page stays cheap and passive.
+
+    The number worth an operator's attention is "unrepairable": nothing could be
+    done for those symbols automatically, so any fatal findings they carry keep
+    them out of every scan until a human looks.
+    """
+    st.markdown("### Candle cache repair")
+    if run is None:
+        st.info(
+            "No candle cache repair has run yet. It runs automatically at the end "
+            "of `python app.py`, or on demand via "
+            "`python -m backend.jobs.repair_candle_cache`."
+        )
+        return
+
+    repair_columns = st.columns(3)
+    repair_columns[0].metric("Repair checked symbols", run.symbols_checked)
+    repair_columns[1].metric("Repaired symbols", run.symbols_repaired)
+    # Deliberately "Unrepairable", not "Still dirty": a partially repaired symbol
+    # also still has findings, but its *fatal* ones are usually gone, so it is
+    # scannable again. Conflating the two would either hide real failures or
+    # raise false alarms. The partial count is surfaced separately below.
+    repair_columns[2].metric("Unrepairable symbols", run.symbols_unrepairable)
+    repair_columns[0].caption(
+        f"Run #{run.run_id} · {run.trigger} · {_format_health_time(run.finished_at)}"
+    )
+    # Rows removed and refetch count are the two "was this pass expensive or
+    # destructive?" numbers, so they get their own caption rather than a metric.
+    repaired_caption = f"{run.rows_removed} row(s) removed"
+    if run.symbols_partially_repaired:
+        repaired_caption += f" · {run.symbols_partially_repaired} partial"
+    repair_columns[1].caption(repaired_caption)
+    repair_columns[2].caption(f"{run.refetch_count} re-download(s)")
+
+    if not run.outcomes:
+        st.caption("Latest repair receipt has no per-symbol detail.")
+        return
+
+    rows = [
+        {
+            "Symbol": outcome.symbol,
+            "Status": outcome.status.replace("_", " "),
+            "Was": ", ".join(outcome.before_codes),
+            "Now": ", ".join(outcome.after_codes),
+            "Actions": ", ".join(outcome.actions),
+            "Rows removed": outcome.rows_removed,
+            "Note": _redact_secrets(outcome.message or ""),
+        }
+        for outcome in run.outcomes
+    ]
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    if run.outcomes_truncated:
+        st.caption(
+            f"Showing {len(run.outcomes)} of {run.total_outcomes} symbols "
+            "(most-actionable first); see logs for the full set."
+        )
+
+
 def _render_admin_health_page(
     authenticated_user: AuthenticatedUser | None,
     *,
@@ -216,6 +280,7 @@ def _render_admin_health_page(
         )
 
     _render_data_quality_summary(snapshot.latest_data_quality_run)
+    _render_candle_repair_summary(snapshot.latest_candle_repair_run)
 
     st.markdown("### Service readiness")
     service_rows = [

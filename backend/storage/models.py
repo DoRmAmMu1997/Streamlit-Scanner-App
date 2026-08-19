@@ -1707,6 +1707,91 @@ class IpoEnrichmentSignal(Base):
     issue: Mapped[IpoIssue] = relationship(back_populates="enrichment_signals")
 
 
+class CandleRepairRun(Base):
+    """DATA-002 — one row per candle-cache repair pass (the repair audit header).
+
+    Where ``scan_runs.data_quality_json`` records *"what was wrong with the candle
+    data during this scan?"*, this table records *"what did we do about it?"*.
+    Each row covers one pass of the repair over the universe: how many symbols
+    were inspected, how many were actually fixed, how many trading-day rows were
+    discarded, how many Dhan re-downloads it cost, and a bounded JSON receipt
+    naming the symbols that still need a human.
+
+    Beginner note:
+    Keeping this separate from ``scan_runs`` matters because a repair happens at a
+    different time and for a different reason than a scan — it runs during the
+    ``python app.py`` prefetch, before any screener executes. Storing it here lets
+    Admin health answer "was the cache cleaned this morning, and what refused to
+    come clean?" without inventing a synthetic scan run.
+
+    ``receipt_json`` is passed through the app's secret redactor before it lands
+    here, exactly like ``audit_logs.metadata_json``, and only ever holds symbols,
+    stable codes, and counts — never prices.
+    """
+
+    __tablename__ = "candle_repair_runs"
+
+    # Same BigInt/SQLite-Integer variant as every other surrogate key here.
+    id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
+
+    # When the pass began. Indexed because every reader wants the newest row.
+    started_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: dt.datetime.now(dt.UTC),
+        index=True,
+        comment="UTC time the repair pass started",
+    )
+
+    # NULL while a pass is still running, or if the process died mid-pass — which
+    # is itself useful evidence, so we do not backfill it.
+    finished_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="UTC time the repair pass finished; NULL if it never did",
+    )
+
+    # What kicked the pass off: 'prefetch' (python app.py) or 'cli' (the job).
+    # A short String rather than an enum so a new trigger needs no migration.
+    trigger: Mapped[str] = mapped_column(
+        String(32), nullable=False, comment="What started the pass: prefetch | cli"
+    )
+
+    symbols_checked: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="Symbols inspected in this pass"
+    )
+    symbols_repaired: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="Symbols whose cache was rewritten"
+    )
+    symbols_unrepairable: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        comment="Symbols still carrying findings after the attempt",
+    )
+    # Counted so an operator can see at a glance whether a pass has been quietly
+    # eating history. The per-symbol drop budget bounds this, but a headline
+    # number makes an anomaly obvious without opening the receipt.
+    rows_removed: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="Candle rows discarded in total"
+    )
+    refetch_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="Dhan re-downloads this pass cost"
+    )
+
+    # Bounded, redacted, versioned detail (schema_version=1). Nullable so a pass
+    # that died before summarising still leaves its header row behind.
+    receipt_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True, comment="Redacted, capped per-symbol repair receipt"
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"CandleRepairRun(id={self.id!r}, trigger={self.trigger!r}, "
+            f"symbols_repaired={self.symbols_repaired!r})"
+        )
+
+
 # ============================================================================
 # NEXT: SCAN-002 (owner: Codex) — implement the database layer on top of this
 # schema. This file gives you the tables; SCAN-002 gives the app a way to talk

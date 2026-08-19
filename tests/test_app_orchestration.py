@@ -318,6 +318,97 @@ def test_prefetch_redacts_dhan_setup_errors(monkeypatch, capsys):
     assert "***REDACTED***" in output
 
 
+def _prefetch_ready(monkeypatch, *, statuses=("fresh",)):
+    """Patch the prefetch's collaborators so only the repair step is left real."""
+    rows = [
+        {"symbol": f"SYM{index}", "security_id": str(index), "mapping_status": "mapped"}
+        for index in range(len(statuses))
+    ]
+
+    class _Loader:
+        def __init__(self, client=None):
+            # Recorded so a test can assert the cache-only (client=None) path.
+            self.client = client
+
+        def cleanup_legacy_cache_files(self):
+            return 0
+
+        def iter_ensure_universe_history(self, rows_arg, **_kwargs):
+            for row, status in zip(rows_arg, statuses, strict=False):
+                yield SimpleNamespace(symbol=row["symbol"], status=status, message=None)
+
+    monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
+    monkeypatch.setattr(app, "ensure_database_schema", lambda: True)
+    monkeypatch.setattr(app, "record_audit_event", lambda **_kwargs: None)
+    monkeypatch.setattr(app, "refresh_universes_and_invalidate", lambda: {})
+    monkeypatch.setattr(app, "union_of_mapped_universes", lambda: pd.DataFrame(rows))
+    monkeypatch.setattr(app, "DailyDataLoader", _Loader)
+    monkeypatch.setattr(app, "DhanDataClient", SimpleNamespace(from_env=lambda: object()))
+    monkeypatch.setattr(app, "persist_repair_summary", lambda *_a, **_k: None)
+    return rows
+
+
+def test_prefetch_repairs_the_cache_after_topping_it_up(monkeypatch, capsys):
+    """DATA-002: the repair runs as the last prefetch step, before Streamlit."""
+    _prefetch_ready(monkeypatch, statuses=("fresh", "incremental"))
+    seen: dict[str, object] = {}
+
+    def fake_repair(loader, rows, **kwargs):
+        seen["row_count"] = len(rows)
+        seen["statuses"] = kwargs.get("prefetch_statuses")
+        return app.CacheRepairSummary(symbols_checked=2, symbols_repaired=1)
+
+    monkeypatch.setattr(app, "repair_universe", fake_repair)
+
+    app.prefetch_data_assets()
+
+    output = capsys.readouterr().out
+    # The repair summary must be printed before the hand-off to Streamlit.
+    assert output.index("Cache repair complete") < output.index("Launching Streamlit")
+    assert seen["row_count"] == 2
+    # The top-up statuses are handed over so the stale guard can use them.
+    assert seen["statuses"] == {"SYM0": "fresh", "SYM1": "incremental"}
+
+
+def test_prefetch_still_launches_streamlit_when_the_repair_explodes(monkeypatch, capsys):
+    """A repair failure must never stop the user reaching their app."""
+    _prefetch_ready(monkeypatch)
+    monkeypatch.setattr(
+        app,
+        "repair_universe",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            RuntimeError("token=REPAIRSECRET should stay hidden")
+        ),
+    )
+
+    app.prefetch_data_assets()
+
+    output = capsys.readouterr().out
+    assert "Launching Streamlit" in output
+    assert "REPAIRSECRET" not in output
+    assert "***REDACTED***" in output
+
+
+def test_prefetch_reports_repaired_count_on_the_refresh_event(monkeypatch, caplog):
+    """Monitoring should be able to see how many caches were cleaned."""
+    _prefetch_ready(monkeypatch)
+    monkeypatch.setattr(
+        app,
+        "repair_universe",
+        lambda *_a, **_k: app.CacheRepairSummary(symbols_checked=1, symbols_repaired=1),
+    )
+
+    with caplog.at_level("INFO"):
+        app.prefetch_data_assets()
+
+    completed = [
+        getattr(record, "structured_fields", {})
+        for record in caplog.records
+        if getattr(record, "event", None) == EVENT_DATA_REFRESH_COMPLETED
+    ]
+    assert completed[0]["candles_repaired"] == 1
+
+
 def test_prefetch_bootstraps_schema_before_data_refresh_audit(monkeypatch):
     """The system audit row should get migrations before the first write."""
 
@@ -1329,3 +1420,34 @@ def test_format_data_freshness_falls_back_to_raw_text():
 
 def test_format_data_freshness_handles_missing_value():
     assert app._format_data_freshness("") == "unknown"
+
+
+def test_prefetch_runs_offline_repairs_when_credentials_are_missing(monkeypatch, capsys):
+    """No Dhan token blocks fetching, not de-duplication.
+
+    Exact-duplicate and impossible-bar repairs need no client at all, and those
+    are what quarantine whole symbols from every scan — so they must still run.
+    """
+    _prefetch_ready(monkeypatch)
+    monkeypatch.setattr(
+        app,
+        "DhanDataClient",
+        SimpleNamespace(
+            from_env=lambda: (_ for _ in ()).throw(RuntimeError("no credentials"))
+        ),
+    )
+    called: dict[str, object] = {}
+
+    def fake_repair(loader, rows, **kwargs):
+        called["client"] = getattr(loader, "client", "missing")
+        called["rows"] = len(rows)
+        return app.CacheRepairSummary(symbols_checked=1, symbols_repaired=1)
+
+    monkeypatch.setattr(app, "repair_universe", fake_repair)
+
+    app.prefetch_data_assets()
+
+    # The repair ran, with a deliberately cache-only loader.
+    assert called["client"] is None
+    assert called["rows"] == 1
+    assert "Launching Streamlit UI" in capsys.readouterr().out

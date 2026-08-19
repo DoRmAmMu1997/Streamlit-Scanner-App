@@ -138,7 +138,7 @@ flowchart TB
 | Configuration | [configuration](components/configuration.md) | Typed env settings, prod fail-closed, secret list |
 | Deployment runtime | [deployment-runtime](components/deployment-runtime.md) | Docker image, build context, container env, port, health check |
 | Data acquisition | [data-acquisition](components/data-acquisition.md) | DhanHQ client + Parquet candle cache |
-| Data quality | [data-quality](components/data-quality.md) | Candle OHLCV validation + loader-boundary quarantine + per-run quality receipt (DATA-001) |
+| Data quality | [data-quality](components/data-quality.md) | Candle OHLCV validation + loader-boundary quarantine + per-run quality receipt (DATA-001) + prefetch-time cache repair (DATA-002) |
 | Universe management | [universe-management](components/universe-management.md) | Build/load universe CSVs, symbol→security_id |
 | Screener framework | [screener-framework](components/screener-framework.md) | `BaseScanner` ABC + plugin registry |
 | Indicators | [indicators](components/indicators.md) | TA-Lib/pandas_ta + fallbacks, levels, weekly |

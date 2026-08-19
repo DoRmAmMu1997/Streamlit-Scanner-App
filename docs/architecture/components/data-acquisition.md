@@ -60,6 +60,7 @@ flowchart TD
 | `.read_cached_history(symbol, security_id)` | Disk-only read (chart UI path); empty frame if missing/corrupt. |
 | `.get_daily_history(instrument, start, end, force_refresh=False)` | `(frame, served_from_cache)`; **cache hit only when the file covers the entire requested range.** |
 | `.ensure_daily_history(instrument, years_back=10, today=None)` | `(frame, status)` where status ∈ `fresh`/`incremental`/`fresh_download`/`backfilled`. The prefetch engine. |
+| `.fetch_window(instrument, start, end)` | Network-only fetch (same pacing, DH-904 backoff, and optional timeout) that **does not write the cache**. Added for the DATA-002 repair, which merges a bounded window *over* existing history — writing it directly would truncate a ten-year file to that window. An empty frame means the vendor has no rows there, not an error. |
 | `.iter_universe_history(...)` | Yields `HistoryLoadItem` per symbol (streaming — compute as you load). |
 | `.load_universe_history(...)` | Batch wrapper → `BatchLoadResult` (frames + failures + counters). |
 | `.cleanup_legacy_cache_files()` / `.cleanup_stale_cache_files(max_age_days=...)` | Cache hygiene. |
@@ -86,6 +87,7 @@ flowchart TD
 ## 5. Failure modes / degradation
 
 - Per-symbol fetch exception → redacted message captured in `BatchLoadResult.failures` + `external_api_failed` log event ([observability.md](observability.md)); the scan continues (→ `partial`).
+- Malformed cached parquet → the DATA-002 repair pass at the end of the prefetch attempts a fix (de-duplicate, re-download, or drop an impossible bar) and re-validates; see [data-quality.md](data-quality.md).
 - Fatal candle quality defect → frame withheld as a `phase="data_quality"` failure + `candle_data_quality_failed` event (codes only); warning-only frames pass through with a `candle_data_quality_warning` event (DATA-001).
 - Corrupt/empty/all-NaT parquet → treated as no cache, full re-download.
 - Rate limit beyond retry budget → `DhanRateLimitError` propagates.

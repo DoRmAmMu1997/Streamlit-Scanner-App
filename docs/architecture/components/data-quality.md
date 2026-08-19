@@ -2,22 +2,25 @@
 
 | | |
 |---|---|
-| **Component** | Reusable OHLCV candle-quality validation + scan-time quarantine, receipt, and health surfacing |
-| **Source** | [`backend/data_quality/candles.py`](../../../backend/data_quality/candles.py), [`backend/data_quality/__init__.py`](../../../backend/data_quality/__init__.py); integrated in [`daily_data_loader.py`](../../../backend/daily_data_loader.py), [`scanning/service.py`](../../../backend/scanning/service.py), [`health.py`](../../../backend/health.py), [`ui/health_page.py`](../../../ui/health_page.py) |
-| **Layer** | Foundation checker (pure, no I/O) + boundary integration in the data/scan layers |
-| **Status** | Stable (DATA-001A checker · DATA-001B integration) |
-| **Related** | [HLD](../high-level-design.md) · [data-acquisition.md](data-acquisition.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [storage-persistence.md](storage-persistence.md) · [health-monitoring.md](health-monitoring.md) · [observability.md](observability.md) · [security.md](security.md) |
+| **Component** | Reusable OHLCV candle-quality validation + scan-time quarantine, receipt, health surfacing, and prefetch-time repair |
+| **Source** | [`backend/data_quality/candles.py`](../../../backend/data_quality/candles.py), [`repair.py`](../../../backend/data_quality/repair.py), [`cache_repair.py`](../../../backend/data_quality/cache_repair.py), [`backend/data_quality/__init__.py`](../../../backend/data_quality/__init__.py); integrated in [`daily_data_loader.py`](../../../backend/daily_data_loader.py), [`scanning/service.py`](../../../backend/scanning/service.py), [`jobs/repair_candle_cache.py`](../../../backend/jobs/repair_candle_cache.py), [`health.py`](../../../backend/health.py), [`ui/health_page.py`](../../../ui/health_page.py) |
+| **Layer** | Foundation checker + repair planner (pure, no I/O) + boundary integration in the data/scan layers |
+| **Status** | Stable (DATA-001A checker · DATA-001B integration · DATA-002 repair) |
+| **Related** | [HLD](../high-level-design.md) · [data-002 repair design](../data-002-candle-cache-repair.md) · [data-acquisition.md](data-acquisition.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [storage-persistence.md](storage-persistence.md) · [health-monitoring.md](health-monitoring.md) · [observability.md](observability.md) · [security.md](security.md) |
 
 ## 1. Purpose & responsibilities
 
 Stop stale or malformed candle data from silently producing false signals
-(EPIC 12 / DATA-001). A pure validator inspects each symbol's daily OHLCV frame
-and returns a structured report; the loader **quarantines** frames with fatal
-defects before any scanner consumes them, the scan service records a bounded
-per-run **receipt** and downgrades the run's status, and Admin health surfaces
-the newest receipt — all without re-fetching or mutating data.
+(EPIC 12 / DATA-001), and then **fix what can honestly be fixed** (DATA-002). A
+pure validator inspects each symbol's daily OHLCV frame and returns a structured
+report; the loader **quarantines** frames with fatal defects before any scanner
+consumes them, the scan service records a bounded per-run **receipt** and
+downgrades the run's status, and Admin health surfaces the newest receipt. The
+repair pass then runs at the end of the `python app.py` prefetch, so the app
+starts against the cleanest cache we can produce rather than silently dropping
+corrupt symbols from every scan.
 
-**Two parts:**
+**Three parts:**
 - **DATA-001A — checker** (`candles.py`): `validate_candles(...)` → an immutable
   `CandleQualityReport` of `DataQualityFinding`s with stable codes/severities.
   Pure, dependency-light (stdlib + pandas), never mutates the caller's frame, no
@@ -25,6 +28,21 @@ the newest receipt — all without re-fetching or mutating data.
 - **DATA-001B — integration**: loader-boundary quarantine, the persisted
   `scan_runs.data_quality_json` receipt + status escalation, structured events,
   and the passive health summary.
+- **DATA-002 — repair** (`repair.py` planner + `cache_repair.py` executor): turns
+  a report into an ordered plan, carries out the offline steps, re-downloads what
+  only the vendor can answer, **re-validates its own work**, and writes the cache
+  back atomically. Full rationale in
+  [data-002-candle-cache-repair.md](../data-002-candle-cache-repair.md).
+
+### Repair, in one paragraph
+
+The repair never invents a price: no interpolation, no clamping, no swapping a
+high and a low, no split adjustment. It removes redundancy (byte-identical
+duplicate rows), asks DhanHQ again when the cached bytes are untrustworthy, and
+drops a bar only after the vendor has had a chance to re-supply it. A drop budget
+measured in *trading days* (not rows) makes de-duplication always safe while
+refusing any repair that would eat real history, and the cache file is only ever
+rewritten when re-validation shows the data genuinely improved.
 
 ## 2. Position in the system
 
@@ -112,3 +130,10 @@ new stable code + matching tests; choose `fatal` only for structurally unusable
 data. Reuse `validate_candles` anywhere a candle frame enters the system (e.g. a
 future intraday loader) by calling it at that boundary and acting on
 `report.is_usable`.
+
+A new **repair** for that finding = one branch in `plan_repair` emitting an
+existing action code (or a new one, plus its arm in `apply_frame_actions`). Two
+rules for anything added there: it must not fabricate a value, and it must be
+reachable in a test with a small DataFrame — the planner stays pure precisely so
+that remains true. If a defect has no honest local fix, emit
+`NO_ACTION_VENDOR_DATA` with a reason rather than guessing.

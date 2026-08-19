@@ -93,6 +93,7 @@ def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Pa
         "alembic_version",
         "app_config",
         "audit_logs",
+        "candle_repair_runs",
         "ipo_documents",
         "ipo_enrichment_signals",
         "ipo_extraction_proposals",
@@ -121,6 +122,24 @@ def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Pa
     }
     assert "data_quality_json" in {
         column["name"] for column in inspector.get_columns("scan_runs")
+    }
+    # DATA-002: the candle cache-repair audit header.
+    assert {index["name"] for index in inspector.get_indexes("candle_repair_runs")} >= {
+        "ix_candle_repair_runs_started_at",
+    }
+    assert {
+        column["name"] for column in inspector.get_columns("candle_repair_runs")
+    } == {
+        "id",
+        "started_at",
+        "finished_at",
+        "trigger",
+        "symbols_checked",
+        "symbols_repaired",
+        "symbols_unrepairable",
+        "rows_removed",
+        "refetch_count",
+        "receipt_json",
     }
     assert {index["name"] for index in inspector.get_indexes("scan_results")} >= {
         "ix_scan_results_run_id",
@@ -687,6 +706,7 @@ def test_ensure_database_schema_creates_tables_and_short_circuits(monkeypatch, t
         "alembic_version",
         "app_config",
         "audit_logs",
+        "candle_repair_runs",
         "ipo_documents",
         "ipo_enrichment_signals",
         "ipo_extraction_proposals",
