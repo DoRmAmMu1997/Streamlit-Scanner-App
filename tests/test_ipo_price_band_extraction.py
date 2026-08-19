@@ -217,3 +217,57 @@ def test_cap_price_fact_carries_no_unit_scaling() -> None:
     assert band.unit_multiplier == Decimal("1")
     assert band.period_end is None
     assert band.page_number == 3
+
+
+def test_a_cover_page_row_with_a_bid_lot_still_binds_the_cap() -> None:
+    """A larger unrelated number on the row must not void the citation.
+
+    Beginner note:
+        The first version of this guard demanded the cap be the largest number
+        anywhere on the span. Real cover-page rows print a bid lot ("150 Equity
+        Shares") and a fiscal year beside a two-digit share price, so that rule
+        rejected perfectly good evidence -- and a rejected cap price means no
+        valuation, which means no verdict at all. Binding to the stated price
+        construct is both stricter and free of that false rejection.
+    """
+    proposal = financial_extractor._ProposalModel.model_validate(
+        _model(price_band_high="100", price_band_high_page=3)
+    )
+    page = _band_page(
+        "Price Band: Rs 95 to Rs 100 per Equity Share | Bid Lot: 150 Equity Shares"
+    )
+
+    source = financial_extractor._matching_numeric_source_for_fact(
+        "price_band_high", "100", page, proposal
+    )
+
+    assert source is not None
+    # The floor is still refused on the very same span.
+    assert not financial_extractor._cap_price_binds_to_a_stated_band(
+        "price_band_high", "95", page.text
+    )
+    # ...and so is the bid lot, which is not a price at all.
+    assert not financial_extractor._cap_price_binds_to_a_stated_band(
+        "price_band_high", "150", page.text
+    )
+
+
+def test_naming_a_price_band_does_not_make_a_sibling_fact_unverifiable() -> None:
+    """A "Basis for the Offer Price" row must still verify its own number.
+
+    Beginner note:
+        The RHP states EPS and NAV "in relation to the Price Band". Registering
+        the cap price in the shared field-label table made those rows carry two
+        semantic fields, and the "exactly one field per span" rule then rejected
+        them -- failing proposals that verified cleanly before the cap price
+        existed. EPS is a core label, so that took the whole proposal down with
+        it.
+    """
+    span = (
+        "Earnings Per Share (EPS) 3.00 in relation to the Price Band of Rs 95 to Rs 100"
+    )
+
+    assert financial_extractor._semantic_field_labels(span) == {"eps"}
+    assert financial_extractor._span_matches_field_label("eps", span)
+    # The cap price is still recognised on that same span, by construct.
+    assert financial_extractor._span_matches_field_label("price_band_high", span)

@@ -20,7 +20,7 @@ trail.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -30,11 +30,9 @@ from backend.config import get_ipo_auto_approve_high_confidence
 from backend.ipo.models import (
     Confidence,
     IpoExtractionProposalStatus,
-    IpoValidationError,
 )
 from backend.ipo.repository import (
     AuditRecorder,
-    IpoNotFoundError,
     SessionFactory,
     approve_extraction_proposal,
     list_extraction_proposals,
@@ -63,6 +61,7 @@ class IpoAutoApprovalOutcome:
 def auto_approve_ready_proposals(
     *,
     issue_id: int | None = None,
+    issue_ids: Sequence[int] | None = None,
     data_dir: Path | None = None,
     enabled: bool | None = None,
     audit_recorder: AuditRecorder = record_audit_event,
@@ -73,6 +72,9 @@ def auto_approve_ready_proposals(
 
     Args:
         issue_id: Restrict the pass to one issue; ``None`` scans the queue.
+        issue_ids: Restrict the pass to a set of issues. A caller that
+            processed a narrowed set of issues must pass the same set, so an
+            approval can never reach an issue the run did not touch.
         data_dir: Override of the verified document-cache root (tests).
         enabled: Override of the environment switch, for tests and callers
             that already resolved the setting.
@@ -101,6 +103,13 @@ def auto_approve_ready_proposals(
         status=IpoExtractionProposalStatus.PENDING,
         session_factory=session_factory,
     )
+    if issue_ids is not None:
+        # Approval writes evidence and mutates the issue row, so a run that
+        # was narrowed (by active-status or a max-issues cap) must not reach
+        # outside its own selection. Without this, a capped run silently
+        # converts the entire queue and then rescores only part of it.
+        wanted = set(issue_ids)
+        pending = [proposal for proposal in pending if proposal.issue_id in wanted]
     approved: list[int] = []
     skipped = 0
     failed = 0
@@ -116,8 +125,15 @@ def auto_approve_ready_proposals(
                 data_dir=data_dir,
                 session_factory=session_factory,
             )
-        except (IpoValidationError, IpoNotFoundError) as exc:
-            # A proposal that cannot convert stays pending for a human.
+        except Exception as exc:  # noqa: BLE001 - see the guarantee below
+            # A proposal that cannot convert stays pending for a human, and
+            # its siblings still process. The catch is deliberately broad
+            # because approval reaches the database and the document cache:
+            # an IntegrityError, an OSError reading a cached PDF, or a
+            # settings failure would otherwise abort the whole screener run
+            # after every earlier stage had already succeeded. Only the
+            # exception's type is recorded, never its message, since upstream
+            # text is untrusted.
             failed += 1
             log_event(
                 logger,

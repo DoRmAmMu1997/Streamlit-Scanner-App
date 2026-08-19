@@ -435,7 +435,7 @@ def delete_ipo_subscription_row(
 
 
 def get_latest_ipo_subscription(
-    session: Session, issue_id: int
+    session: Session, issue_id: int, *, official_only: bool = False
 ) -> IpoSubscription | None:
     """Return only the newest demand snapshot for one issue.
 
@@ -443,16 +443,20 @@ def get_latest_ipo_subscription(
     read mirrors :func:`get_latest_ipo_evaluation_rows`: deterministic ordering
     plus ``LIMIT 1`` instead of materializing the whole capture history.
 
+    ``official_only`` excludes low-confidence (IPO-011 web-sourced) snapshots.
+
     Beginner note:
         The identifier breaks ties when two captures share a timestamp, making
         “latest” stable on both SQLite and PostgreSQL.
     """
-    stmt = (
-        select(IpoSubscription)
-        .where(IpoSubscription.issue_id == issue_id)
-        .order_by(IpoSubscription.captured_at.desc(), IpoSubscription.id.desc())
-        .limit(1)
-    )
+    stmt = select(IpoSubscription).where(IpoSubscription.issue_id == issue_id)
+    if official_only:
+        # The literal matches the CHECK vocabulary in models.py; the storage
+        # layer deliberately does not import the domain enum.
+        stmt = stmt.where(IpoSubscription.source_confidence != "low")
+    stmt = stmt.order_by(
+        IpoSubscription.captured_at.desc(), IpoSubscription.id.desc()
+    ).limit(1)
     return session.scalar(stmt)
 
 

@@ -618,6 +618,65 @@ def test_approval_writes_the_verified_cap_price_onto_the_issue(
     assert priced.price_band_high == Decimal("242")
 
 
+def test_a_genuine_v2_proposal_still_approves_after_the_cap_price_landed(
+    file_session_factory, tmp_path: Path
+) -> None:
+    """Adding an optional field must not invalidate queued reviews.
+
+    Beginner note:
+        A proposal drafted before IPO-011 has no ``price_band_high`` keys in
+        its payload at all -- not keys set to null, no keys. The receipt
+        verifier rebuilds the model from the payload, so subscripting every
+        known field unconditionally raised ``KeyError`` on exactly those rows.
+        That was swallowed by a broad except and reported as "receipts do not
+        match the verified cached PDF", which reads like tampering and would
+        have quietly made every in-flight v2 review un-approvable.
+    """
+    issue, document, digest = _cached_document(
+        file_session_factory, tmp_path, priced=False
+    )
+    payload = _bound_payload(digest)
+    # Reproduce a real pre-IPO-011 payload: the optional keys never existed.
+    payload.pop("price_band_high", None)
+    payload.pop("price_band_high_page", None)
+    payload["evidence_schema_version"] = "cited-financial-fact/v2"
+    assert "price_band_high" not in payload
+
+    with file_session_factory() as session:
+        legacy = insert_ipo_extraction_proposal(
+            session,
+            issue.id,
+            document.id,
+            {
+                "status": "pending",
+                "document_url_snapshot": document.document_url,
+                "payload_json": payload,
+                "evidence_schema_version": "cited-financial-fact/v2",
+                "confidence": "high",
+                "needs_review_reasons_json": [],
+                "model_version": "ipo-010-extractor-v2",
+                "agent_model": "claude-sonnet-4-6",
+                "source_content_sha256": digest,
+                "page_count": 16,
+            },
+        )
+        proposal_id = legacy.id
+
+    revision = approve_extraction_proposal(
+        proposal_id,
+        reviewed_by_email="reviewer@example.com",
+        data_dir=tmp_path,
+        now=lambda: _NOW,
+        session_factory=file_session_factory,
+    )
+
+    assert revision is not None
+    # A v2 proposal carries no issue terms, so the issue stays unpriced.
+    unchanged = get_issue(issue.id, session_factory=file_session_factory)
+    assert unchanged is not None
+    assert unchanged.price_band_high is None
+
+
 def test_unpriced_drhp_proposal_still_approves_and_leaves_the_issue_unpriced(
     file_session_factory, tmp_path: Path
 ) -> None:

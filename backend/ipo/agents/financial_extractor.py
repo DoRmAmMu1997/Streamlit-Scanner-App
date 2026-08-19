@@ -365,10 +365,16 @@ class _ProposalModel(StrictAIModel):
                 "price_band_high requires both a value and its source page."
             )
         if has_value:
-            _require_decimal_text(str(self.price_band_high), "price_band_high")
+            # Keep the normalized text, exactly as the _decimal_text field
+            # validator does for every other value field. Discarding it would
+            # leave this the one field stored with the model's raw spacing.
+            normalized = _require_decimal_text(
+                str(self.price_band_high), "price_band_high"
+            )
             _require_page(int(self.price_band_high_page or 0), "price_band_high_page")
-            if Decimal(str(self.price_band_high)) <= 0:
+            if Decimal(normalized) <= 0:
                 raise ValueError("price_band_high must be a positive rupee amount.")
+            object.__setattr__(self, "price_band_high", normalized)
         return self
 
     @field_validator("financial_amount_unit", "issue_amount_unit")
@@ -594,14 +600,6 @@ _FIELD_LABEL_PATTERNS: Final[dict[str, tuple[re.Pattern[str], ...]]] = {
         re.compile(r"\beps\b", re.IGNORECASE),
         re.compile(r"\bearnings\s+per\s+share\b", re.IGNORECASE),
     ),
-    # IPO-011. Only the CAP price is extracted: it is the single bound every
-    # ratio consumes ("upper price band / computed EPS"), and one field per
-    # line keeps the "exactly one semantic field" rule usable -- a price-band
-    # line naming both a floor and a cap would otherwise be ambiguous.
-    "price_band_high": (
-        re.compile(r"\bprice\s+band\b", re.IGNORECASE),
-        re.compile(r"\bcap\s+price\b", re.IGNORECASE),
-    ),
     "nav_book_value": (
         re.compile(r"\bnav\b", re.IGNORECASE),
         re.compile(r"\bbook\s+value\b", re.IGNORECASE),
@@ -651,6 +649,24 @@ def _citation_field_name(label: str) -> str:
     return peer_match.group(2) if peer_match else label
 
 
+# IPO-011: the cap price is recognised by these constructs rather than by an
+# entry in _FIELD_LABEL_PATTERNS. Registering it there would have added a
+# second semantic field to every span mentioning a price band -- including the
+# standard "Basis for the Offer Price" rows that state EPS or NAV "in relation
+# to the Price Band" -- and the "exactly one semantic field" rule would then
+# have rejected facts that verified cleanly before this ticket.
+_PRICE_BAND_RANGE_PATTERN: Final = re.compile(
+    r"(?:price\s+band|band\s+of)\D{0,40}?"
+    r"(?P<low>\d[\d,]*(?:\.\d+)?)\s*(?:to|through|[-–—])\s*"
+    r"(?:rs\.?|₹|inr)?\s*(?P<high>\d[\d,]*(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+_CAP_PRICE_PATTERN: Final = re.compile(
+    r"cap\s+price\D{0,40}?(?P<cap>\d[\d,]*(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+
+
 def _semantic_field_labels(span: str) -> set[str]:
     """Return unambiguous field meanings named in one source span."""
     matched = {
@@ -676,6 +692,12 @@ def _span_matches_field_label(label: str, span: str) -> bool:
         normalized_company = " ".join(peer_match.group(1).casefold().split())
         normalized_span = " ".join(span.casefold().split())
         return normalized_company in normalized_span
+    if field_name == "price_band_high":
+        # Identity comes from the price construct itself, and the exact bound
+        # is then pinned by _cap_price_binds_to_a_stated_band. Keeping this
+        # field out of the shared table means a span may name a price band
+        # *and* another fact without either becoming unverifiable.
+        return bool(_stated_cap_prices(span))
     if field_name not in semantic_fields:
         return False
     # A compact row containing multiple facts does not prove which number
@@ -684,25 +706,51 @@ def _span_matches_field_label(label: str, span: str) -> bool:
     return len(semantic_fields) == 1
 
 
-def _cap_price_is_the_highest_on_span(label: str, value: str, span: str) -> bool:
-    """Require a claimed cap price to be the largest number in its own span.
+def _stated_cap_prices(span: str) -> list[Decimal]:
+    """Return every cap price this span states as part of a price construct.
 
     Beginner note:
-        A price-band line names both bounds ("Price Band: Rs 95 to Rs 100"),
-        and the plain token matcher would happily bind the floor as if it were
-        the cap. That error runs in the unsafe direction -- a lower price makes
-        the issue look cheaper, raising the valuation factor -- so the host
-        rejects any cap claim that is not the maximum number on the span it
-        cites. Other fields are unaffected.
+        The cap is read from the *construct that names it* rather than from
+        loose numbers on the line. A band prints as a range ("Price Band: Rs 95
+        to Rs 100"), whose cap is the larger of the two bounds; a cap price can
+        also be named outright ("at the Cap Price of Rs 100"). Anything else on
+        the row -- a bid lot, a share count, a fiscal year -- is not part of
+        either construct and so cannot be mistaken for a price.
+    """
+    caps: list[Decimal] = []
+    for match in _PRICE_BAND_RANGE_PATTERN.finditer(span):
+        low = _parse_printed_number(match.group("low"))
+        high = _parse_printed_number(match.group("high"))
+        if low is None or high is None:
+            continue
+        caps.append(max(low, high))
+    for match in _CAP_PRICE_PATTERN.finditer(span):
+        stated = _parse_printed_number(match.group("cap"))
+        if stated is not None:
+            caps.append(stated)
+    return caps
+
+
+def _cap_price_binds_to_a_stated_band(label: str, value: str, span: str) -> bool:
+    """Require a claimed cap price to be a cap the span actually states.
+
+    Beginner note:
+        A price-band line names both bounds, and a plain token match would bind
+        the floor as readily as the cap. That error runs in the unsafe
+        direction -- a lower price makes the issue look cheaper, inflating the
+        valuation factor -- so the claim must equal the upper bound of a band
+        the span really prints, or a cap price it names outright.
+
+        An earlier version of this rule instead demanded the claim be the
+        largest number anywhere on the span. That rejected perfectly good
+        citations, because a cover-page row also carries a bid lot ("150 Equity
+        Shares") or a fiscal year, either of which exceeds a two-digit share
+        price. Binding to the construct is both stricter about what counts as
+        evidence and free of that false rejection.
     """
     if label != "price_band_high":
         return True
-    claimed = Decimal(value)
-    for match in _NUMBER_TOKEN_PATTERN.finditer(span):
-        parsed = _parse_printed_number(match.group("token").strip())
-        if parsed is not None and parsed > claimed:
-            return False
-    return True
+    return Decimal(value) in _stated_cap_prices(span)
 
 
 def _span_numeric_token(value: str, span: str) -> str | None:
@@ -917,7 +965,7 @@ def _matching_numeric_source_for_fact(
                     header_rows,
                 ):
                     continue
-                if not _cap_price_is_the_highest_on_span(label, value, row_text):
+                if not _cap_price_binds_to_a_stated_band(label, value, row_text):
                     continue
                 if period_end is not None:
                     header_text = " ".join(
@@ -955,7 +1003,7 @@ def _matching_numeric_source_for_fact(
         source_token = _span_numeric_token(value, line)
         if source_token is None:
             continue
-        if not _cap_price_is_the_highest_on_span(label, value, line):
+        if not _cap_price_binds_to_a_stated_band(label, value, line):
             continue
         if period_end is not None and not _period_pattern(period_end).search(line):
             continue
@@ -1342,7 +1390,17 @@ def verify_cited_receipts_against_pages(
     """
     try:
         proposal = _ProposalModel.model_validate(
-            {name: payload[name] for name in _ProposalModel.model_fields}
+            # Optional fields are absent from older payloads by design: a
+            # cited-financial-fact/v2 proposal predates the cap price entirely.
+            # Subscripting unconditionally would raise KeyError here, be caught
+            # below, and report a genuine queued proposal as failing receipt
+            # verification -- silently voiding the v2 back-compatibility this
+            # module and the approval path deliberately preserve.
+            {
+                name: payload[name]
+                for name in _ProposalModel.model_fields
+                if name in payload
+            }
         )
         raw_facts = payload["cited_financial_facts"]
         raw_text_evidence = payload["cited_text_evidence"]

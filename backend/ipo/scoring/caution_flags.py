@@ -205,11 +205,17 @@ def _weak_qib_demand_near_close(inputs: IpoFactorInputs) -> IpoCautionFlag:
         snapshot is itself the warning the spec asks for.
 
         IPO-011 added a low-confidence, web-sourced demand snapshot. This hard
-        caution forces ``Not Recommended`` outright, so it deliberately refuses
-        to judge on that evidence: a scraped headline must never be able to
-        reject an issue. A low-confidence-only snapshot is reported as
-        ``not_evaluable`` — the same answer as having no snapshot before the
-        window opens — while the optional QIB *factor* may still use it.
+        caution forces ``Not Recommended`` outright, so a scraped headline must
+        have **no influence on it in either direction**. The rule therefore
+        treats a low-confidence snapshot as if it were absent: the answer is
+        byte-identical to what it would have been had the scraper never run.
+
+        Reading that guard as "skip the rule when a scrape exists" was the
+        original mistake. Because the collector writes a snapshot for exactly
+        the issues that have no official evidence, it would have converted the
+        ``triggered`` answer into ``not_evaluable`` for precisely the issues
+        this caution exists to reject. The optional QIB *factor* may still
+        consume the reading; this hard override may not.
     """
     issue = inputs.issue
     if issue.status not in (IpoStatus.OPEN, IpoStatus.CLOSED) or issue.close_date is None:
@@ -226,20 +232,25 @@ def _weak_qib_demand_near_close(inputs: IpoFactorInputs) -> IpoCautionFlag:
             f"Book closes {issue.close_date.isoformat()}; too early to judge demand.",
         )
     subscription = inputs.subscription
-    if subscription is not None and subscription.source_confidence is Confidence.LOW:
-        return _flag(
-            FLAG_WEAK_QIB_DEMAND_NEAR_CLOSE,
-            IpoCautionFlagStatus.NOT_EVALUABLE,
-            (
-                "Only a low-confidence web-sourced demand snapshot is available; "
-                "this hard caution requires official subscription evidence."
-            ),
-        )
+    # Discard low-confidence evidence *before* any decision is taken, so this
+    # rule behaves exactly as if the web collector had never run.
+    web_sourced_only = (
+        subscription is not None and subscription.source_confidence is Confidence.LOW
+    )
+    if web_sourced_only:
+        subscription = None
     if subscription is None or subscription.qib_multiple is None:
+        reason = (
+            "Only a low-confidence web-sourced demand snapshot exists, which this "
+            "hard caution ignores; no official QIB demand evidence is available "
+            "this close to the book closing."
+            if web_sourced_only
+            else "No QIB demand snapshot available this close to the book closing."
+        )
         return _flag(
             FLAG_WEAK_QIB_DEMAND_NEAR_CLOSE,
             IpoCautionFlagStatus.TRIGGERED,
-            "No QIB demand snapshot available this close to the book closing.",
+            reason,
         )
     if subscription.qib_multiple < QIB_WEAK_MULTIPLE:
         return _flag(

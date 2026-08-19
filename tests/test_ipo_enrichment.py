@@ -648,6 +648,13 @@ def _collect(issue_id: int, client: _FakeClient, session_factory: Any, **overrid
         ("The issue was subscribed 5 times overall", None),
         # No number at all.
         ("QIB demand was reported as healthy", None),
+        # A full status headline lists every category at once. The QIB figure
+        # must be the one read -- taking the adjacent retail number would
+        # report a weak institutional book as a strong one.
+        ("Day 3: Retail 25.6 times, QIB 1.2 times, NII 40 times", "1.20"),
+        ("Overall subscribed 10 times, QIB portion 2 times", "2.00"),
+        # When one clause names two categories, nothing can be attributed.
+        ("QIB and retail together 5 times", None),
     ],
 )
 def test_subscription_demand_parsing_requires_an_institutional_anchor(
@@ -725,6 +732,44 @@ def test_web_demand_never_shadows_an_official_snapshot(file_session_factory) -> 
     assert len(snapshots) == 1
     assert snapshots[0].source_confidence is Confidence.HIGH
     assert snapshots[0].qib_multiple == Decimal("40.00")
+
+
+def test_official_evidence_outranks_an_earlier_captured_web_snapshot(
+    file_session_factory,
+) -> None:
+    """A later-recorded official snapshot wins even with an older timestamp.
+
+    Beginner note:
+        Guarding only the write is not enough. An exchange snapshot is stamped
+        with its own publication time, so recording it in the evening after a
+        scrape legitimately gives it the *earlier* ``captured_at``. Ordering by
+        recency alone would then hand scoring the scraped number forever, which
+        is exactly the shadowing this rule exists to prevent -- so the read
+        prefers official evidence outright.
+    """
+    issue = create_issue(_issue_data(), session_factory=file_session_factory)
+    # The scrape lands first, stamped "now".
+    _collect(
+        issue.id,
+        _subscription_client("QIB portion subscribed 22.5 times"),
+        file_session_factory,
+    )
+    # The official snapshot is entered afterwards, carrying its publication
+    # time, which is earlier than the scrape's capture instant.
+    create_subscription(
+        issue.id,
+        IpoSubscriptionData(
+            captured_at=_CAPTURED_AT - dt.timedelta(hours=6),
+            qib_multiple=Decimal("1.10"),
+            source_confidence=Confidence.HIGH,
+        ),
+        session_factory=file_session_factory,
+    )
+
+    latest = get_latest_subscription(issue.id, session_factory=file_session_factory)
+    assert latest is not None
+    assert latest.source_confidence is Confidence.HIGH
+    assert latest.qib_multiple == Decimal("1.10")
 
 
 def test_unchanged_web_demand_does_not_append_a_duplicate_snapshot(

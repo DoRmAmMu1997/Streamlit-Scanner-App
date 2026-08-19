@@ -53,33 +53,55 @@ def _row(**overrides: Any) -> IpoDashboardRow:
 
 
 def _install(monkeypatch, rows: list[IpoDashboardRow], **overrides: Any) -> dict[str, Any]:
-    """Fake the pipeline, auto-approval, and snapshot; capture the call args."""
-    captured: dict[str, Any] = {"pipeline_calls": []}
+    """Fake the pipeline, auto-approval, and snapshot; capture the call args.
+
+    ``rows`` may be a list of row lists, in which case each successive dashboard
+    snapshot returns the next entry. That models a run where ingestion makes new
+    issues appear partway through.
+    """
+    captured: dict[str, Any] = {"pipeline_calls": [], "approval_calls": []}
 
     def _fake_pipeline(**kwargs: Any) -> Any:
         """Record one pipeline invocation and report no failed issues."""
         captured["pipeline_calls"].append(kwargs)
         return SimpleNamespace(issues=())
 
-    monkeypatch.setattr(
-        ipo_screener,
-        "build_dashboard_snapshot",
-        lambda **_kwargs: IpoDashboardSnapshot(
-            generated_at=_UPDATED_AT, rows=tuple(rows)
-        ),
+    snapshots = list(overrides["snapshots"]) if "snapshots" in overrides else [rows]
+
+    def _fake_snapshot(**_kwargs: Any) -> IpoDashboardSnapshot:
+        """Return the next staged snapshot, repeating the last one forever."""
+        current = snapshots[0] if len(snapshots) == 1 else snapshots.pop(0)
+        return IpoDashboardSnapshot(generated_at=_UPDATED_AT, rows=tuple(current))
+
+    approver = overrides.get(
+        "approver", lambda **_kwargs: SimpleNamespace(approved=(), disabled=True)
     )
+
+    def _recording_approver(**kwargs: Any) -> Any:
+        """Record the scope each auto-approval pass was given."""
+        captured["approval_calls"].append(kwargs)
+        return approver(**kwargs)
+
+    monkeypatch.setattr(ipo_screener, "build_dashboard_snapshot", _fake_snapshot)
     monkeypatch.setattr(
         ipo_screener, "run_ipo_screener", overrides.get("pipeline", _fake_pipeline)
     )
     monkeypatch.setattr(
-        ipo_screener,
-        "auto_approve_ready_proposals",
-        overrides.get(
-            "approver",
-            lambda **_kwargs: SimpleNamespace(approved=(), disabled=True),
-        ),
+        ipo_screener, "auto_approve_ready_proposals", _recording_approver
     )
     return captured
+
+
+def _ingestion_passes(captured: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the ingestion-only pipeline calls (the ones that skip scoring)."""
+    return [call for call in captured["pipeline_calls"] if call.get("skip_score")]
+
+
+def _work_pass(captured: dict[str, Any]) -> dict[str, Any]:
+    """Return the pipeline call that does the download/enrich/extract work."""
+    return next(
+        call for call in captured["pipeline_calls"] if not call.get("skip_score")
+    )
 
 
 def test_registry_metadata_declares_an_event_driven_screener() -> None:
@@ -111,11 +133,71 @@ def test_toggles_map_onto_the_pipeline_stages(monkeypatch) -> None:
         },
     )
 
-    call = captured["pipeline_calls"][0]
+    # Ingestion is off, so no ingestion-only pass runs at all.
+    assert _ingestion_passes(captured) == []
+    call = _work_pass(captured)
     assert call["skip_scan"] is True
     assert call["skip_download"] is False
     assert call["skip_enrich"] is True
     assert call["extract"] is True
+
+
+def test_ingestion_runs_as_its_own_pass_before_issues_are_selected(
+    monkeypatch,
+) -> None:
+    """Filings must be inventoried before the run decides what to work on."""
+    captured = _install(monkeypatch, [_row()])
+    scanner = ipo_screener.IpoScreener()
+
+    scanner.run(None, None, {"run_ingestion": True, "max_issues": 0})
+
+    ingestion = _ingestion_passes(captured)
+    assert len(ingestion) == 1
+    # It inventories only: no downloading, scraping, spending, or scoring.
+    assert ingestion[0]["skip_download"] is True
+    assert ingestion[0]["skip_enrich"] is True
+    assert ingestion[0]["skip_score"] is True
+    assert "extract" not in ingestion[0] or ingestion[0]["extract"] is False
+    # The working pass then does not repeat the SEBI scan.
+    assert _work_pass(captured)["skip_scan"] is True
+
+
+def test_a_filing_discovered_by_this_run_is_processed_by_this_run(
+    monkeypatch,
+) -> None:
+    """A new filing must not wait for a second button press.
+
+    Beginner note:
+        Selecting issues before the SEBI scan would freeze the list to what was
+        already known, so anything the scan discovered would be filtered out of
+        download, enrichment and scoring -- and would only be picked up if the
+        operator pressed Run again. That is the exact failure a one-button
+        screener exists to prevent, so the selection is taken from the snapshot
+        that exists *after* ingestion.
+    """
+    known = _row(issue_id=7)
+    # An archived issue keeps the active-only filter narrowing, so the screener
+    # sends an explicit id list rather than "every issue".
+    archived = _row(issue_id=8, issue_status=IpoStatus.LISTED)
+    discovered = _row(issue_id=42, company_name="Newly Filed Ltd")
+    before = [known, archived]
+    after = [known, archived, discovered]
+    captured = _install(
+        monkeypatch,
+        before,
+        # Before ingestion only issues 7 and 8 exist; the scan reveals 42.
+        snapshots=[after, after],
+    )
+    scanner = ipo_screener.IpoScreener()
+
+    frame = scanner.run(
+        None, None, {"run_ingestion": True, "only_active_issues": True, "max_issues": 0}
+    )
+
+    # Selecting before the scan would have produced [7]; the post-ingestion
+    # snapshot must carry the freshly discovered issue into the same run.
+    assert _work_pass(captured)["issue_ids"] == [7, 42]
+    assert sorted(frame["symbol"]) == ["IPO:42", "IPO:7"]
 
 
 def test_every_emitted_row_satisfies_the_result_contract(monkeypatch) -> None:
@@ -229,7 +311,11 @@ def test_auto_approved_proposals_trigger_one_rescore_pass(monkeypatch) -> None:
     )
     scanner = ipo_screener.IpoScreener()
 
-    scanner.run(None, None, {"max_issues": 0, "only_active_issues": False})
+    scanner.run(
+        None,
+        None,
+        {"run_ingestion": False, "max_issues": 0, "only_active_issues": False},
+    )
 
     assert len(captured["pipeline_calls"]) == 2
     rescore = captured["pipeline_calls"][1]
@@ -238,6 +324,48 @@ def test_auto_approved_proposals_trigger_one_rescore_pass(monkeypatch) -> None:
     assert rescore["skip_download"] is True
     assert rescore["skip_enrich"] is True
     assert "extract" not in rescore or rescore.get("extract") is False
+
+
+def test_auto_approval_is_scoped_to_the_issues_this_run_selected(
+    monkeypatch,
+) -> None:
+    """A capped run must not convert proposals it will never rescore.
+
+    Beginner note:
+        Approval writes evidence and mutates the issue row, so it is a real
+        mutation and not a read. An unscoped pass would convert every pending
+        proposal in the queue -- including issues excluded by the active-only
+        filter or the cap -- and the follow-up scoring pass only covers the
+        selected set, leaving those issues approved but stale.
+    """
+    rows = [_row(issue_id=7), _row(issue_id=8, issue_status=IpoStatus.LISTED)]
+    captured = _install(monkeypatch, rows)
+    scanner = ipo_screener.IpoScreener()
+
+    scanner.run(
+        None,
+        None,
+        {"run_ingestion": False, "only_active_issues": True, "max_issues": 0},
+    )
+
+    assert captured["approval_calls"] == [{"issue_ids": [7]}]
+
+
+def test_an_unnarrowed_run_lets_auto_approval_see_the_whole_queue(
+    monkeypatch,
+) -> None:
+    """``None`` means "every issue" for both the pipeline and approval."""
+    captured = _install(monkeypatch, [_row(issue_id=7)])
+    scanner = ipo_screener.IpoScreener()
+
+    scanner.run(
+        None,
+        None,
+        {"run_ingestion": False, "only_active_issues": False, "max_issues": 0},
+    )
+
+    assert captured["approval_calls"] == [{"issue_ids": None}]
+    assert _work_pass(captured)["issue_ids"] is None
 
 
 @pytest.mark.parametrize(
@@ -259,7 +387,11 @@ def test_issue_selection_narrows_the_run(
     scanner.run(
         None,
         None,
-        {"only_active_issues": only_active, "max_issues": max_issues},
+        {
+            "run_ingestion": False,
+            "only_active_issues": only_active,
+            "max_issues": max_issues,
+        },
     )
 
-    assert captured["pipeline_calls"][0]["issue_ids"] == expected_ids
+    assert _work_pass(captured)["issue_ids"] == expected_ids

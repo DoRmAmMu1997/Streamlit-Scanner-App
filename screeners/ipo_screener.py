@@ -30,8 +30,7 @@ import pandas as pd
 
 from backend.ipo.agents.auto_approval import auto_approve_ready_proposals
 from backend.ipo.dashboard import IpoDashboardRow, build_dashboard_snapshot
-from backend.ipo.models import IpoStatus
-from backend.jobs.run_ipo_screener import run_ipo_screener
+from backend.jobs.run_ipo_screener import ACTIVE_ISSUE_STATUSES, run_ipo_screener
 from backend.scanner_base import BaseScanner
 
 logger = logging.getLogger(__name__)
@@ -39,12 +38,11 @@ logger = logging.getLogger(__name__)
 # Issues in these states can still change (new filings, fresh demand, a
 # listing). ``listed`` issues are archived history and are skipped when the
 # operator leaves ``only_active_issues`` on.
-_ACTIVE_STATUSES = (
-    IpoStatus.DRHP_FILED,
-    IpoStatus.RHP_FILED,
-    IpoStatus.OPEN,
-    IpoStatus.CLOSED,
-)
+#
+# Imported from the pipeline rather than restated here: the button and the
+# terminal must agree on what "active" means, and a second copy of the tuple
+# would let them drift apart the first time either side is edited alone.
+_ACTIVE_STATUSES = ACTIVE_ISSUE_STATUSES
 
 # The pipeline stages reported through the shared progress callback, in order.
 _STAGES = (
@@ -88,6 +86,10 @@ class IpoScreener(BaseScanner):
     EXTRA_RESULT_COLUMNS: ClassVar[list[str]] = [
         "company_name",
         "issue_status",
+        # The evaluation date. It is not `signal_date`, because that column
+        # enrols a row in forward-return validation, which is meaningless for
+        # an IPO issue -- see the comment in `_result_row`.
+        "scored_on",
         "ipo_score",
         "recommendation_type",
         "confidence",
@@ -133,9 +135,24 @@ class IpoScreener(BaseScanner):
                 progress(step, total, _STAGES[min(step, total - 1)])
 
         report(0)
+        run_ingestion = bool(params.get("run_ingestion", True))
+        if run_ingestion:
+            # Ingest first, as its own pass. Selecting issues before the SEBI
+            # scan would freeze the list to what was already known, so a filing
+            # discovered by this very run would be filtered out of download,
+            # enrichment, extraction and scoring -- and would only be processed
+            # if the operator pressed the button a second time, which is the
+            # exact failure a one-button screener exists to prevent.
+            run_ipo_screener(
+                skip_download=True,
+                skip_enrich=True,
+                skip_score=True,
+                output=io.StringIO(),
+            )
+
         issue_ids = self._selected_issue_ids(params)
         outcome = run_ipo_screener(
-            skip_scan=not bool(params.get("run_ingestion", True)),
+            skip_scan=True,
             skip_download=not bool(params.get("download_documents", True)),
             skip_enrich=not bool(params.get("collect_enrichment", True)),
             extract=bool(params.get("draft_ai_extractions", False)),
@@ -146,8 +163,11 @@ class IpoScreener(BaseScanner):
         report(1)
         # Convert freshly drafted, fully verified proposals into evidence when
         # the operator enabled it, then re-score so the button's own run shows
-        # the result rather than making the user press it twice.
-        approval = auto_approve_ready_proposals()
+        # the result rather than making the user press it twice. The scope is
+        # this run's own selection: approval writes evidence and mutates the
+        # issue row, so a capped run must not convert proposals belonging to
+        # issues it never processed and will not rescore.
+        approval = auto_approve_ready_proposals(issue_ids=issue_ids)
         if approval.approved:
             run_ipo_screener(
                 skip_scan=True,
@@ -163,18 +183,28 @@ class IpoScreener(BaseScanner):
             rows, compute_failure_callback=params.get("compute_failure_callback")
         )
 
+    @staticmethod
+    def _apply_selection(rows: list[IpoDashboardRow], params: dict) -> list[IpoDashboardRow]:
+        """Apply the operator's active-only and cap choices to a row list.
+
+        One implementation, used both to choose what the pipeline processes and
+        to choose what the results table reports. Two copies of this rule would
+        let the processed set and the reported set drift apart silently.
+        """
+        if bool(params.get("only_active_issues", True)):
+            rows = [row for row in rows if row.issue_status in _ACTIVE_STATUSES]
+        max_issues = int(params.get("max_issues", 0) or 0)
+        if max_issues > 0:
+            rows = rows[:max_issues]
+        return rows
+
     def _selected_issue_ids(self, params: dict) -> list[int] | None:
         """Narrow the run to active issues and the configured cap.
 
         Returning ``None`` means "every issue", which is what the CLI does.
         """
         snapshot = build_dashboard_snapshot()
-        rows = list(snapshot.rows)
-        if bool(params.get("only_active_issues", True)):
-            rows = [row for row in rows if row.issue_status in _ACTIVE_STATUSES]
-        max_issues = int(params.get("max_issues", 0) or 0)
-        if max_issues > 0:
-            rows = rows[:max_issues]
+        rows = self._apply_selection(list(snapshot.rows), params)
         if len(rows) == len(snapshot.rows):
             return None
         return [row.issue_id for row in rows]
@@ -184,12 +214,7 @@ class IpoScreener(BaseScanner):
     ) -> list[dict[str, Any]]:
         """Read the post-run snapshot and shape one row per issue."""
         snapshot = build_dashboard_snapshot()
-        rows = list(snapshot.rows)
-        if bool(params.get("only_active_issues", True)):
-            rows = [row for row in rows if row.issue_status in _ACTIVE_STATUSES]
-        max_issues = int(params.get("max_issues", 0) or 0)
-        if max_issues > 0:
-            rows = rows[:max_issues]
+        rows = self._apply_selection(list(snapshot.rows), params)
         return [
             _result_row(row, scanner=self, failed=row.issue_id in failed_issue_ids)
             for row in rows
@@ -259,7 +284,14 @@ def _result_row(
     return {
         "symbol": f"IPO:{row.issue_id}",
         "rating": row.recommendation,
-        "signal_date": row.last_updated.date() if row.last_updated else None,
+        # Deliberately null. A forward return is "the price N sessions after
+        # the signal date", which an IPO issue has no series for: the VALID-002
+        # job selects every result carrying a signal_date, could never resolve
+        # the "ipo_filings" universe to instruments, and would therefore requeue
+        # these rows as PENDING forever, consuming its batch budget. The
+        # evaluation date is still reported, in its own column.
+        "signal_date": None,
+        "scored_on": row.last_updated.date() if row.last_updated else None,
         "close": row.score,
         "reason": row.reasons[0] if row.reasons else "No evaluation yet.",
         "company_name": row.company_name,

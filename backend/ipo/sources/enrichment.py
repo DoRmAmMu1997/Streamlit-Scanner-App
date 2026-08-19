@@ -113,6 +113,15 @@ _GMP_TERM_PATTERN: Final = re.compile(
 _QIB_TERM_PATTERN: Final = re.compile(
     r"\b(?:qib|qibs|qualified\s+institutional(?:\s+buyers?)?)\b", re.IGNORECASE
 )
+# IPO-011 hardening: the other subscription categories a status headline prints
+# alongside QIB. A multiple counts as institutional demand only when the QIB
+# anchor is strictly closer to it than every one of these, which is what stops
+# "Retail 25.6 times, QIB 1.2 times" being recorded as a 25.6x QIB book.
+_COMPETING_CATEGORY_PATTERN: Final = re.compile(
+    r"\b(?:retail|rii|nii|hni|non[-\s]?institutional|employee|shareholder|"
+    r"overall|total|anchor)\b",
+    re.IGNORECASE,
+)
 # "2.5x", "2.5 times", "subscribed 2.5 time(s)".
 _SUBSCRIPTION_MULTIPLE_PATTERN: Final = re.compile(
     r"(\d{1,4}(?:\.\d+)?)\s*(?:x\b|times?\b)", re.IGNORECASE
@@ -125,6 +134,10 @@ _RUPEE_ABBREVIATION_PATTERN: Final = re.compile(
     r"\b(rs)\.(?=\s*-?\d)", re.IGNORECASE
 )
 _CLAUSE_SPLIT_PATTERN: Final = re.compile(r"[;\n!?]+|(?<!\d)\.|\.(?!\d)")
+# A subscription-status headline lists its categories comma- or pipe-separated
+# ("Retail 25.6 times, QIB 1.2 times"), so those punctuation marks end a clause
+# here even though they do not for the GMP prose the original splitter serves.
+_CATEGORY_SPLIT_PATTERN: Final = re.compile(r"[;,\n!?|/]+|(?<!\d)\.|\.(?!\d)")
 _NEGATION_PATTERN: Final = re.compile(
     r"\b(?:no|not|never|without|den(?:y|ies|ied)|dismiss(?:ed|al)?|"
     r"clear(?:ed)?|exonerat(?:ed|ion)|withdrawn)\b",
@@ -345,27 +358,73 @@ def _match_distance(left: re.Match[str], right: re.Match[str]) -> int:
     return 0
 
 
-def _near_gmp_value(
-    text: str,
-    pattern: re.Pattern[str],
-    term_pattern: re.Pattern[str] | None = None,
-) -> Decimal | None:
-    """Return the first value bound to an anchor term in the same short clause.
-
-    ``term_pattern`` defaults to the GMP anchor. IPO-011 reuses the same
-    clause-and-distance discipline for QIB demand rather than inventing a
-    second, laxer proximity rule.
-    """
-    anchor = term_pattern if term_pattern is not None else _GMP_TERM_PATTERN
+def _near_gmp_value(text: str, pattern: re.Pattern[str]) -> Decimal | None:
+    """Return the first value bound to a GMP term in the same short clause."""
     # Protect only the standalone currency abbreviation when it introduces a
     # numeric amount. Ordinary words ending in "rs." remain sentence endings.
     clause_text = _RUPEE_ABBREVIATION_PATTERN.sub(r"\1 ", text)
     for clause in _CLAUSE_SPLIT_PATTERN.split(clause_text):
-        terms = list(anchor.finditer(clause))
+        terms = list(_GMP_TERM_PATTERN.finditer(clause))
         for match in pattern.finditer(clause):
             if any(_match_distance(match, term) <= 40 for term in terms):
                 return Decimal(match.group(1))
     return None
+
+
+def _qib_bound_multiple(text: str) -> Decimal | None:
+    """Return the subscription multiple that demonstrably belongs to QIB.
+
+    Beginner note:
+        A subscription-status headline prints every category at once -- "Retail
+        25.6 times, QIB 1.2 times, NII 40 times". Merely sitting *near* the QIB
+        anchor therefore proves nothing, because the retail figure sits near it
+        too; the first attempt at this rule read that headline as a 25.6x
+        institutional book when the real one was 1.2x, which inverts the signal
+        in the dangerous direction.
+
+        So two things are required. The clause is split on the punctuation
+        those headlines actually use (commas and pipes, not just sentence
+        ends), and within a clause the QIB anchor must be *strictly closer* to
+        the number than any competing category word. Anything ambiguous returns
+        ``None`` -- no reading at all is safer than the wrong category.
+    """
+    clause_text = _RUPEE_ABBREVIATION_PATTERN.sub(r"\1 ", text)
+    for clause in _CATEGORY_SPLIT_PATTERN.split(clause_text):
+        qib_terms = list(_QIB_TERM_PATTERN.finditer(clause))
+        if not qib_terms:
+            continue
+        competitors = list(_COMPETING_CATEGORY_PATTERN.finditer(clause))
+        for match in _SUBSCRIPTION_MULTIPLE_PATTERN.finditer(clause):
+            nearest_qib = min(_match_distance(match, term) for term in qib_terms)
+            if nearest_qib > 40:
+                continue
+            if competitors and min(
+                _match_distance(match, other) for other in competitors
+            ) <= nearest_qib:
+                # Another category owns this number, or the clause cannot say
+                # which one does. Either way it is not QIB evidence.
+                continue
+            return Decimal(match.group(1))
+    return None
+
+
+def _median_reading(readings: list[Decimal]) -> Decimal:
+    """Return the two-place median of one batch of provider readings.
+
+    Beginner note:
+        The median is what stops a single outlier headline from setting an
+        observation on its own. Both parsers share this one implementation so
+        their rounding can never drift apart -- they previously carried
+        byte-identical copies, which is exactly how such a drift starts.
+    """
+    readings.sort()
+    middle = len(readings) // 2
+    median = (
+        readings[middle]
+        if len(readings) % 2 == 1
+        else (readings[middle - 1] + readings[middle]) / Decimal(2)
+    )
+    return median.quantize(_TWO_PLACES, rounding=ROUND_HALF_UP)
 
 
 def _parse_subscription_demand(
@@ -374,12 +433,14 @@ def _parse_subscription_demand(
     """Extract one conservative QIB subscription multiple, else ``None``.
 
     Beginner note:
-        This mirrors :func:`_parse_gmp` exactly: title and snippet stay
-        separate provider claims, the number must sit in the same clause and
-        within the same character distance as an explicit QIB term, and the
-        median across entries prevents one outlier headline from setting the
-        observation. Anything ambiguous returns ``None`` rather than guessing,
-        because an invented demand multiple would feed a scored factor.
+        This follows :func:`_parse_gmp`'s shape -- title and snippet stay
+        separate provider claims, and the median across entries prevents one
+        outlier headline from setting the observation -- but the binding rule
+        is stricter. GMP prose names one quantity; a subscription headline
+        names every category at once, so :func:`_qib_bound_multiple` requires
+        the number to be attributable to QIB rather than merely adjacent to it.
+        Anything ambiguous returns ``None`` rather than guessing, because an
+        invented demand multiple would feed a scored factor.
     """
     readings: list[Decimal] = []
     for entry in entries:
@@ -391,12 +452,7 @@ def _parse_subscription_demand(
             (
                 value
                 for text in source_fields
-                if (
-                    value := _near_gmp_value(
-                        text, _SUBSCRIPTION_MULTIPLE_PATTERN, _QIB_TERM_PATTERN
-                    )
-                )
-                is not None
+                if (value := _qib_bound_multiple(text)) is not None
             ),
             None,
         )
@@ -404,14 +460,7 @@ def _parse_subscription_demand(
             readings.append(multiple)
     if not readings:
         return None
-    readings.sort()
-    middle = len(readings) // 2
-    median = (
-        readings[middle]
-        if len(readings) % 2 == 1
-        else (readings[middle - 1] + readings[middle]) / Decimal(2)
-    )
-    return median.quantize(_TWO_PLACES, rounding=ROUND_HALF_UP)
+    return _median_reading(readings)
 
 
 def _parse_gmp(
@@ -458,14 +507,7 @@ def _parse_gmp(
             readings.append(rupees / price_band_high * Decimal(100))
     if not readings:
         return None
-    readings.sort()
-    middle = len(readings) // 2
-    median = (
-        readings[middle]
-        if len(readings) % 2 == 1
-        else (readings[middle - 1] + readings[middle]) / Decimal(2)
-    )
-    return median.quantize(_TWO_PLACES, rounding=ROUND_HALF_UP)
+    return _median_reading(readings)
 
 
 def _record_web_subscription_snapshot(
@@ -481,9 +523,11 @@ def _record_web_subscription_snapshot(
         Two guards keep this web-sourced number from doing damage it was never
         trusted to do.
 
-        First, it never shadows better evidence: scoring reads the *newest*
-        snapshot, so if any official (non-low-confidence) snapshot already
-        exists for the issue, this function writes nothing at all.
+        First, it never shadows better evidence. ``get_latest_subscription``
+        prefers an official snapshot over any web-sourced one regardless of
+        capture time, so when official evidence exists this sees it and writes
+        nothing at all -- and, just as importantly, a web row already on file
+        cannot outrank an official snapshot recorded later.
 
         Second, it never breaks idempotency: an unchanged reading is skipped
         instead of appending a new row every run, because the scoring

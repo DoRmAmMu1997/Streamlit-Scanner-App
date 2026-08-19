@@ -1643,9 +1643,19 @@ def _expected_cited_facts(
     for field in _ISSUE_TERM_FACT_FIELDS:
         if payload.get(field) is None:
             continue
+        page = payload.get(f"{field}_page")
+        if page is None:
+            # This function runs outside the caller's KeyError-to-validation
+            # conversion, so a half-written payload must be rejected in the
+            # project's own error vocabulary rather than escaping as a bare
+            # KeyError from an admin page or an unattended approval pass.
+            raise IpoValidationError(
+                f"Proposal payload carries {field} without {field}_page; "
+                "the citation is incomplete."
+            )
         expected[field] = (
             Decimal(str(payload[field])),
-            int(payload[f"{field}_page"]),
+            int(page),
             None,
             None,
             Decimal("1"),
@@ -2218,6 +2228,24 @@ def approve_extraction_proposal(
             if record.payload.get(field) is not None
         }
         if issue_term_values:
+            # The issue row carries a CHECK requiring the cap to sit at or
+            # above a stored floor. Comparing here turns a genuine conflict
+            # into the same typed "needs review" error every other approval
+            # failure raises, instead of an IntegrityError surfacing as a raw
+            # traceback in the admin page and aborting an autonomous run.
+            issue_row = get_ipo_issue(session, record.issue_id)
+            stored_low = getattr(issue_row, "price_band_low", None)
+            proposed_high = issue_term_values.get("price_band_high")
+            if (
+                stored_low is not None
+                and proposed_high is not None
+                and proposed_high < Decimal(str(stored_low))
+            ):
+                raise IpoValidationError(
+                    f"Extraction proposal {proposal_id} claims a cap price below "
+                    "the price-band floor already recorded on the issue; it "
+                    "needs human review rather than automatic approval."
+                )
             update_ipo_issue_row(session, record.issue_id, issue_term_values)
         marked = mark_ipo_extraction_proposal_reviewed(
             session,
@@ -2582,11 +2610,21 @@ def get_latest_subscription(
     Beginner note:
         Subscription demand changes during the offer window. Scoring uses one
         newest immutable snapshot instead of blending historical multiples.
+
+        Official evidence outranks the IPO-011 web-sourced snapshot even when
+        the web row was captured more recently. Recency alone would let an
+        advisory reading shadow a filing: an exchange snapshot is stamped with
+        its own publication time, so recording it after an evening scrape can
+        legitimately give it the *earlier* timestamp. Preferring official
+        evidence here makes "advisory never shadows official" true of the read
+        itself rather than only of the write that created the row.
     """
     with session_factory() as session:
         if get_ipo_issue(session, issue_id) is None:
             raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
-        row = get_latest_ipo_subscription(session, issue_id)
+        row = get_latest_ipo_subscription(session, issue_id, official_only=True)
+        if row is None:
+            row = get_latest_ipo_subscription(session, issue_id)
         return _subscription_record(row) if row is not None else None
 
 

@@ -32,6 +32,7 @@ from backend.ipo.financials.ratio_engine import (
 )
 from backend.ipo.manual_extraction import IpoManualExtractionRecord, IpoPeerMetric
 from backend.ipo.models import (
+    Confidence,
     DebtReductionPurposeEvidence,
     DebtReductionPurposeStatus,
     FactorAssessment,
@@ -43,7 +44,7 @@ from backend.ipo.models import (
     IpoSubscriptionRecord,
 )
 
-FACTOR_MODEL_VERSION: Final = "ipo-006-factors-v2"
+FACTOR_MODEL_VERSION: Final = "ipo-006-factors-v3"
 
 # GMP chatter goes stale fast around an issue window; older observations are
 # ignored entirely rather than down-weighted so staleness cannot fabricate a
@@ -541,12 +542,22 @@ def _qib_subscription(subscription: IpoSubscriptionRecord | None) -> FactorAsses
             ),
         )
     banded = _band(subscription.qib_multiple, QIB_BANDS)
+    # IPO-011: this snapshot may be an official filing or a low-confidence web
+    # reading, so the receipt must say which. A reader comparing two issues
+    # otherwise cannot tell an exchange-published book from a scraped headline.
+    # (The hard weak-demand caution ignores low-confidence readings entirely;
+    # see backend/ipo/scoring/caution_flags.py.)
+    provenance = (
+        " Low-confidence web source; never overrides document evidence."
+        if subscription.source_confidence is Confidence.LOW
+        else ""
+    )
     return FactorAssessment(
         score=banded,
         reason=(
             f"QIB subscription: QIB book {_fmt(subscription.qib_multiple)}x -> {banded}; "
             f"factor {banded}/100. Source: subscription snapshot captured "
-            f"{subscription.captured_at.isoformat()}."
+            f"{subscription.captured_at.isoformat()}.{provenance}"
         ),
     )
 

@@ -32,7 +32,9 @@ rather than having its own contract widened.
 |---|---|
 | **Auto-approval is opt-in** (`IPO_AUTO_APPROVE_HIGH_CONFIDENCE`, default off) and only ever converts `HIGH`-confidence proposals. | `HIGH` means the host already re-resolved *every* cited value from the hash-verified PDF. `MEDIUM` carries values it could not confirm, which is exactly the case a human must adjudicate. With the switch off, behaviour is identical to the reviewed flow. |
 | Autonomous approvals are attributed to a reserved automation identity (`ipo-automation@screener.local`). | An autonomous approval must never be mistakable for a human attestation in `entered_by_email` or the audit trail. |
-| Web-sourced QIB demand may feed the optional 10-point factor but **can never fire** the `weak_qib_demand_near_close` hard caution. | That flag forces `Not Recommended` regardless of score. A scraped headline must not be able to reject an issue; the caution waits for official evidence and reports `not_evaluable` otherwise. |
+| Web-sourced QIB demand may feed the optional 10-point factor, but the `weak_qib_demand_near_close` hard caution **answers identically whether or not the scrape ran**. | That flag forces `Not Recommended` regardless of score, so a scraped headline must not move it in *either* direction. Stating the rule as "can never fire it" was the original error: because the collector writes a snapshot precisely for issues with no official evidence, treating that snapshot as a reason to skip the rule turned `triggered` into `not_evaluable` for exactly the issues the caution exists to reject. A low-confidence snapshot is therefore discarded before any decision is taken, and the flag behaves as if the collector had never run. |
+| A subscription multiple is attributed to QIB only when the QIB anchor is **strictly closer to it** than any competing category word, in a clause split on commas and pipes. | A status headline prints every category at once ("Retail 25.6 times, QIB 1.2 times, NII 40 times"). Proximity alone is not evidence — the retail figure is near the QIB anchor too — and reading 25.6x for a real 1.2x book inverts the demand signal. Ambiguity yields no reading. |
+| Official evidence outranks a web snapshot **at read time**, not only at write time. | An exchange snapshot carries its own publication timestamp, so recording it after an evening scrape can legitimately give it the earlier `captured_at`. Ordering by recency alone would let the scrape shadow it permanently. |
 | The subscription parser requires an explicit QIB anchor in the same clause. | Retail and overall subscription figures share the same headlines and would badly misstate institutional demand. Ambiguity yields `None`, never a guess. |
 | A low-confidence snapshot is never written when official evidence exists, and an unchanged reading is never re-appended. | Scoring reads the *newest* snapshot, so appending would silently demote official data; and a new row every run would churn the scoring fingerprint so no issue could ever report `skipped_unchanged`. |
 | The button is `RUN_SCAN` (analyst), like every other screener, but `draft_ai_extractions` defaults **off**. | Consistency with the screener framework, while paid model calls stay a deliberate per-run opt-in. |
@@ -80,10 +82,34 @@ gets its own column). Unscored issues still emit a row carrying an
 `awaiting_evidence` rule, because a contract-invalid row is silently dropped
 from persistence and would otherwise vanish from the operator's view.
 
+`signal_date` is deliberately **null**, and the evaluation date travels in its
+own `scored_on` column. A forward return is "the price N sessions after the
+signal date", which an IPO issue has no series for — and VALID-002 selects
+every scan result carrying a `signal_date`. Those rows could never resolve the
+`ipo_filings` universe to instruments, so every horizon would be stored
+`PENDING`, be re-selected on the next run, and consume the job's batch budget
+forever. Leaving the column null keeps IPO rows out of a queue they can never
+leave.
+
 `run_scan` runs `score_candidates` after the screener and overwrites
 `final_score` with `None` for synthetic symbols, so the IPO score lives in
 `ipo_score`; sorting the results table by `final_score` is meaningless for
 this screener. Documented rather than worked around.
+
+## Run order
+
+Ingestion runs as its own pass **before** the issue selection is computed
+(`skip_score=True`, no downloads or scraping). Selecting first would freeze the
+list to what was already known, so a filing discovered by that very run would
+be filtered out of every later stage and would only be processed if the
+operator pressed the button again — the exact failure a one-button screener
+exists to prevent.
+
+Auto-approval is scoped to the same selection the pipeline processed. Approval
+writes evidence and mutates the issue row, so an unscoped pass would convert
+proposals belonging to issues the run never touched and will not rescore,
+leaving them approved but stale. When the run covers every issue the scope is
+`None`, which means the same thing for both.
 
 ## Naming
 
