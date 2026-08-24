@@ -15,7 +15,10 @@ import pytest
 import requests
 
 from backend.sixty_seven.search_client import (
+    SerpApiAuthError,
     SerpApiClient,
+    SerpApiQuotaError,
+    SerpApiRateLimitError,
     SerpApiSearchError,
     SerpApiSetupError,
 )
@@ -194,6 +197,95 @@ def test_serpapi_client_returns_empty_list_when_no_results():
     session = _FakeSession(_FakeResponse({"organic_results": []}))
 
     assert SerpApiClient(api_key="secret", session=session).search("DEMO") == []
+
+
+def test_a_query_google_found_nothing_for_is_not_a_failure():
+    """SerpAPI reports "no results" as an error field; it is an empty result.
+
+    Beginner note:
+        This is the shape the provider actually sends for a query with no
+        coverage -- HTTP 200 carrying an ``error`` string -- not the
+        ``{"organic_results": []}`` the test above uses. Treating it as a hard
+        failure made thin-coverage IPO queries (peer discovery, brokerage
+        reviews) look like provider outages, and the caller then dropped the
+        signal entirely instead of recording an honest "nothing found".
+    """
+    session = _FakeSession(
+        _FakeResponse({"error": "Google hasn't returned any results for this query."})
+    )
+
+    assert SerpApiClient(api_key="secret", session=session).search("DEMO") == []
+
+
+def test_a_real_provider_error_still_raises_despite_the_no_results_rule():
+    """The benign match is narrow: anything else is still a failure."""
+    session = _FakeSession(_FakeResponse({"error": "Invalid API key."}))
+
+    with pytest.raises(SerpApiSearchError):
+        SerpApiClient(api_key="secret", session=session).search("DEMO")
+
+
+def test_exhausted_plan_is_reported_as_a_quota_error_with_its_status():
+    """A 429 whose body names exhaustion is permanent, not a throttle.
+
+    Beginner note:
+        The body has to be read *before* the status check for this to work at
+        all. SerpAPI sends plan exhaustion as HTTP 429 with a JSON body, so
+        raising on the status first discarded the one field explaining why
+        every remaining search in the run was going to fail too.
+    """
+    session = _FakeSession(
+        _FakeResponse(
+            {"error": "Your account has run out of searches."},
+            status_code=429,
+        )
+    )
+
+    with pytest.raises(SerpApiQuotaError) as exc_info:
+        SerpApiClient(api_key="secret", session=session).search("DEMO")
+
+    assert exc_info.value.status_code == 429
+    # Still a SerpApiSearchError, so existing handlers keep working.
+    assert isinstance(exc_info.value, SerpApiSearchError)
+
+
+def test_a_bare_429_is_treated_as_a_transient_throttle():
+    """Without a body saying otherwise, 429 is the recoverable reading.
+
+    Claiming exhaustion on thin evidence would stop a run that could have
+    continued; the reverse merely lets it finish.
+    """
+    session = _FakeSession(_FakeResponse({}, status_code=429))
+
+    with pytest.raises(SerpApiRateLimitError) as exc_info:
+        SerpApiClient(api_key="secret", session=session).search("DEMO")
+
+    assert exc_info.value.status_code == 429
+    assert not isinstance(exc_info.value, SerpApiQuotaError)
+
+
+@pytest.mark.parametrize("status_code", [401, 403])
+def test_rejected_credentials_are_reported_as_an_auth_error(status_code: int):
+    """401/403 is a configuration fault, not an outage."""
+    session = _FakeSession(_FakeResponse({}, status_code=status_code))
+
+    with pytest.raises(SerpApiAuthError) as exc_info:
+        SerpApiClient(api_key="serp-secret", session=session).search("DEMO")
+
+    assert exc_info.value.status_code == status_code
+    # The status-bearing message must still never carry the key.
+    assert "serp-secret" not in str(exc_info.value)
+
+
+def test_a_server_error_keeps_the_base_type_and_records_its_status():
+    """5xx stays the catch-all type, but the status is no longer discarded."""
+    session = _FakeSession(_FakeResponse({}, status_code=503))
+
+    with pytest.raises(SerpApiSearchError) as exc_info:
+        SerpApiClient(api_key="secret", session=session).search("DEMO")
+
+    assert exc_info.value.status_code == 503
+    assert type(exc_info.value) is SerpApiSearchError
 
 
 def test_serpapi_client_rejects_advertised_oversized_response_before_reading():

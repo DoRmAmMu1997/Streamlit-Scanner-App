@@ -286,6 +286,41 @@ each string field at 2,000 characters. Missing, malformed, or understated
 `Content-Length` does not bypass the streamed limit. Cleanup is always attempted
 without replacing the primary redacted error or cancellation.
 
+### Reading an `ipo_enrichment_failed` warning
+
+The log records the exception's class name and HTTP status, never the provider's
+message (upstream text is untrusted). The class is the diagnosis:
+
+| `error_type` | What happened | What to do |
+|---|---|---|
+| `SerpApiQuotaError` | The plan has no searches left. | Nothing until the quota resets. The run stops enriching and prints `enrichment=quota_exhausted`. Reduce run size or raise the plan. |
+| `SerpApiRateLimitError` | Throttled (HTTP 429, no quota message). | Transient; re-run later, and consider fewer issues per run. |
+| `SerpApiAuthError` | Key rejected (HTTP 401/403). | Fix `SERPAPI_API_KEY`; every call fails until then. |
+| `SerpApiSearchError` | Transport failure, timeout, 5xx, oversize or non-JSON body. | Usually transient; check the `status_code` field. |
+
+A query Google simply had no results for is **not** a failure and produces no
+warning — it persists an empty observation for that signal type.
+
+**Budget note.** Enrichment issues one search per signal type (8) per issue on
+every run, with no freshness reuse. A Streamlit press capped at `max_issues=25`
+costs 200 searches; an uncapped CLI run costs 8 × every upcoming issue. Size the
+plan and `max_issues` against that before scheduling. Only issues whose offer has
+not finished are processed — see "Which issues a run touches" below.
+
+### Which issues a run touches
+
+A run processes issues in `drhp_filed`, `rhp_filed`, and `open` only. SEBI's
+final-offer filing maps to `closed`, and that document is filed *after* the issue
+completes, so scanning those spends quota on a decision nobody can act on. Listed
+issues are archived history and are likewise skipped.
+
+This is a lifecycle-stage rule, not a date comparison: the issue row carries no
+listing date, and `open_date`/`close_date` are never populated by ingestion.
+
+Naming issues explicitly overrides the filter — `--issue-id N` still reaches a
+finished issue, so it can be deliberately re-downloaded, re-extracted, or
+re-scored after a rule change.
+
 Scoring reads issue, approved profile, ratio receipts, subscription, and
 enrichment as one immutable snapshot. The semantic fingerprint excludes
 database ids; unchanged reruns insert neither duplicate enrichment evidence nor

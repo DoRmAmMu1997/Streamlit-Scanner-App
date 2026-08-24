@@ -61,6 +61,7 @@ from backend.security import (
 from backend.sixty_seven.search_client import (
     SearchResult,
     SerpApiClient,
+    SerpApiQuotaError,
     SerpApiSearchError,
     SerpApiSetupError,
 )
@@ -206,6 +207,11 @@ class IpoEnrichmentOutcome:
         IpoEnrichmentBatchUsability.USABLE
     )
     human_review_required: bool = False
+    # Set when the provider reported the plan is spent. Unlike an ordinary
+    # failure this is not per-issue: nothing else in the run can succeed
+    # either, so orchestration stops rather than issuing hundreds of calls
+    # that are all going to be refused.
+    quota_exhausted: bool = False
 
 
 def _semantic_item_hash(entry: dict[str, Any]) -> str:
@@ -627,6 +633,7 @@ def collect_enrichment_signals(
     when = captured_at if captured_at is not None else dt.datetime.now(dt.UTC)
     signals: list[IpoEnrichmentSignalData] = []
     error_types: list[str] = []
+    quota_exhausted = False
     for signal_type in IpoEnrichmentSignalType:
         query = _QUERY_TEMPLATES[signal_type].format(
             company=persisted_company_name
@@ -635,6 +642,9 @@ def collect_enrichment_signals(
             results = active_client.search(query, max_results=max_results)
         except SerpApiSearchError as exc:
             error_types.append(type(exc).__name__)
+            # The class name and the status are the whole diagnosis. The
+            # exception *message* is deliberately not logged: it can echo
+            # provider text, which is untrusted upstream input.
             log_event(
                 logger,
                 EVENT_IPO_ENRICHMENT_FAILED,
@@ -642,7 +652,13 @@ def collect_enrichment_signals(
                 issue_id=issue_id,
                 signal_type=signal_type.value,
                 error_type=type(exc).__name__,
+                status_code=getattr(exc, "status_code", None),
             )
+            if isinstance(exc, SerpApiQuotaError):
+                # Every remaining query would be refused the same way, so stop
+                # here and let the caller stop too.
+                quota_exhausted = True
+                break
             continue
         entries, usability = _normalize_entries(results)
         clean_entries = tuple(
@@ -704,4 +720,5 @@ def collect_enrichment_signals(
             overall_usability is not IpoEnrichmentBatchUsability.USABLE
             or bool(error_types)
         ),
+        quota_exhausted=quota_exhausted,
     )

@@ -51,6 +51,37 @@ follow-up, not part of this change.
   `source_policy='serpapi-low-confidence-v2'`, and each batch
   persists atomically per issue with per-type query isolation.
 
+## Failure taxonomy (IPO-012)
+
+Callers log an exception's *class name* and never its message, because a
+provider message is untrusted upstream text. A single flat `SerpApiSearchError`
+therefore made every failure read identically: an exhausted plan looked exactly
+like a two-second network blip. The client now raises subclasses — all still
+inheriting `SerpApiSearchError`, so existing handlers are unaffected:
+
+| Type | Condition | Nature |
+|---|---|---|
+| `SerpApiQuotaError` | body says the account is out of searches | permanent for the billing period |
+| `SerpApiRateLimitError` | HTTP 429 with no quota wording | transient |
+| `SerpApiAuthError` | HTTP 401 / 403 | configuration fault |
+| `SerpApiSearchError` | transport, timeout, 5xx, oversize, non-JSON | catch-all |
+
+Every instance carries `status_code`, which is logged alongside the class. A
+status code is safe metadata; the response body is not, and stays redacted.
+
+Two behaviours follow from the taxonomy:
+
+- **A no-results response is not a failure.** SerpAPI answers a query Google had
+  no coverage for with HTTP 200 and an `error` field. That is matched narrowly
+  and returns an empty list, so the signal persists an honest empty observation
+  instead of being dropped. Matching is deliberately conservative — mistaking a
+  real error for "no results" would hide it.
+- **The body is read before the status is checked.** Plan exhaustion arrives as
+  HTTP 429 *with* a JSON body, so raising on the status first discarded the only
+  field that explains it. On quota exhaustion the collector stops the batch and
+  the job stops enriching, rather than issuing hundreds of calls that are all
+  going to be refused.
+
 ## Testing
 
 `tests/test_ipo_enrichment.py` pins the no-key skip, the quarantine round

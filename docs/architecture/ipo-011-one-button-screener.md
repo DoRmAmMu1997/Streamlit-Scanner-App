@@ -111,6 +111,14 @@ proposals belonging to issues the run never touched and will not rescore,
 leaving them approved but stale. When the run covers every issue the scope is
 `None`, which means the same thing for both.
 
+**Superseded by IPO-012:** `ACTIVE_ISSUE_STATUSES` became
+`UPCOMING_ISSUE_STATUSES` and no longer includes `CLOSED`, and the filter is
+applied once at issue selection rather than only inside the enrichment loop — so
+downloads, enrichment, extraction and scoring now skip finished offers together.
+An explicitly named `issue_ids` bypasses the filter. See
+[ipo-009-serpapi-enrichment](ipo-009-serpapi-enrichment.md) for why it mattered:
+enrichment costs 8 searches per issue against a hard monthly cap.
+
 ## Naming
 
 The read-only nav view was renamed **"IPO screener" → "IPO dashboard"** so it

@@ -37,7 +37,99 @@ class SerpApiSetupError(RuntimeError):
 
 
 class SerpApiSearchError(RuntimeError):
-    """Raised when SerpAPI cannot return usable search results."""
+    """Raised when SerpAPI cannot return usable search results.
+
+    Beginner note — why the subclasses below exist:
+        Callers log an exception's *class name* and never its message, because
+        a provider message is untrusted upstream text. A single flat type
+        therefore made every failure read identically in the logs: a quota that
+        will not reset until next month looked exactly like a two-second
+        network blip. The subclasses give the log something that can actually
+        vary, which is the same fix ``SebiBlockedError`` applies to SEBI.
+
+        They all inherit from this class, so an existing
+        ``except SerpApiSearchError`` keeps catching everything it used to.
+    """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        """Record the HTTP status alongside the redacted message.
+
+        A status code is safe metadata (unlike a response body), so it can be
+        logged verbatim to tell a 429 apart from a 500.
+        """
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class SerpApiQuotaError(SerpApiSearchError):
+    """Raised when the SerpAPI plan has no searches left.
+
+    Permanent for the billing period: re-running cannot help, and a caller that
+    keeps issuing searches only wastes wall-clock time.
+    """
+
+
+class SerpApiRateLimitError(SerpApiSearchError):
+    """Raised when SerpAPI throttles a burst of requests.
+
+    Transient, unlike :class:`SerpApiQuotaError` — the same query may succeed
+    after a pause, so a caller may reasonably continue with other work.
+    """
+
+
+class SerpApiAuthError(SerpApiSearchError):
+    """Raised when SerpAPI rejects the credentials (HTTP 401/403).
+
+    A configuration problem: every subsequent call will fail the same way until
+    the key is fixed.
+    """
+
+
+# SerpAPI answers a query Google found nothing for with HTTP 200 and an
+# ``error`` field, which is not a failure at all — it is an empty result set.
+# Matched narrowly on purpose: mistaking a real provider error for "no results"
+# would silently hide it, so anything unrecognised keeps raising.
+_NO_RESULTS_MARKERS: Final = (
+    "hasn't returned any results",
+    "has not returned any results",
+)
+# Quota exhaustion wording, checked against the provider's error text.
+_QUOTA_MARKERS: Final = (
+    "run out of searches",
+    "exceeded your searches",
+    "account has no searches",
+    "search limit",
+)
+
+
+def _classify_status(message: str, status_code: int | None) -> SerpApiSearchError:
+    """Pick the error type an HTTP status alone justifies.
+
+    Beginner note:
+        A 429 without a readable body is ambiguous — it could be a burst
+        throttle or an exhausted plan — so it is reported as the *transient* of
+        the two. Claiming exhaustion on thin evidence would stop a run that
+        could have continued; the reverse merely lets it finish.
+    """
+    if status_code in (401, 403):
+        return SerpApiAuthError(message, status_code=status_code)
+    if status_code == 429:
+        return SerpApiRateLimitError(message, status_code=status_code)
+    return SerpApiSearchError(message, status_code=status_code)
+
+
+def _classify_provider_error(
+    detail: str, folded: str, status_code: int | None
+) -> SerpApiSearchError:
+    """Pick the error type for a response whose body names the problem.
+
+    The body is authoritative where it is explicit: SerpAPI says outright when
+    an account is out of searches, which upgrades an otherwise ambiguous 429
+    from "throttled, try later" to "spent, nothing will work until it resets".
+    """
+    if any(marker in folded for marker in _QUOTA_MARKERS):
+        return SerpApiQuotaError(detail, status_code=status_code)
+    return _classify_status(detail, status_code)
 
 
 @dataclass(frozen=True)
@@ -145,22 +237,43 @@ class SerpApiClient:
             raise SerpApiSearchError(f"SerpAPI request failed: {detail}") from exc
 
         try:
-            response.raise_for_status()
+            # Read the body BEFORE checking the status. SerpAPI reports plan
+            # exhaustion as HTTP 429 carrying a JSON body that names the cause,
+            # so raising on the status first threw that explanation away and
+            # left quota exhaustion indistinguishable from any other 4xx. The
+            # read is already bounded to 1 MiB, so this costs nothing.
             payload = _bounded_json(response)
-            # API-level errors arrive with HTTP 200, so classify them before
-            # cleanup and preserve them if closing the response also fails.
-            if isinstance(payload, dict) and payload.get("error"):
-                detail = redact_text(
-                    str(payload["error"]), extra_secrets=[self.api_key]
-                )
-                raise SerpApiSearchError(detail)
+            provider_error = (
+                str(payload["error"])
+                if isinstance(payload, dict) and payload.get("error")
+                else ""
+            )
+            status_code = getattr(response, "status_code", None)
+            if provider_error:
+                detail = redact_text(provider_error, extra_secrets=[self.api_key])
+                folded = provider_error.casefold()
+                if any(marker in folded for marker in _NO_RESULTS_MARKERS):
+                    # Not a failure: Google simply had nothing for this query.
+                    # Returning empty lets the caller persist an honest "no
+                    # observations" record instead of dropping the signal.
+                    _close_response(
+                        response, api_key=self.api_key, suppress_errors=False
+                    )
+                    return []
+                raise _classify_provider_error(detail, folded, status_code)
+            # No error field, so a non-2xx status is the only thing left that
+            # can make this response unusable.
+            response.raise_for_status()
         except requests.RequestException as exc:
             # A requests error can echo the full request URL — including the
             # api_key query param — so scrub through the same utility used by
             # Streamlit errors and scanner failure details.
             detail = redact_text(str(exc), extra_secrets=[self.api_key])
+            status_code = getattr(response, "status_code", None)
             _close_response(response, api_key=self.api_key, suppress_errors=True)
-            raise SerpApiSearchError(f"SerpAPI request failed: {detail}") from exc
+            raise _classify_status(
+                f"SerpAPI request failed: {detail}", status_code
+            ) from exc
         except BaseException:
             # Cleanup must never replace a typed/redacted primary failure.
             _close_response(response, api_key=self.api_key, suppress_errors=True)

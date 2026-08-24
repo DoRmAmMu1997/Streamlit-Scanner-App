@@ -390,6 +390,19 @@ def run_ipo_screener(
             enrichment_collected += len(enrichment.signals)
             if enrichment.error_type is not None:
                 enrichment_failed += 1
+            if getattr(enrichment, "quota_exhausted", False):
+                # Like the missing-key case above, this is a whole-run
+                # condition rather than a per-issue one: the plan is spent, so
+                # every remaining issue would fail the same way. Stopping turns
+                # ~20 minutes of identical warnings into one actionable line.
+                print(
+                    "[ipo-screener] enrichment=quota_exhausted "
+                    "(the SerpAPI plan has no searches left; continuing "
+                    "without web signals)",
+                    file=out,
+                    flush=True,
+                )
+                break
 
     proposals_created = 0
     proposals_skipped = 0
