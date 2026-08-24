@@ -8,6 +8,7 @@ handling. This module centralizes that work so screeners can stay small.
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import logging
 import re
 import threading
@@ -48,6 +49,13 @@ logger = logging.getLogger(__name__)
 # headless daily job. Keeping it (and the leap-safe "subtract whole years" math in
 # ``history_start_date``) in one place stops the three callers from drifting apart.
 DEFAULT_HISTORY_YEARS_BACK = 10
+
+# How long we trust a recorded "the vendor has nothing earlier than this" answer
+# before probing again. Vendors do occasionally backfill history, so the belief
+# expires rather than becoming permanent; a month keeps the cost negligible
+# (one request per affected symbol per month) while never hiding real data for
+# long. Mirrors the DATA-002 ``REPAIR_RETRY_AFTER_DAYS`` cooldown precedent.
+VENDOR_EARLIEST_RECHECK_DAYS = 30
 
 
 def history_start_date(
@@ -109,6 +117,7 @@ def _cache_covers_range(
     last_date: date | None,
     requested_start: date,
     requested_end: date,
+    vendor_earliest: date | None = None,
 ) -> bool:
     """Return True when a cached range is good enough to answer a request.
 
@@ -130,7 +139,35 @@ def _cache_covers_range(
     if first_date is None or last_date is None:
         return False
     tolerated_end = requested_end - timedelta(days=STALE_LATEST_TOLERANCE_DAYS)
-    return first_date <= requested_start and last_date >= tolerated_end
+    if last_date < tolerated_end:
+        return False
+    return _cache_reaches_back_far_enough(first_date, requested_start, vendor_earliest)
+
+
+def _cache_reaches_back_far_enough(
+    first_date: date,
+    requested_start: date,
+    vendor_earliest: date | None,
+) -> bool:
+    """Return True when nothing earlier is missing that could still be fetched.
+
+    Normally that means the cache literally reaches ``requested_start``. But a
+    stock that listed *after* that date can never satisfy it — DhanHQ has nothing
+    earlier to give — and demanding it made 200 of 577 symbols a permanent cache
+    miss, re-downloading their full history on every prefetch and every scan
+    (DATA-004).
+
+    ``vendor_earliest`` is the earliest bar the vendor actually served for a probe
+    that reached at least as far back as this request (see
+    ``DailyDataLoader._vendor_earliest_for``). When the cache already starts at or
+    before that bar, it is as complete as it can ever be, so asking again is pure
+    waste. ``None`` means we have no such evidence and the strict rule applies —
+    which keeps an interrupted prefetch's partial file being refetched, since
+    there the vendor genuinely does have the missing years.
+    """
+    if first_date <= requested_start:
+        return True
+    return vendor_earliest is not None and first_date <= vendor_earliest
 
 
 def _date_bounds(candles: pd.DataFrame) -> tuple[date | None, date | None]:
@@ -333,6 +370,106 @@ class DailyDataLoader:
         except OSError:
             logger.warning("Could not write daily-cache checked marker for %s", symbol)
 
+    def first_bar_path(self, symbol: str, security_id: str | int) -> Path:
+        """Return the sidecar recording how far back the vendor's history goes.
+
+        A third marker alongside ``.checked`` (an empty tail) and ``.repaired``
+        (a repair cooldown), following the same pattern: remember an answer the
+        vendor already gave so we do not pay for the identical request forever.
+        """
+        return self.cache_path(symbol, security_id).with_suffix(".firstbar")
+
+    def _vendor_earliest_for(
+        self, symbol: str, security_id: str | int, requested_start: date, today: date
+    ) -> date | None:
+        """The vendor's earliest bar, when we have evidence that answers this request.
+
+        Returns ``None`` — meaning "no evidence, apply the strict rule" — unless
+        all three hold:
+
+        - a marker exists and parses;
+        - it was recorded within ``VENDOR_EARLIEST_RECHECK_DAYS`` (vendors do
+          backfill occasionally, so the belief expires);
+        - the recorded probe reached **at least as far back** as this request.
+          Learning that nothing exists before 2021 when you only asked from 2021
+          says nothing about 2016, so a shallower probe must not suppress a
+          deeper refetch.
+
+        Any read or parse problem returns ``None``, so a corrupt marker can only
+        ever cost an extra request — never hide history that really is missing.
+        """
+        path = self.first_bar_path(symbol, security_id)
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            requested_from = _coerce_date(str(payload["requested_from"]))
+            earliest_available = _coerce_date(str(payload["earliest_available"]))
+            recorded_on = _coerce_date(str(payload["recorded_on"]))
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            return None
+        if (today - recorded_on).days >= VENDOR_EARLIEST_RECHECK_DAYS:
+            return None
+        if requested_from > requested_start:
+            return None
+        return earliest_available
+
+    def _write_vendor_earliest(
+        self,
+        symbol: str,
+        security_id: str | int,
+        *,
+        requested_from: date,
+        earliest_available: date,
+        recorded_on: date,
+    ) -> None:
+        """Persist what the vendor served, so the next pass need not ask again."""
+        try:
+            self.first_bar_path(symbol, security_id).write_text(
+                json.dumps(
+                    {
+                        "requested_from": requested_from.isoformat(),
+                        "earliest_available": earliest_available.isoformat(),
+                        "recorded_on": recorded_on.isoformat(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+        except OSError:
+            # The marker is an optimisation, never a correctness requirement.
+            logger.warning("Could not write daily-cache first-bar marker for %s", symbol)
+
+    def _record_vendor_earliest(
+        self,
+        symbol: str,
+        security_id: str | int,
+        *,
+        requested_from: date | datetime | str,
+        candles: pd.DataFrame,
+        today: date,
+    ) -> None:
+        """Record the vendor's earliest bar when it fell short of what we asked for.
+
+        Called after any full-window download. A response that *does* reach the
+        requested start teaches us nothing worth storing, and an empty response is
+        no evidence at all, so both are skipped.
+        """
+        if candles.empty:
+            return
+        first_date, _last_date = _date_bounds(candles)
+        if first_date is None:
+            return
+        start = _coerce_date(requested_from)
+        if first_date <= start:
+            return
+        self._write_vendor_earliest(
+            symbol,
+            security_id,
+            requested_from=start,
+            earliest_available=first_date,
+            recorded_on=today,
+        )
+
     def read_cached_history(self, symbol: str, security_id: str | int) -> pd.DataFrame:
         """Return the cached daily candles for one stock; empty DataFrame if missing.
 
@@ -411,7 +548,12 @@ class DailyDataLoader:
                 first_date, last_date = _date_bounds(cached)
             requested_start = _coerce_date(start_date)
             requested_end = _coerce_date(end_date)
-            if _cache_covers_range(first_date, last_date, requested_start, requested_end):
+            vendor_earliest = self._vendor_earliest_for(
+                symbol, security_id, requested_start, requested_end
+            )
+            if _cache_covers_range(
+                first_date, last_date, requested_start, requested_end, vendor_earliest
+            ):
                 if cached is None:
                     # The footer is only an advisory index. The file can be
                     # replaced after the metadata read, and a valid footer
@@ -419,7 +561,11 @@ class DailyDataLoader:
                     cached = pd.read_parquet(path)
                 actual_first, actual_last = _date_bounds(cached)
                 if _cache_covers_range(
-                    actual_first, actual_last, requested_start, requested_end
+                    actual_first,
+                    actual_last,
+                    requested_start,
+                    requested_end,
+                    vendor_earliest,
                 ):
                     return self._slice_to_range(cached, start_date, end_date), True
 
@@ -435,6 +581,13 @@ class DailyDataLoader:
         if not candles.empty:
             path.parent.mkdir(parents=True, exist_ok=True)
             candles.to_parquet(path, index=False)
+        self._record_vendor_earliest(
+            symbol,
+            security_id,
+            requested_from=start_date,
+            candles=candles,
+            today=_coerce_date(end_date),
+        )
         return self._slice_to_range(candles, start_date, end_date), False
 
     def fetch_window(
@@ -516,6 +669,9 @@ class DailyDataLoader:
             if not candles.empty:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 candles.to_parquet(path, index=False)
+            self._record_vendor_earliest(
+                symbol, security_id, requested_from=start, candles=candles, today=today
+            )
             return candles, "fresh_download"
 
         cached = pd.read_parquet(path)
@@ -531,6 +687,9 @@ class DailyDataLoader:
             )
             if not candles.empty:
                 candles.to_parquet(path, index=False)
+            self._record_vendor_earliest(
+                symbol, security_id, requested_from=start, candles=candles, today=today
+            )
             return candles, "fresh_download"
 
         first_date, last_date = _date_bounds(cached)
@@ -547,9 +706,18 @@ class DailyDataLoader:
             )
             if not candles.empty:
                 candles.to_parquet(path, index=False)
+            self._record_vendor_earliest(
+                symbol, security_id, requested_from=start, candles=candles, today=today
+            )
             return candles, "fresh_download"
 
-        if first_date > start:
+        # A cache that starts late is either an interrupted prefetch (the vendor
+        # HAS the missing years, so refetch) or a stock that listed after the
+        # window opened (the vendor has nothing earlier, so refetching is waste
+        # forever). ``_vendor_earliest_for`` is what tells the two apart; without
+        # evidence it returns None and the original always-refetch rule applies.
+        vendor_earliest = self._vendor_earliest_for(symbol, security_id, start, today)
+        if not _cache_reaches_back_far_enough(first_date, start, vendor_earliest):
             # The cache may be current at the back but missing years at the
             # front, usually after an old interrupted prefetch. Refetch the
             # intended full window so long-lookback screeners see real history.
@@ -560,10 +728,15 @@ class DailyDataLoader:
                 from_date=start,
                 to_date=today,
             )
+            self._record_vendor_earliest(
+                symbol, security_id, requested_from=start, candles=candles, today=today
+            )
             if not candles.empty:
                 candles.to_parquet(path, index=False)
                 return candles, "backfilled"
             return cached, "fresh"
+        # Falling through on purpose: a later listing still needs its daily
+        # top-up. Suppressing the backfill must not freeze the symbol's tail.
 
         if last_date >= today:
             return cached, "fresh"
@@ -1195,17 +1368,18 @@ class DailyDataLoader:
         choose the age threshold, and only daily parquet files plus their
         sidecar markers are touched.
 
-        Two sidecar kinds travel with a parquet: `.checked` (the empty-increment
-        marker written here) and `.repaired` (the DATA-002 repair cooldown). Both
-        are meaningless without their parquet, so an orphan of either is removed
-        regardless of age.
+        Three sidecar kinds travel with a parquet: `.checked` (the empty-increment
+        marker written here), `.repaired` (the DATA-002 repair cooldown), and
+        `.firstbar` (the DATA-004 record of how far back the vendor's history
+        goes). All are meaningless without their parquet, so an orphan of any of
+        them is removed regardless of age.
         """
         if not self.cache_dir.exists():
             return 0
         now = now or datetime.now()
         cutoff = now - timedelta(days=max(1, int(max_age_days)))
         targets: set[Path] = set()
-        sidecar_suffixes = (".checked", ".repaired")
+        sidecar_suffixes = (".checked", ".repaired", ".firstbar")
 
         for parquet in self.cache_dir.glob("*.parquet"):
             modified = datetime.fromtimestamp(parquet.stat().st_mtime)
