@@ -70,13 +70,29 @@ _TYPE_TOKENS = {
     INSUFFICIENT_VERIFIED_DATA: "insufficient_verified_data",
 }
 
-# Issues in these states can still change (new filings, demand, listings), so
-# enrichment queries and re-scores target them; listed issues stay archived.
-ACTIVE_ISSUE_STATUSES = (
+# The issue states worth spending a run on: the offer has not finished yet, so
+# fresh evidence can still change the verdict.
+#
+# Beginner note — why ``closed`` is NOT here:
+#     SEBI's filing categories map DRHP -> drhp_filed, RHP -> rhp_filed, and
+#     final offer -> ``closed`` (see backend/ipo/sources/sebi.py). A final offer
+#     document is filed *after* the issue completes, so ``closed`` means "this
+#     IPO is over", and scanning it spends a hard-capped SerpAPI quota on a
+#     decision nobody can act on any more.
+#
+#     There is deliberately no date comparison here. The issue row carries no
+#     listing date at all, and ``open_date``/``close_date`` are never populated
+#     by ingestion, so lifecycle stage is the only signal that actually exists.
+#
+#     One consequence to leave alone: ``_weak_qib_demand_near_close`` judges
+#     issues whose status is OPEN or CLOSED, so its evidence stops refreshing
+#     for closed issues. That is correct — the vocabulary overloads ``closed``,
+#     and the one produced by ingestion means "final offer filed", long past
+#     the book close that flag is about.
+UPCOMING_ISSUE_STATUSES = (
     IpoStatus.DRHP_FILED,
     IpoStatus.RHP_FILED,
     IpoStatus.OPEN,
-    IpoStatus.CLOSED,
 )
 
 
@@ -293,8 +309,19 @@ def run_ipo_screener(
 
     issues = issue_lister(session_factory=session_factory)
     if issue_ids:
+        # An explicitly named set is an operator decision and wins outright, so
+        # a finished issue can still be re-downloaded, re-extracted, or
+        # re-scored on purpose. Without this the documented
+        # ``--force-extract --issue-id N`` workflow could never reach one.
         wanted = set(issue_ids)
         issues = [issue for issue in issues if issue.id in wanted]
+    else:
+        # Filter once, here, so every stage below inherits it: downloads,
+        # enrichment, extraction, and scoring all skip finished issues
+        # together rather than each stage deciding for itself.
+        issues = [
+            issue for issue in issues if issue.status in UPCOMING_ISSUE_STATUSES
+        ]
 
     downloads_attempted = 0
     downloads_failed = 0
@@ -328,8 +355,9 @@ def run_ipo_screener(
     enrichment_skipped_no_key = False
     if not skip_enrich:
         for issue in issues:
-            if issue.status not in ACTIVE_ISSUE_STATUSES:
-                continue
+            # No status check here: ``issues`` was already narrowed to upcoming
+            # offers above. Re-checking would also override an explicitly named
+            # issue, which is the one case an operator has said they want.
             # One issue's search failure must not stop the sibling batches.
             try:
                 enrichment = enricher(

@@ -431,6 +431,97 @@ def test_issue_id_filter_narrows_every_stage() -> None:
     assert rescored == [2]
 
 
+def test_finished_issues_are_skipped_by_every_stage() -> None:
+    """A completed IPO costs nothing: no download, no search, no re-score.
+
+    Beginner note:
+        SEBI's final-offer filing maps to ``closed``, and that document is
+        filed *after* the issue is over. Enrichment is capped by a paid SerpAPI
+        quota and spends eight searches per issue, so scanning finished offers
+        is pure waste on a decision nobody can act on any more.
+    """
+    issues = [
+        _issue(1, "Upcoming Ltd", status=IpoStatus.RHP_FILED),
+        _issue(2, "Finished Ltd", status=IpoStatus.CLOSED),
+        _issue(3, "Old Ltd", status=IpoStatus.LISTED),
+    ]
+    downloaded: list[int] = []
+    enriched: list[int] = []
+    rescored: list[int] = []
+
+    def _download(issue_id: int, _document_id: int, **_kwargs: Any) -> Any:
+        """Record which issues reached the download stage."""
+        downloaded.append(issue_id)
+        return SimpleNamespace()
+
+    def _enrich(issue_id: int, **_kwargs: Any) -> Any:
+        """Record which issues reached the enrichment stage."""
+        enriched.append(issue_id)
+        return SimpleNamespace(signals=(), skipped_no_key=False, error_type=None)
+
+    def _score(issue_id: int, **_kwargs: Any) -> IpoRescoreOutcome:
+        """Record which issues reached the scoring stage."""
+        rescored.append(issue_id)
+        return _rescore(
+            issues[0], "insufficient_inputs", missing=("manual_extraction",)
+        )
+
+    out = io.StringIO()
+    run_ipo_screener(
+        skip_scan=True,
+        ensure_schema=lambda: True,
+        issue_lister=lambda **_kwargs: issues,
+        document_lister=lambda *_args, **_kwargs: [
+            _document(5, parse_status=IpoDocumentParseStatus.NOT_DOWNLOADED)
+        ],
+        document_downloader=_download,
+        enricher=_enrich,
+        rescorer=_score,
+        session_factory=object,
+        output=out,
+    )
+
+    assert downloaded == [1]
+    assert enriched == [1]
+    assert rescored == [1]
+
+
+def test_an_explicitly_named_finished_issue_is_still_processed() -> None:
+    """Naming an issue is an operator decision that outranks the filter.
+
+    Beginner note:
+        Without this escape hatch the documented
+        ``--force-extract --issue-id N`` workflow could never reach a closed
+        issue, and no finished offer could ever be deliberately re-scored after
+        a rule change.
+    """
+    issues = [_issue(7, "Finished Ltd", status=IpoStatus.CLOSED)]
+    rescored: list[int] = []
+
+    def _score(issue_id: int, **_kwargs: Any) -> IpoRescoreOutcome:
+        """Record that the named issue was scored despite being finished."""
+        rescored.append(issue_id)
+        return _rescore(
+            issues[0], "insufficient_inputs", missing=("manual_extraction",)
+        )
+
+    out = io.StringIO()
+    run_ipo_screener(
+        skip_scan=True,
+        skip_download=True,
+        skip_enrich=True,
+        issue_ids=[7],
+        ensure_schema=lambda: True,
+        issue_lister=lambda **_kwargs: issues,
+        document_lister=lambda *_args, **_kwargs: [],
+        rescorer=_score,
+        session_factory=object,
+        output=out,
+    )
+
+    assert rescored == [7]
+
+
 def test_main_wires_cli_flags_into_the_runner() -> None:
     """The CLI surface maps one-to-one onto the runner's keyword options."""
     received: dict[str, Any] = {}
