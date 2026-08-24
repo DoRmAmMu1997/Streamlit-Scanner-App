@@ -1127,3 +1127,79 @@ def test_fetch_workers_setting_clamps_and_defaults(monkeypatch, tmp_path):
     # The loader clamps explicit constructor values the same way.
     loader = DailyDataLoader(None, cache_dir=tmp_path, fetch_workers=99)
     assert loader.fetch_workers == 8
+
+
+# ---------------------------------------------------------------------------
+# DATA-003: a cache the vendor cannot improve on is still a hit
+# ---------------------------------------------------------------------------
+
+
+def _covering_cache(loader, *, last_date, first_date):
+    """Write a cache spanning [first_date, last_date] for the standard instrument."""
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime([first_date, last_date]),
+            "open": [100.0, 101.0],
+            "high": [105.0, 106.0],
+            "low": [99.0, 100.0],
+            "close": [104.0, 105.0],
+            "volume": [1_000.0, 1_100.0],
+        }
+    )
+    frame.to_parquet(loader.cache_path("DEMO", "1"), index=False)
+    return frame
+
+
+def test_cache_short_of_today_by_a_weekend_is_still_a_hit(tmp_path):
+    """The live failure: a scan asks through today, the vendor's newest bar is Friday.
+
+    Requiring last_date >= today made every symbol a miss, so each scan
+    re-downloaded the whole universe and overwrote the cache with raw vendor data.
+    """
+    client = FakeDhanClient()
+    loader = DailyDataLoader(client, cache_dir=tmp_path, request_delay_seconds=0.0)
+    today = date(2026, 8, 24)  # Monday; newest published bar is Friday the 21st
+    _covering_cache(loader, first_date=date(2016, 8, 1), last_date=date(2026, 8, 21))
+
+    _frame, from_cache = loader.get_daily_history(
+        {"symbol": "DEMO", "security_id": "1"},
+        start_date=date(2016, 8, 24),
+        end_date=today,
+    )
+
+    assert from_cache is True
+    assert client.calls == 0  # nothing re-downloaded, nothing overwritten
+
+
+def test_cache_far_behind_the_requested_end_is_still_a_miss(tmp_path):
+    """Tolerance is for unpublished bars, not for genuinely abandoned history."""
+    client = FakeDhanClient()
+    loader = DailyDataLoader(client, cache_dir=tmp_path, request_delay_seconds=0.0)
+    _covering_cache(loader, first_date=date(2016, 8, 1), last_date=date(2026, 7, 1))
+
+    _frame, from_cache = loader.get_daily_history(
+        {"symbol": "DEMO", "security_id": "1"},
+        start_date=date(2016, 8, 24),
+        end_date=date(2026, 8, 24),
+    )
+
+    assert from_cache is False
+
+
+def test_cache_missing_early_history_is_a_miss_however_current_it_is(tmp_path):
+    """The START comparison stays strict.
+
+    A partial parquet from an interrupted prefetch must never silently run a
+    long-lookback screener on too little history.
+    """
+    client = FakeDhanClient()
+    loader = DailyDataLoader(client, cache_dir=tmp_path, request_delay_seconds=0.0)
+    _covering_cache(loader, first_date=date(2025, 1, 2), last_date=date(2026, 8, 24))
+
+    _frame, from_cache = loader.get_daily_history(
+        {"symbol": "DEMO", "security_id": "1"},
+        start_date=date(2016, 8, 24),
+        end_date=date(2026, 8, 24),
+    )
+
+    assert from_cache is False

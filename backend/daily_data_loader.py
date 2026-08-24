@@ -27,6 +27,7 @@ from backend.config import (
     dhan_request_delay_seconds,
 )
 from backend.data_quality import CandleQualityReport, validate_candles
+from backend.data_quality.candles import STALE_LATEST_TOLERANCE_DAYS
 from backend.dhan_client import DhanDataClient, DhanRateLimitError
 from backend.observability import (
     EVENT_CANDLE_DATA_QUALITY_FAILED,
@@ -101,6 +102,35 @@ def safe_file_stem(value: object) -> str:
     if cleaned in {"", ".", ".."}:
         return "unknown"
     return cleaned
+
+
+def _cache_covers_range(
+    first_date: date | None,
+    last_date: date | None,
+    requested_start: date,
+    requested_end: date,
+) -> bool:
+    """Return True when a cached range is good enough to answer a request.
+
+    The **start** is compared strictly: a parquet missing early history (common
+    after an interrupted prefetch) must never silently run a long-lookback
+    screener on too little data.
+
+    The **end** is compared with ``STALE_LATEST_TOLERANCE_DAYS`` of slack, because
+    callers routinely ask for data "through today" while the newest bar the vendor
+    has published is Friday's. Demanding an exact match made every symbol a cache
+    miss outside market hours, so each scan re-downloaded the entire universe and
+    overwrote the cache with raw vendor data (DATA-003).
+
+    Reusing DATA-001's constant is deliberate: it is already the app's definition
+    of "how far the newest candle may trail today before that is suspicious", and
+    a frame inside it still raises ``STALE_LATEST_CANDLE`` as a warning, so nothing
+    is hidden by treating it as current enough to serve.
+    """
+    if first_date is None or last_date is None:
+        return False
+    tolerated_end = requested_end - timedelta(days=STALE_LATEST_TOLERANCE_DAYS)
+    return first_date <= requested_start and last_date >= tolerated_end
 
 
 def _date_bounds(candles: pd.DataFrame) -> tuple[date | None, date | None]:
@@ -381,23 +411,15 @@ class DailyDataLoader:
                 first_date, last_date = _date_bounds(cached)
             requested_start = _coerce_date(start_date)
             requested_end = _coerce_date(end_date)
-            if (
-                first_date is not None
-                and last_date is not None
-                and first_date <= requested_start
-                and last_date >= requested_end
-            ):
+            if _cache_covers_range(first_date, last_date, requested_start, requested_end):
                 if cached is None:
                     # The footer is only an advisory index. The file can be
                     # replaced after the metadata read, and a valid footer
                     # does not prove every data page is readable.
                     cached = pd.read_parquet(path)
                 actual_first, actual_last = _date_bounds(cached)
-                if (
-                    actual_first is not None
-                    and actual_last is not None
-                    and actual_first <= requested_start
-                    and actual_last >= requested_end
+                if _cache_covers_range(
+                    actual_first, actual_last, requested_start, requested_end
                 ):
                     return self._slice_to_range(cached, start_date, end_date), True
 
