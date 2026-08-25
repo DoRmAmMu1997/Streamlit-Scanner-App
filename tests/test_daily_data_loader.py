@@ -1203,3 +1203,118 @@ def test_cache_missing_early_history_is_a_miss_however_current_it_is(tmp_path):
     )
 
     assert from_cache is False
+
+
+# ---------------------------------------------------------------------------
+# DATA-003 follow-up: only genuinely unpublishable days may be tolerated
+# ---------------------------------------------------------------------------
+
+
+def _cache_ending(loader, last_date, *, first_date=date(2016, 8, 1)):
+    pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime([first_date, last_date]),
+            "open": [100.0, 101.0],
+            "high": [105.0, 106.0],
+            "low": [99.0, 100.0],
+            "close": [104.0, 105.0],
+            "volume": [1_000.0, 1_100.0],
+        }
+    ).to_parquet(loader.cache_path("DEMO", "1"), index=False)
+
+
+def _is_hit(loader, *, end_date, start_date=date(2016, 8, 24)):
+    _frame, from_cache = loader.get_daily_history(
+        {"symbol": "DEMO", "security_id": "1"},
+        start_date=start_date,
+        end_date=end_date,
+    )
+    return from_cache
+
+
+def test_a_weekend_only_gap_is_a_hit(tmp_path):
+    """Friday's bar, scanned on Monday: only Sat/Sun are missing, so nothing is lost.
+
+    This is the case DATA-003 exists to serve — without it every scan re-downloads
+    the whole universe.
+    """
+    client = FakeDhanClient()
+    loader = DailyDataLoader(client, cache_dir=tmp_path, request_delay_seconds=0.0)
+    _cache_ending(loader, date(2026, 8, 21))  # Friday
+
+    assert _is_hit(loader, end_date=date(2026, 8, 24)) is True  # Monday
+    assert client.calls == 0
+
+
+def test_a_missing_published_weekday_is_a_miss(tmp_path):
+    """Thursday's bar, scanned on Monday: Friday's bar exists and is absent.
+
+    Serving this silently would run screeners on prices that are demonstrably
+    behind the market.
+    """
+    client = FakeDhanClient()
+    loader = DailyDataLoader(client, cache_dir=tmp_path, request_delay_seconds=0.0)
+    _cache_ending(loader, date(2026, 8, 20))  # Thursday
+
+    assert _is_hit(loader, end_date=date(2026, 8, 24)) is False  # Monday
+
+
+def test_todays_own_bar_may_be_unpublished(tmp_path):
+    """The request end itself is always tolerated — EOD data lands late."""
+    client = FakeDhanClient()
+    loader = DailyDataLoader(client, cache_dir=tmp_path, request_delay_seconds=0.0)
+    _cache_ending(loader, date(2026, 8, 24))  # Monday
+
+    assert _is_hit(loader, end_date=date(2026, 8, 25)) is True  # Tuesday
+    assert client.calls == 0
+
+
+def test_a_skipped_midweek_day_is_a_miss(tmp_path):
+    """Friday's bar scanned on Tuesday: Monday's bar exists and is absent."""
+    client = FakeDhanClient()
+    loader = DailyDataLoader(client, cache_dir=tmp_path, request_delay_seconds=0.0)
+    _cache_ending(loader, date(2026, 8, 21))  # Friday
+
+    assert _is_hit(loader, end_date=date(2026, 8, 25)) is False  # Tuesday
+
+
+def test_a_long_stale_cache_is_a_miss(tmp_path):
+    client = FakeDhanClient()
+    loader = DailyDataLoader(client, cache_dir=tmp_path, request_delay_seconds=0.0)
+    _cache_ending(loader, date(2026, 8, 3))
+
+    assert _is_hit(loader, end_date=date(2026, 8, 24)) is False
+
+
+def test_a_market_holiday_is_a_hit_when_the_prefetch_already_asked(tmp_path):
+    """A holiday Monday is a weekday, so arithmetic alone would force a refetch.
+
+    The prefetch's existing `.checked` marker records that Dhan was asked for this
+    tail and had nothing, which is direct evidence rather than a guess.
+    """
+    client = FakeDhanClient()
+    loader = DailyDataLoader(client, cache_dir=tmp_path, request_delay_seconds=0.0)
+    _cache_ending(loader, date(2026, 8, 21))  # Friday
+    loader.checked_path("DEMO", "1").write_text("2026-08-25", encoding="utf-8")
+
+    assert _is_hit(loader, end_date=date(2026, 8, 25)) is True  # holiday Monday behind us
+    assert client.calls == 0
+
+
+def test_the_same_holiday_gap_is_a_miss_without_that_evidence(tmp_path):
+    """No marker means we genuinely do not know, so ask."""
+    client = FakeDhanClient()
+    loader = DailyDataLoader(client, cache_dir=tmp_path, request_delay_seconds=0.0)
+    _cache_ending(loader, date(2026, 8, 21))
+
+    assert _is_hit(loader, end_date=date(2026, 8, 25)) is False
+
+
+def test_a_stale_checked_marker_does_not_vouch_for_a_later_request(tmp_path):
+    """Evidence from last week says nothing about today's missing bars."""
+    client = FakeDhanClient()
+    loader = DailyDataLoader(client, cache_dir=tmp_path, request_delay_seconds=0.0)
+    _cache_ending(loader, date(2026, 8, 21))
+    loader.checked_path("DEMO", "1").write_text("2026-08-22", encoding="utf-8")
+
+    assert _is_hit(loader, end_date=date(2026, 8, 25)) is False

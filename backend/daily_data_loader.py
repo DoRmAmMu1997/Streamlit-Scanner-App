@@ -27,7 +27,6 @@ from backend.config import (
     dhan_request_delay_seconds,
 )
 from backend.data_quality import CandleQualityReport, validate_candles
-from backend.data_quality.candles import STALE_LATEST_TOLERANCE_DAYS
 from backend.dhan_client import DhanDataClient, DhanRateLimitError
 from backend.observability import (
     EVENT_CANDLE_DATA_QUALITY_FAILED,
@@ -104,11 +103,47 @@ def safe_file_stem(value: object) -> str:
     return cleaned
 
 
+# The longest gap the weekday walk below can ever accept is a long weekend, so a
+# wider gap is rejected without walking it. Purely a performance guard: a decade-old
+# cache should not iterate 3,650 days to reach the same "no" a subtraction gives.
+_MAX_TOLERABLE_GAP_DAYS = 7
+
+
+def _only_unpublished_days_missing(last_date: date, requested_end: date) -> bool:
+    """True when nothing the market has actually published is missing from the cache.
+
+    Two kinds of day may be absent without the cache being out of date:
+
+    - **weekends**, when the exchange did not trade at all; and
+    - **``requested_end`` itself**, because the current session's end-of-day bar is
+      routinely not published yet when a scan runs.
+
+    That second carve-out is load-bearing. Without it every weekday scan would be a
+    miss again, which is the whole problem DATA-003 set out to fix.
+
+    Any *other* missing weekday means a bar the market really did publish is absent,
+    so the cache is genuinely behind and must be refreshed. This replaces an earlier
+    blanket "tolerate four calendar days" rule, which silently served a cache ending
+    on Thursday to a Monday scan even though Friday's bar existed.
+    """
+    if last_date >= requested_end:
+        return True
+    if (requested_end - last_date).days > _MAX_TOLERABLE_GAP_DAYS:
+        return False
+    day = last_date + timedelta(days=1)
+    while day < requested_end:
+        if day.weekday() < 5:  # Monday-Friday
+            return False
+        day += timedelta(days=1)
+    return True
+
+
 def _cache_covers_range(
     first_date: date | None,
     last_date: date | None,
     requested_start: date,
     requested_end: date,
+    checked_through: date | None = None,
 ) -> bool:
     """Return True when a cached range is good enough to answer a request.
 
@@ -116,21 +151,30 @@ def _cache_covers_range(
     after an interrupted prefetch) must never silently run a long-lookback
     screener on too little data.
 
-    The **end** is compared with ``STALE_LATEST_TOLERANCE_DAYS`` of slack, because
-    callers routinely ask for data "through today" while the newest bar the vendor
-    has published is Friday's. Demanding an exact match made every symbol a cache
-    miss outside market hours, so each scan re-downloaded the entire universe and
-    overwrote the cache with raw vendor data (DATA-003).
+    The **end** is satisfied by evidence rather than by a time window, in one of
+    two ways:
 
-    Reusing DATA-001's constant is deliberate: it is already the app's definition
-    of "how far the newest candle may trail today before that is suspicious", and
-    a frame inside it still raises ``STALE_LATEST_CANDLE`` as a warning, so nothing
-    is hidden by treating it as current enough to serve.
+    - ``_only_unpublished_days_missing`` — nothing absent but weekends and possibly
+      the current session's own unpublished bar; or
+    - ``checked_through`` — the loader's existing ``.checked`` marker, written by
+      the prefetch precisely when it asked Dhan for this tail and got nothing back.
+      That covers market holidays, which are weekdays and so fail the arithmetic
+      above despite there being no bar to fetch.
+
+    Note this rule and DATA-001's ``STALE_LATEST_CANDLE`` warning cover **disjoint**
+    ranges: the warning fires only when the newest bar trails by *more* than
+    ``STALE_LATEST_TOLERANCE_DAYS``, so anything served here is below its threshold
+    and passes silently. An earlier version of this docstring claimed the warning
+    still fired as a backstop — it does not, which is exactly why the end test has
+    to stand on its own evidence rather than on a tolerance window.
     """
     if first_date is None or last_date is None:
         return False
-    tolerated_end = requested_end - timedelta(days=STALE_LATEST_TOLERANCE_DAYS)
-    return first_date <= requested_start and last_date >= tolerated_end
+    if first_date > requested_start:
+        return False
+    if _only_unpublished_days_missing(last_date, requested_end):
+        return True
+    return checked_through is not None and checked_through >= requested_end
 
 
 def _date_bounds(candles: pd.DataFrame) -> tuple[date | None, date | None]:
@@ -411,7 +455,13 @@ class DailyDataLoader:
                 first_date, last_date = _date_bounds(cached)
             requested_start = _coerce_date(start_date)
             requested_end = _coerce_date(end_date)
-            if _cache_covers_range(first_date, last_date, requested_start, requested_end):
+            # The prefetch's marker is the only evidence that distinguishes a
+            # market holiday (a weekday with no bar to fetch) from a weekday whose
+            # bar we simply have not collected yet.
+            checked_through = self._read_checked_through(symbol, security_id)
+            if _cache_covers_range(
+                first_date, last_date, requested_start, requested_end, checked_through
+            ):
                 if cached is None:
                     # The footer is only an advisory index. The file can be
                     # replaced after the metadata read, and a valid footer
@@ -419,7 +469,11 @@ class DailyDataLoader:
                     cached = pd.read_parquet(path)
                 actual_first, actual_last = _date_bounds(cached)
                 if _cache_covers_range(
-                    actual_first, actual_last, requested_start, requested_end
+                    actual_first,
+                    actual_last,
+                    requested_start,
+                    requested_end,
+                    checked_through,
                 ):
                     return self._slice_to_range(cached, start_date, end_date), True
 
