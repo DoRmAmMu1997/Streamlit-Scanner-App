@@ -159,7 +159,8 @@ def _cache_covers_range(
     - ``checked_through`` — the loader's existing ``.checked`` marker, written by
       the prefetch precisely when it asked Dhan for this tail and got nothing back.
       That covers market holidays, which are weekdays and so fail the arithmetic
-      above despite there being no bar to fetch.
+      above despite there being no bar to fetch. It is bounded by
+      ``_MAX_TOLERABLE_GAP_DAYS`` too, so it can only ever rescue a short gap.
 
     Note this rule and DATA-001's ``STALE_LATEST_CANDLE`` warning cover **disjoint**
     ranges: the warning fires only when the newest bar trails by *more* than
@@ -174,6 +175,13 @@ def _cache_covers_range(
         return False
     if _only_unpublished_days_missing(last_date, requested_end):
         return True
+    # The marker exists to rescue market holidays, which are by definition short
+    # gaps, so it is bounded by the same window as the weekday walk above. Without
+    # that bound a vendor outage answering "no data" instead of erroring would have
+    # the prefetch stamp `.checked` daily, certifying an arbitrarily stale cache as
+    # complete while scans reported a clean hit.
+    if (requested_end - last_date).days > _MAX_TOLERABLE_GAP_DAYS:
+        return False
     return checked_through is not None and checked_through >= requested_end
 
 
