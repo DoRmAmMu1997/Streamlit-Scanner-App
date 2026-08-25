@@ -1318,3 +1318,30 @@ def test_a_stale_checked_marker_does_not_vouch_for_a_later_request(tmp_path):
     loader.checked_path("DEMO", "1").write_text("2026-08-22", encoding="utf-8")
 
     assert _is_hit(loader, end_date=date(2026, 8, 25)) is False
+
+
+def test_a_checked_marker_cannot_vouch_for_an_unboundedly_stale_cache(tmp_path):
+    """Self-review finding: the holiday rescue must stay a holiday rescue.
+
+    A vendor outage that answers "no data" rather than erroring makes the prefetch
+    stamp `.checked` every day. Without a staleness bound that marker would certify
+    a month-old cache as complete, and scans would compute signals on stale prices
+    while reporting a clean cache hit.
+    """
+    client = FakeDhanClient()
+    loader = DailyDataLoader(client, cache_dir=tmp_path, request_delay_seconds=0.0)
+    _cache_ending(loader, date(2026, 7, 20))  # a month behind
+    loader.checked_path("DEMO", "1").write_text("2026-08-25", encoding="utf-8")
+
+    assert _is_hit(loader, end_date=date(2026, 8, 25)) is False
+
+
+def test_a_checked_marker_still_rescues_a_short_holiday_gap(tmp_path):
+    """The bound must not break the case the fallback exists for."""
+    client = FakeDhanClient()
+    loader = DailyDataLoader(client, cache_dir=tmp_path, request_delay_seconds=0.0)
+    _cache_ending(loader, date(2026, 8, 21))  # Friday
+    loader.checked_path("DEMO", "1").write_text("2026-08-25", encoding="utf-8")
+
+    assert _is_hit(loader, end_date=date(2026, 8, 25)) is True
+    assert client.calls == 0
