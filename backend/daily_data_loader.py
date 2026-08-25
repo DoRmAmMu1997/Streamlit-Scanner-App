@@ -28,7 +28,6 @@ from backend.config import (
     dhan_request_delay_seconds,
 )
 from backend.data_quality import CandleQualityReport, validate_candles
-from backend.data_quality.candles import STALE_LATEST_TOLERANCE_DAYS
 from backend.dhan_client import DhanDataClient, DhanRateLimitError
 from backend.observability import (
     EVENT_CANDLE_DATA_QUALITY_FAILED,
@@ -112,12 +111,48 @@ def safe_file_stem(value: object) -> str:
     return cleaned
 
 
+# The longest gap the weekday walk below can ever accept is a long weekend, so a
+# wider gap is rejected without walking it. Purely a performance guard: a decade-old
+# cache should not iterate 3,650 days to reach the same "no" a subtraction gives.
+_MAX_TOLERABLE_GAP_DAYS = 7
+
+
+def _only_unpublished_days_missing(last_date: date, requested_end: date) -> bool:
+    """True when nothing the market has actually published is missing from the cache.
+
+    Two kinds of day may be absent without the cache being out of date:
+
+    - **weekends**, when the exchange did not trade at all; and
+    - **``requested_end`` itself**, because the current session's end-of-day bar is
+      routinely not published yet when a scan runs.
+
+    That second carve-out is load-bearing. Without it every weekday scan would be a
+    miss again, which is the whole problem DATA-003 set out to fix.
+
+    Any *other* missing weekday means a bar the market really did publish is absent,
+    so the cache is genuinely behind and must be refreshed. This replaces an earlier
+    blanket "tolerate four calendar days" rule, which silently served a cache ending
+    on Thursday to a Monday scan even though Friday's bar existed.
+    """
+    if last_date >= requested_end:
+        return True
+    if (requested_end - last_date).days > _MAX_TOLERABLE_GAP_DAYS:
+        return False
+    day = last_date + timedelta(days=1)
+    while day < requested_end:
+        if day.weekday() < 5:  # Monday-Friday
+            return False
+        day += timedelta(days=1)
+    return True
+
+
 def _cache_covers_range(
     first_date: date | None,
     last_date: date | None,
     requested_start: date,
     requested_end: date,
     vendor_earliest: date | None = None,
+    checked_through: date | None = None,
 ) -> bool:
     """Return True when a cached range is good enough to answer a request.
 
@@ -125,23 +160,32 @@ def _cache_covers_range(
     after an interrupted prefetch) must never silently run a long-lookback
     screener on too little data.
 
-    The **end** is compared with ``STALE_LATEST_TOLERANCE_DAYS`` of slack, because
-    callers routinely ask for data "through today" while the newest bar the vendor
-    has published is Friday's. Demanding an exact match made every symbol a cache
-    miss outside market hours, so each scan re-downloaded the entire universe and
-    overwrote the cache with raw vendor data (DATA-003).
+    The **end** is satisfied by evidence rather than by a time window, in one of
+    two ways:
 
-    Reusing DATA-001's constant is deliberate: it is already the app's definition
-    of "how far the newest candle may trail today before that is suspicious", and
-    a frame inside it still raises ``STALE_LATEST_CANDLE`` as a warning, so nothing
-    is hidden by treating it as current enough to serve.
+    - ``_only_unpublished_days_missing`` — nothing absent but weekends and possibly
+      the current session's own unpublished bar; or
+    - ``checked_through`` — the loader's existing ``.checked`` marker, written by
+      the prefetch precisely when it asked Dhan for this tail and got nothing back.
+      That covers market holidays, which are weekdays and so fail the arithmetic
+      above despite there being no bar to fetch.
+
+    Note this rule and DATA-001's ``STALE_LATEST_CANDLE`` warning cover **disjoint**
+    ranges: the warning fires only when the newest bar trails by *more* than
+    ``STALE_LATEST_TOLERANCE_DAYS``, so anything served here is below its threshold
+    and passes silently. An earlier version of this docstring claimed the warning
+    still fired as a backstop — it does not, which is exactly why the end test has
+    to stand on its own evidence rather than on a tolerance window.
     """
     if first_date is None or last_date is None:
         return False
-    tolerated_end = requested_end - timedelta(days=STALE_LATEST_TOLERANCE_DAYS)
-    if last_date < tolerated_end:
+    # Front and back are judged by separate evidence: how far the vendor's history
+    # goes (DATA-004) and which recent days it has actually published (DATA-003).
+    if not _cache_reaches_back_far_enough(first_date, requested_start, vendor_earliest):
         return False
-    return _cache_reaches_back_far_enough(first_date, requested_start, vendor_earliest)
+    if _only_unpublished_days_missing(last_date, requested_end):
+        return True
+    return checked_through is not None and checked_through >= requested_end
 
 
 def _cache_reaches_back_far_enough(
@@ -284,6 +328,7 @@ class DailyDataLoader:
         max_consecutive_failures: int | None = None,
         sleep_func: Callable[[float], None] = time.sleep,
         fetch_workers: int | None = None,
+        today_func: Callable[[], date] = date.today,
     ):
         # The Dhan client is optional so cache-only callers (the legacy-file
         # cleanup step, the chart UI's `read_cached_history`) can build a loader
@@ -309,6 +354,12 @@ class DailyDataLoader:
         )
         self.max_consecutive_failures = max(0, int(max_consecutive_failures or 0))
         self.sleep_func = sleep_func
+        # Wall clock, injected like sleep_func so tests can pin it. Deliberately
+        # separate from the ``today`` argument callers pass to describe a DATA
+        # window: "the date I am asking about" and "the date it is now" are
+        # different questions, and conflating them let a marker's 30-day expiry be
+        # judged against a historical request boundary, so it never expired.
+        self.today_func = today_func
         # PERF-001: 1 (the default) keeps the long-standing sequential path
         # byte-identical. Values above 1 fetch with a thread pool while the
         # shared pacer holds the global inter-request delay.
@@ -380,7 +431,7 @@ class DailyDataLoader:
         return self.cache_path(symbol, security_id).with_suffix(".firstbar")
 
     def _vendor_earliest_for(
-        self, symbol: str, security_id: str | int, requested_start: date, today: date
+        self, symbol: str, security_id: str | int, requested_start: date
     ) -> date | None:
         """The vendor's earliest bar, when we have evidence that answers this request.
 
@@ -388,8 +439,11 @@ class DailyDataLoader:
         all three hold:
 
         - a marker exists and parses;
-        - it was recorded within ``VENDOR_EARLIEST_RECHECK_DAYS`` (vendors do
-          backfill occasionally, so the belief expires);
+        - it was recorded within ``VENDOR_EARLIEST_RECHECK_DAYS`` of **now**
+          (vendors do backfill occasionally, so the belief expires). Age is
+          measured against the injected wall clock, never against the requested
+          window: judging it by a request boundary meant a repeated historical
+          request always computed an age of zero and the marker never expired.
         - the recorded probe reached **at least as far back** as this request.
           Learning that nothing exists before 2021 when you only asked from 2021
           says nothing about 2016, so a shallower probe must not suppress a
@@ -408,7 +462,7 @@ class DailyDataLoader:
             recorded_on = _coerce_date(str(payload["recorded_on"]))
         except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
             return None
-        if (today - recorded_on).days >= VENDOR_EARLIEST_RECHECK_DAYS:
+        if (self.today_func() - recorded_on).days >= VENDOR_EARLIEST_RECHECK_DAYS:
             return None
         if requested_from > requested_start:
             return None
@@ -446,13 +500,16 @@ class DailyDataLoader:
         *,
         requested_from: date | datetime | str,
         candles: pd.DataFrame,
-        today: date,
     ) -> None:
         """Record the vendor's earliest bar when it fell short of what we asked for.
 
         Called after any full-window download. A response that *does* reach the
         requested start teaches us nothing worth storing, and an empty response is
         no evidence at all, so both are skipped.
+
+        ``recorded_on`` is stamped from the injected wall clock rather than from the
+        caller's requested window, so the marker ages in real time whatever range
+        was asked for.
         """
         if candles.empty:
             return
@@ -467,7 +524,7 @@ class DailyDataLoader:
             security_id,
             requested_from=start,
             earliest_available=first_date,
-            recorded_on=today,
+            recorded_on=self.today_func(),
         )
 
     def read_cached_history(self, symbol: str, security_id: str | int) -> pd.DataFrame:
@@ -549,10 +606,19 @@ class DailyDataLoader:
             requested_start = _coerce_date(start_date)
             requested_end = _coerce_date(end_date)
             vendor_earliest = self._vendor_earliest_for(
-                symbol, security_id, requested_start, requested_end
+                symbol, security_id, requested_start
             )
+            # The prefetch's marker is the only evidence that distinguishes a
+            # market holiday (a weekday with no bar to fetch) from a weekday whose
+            # bar we simply have not collected yet.
+            checked_through = self._read_checked_through(symbol, security_id)
             if _cache_covers_range(
-                first_date, last_date, requested_start, requested_end, vendor_earliest
+                first_date,
+                last_date,
+                requested_start,
+                requested_end,
+                vendor_earliest,
+                checked_through,
             ):
                 if cached is None:
                     # The footer is only an advisory index. The file can be
@@ -566,6 +632,7 @@ class DailyDataLoader:
                     requested_start,
                     requested_end,
                     vendor_earliest,
+                    checked_through,
                 ):
                     return self._slice_to_range(cached, start_date, end_date), True
 
@@ -582,11 +649,7 @@ class DailyDataLoader:
             path.parent.mkdir(parents=True, exist_ok=True)
             candles.to_parquet(path, index=False)
         self._record_vendor_earliest(
-            symbol,
-            security_id,
-            requested_from=start_date,
-            candles=candles,
-            today=_coerce_date(end_date),
+            symbol, security_id, requested_from=start_date, candles=candles
         )
         return self._slice_to_range(candles, start_date, end_date), False
 
@@ -670,7 +733,7 @@ class DailyDataLoader:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 candles.to_parquet(path, index=False)
             self._record_vendor_earliest(
-                symbol, security_id, requested_from=start, candles=candles, today=today
+                symbol, security_id, requested_from=start, candles=candles
             )
             return candles, "fresh_download"
 
@@ -688,7 +751,7 @@ class DailyDataLoader:
             if not candles.empty:
                 candles.to_parquet(path, index=False)
             self._record_vendor_earliest(
-                symbol, security_id, requested_from=start, candles=candles, today=today
+                symbol, security_id, requested_from=start, candles=candles
             )
             return candles, "fresh_download"
 
@@ -707,7 +770,7 @@ class DailyDataLoader:
             if not candles.empty:
                 candles.to_parquet(path, index=False)
             self._record_vendor_earliest(
-                symbol, security_id, requested_from=start, candles=candles, today=today
+                symbol, security_id, requested_from=start, candles=candles
             )
             return candles, "fresh_download"
 
@@ -716,7 +779,7 @@ class DailyDataLoader:
         # window opened (the vendor has nothing earlier, so refetching is waste
         # forever). ``_vendor_earliest_for`` is what tells the two apart; without
         # evidence it returns None and the original always-refetch rule applies.
-        vendor_earliest = self._vendor_earliest_for(symbol, security_id, start, today)
+        vendor_earliest = self._vendor_earliest_for(symbol, security_id, start)
         if not _cache_reaches_back_far_enough(first_date, start, vendor_earliest):
             # The cache may be current at the back but missing years at the
             # front, usually after an old interrupted prefetch. Refetch the
@@ -729,7 +792,7 @@ class DailyDataLoader:
                 to_date=today,
             )
             self._record_vendor_earliest(
-                symbol, security_id, requested_from=start, candles=candles, today=today
+                symbol, security_id, requested_from=start, candles=candles
             )
             if not candles.empty:
                 candles.to_parquet(path, index=False)

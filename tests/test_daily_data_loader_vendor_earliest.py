@@ -87,10 +87,21 @@ class ListedLateClient:
         )
 
 
-def _loader(tmp_path: Path, client: object) -> DailyDataLoader:
+def _loader(
+    tmp_path: Path, client: object, *, now: date = TODAY
+) -> DailyDataLoader:
+    """Build a loader with a pinned wall clock.
+
+    ``now`` is the injected clock, which is what the marker's expiry is measured
+    against. It is deliberately separate from the ``today`` argument these tests
+    pass to ``ensure_daily_history``: that one describes the *data* window.
+    """
     # The loader only calls fetch_daily_candles, so the duck-typed fake stands in.
     return DailyDataLoader(
-        cast(DhanDataClient, client), cache_dir=tmp_path, request_delay_seconds=0.0
+        cast(DhanDataClient, client),
+        cache_dir=tmp_path,
+        request_delay_seconds=0.0,
+        today_func=lambda: now,
     )
 
 
@@ -309,3 +320,62 @@ def test_the_marker_suffix_is_distinct_from_the_other_sidecars(tmp_path: Path):
     assert path.suffix == ".firstbar"
     assert path.with_suffix(".checked") != path
     assert path.with_suffix(".repaired") != path
+
+
+# ---------------------------------------------------------------------------
+# The marker ages in real time, not against the requested window
+# ---------------------------------------------------------------------------
+
+
+def test_a_marker_from_a_historical_request_still_expires(tmp_path: Path):
+    """Codex review, PR #114.
+
+    ``get_daily_history`` used to stamp ``recorded_on`` with the request's own
+    ``end_date``. Repeating a historical request then computed an age of zero every
+    time, so the 30-day expiry never fired and a vendor backfill could stay hidden
+    behind a partial cache indefinitely.
+    """
+    historical_end = date(2020, 6, 30)
+    client = ListedLateClient(listed_on=LISTED_ON, through=historical_end)
+    # The clock is far ahead of the window being requested.
+    loader = _loader(tmp_path, client, now=TODAY)
+
+    loader.get_daily_history(ROW, start_date=HISTORY_START, end_date=historical_end)
+
+    payload = json.loads(_marker(loader).read_text(encoding="utf-8"))
+    # Stamped from the clock, not from the 2020 request boundary.
+    assert date.fromisoformat(payload["recorded_on"]) == TODAY
+    # And it is therefore already long expired relative to when it was "recorded".
+    stale_loader = _loader(tmp_path, client, now=TODAY + timedelta(days=31))
+    assert stale_loader._vendor_earliest_for(
+        ROW["symbol"], ROW["security_id"], HISTORY_START
+    ) is None
+
+
+def test_a_future_dated_request_does_not_extend_a_markers_life(tmp_path: Path):
+    """A request reaching into the future must not keep a stale belief alive."""
+    client = ListedLateClient()
+    loader = _loader(tmp_path, client, now=TODAY)
+    loader._write_vendor_earliest(
+        ROW["symbol"], ROW["security_id"], requested_from=HISTORY_START,
+        earliest_available=LISTED_ON, recorded_on=TODAY - timedelta(days=45),
+    )
+
+    # Asking about a window that ends next year must not make a 45-day-old
+    # marker look fresh.
+    assert loader._vendor_earliest_for(
+        ROW["symbol"], ROW["security_id"], HISTORY_START
+    ) is None
+
+
+def test_a_recent_marker_is_honoured_against_the_clock(tmp_path: Path):
+    """The positive case, so the expiry test above cannot pass vacuously."""
+    loader = _loader(tmp_path, ListedLateClient(), now=TODAY)
+    loader._write_vendor_earliest(
+        ROW["symbol"], ROW["security_id"], requested_from=HISTORY_START,
+        earliest_available=LISTED_ON, recorded_on=TODAY - timedelta(days=5),
+    )
+
+    assert loader._vendor_earliest_for(
+        ROW["symbol"], ROW["security_id"], HISTORY_START
+    ) == LISTED_ON
