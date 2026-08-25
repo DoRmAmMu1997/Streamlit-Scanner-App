@@ -294,7 +294,7 @@ message (upstream text is untrusted). The class is the diagnosis:
 | `error_type` | What happened | What to do |
 |---|---|---|
 | `SerpApiQuotaError` | The plan has no searches left. | Nothing until the quota resets. The run stops enriching and prints `enrichment=quota_exhausted`. Reduce run size or raise the plan. |
-| `SerpApiRateLimitError` | Throttled (HTTP 429, no quota message). | Transient; re-run later, and consider fewer issues per run. |
+| `SerpApiRateLimitError` | Throttled (HTTP 429, no quota message). | Transient; re-run later, and consider fewer issues per run. A run of consecutive throttles stops the stage and prints `enrichment=rate_limited`. |
 | `SerpApiAuthError` | Key rejected (HTTP 401/403). | Fix `SERPAPI_API_KEY`; every call fails until then. |
 | `SerpApiSearchError` | Transport failure, timeout, 5xx, oversize or non-JSON body. | Usually transient; check the `status_code` field. |
 
@@ -319,7 +319,12 @@ listing date, and `open_date`/`close_date` are never populated by ingestion.
 
 Naming issues explicitly overrides the filter — `--issue-id N` still reaches a
 finished issue, so it can be deliberately re-downloaded, re-extracted, or
-re-scored after a rule change.
+re-scored after a rule change. `--include-finished` lifts the filter for a whole
+run, which is the way to retry a failed download or back-apply a scoring change
+across every finished issue without enumerating ids by hand.
+
+Each run reports `skipped_finished=N` in its totals line, so a drop in the
+evaluated count is never silent.
 
 Scoring reads issue, approved profile, ratio receipts, subscription, and
 enrichment as one immutable snapshot. The semantic fingerprint excludes

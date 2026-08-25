@@ -66,7 +66,10 @@ inheriting `SerpApiSearchError`, so existing handlers are unaffected:
 | `SerpApiAuthError` | HTTP 401 / 403 | configuration fault |
 | `SerpApiSearchError` | transport, timeout, 5xx, oversize, non-JSON | catch-all |
 
-Every instance carries `status_code`, which is logged alongside the class. A
+Every instance raised *from a response* carries `status_code`, which is logged
+alongside the class — including one whose body was not JSON, since an error page
+from a CDN or WAF is exactly the case the taxonomy has to survive. A transport
+failure raised before any response exists has no status, and reports `None`. A
 status code is safe metadata; the response body is not, and stays redacted.
 
 Two behaviours follow from the taxonomy:

@@ -43,6 +43,7 @@ from backend.security import BLOCKED_EVIDENCE_TEXT
 from backend.sixty_seven.search_client import (
     SearchResult,
     SerpApiQuotaError,
+    SerpApiRateLimitError,
     SerpApiSearchError,
     SerpApiSetupError,
 )
@@ -646,6 +647,52 @@ def test_an_exhausted_plan_stops_the_batch_instead_of_grinding_on(
     # Stopped at the failure rather than attempting all eight query types.
     assert len(client.queries) == 2
     assert len(client.queries) < len(IpoEnrichmentSignalType)
+
+
+def test_a_run_of_throttles_stops_the_batch_but_a_single_one_does_not(
+    file_session_factory,
+) -> None:
+    """One throttle is worth continuing past; a streak of them is not.
+
+    Beginner note:
+        A rate limit is transient, so treating the first one as fatal would
+        abandon a run that just needed to carry on. But the queries fire
+        back-to-back with no pause, so a *sustained* throttle produces hundreds
+        of immediately-refused requests and an unreadable wall of identical
+        warnings. The streak counter is the middle ground -- and it resets on
+        any success, so intermittent throttling never trips it.
+    """
+    issue = create_issue(_issue_data(), session_factory=file_session_factory)
+
+    class _ThrottlingClient(_FakeClient):
+        """Throttle on a caller-chosen set of query positions."""
+
+        def __init__(self, failing_positions: set[int]) -> None:
+            """Record which 1-based query positions should be refused."""
+            super().__init__({})
+            self.failing_positions = failing_positions
+
+        def search(self, query: str, *, max_results: int = 5) -> list[SearchResult]:
+            """Raise a throttle for the configured positions, else succeed."""
+            self.queries.append(query)
+            if len(self.queries) in self.failing_positions:
+                raise SerpApiRateLimitError("Too Many Requests", status_code=429)
+            return []
+
+    # An unbroken run of throttles from the first query stops the batch.
+    streak = _ThrottlingClient({1, 2, 3, 4, 5, 6, 7, 8})
+    stopped = _collect(issue.id, streak, file_session_factory)
+
+    assert stopped.rate_limited is True
+    assert stopped.quota_exhausted is False
+    assert len(streak.queries) < len(IpoEnrichmentSignalType)
+
+    # A success in between resets the counter, so the batch runs to completion.
+    intermittent = _ThrottlingClient({1, 3, 5})
+    finished = _collect(issue.id, intermittent, file_session_factory)
+
+    assert finished.rate_limited is False
+    assert len(intermittent.queries) == len(IpoEnrichmentSignalType)
 
 
 def test_a_query_with_no_google_results_records_an_empty_observation(

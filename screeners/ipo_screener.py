@@ -202,16 +202,30 @@ class IpoScreener(BaseScanner):
             rows = rows[:max_issues]
         return rows
 
-    def _selected_issue_ids(self, params: dict) -> list[int] | None:
-        """Narrow the run to active issues and the configured cap.
+    def _selected_issue_ids(self, params: dict) -> list[int]:
+        """Name every issue this run should process, explicitly.
 
-        Returning ``None`` means "every issue", which is what the CLI does.
+        Beginner note:
+            This deliberately never returns "no selection". It used to return
+            ``None`` whenever the toggles happened not to narrow anything,
+            meaning "let the pipeline decide" -- and the pipeline's own default
+            is upcoming-only. So an operator who *unticked* ``only_active_issues``
+            to widen the run silently got upcoming-only processing, while the
+            results table still reported every row.
+
+            It was worse than a plain bug because it was order-dependent: with a
+            cap that happened to bite, an explicit list was sent and finished
+            issues inside the cap *were* processed. Whether the toggle worked
+            depended on whether the cap bit.
+
+            Sending the list the table will report makes the button's selection
+            authoritative in every combination, so the processed set and the
+            reported set cannot diverge.
         """
         snapshot = build_dashboard_snapshot()
-        rows = self._apply_selection(list(snapshot.rows), params)
-        if len(rows) == len(snapshot.rows):
-            return None
-        return [row.issue_id for row in rows]
+        return [
+            row.issue_id for row in self._apply_selection(list(snapshot.rows), params)
+        ]
 
     def _result_rows(
         self, params: dict, *, failed_issue_ids: set[int]

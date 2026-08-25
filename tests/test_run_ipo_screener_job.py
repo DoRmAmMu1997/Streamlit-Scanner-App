@@ -14,6 +14,8 @@ from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from backend.ipo.agents.financial_extractor import IpoExtractionErrorReceipt
 from backend.ipo.models import Confidence, IpoDocumentParseStatus, IpoStatus
 from backend.ipo.scoring.recommendation import (
@@ -94,6 +96,31 @@ def _rescore(issue: Any, status: str, evaluation: Any = None, **kwargs: Any) -> 
     )
 
 
+def _enrichment(
+    *,
+    signals: tuple[Any, ...] = (),
+    skipped_no_key: bool = False,
+    error_type: str | None = None,
+    quota_exhausted: bool = False,
+    rate_limited: bool = False,
+) -> Any:
+    """Build one enrichment outcome carrying every field the job reads.
+
+    Beginner note:
+        The job reads these attributes directly rather than via ``getattr``
+        defaults, so a fake that omits one fails loudly. That is deliberate: a
+        silent default would let a future rename disable the quota and throttle
+        short-circuits with no test catching it.
+    """
+    return SimpleNamespace(
+        signals=signals,
+        skipped_no_key=skipped_no_key,
+        error_type=error_type,
+        quota_exhausted=quota_exhausted,
+        rate_limited=rate_limited,
+    )
+
+
 def _quiet_filings(**_kwargs: Any) -> IpoFilingJobOutcome:
     """Stand-in filings run that succeeded with nothing to report."""
     return IpoFilingJobOutcome()
@@ -122,9 +149,7 @@ def test_happy_path_prints_verdict_lines_totals_and_exits_zero() -> None:
         filings_runner=_quiet_filings,
         issue_lister=lambda **_kwargs: issues,
         document_lister=lambda *_args, **_kwargs: [],
-        enricher=lambda issue_id, **_kwargs: SimpleNamespace(
-            skipped_no_key=False, signals=(1, 2), error_type=None
-        ),
+        enricher=lambda issue_id, **_kwargs: _enrichment(signals=(1, 2)),
         rescorer=lambda issue_id, **_kwargs: outcomes[issue_id],
         session_factory=object,
         output=out,
@@ -370,7 +395,7 @@ def test_missing_serpapi_key_is_a_graceful_skip_not_a_failure() -> None:
     def _enricher(issue_id: int, **_kwargs: Any) -> Any:
         """Report the missing key exactly like the real collector."""
         enrich_calls.append(issue_id)
-        return SimpleNamespace(skipped_no_key=True, signals=(), error_type=None)
+        return _enrichment(skipped_no_key=True)
 
     out = io.StringIO()
     result = run_ipo_screener(
@@ -392,6 +417,57 @@ def test_missing_serpapi_key_is_a_graceful_skip_not_a_failure() -> None:
     assert enrich_calls == [1]  # one probe proves the key is absent
     assert result.enrichment_skipped_no_key is True
     assert "enrichment=skipped_no_key" in out.getvalue()
+    assert result.exit_code == 0
+
+
+@pytest.mark.parametrize("field", ["quota_exhausted", "rate_limited"])
+def test_a_refusing_provider_stops_the_stage_and_still_exits_zero(
+    field: str,
+) -> None:
+    """A spent quota or sustained throttle is a state, not a process failure.
+
+    Beginner note:
+        Counting these as failures would drive the exit code nonzero on every
+        scheduled run for the rest of the billing period, alarming a scheduler
+        identically to a real outage — while the same class of "optional
+        feature unavailable" state (a missing key) exits 0. They also stop the
+        stage, because every remaining issue would be refused the same way.
+    """
+    issues = [_issue(1, "Acme Ltd"), _issue(2, "Beta Ltd")]
+    enrich_calls: list[int] = []
+
+    quota = field == "quota_exhausted"
+
+    def _enricher(issue_id: int, **_kwargs: Any) -> Any:
+        """Report the provider refusing further work for the whole run."""
+        enrich_calls.append(issue_id)
+        return _enrichment(
+            error_type="SerpApiError",
+            quota_exhausted=quota,
+            rate_limited=not quota,
+        )
+
+    out = io.StringIO()
+    result = run_ipo_screener(
+        skip_scan=True,
+        skip_download=True,
+        ensure_schema=lambda: True,
+        issue_lister=lambda **_kwargs: issues,
+        document_lister=lambda *_args, **_kwargs: [],
+        enricher=_enricher,
+        rescorer=lambda issue_id, **_kwargs: _rescore(
+            next(issue for issue in issues if issue.id == issue_id),
+            "insufficient_inputs",
+            missing=("manual_extraction",),
+        ),
+        session_factory=object,
+        output=out,
+    )
+
+    assert enrich_calls == [1]  # stopped rather than probing every issue
+    assert getattr(result, f"enrichment_{field}") is True
+    assert f"enrichment={field}" in out.getvalue()
+    assert result.enrichment_failed == 0
     assert result.exit_code == 0
 
 
@@ -447,6 +523,7 @@ def test_finished_issues_are_skipped_by_every_stage() -> None:
     ]
     downloaded: list[int] = []
     enriched: list[int] = []
+    extracted: list[int] = []
     rescored: list[int] = []
 
     def _download(issue_id: int, _document_id: int, **_kwargs: Any) -> Any:
@@ -457,7 +534,12 @@ def test_finished_issues_are_skipped_by_every_stage() -> None:
     def _enrich(issue_id: int, **_kwargs: Any) -> Any:
         """Record which issues reached the enrichment stage."""
         enriched.append(issue_id)
-        return SimpleNamespace(signals=(), skipped_no_key=False, error_type=None)
+        return _enrichment()
+
+    def _extract(issue_id: int, _document_id: int, **_kwargs: Any) -> Any:
+        """Record which issues reached the paid AI extraction stage."""
+        extracted.append(issue_id)
+        return SimpleNamespace(id=1, confidence=Confidence.HIGH)
 
     def _score(issue_id: int, **_kwargs: Any) -> IpoRescoreOutcome:
         """Record which issues reached the scoring stage."""
@@ -467,15 +549,20 @@ def test_finished_issues_are_skipped_by_every_stage() -> None:
         )
 
     out = io.StringIO()
-    run_ipo_screener(
+    result = run_ipo_screener(
         skip_scan=True,
+        # Extraction is included deliberately: it spends Claude plan credit, so
+        # "every stage" has to mean every stage, not just the free ones.
+        extract=True,
         ensure_schema=lambda: True,
         issue_lister=lambda **_kwargs: issues,
         document_lister=lambda *_args, **_kwargs: [
-            _document(5, parse_status=IpoDocumentParseStatus.NOT_DOWNLOADED)
+            _document(5, parse_status=IpoDocumentParseStatus.NOT_DOWNLOADED),
+            _document(6, parse_status=IpoDocumentParseStatus.PENDING),
         ],
         document_downloader=_download,
         enricher=_enrich,
+        extractor=_extract,
         rescorer=_score,
         session_factory=object,
         output=out,
@@ -483,7 +570,51 @@ def test_finished_issues_are_skipped_by_every_stage() -> None:
 
     assert downloaded == [1]
     assert enriched == [1]
+    assert extracted == [1]
     assert rescored == [1]
+    # The run says how much inventory it set aside, rather than silently
+    # reporting totals over fewer issues than the last run with no explanation.
+    assert result.issues_skipped_finished == 2
+    assert "skipped_finished=2" in out.getvalue()
+
+
+def test_include_finished_reaches_the_whole_inventory() -> None:
+    """The escape hatch exists so finished issues are not permanently stranded.
+
+    Beginner note:
+        Without it, a closed issue whose prospectus download failed could only
+        ever be retried by naming its id by hand, and back-applying a scoring
+        change to every finished issue would mean enumerating them all.
+    """
+    issues = [
+        _issue(1, "Upcoming Ltd", status=IpoStatus.RHP_FILED),
+        _issue(2, "Finished Ltd", status=IpoStatus.CLOSED),
+    ]
+    rescored: list[int] = []
+
+    def _score(issue_id: int, **_kwargs: Any) -> IpoRescoreOutcome:
+        """Record every issue the run scored."""
+        rescored.append(issue_id)
+        return _rescore(
+            issues[0], "insufficient_inputs", missing=("manual_extraction",)
+        )
+
+    out = io.StringIO()
+    result = run_ipo_screener(
+        skip_scan=True,
+        skip_download=True,
+        skip_enrich=True,
+        include_finished=True,
+        ensure_schema=lambda: True,
+        issue_lister=lambda **_kwargs: issues,
+        document_lister=lambda *_args, **_kwargs: [],
+        rescorer=_score,
+        session_factory=object,
+        output=out,
+    )
+
+    assert rescored == [1, 2]
+    assert result.issues_skipped_finished == 0
 
 
 def test_an_explicitly_named_finished_issue_is_still_processed() -> None:

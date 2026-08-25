@@ -288,6 +288,76 @@ def test_a_server_error_keeps_the_base_type_and_records_its_status():
     assert type(exc_info.value) is SerpApiSearchError
 
 
+@pytest.mark.parametrize(
+    ("status_code", "expected"),
+    [
+        (429, SerpApiRateLimitError),
+        (401, SerpApiAuthError),
+        (403, SerpApiAuthError),
+    ],
+)
+def test_a_non_json_error_body_is_still_classified_by_status(
+    status_code: int, expected: type
+):
+    """An HTML error page must not collapse back into the bare base class.
+
+    Beginner note:
+        Reading the body before the status is what makes a 429 quota message
+        readable, but it also means a response whose body is *not* JSON raises
+        during decoding -- before the status is ever inspected. Any CDN, proxy
+        or WAF in front of the provider answers a 401/403/429 with an HTML
+        page, so without re-classifying on the way out, the most common error
+        responses would stay exactly as undiagnosable as before this taxonomy
+        existed.
+    """
+    session = _FakeSession(
+        _FakeResponse(
+            None,
+            status_code=status_code,
+            body=b"<html><body>Too Many Requests</body></html>",
+        )
+    )
+
+    with pytest.raises(expected) as exc_info:
+        SerpApiClient(api_key="secret", session=session).search("DEMO")
+
+    assert exc_info.value.status_code == status_code
+
+
+def test_a_non_json_body_on_a_success_stays_the_plain_decode_failure():
+    """A 200 that is not JSON has no status to classify, so it stays generic."""
+    session = _FakeSession(_FakeResponse(None, body=b"<html>nope</html>"))
+
+    with pytest.raises(SerpApiSearchError) as exc_info:
+        SerpApiClient(api_key="secret", session=session).search("DEMO")
+
+    assert type(exc_info.value) is SerpApiSearchError
+    assert "non-JSON" in str(exc_info.value)
+
+
+def test_an_hourly_throttle_message_is_not_read_as_a_spent_plan():
+    """Only unambiguously terminal wording counts as quota exhaustion.
+
+    Beginner note:
+        "You have exceeded your hourly search limit" is a throttle that clears
+        on its own. Classifying it as exhaustion would abort the whole
+        enrichment stage for a run that just needed to come back later -- the
+        opposite of the conservative reading this taxonomy is supposed to take.
+    """
+    session = _FakeSession(
+        _FakeResponse(
+            {"error": "You have exceeded your hourly search limit."},
+            status_code=429,
+        )
+    )
+
+    with pytest.raises(SerpApiSearchError) as exc_info:
+        SerpApiClient(api_key="secret", session=session).search("DEMO")
+
+    assert not isinstance(exc_info.value, SerpApiQuotaError)
+    assert isinstance(exc_info.value, SerpApiRateLimitError)
+
+
 def test_serpapi_client_rejects_advertised_oversized_response_before_reading():
     """An oversized credible header is rejected before streaming or decoding."""
     response = _FakeResponse(

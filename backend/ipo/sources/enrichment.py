@@ -62,6 +62,7 @@ from backend.sixty_seven.search_client import (
     SearchResult,
     SerpApiClient,
     SerpApiQuotaError,
+    SerpApiRateLimitError,
     SerpApiSearchError,
     SerpApiSetupError,
 )
@@ -147,6 +148,11 @@ _NEGATION_PATTERN: Final = re.compile(
 
 _TWO_PLACES = Decimal("0.01")
 
+# How many back-to-back provider throttles end the batch. One throttle is
+# worth continuing past; a streak means the burst pattern itself is the
+# problem, and the queries fire with no pause between them.
+_RATE_LIMIT_STREAK_LIMIT: Final = 3
+
 
 def _normalize_enrichment_text(value: str) -> str:
     """Normalize web text without erasing newline clause boundaries.
@@ -212,6 +218,10 @@ class IpoEnrichmentOutcome:
     # either, so orchestration stops rather than issuing hundreds of calls
     # that are all going to be refused.
     quota_exhausted: bool = False
+    # Set when a run of consecutive throttles proves the provider is
+    # refusing this account's burst; the caller stops rather than emitting
+    # hundreds of identical refusals.
+    rate_limited: bool = False
 
 
 def _semantic_item_hash(entry: dict[str, Any]) -> str:
@@ -634,6 +644,8 @@ def collect_enrichment_signals(
     signals: list[IpoEnrichmentSignalData] = []
     error_types: list[str] = []
     quota_exhausted = False
+    rate_limited = False
+    consecutive_rate_limits = 0
     for signal_type in IpoEnrichmentSignalType:
         query = _QUERY_TEMPLATES[signal_type].format(
             company=persisted_company_name
@@ -652,14 +664,25 @@ def collect_enrichment_signals(
                 issue_id=issue_id,
                 signal_type=signal_type.value,
                 error_type=type(exc).__name__,
-                status_code=getattr(exc, "status_code", None),
+                status_code=exc.status_code,
             )
             if isinstance(exc, SerpApiQuotaError):
                 # Every remaining query would be refused the same way, so stop
                 # here and let the caller stop too.
                 quota_exhausted = True
                 break
+            if isinstance(exc, SerpApiRateLimitError):
+                consecutive_rate_limits += 1
+                if consecutive_rate_limits >= _RATE_LIMIT_STREAK_LIMIT:
+                    # A throttle is transient, so one is worth continuing past.
+                    # A run of them is not: the queries fire back-to-back with
+                    # no pause, so the pattern persists and the batch would
+                    # otherwise emit hundreds of identical refusals. Stopping
+                    # is not pacing -- nothing here sleeps.
+                    rate_limited = True
+                    break
             continue
+        consecutive_rate_limits = 0
         entries, usability = _normalize_entries(results)
         clean_entries = tuple(
             entry
@@ -721,4 +744,5 @@ def collect_enrichment_signals(
             or bool(error_types)
         ),
         quota_exhausted=quota_exhausted,
+        rate_limited=rate_limited,
     )

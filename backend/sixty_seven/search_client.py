@@ -94,11 +94,17 @@ _NO_RESULTS_MARKERS: Final = (
     "has not returned any results",
 )
 # Quota exhaustion wording, checked against the provider's error text.
+#
+# Every marker here must be unambiguously TERMINAL. A bare "search limit" was
+# tried and removed: "you have exceeded your hourly search limit" is a throttle
+# that clears on its own, and matching it classified a recoverable pause as a
+# spent plan and aborted the whole enrichment stage. Ambiguous wording falls
+# through to the status-based classifier, which reads it as transient.
 _QUOTA_MARKERS: Final = (
     "run out of searches",
     "exceeded your searches",
     "account has no searches",
-    "search limit",
+    "monthly search limit",
 )
 
 
@@ -242,7 +248,19 @@ class SerpApiClient:
             # so raising on the status first threw that explanation away and
             # left quota exhaustion indistinguishable from any other 4xx. The
             # read is already bounded to 1 MiB, so this costs nothing.
-            payload = _bounded_json(response)
+            try:
+                payload = _bounded_json(response)
+            except SerpApiSearchError as exc:
+                # An error response does not have to be JSON. Any CDN, proxy or
+                # WAF in front of SerpAPI answers a 401/403/429/5xx with an HTML
+                # page, and decoding that raises here -- before the status is
+                # ever inspected. Re-raising through the classifier keeps the
+                # taxonomy working for exactly the responses that made it
+                # necessary, instead of collapsing them back into the bare base
+                # class with no status.
+                raise _classify_status(
+                    str(exc), getattr(response, "status_code", None)
+                ) from exc
             provider_error = (
                 str(payload["error"])
                 if isinstance(payload, dict) and payload.get("error")
