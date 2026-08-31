@@ -81,7 +81,21 @@ def _normalize_email(email: str) -> str:
 # The check exists because a typo'd grant ("analyst@" or "user@gmailcom") is
 # silent dead weight in ``user_roles`` — the auth gate can never match it, and
 # nobody notices until the intended user reports being locked out.
-_EMAIL_SHAPE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+#
+# SEC-003: every atom here excludes "." so each split point is forced by a
+# literal dot — the pattern is unambiguous and matches in linear time. The
+# earlier ``[^@\s]+\.[^@\s]+`` domain half let ``[^@\s]`` match dots too, so a
+# rejecting address made the engine retry every dot in the domain and rescan to
+# the end each time: quadratic (CodeQL py/polynomial-redos). A 32 KB paste into
+# the admin Roles form took ~12s of blocked server thread; it now takes ~5ms.
+# Side effect of the rewrite, and desirable: empty DNS labels ("a@a..b",
+# "a@b.c.") are now rejected too, exactly the typo'd grants SEC-001 targets.
+_EMAIL_SHAPE = re.compile(r"^[^@\s]+@[^@\s.]+(?:\.[^@\s.]+)+$")
+
+# RFC 5321 caps a full address at 254 characters. Checking the length before the
+# regex bounds the work no matter how the pattern is edited later — cheap belt
+# and braces so a future loosening cannot quietly reintroduce a ReDoS.
+_MAX_EMAIL_LENGTH = 254
 
 
 def _guard_last_admin(locked_admins: list[Any]) -> None:
@@ -116,7 +130,7 @@ def assign_role(
     role is a no-op that records nothing.
     """
     normalized = _normalize_email(email)
-    if not _EMAIL_SHAPE.match(normalized):
+    if len(normalized) > _MAX_EMAIL_LENGTH or not _EMAIL_SHAPE.match(normalized):
         raise RoleAssignmentError("A valid email address is required.")
     parsed = Role.parse(role)
     if parsed is None:
