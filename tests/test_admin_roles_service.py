@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from backend.admin import roles_service
@@ -80,6 +82,19 @@ def test_assign_same_role_is_noop_without_audit(file_session_factory, monkeypatc
         "spa ce@example.com",
         "user@nodot",
         "two@@example.com",
+        # SEC-003: empty DNS labels. The pre-SEC-003 pattern accepted these
+        # because its `[^@\s]` domain atoms matched dots as well; an address
+        # with an empty label is exactly the kind of typo'd grant SEC-001 wants
+        # kept out of user_roles.
+        "a@a..b",
+        "a@.b.c",
+        "a@b.c.",
+        # SEC-003: the ReDoS witness shape. Note this one is rejected by the
+        # length cap, not the pattern — the cap is the first line of defence.
+        # The pattern's own linear-time property is pinned separately below.
+        "a@" + "a." * 200 + "@",
+        # SEC-003: longer than the 254-code-point application cap.
+        "a" * 250 + "@example.com",
     ],
 )
 def test_assign_rejects_invalid_email(file_session_factory, bad_email):
@@ -88,6 +103,105 @@ def test_assign_rejects_invalid_email(file_session_factory, bad_email):
             email=bad_email, role="viewer", assigned_by="boss@example.com",
             session_factory=file_session_factory,
         )
+
+
+def test_assign_accepts_email_at_application_length_limit(
+    file_session_factory, monkeypatch
+):
+    """SEC-003: a structurally valid 254-character address remains assignable.
+
+    Beginner note: the length guard is inclusive. This fixture uses a 64-character
+    local part and domain labels no longer than 63 characters, so a rejection here
+    would reveal an off-by-one error in the application-level work bound rather than
+    a different shape-validation failure.
+    """
+    monkeypatch.setenv("ADMIN_EMAILS", "boss@example.com")
+    email = "a" * 64 + "@" + "b" * 63 + "." + "c" * 63 + "." + "d" * 61
+    assert len(email) == 254
+
+    result = assign_role(
+        email=email,
+        role="viewer",
+        assigned_by="boss@example.com",
+        session_factory=file_session_factory,
+    )
+
+    assert result.changed is True
+    assert result.email == email
+
+
+def test_assign_rejects_email_above_application_length_limit(file_session_factory):
+    """SEC-003: the first structurally valid address above the cap is rejected.
+
+    Beginner note: this is the 255-character counterpart to the accepted boundary
+    case above. Keeping every individual label valid isolates the total-length rule,
+    so the pair pins ``254 accepted / 255 rejected`` without depending on a malformed
+    email shape.
+    """
+    email = "a" * 64 + "@" + "b" * 63 + "." + "c" * 63 + "." + "d" * 62
+    assert len(email) == 255
+
+    with pytest.raises(RoleAssignmentError):
+        assign_role(
+            email=email,
+            role="viewer",
+            assigned_by="boss@example.com",
+            session_factory=file_session_factory,
+        )
+
+
+def test_email_shape_pattern_stays_linear_on_pathological_input():
+    r"""SEC-003: the pattern itself must reject a ReDoS shape in milliseconds.
+
+    Beginner note: the old `^[^@\s]+@[^@\s]+\.[^@\s]+$` was *ambiguous* — its
+    domain half could split at any dot, so a rejecting address forced the regex
+    engine to retry every dot and rescan to the end each time (quadratic work).
+    This input took ~18 seconds on that pattern and ~8ms on the current one.
+
+    This asserts on ``_EMAIL_SHAPE`` **directly**, and deliberately not through
+    ``assign_role``: the 254-code-point application cap rejects any input long enough
+    to be pathological before the regex is reached, so a test routed through
+    ``assign_role`` would pass even with the ambiguous pattern restored and
+    would guard nothing. The cap is the first line of defence; this test is the
+    second, so raising or removing the cap later cannot silently re-expose the
+    quadratic blow-up. The generous one-second bound cannot flake on a loaded CI
+    runner while still failing loudly if the ambiguity ever returns.
+    """
+    pathological = "a@" + "a." * 20000 + "@"
+
+    started = time.perf_counter()
+    assert roles_service._EMAIL_SHAPE.match(pathological) is None
+    assert time.perf_counter() - started < 1.0
+
+
+def test_assign_rejects_over_length_email_before_running_the_pattern(
+    file_session_factory, monkeypatch
+):
+    """SEC-003: the length cap short-circuits, so the regex never sees huge input.
+
+    Pins the ordering that makes the cap meaningful as a ReDoS bound: if the
+    guard were ever reordered to match first, this fails.
+    """
+    calls: list[str] = []
+    original_pattern = roles_service._EMAIL_SHAPE
+
+    class _RecordingPattern:
+        def match(self, value: str):
+            calls.append(value)
+            # Beginner note: capture the real pattern before monkeypatching the
+            # module. Looking it up through ``roles_service`` here would find this
+            # recording double again and recurse instead of exercising the matcher.
+            return original_pattern.match(value)
+
+    monkeypatch.setattr(roles_service, "_EMAIL_SHAPE", _RecordingPattern())
+
+    with pytest.raises(RoleAssignmentError):
+        assign_role(
+            email="a@" + "a." * 20000 + "@", role="viewer",
+            assigned_by="boss@example.com", session_factory=file_session_factory,
+        )
+
+    assert calls == []
 
 
 def test_assign_accepts_and_normalizes_realistic_email(file_session_factory, monkeypatch):

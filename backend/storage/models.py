@@ -700,8 +700,10 @@ class UserRole(Base):
     )
 
     # The normalized, lower-cased identity email — the exact form the auth gate
-    # compares against ALLOWED_EMAILS/ADMIN_EMAILS. 320 is the maximum email
-    # length, matching ``audit_logs.user_email``.
+    # compares against ALLOWED_EMAILS/ADMIN_EMAILS. The column keeps its existing
+    # 320-character storage capacity to match ``audit_logs.user_email`` and older
+    # rows; ``assign_role`` applies the stricter 254-code-point input-work bound
+    # before new assignments reach persistence.
     email: Mapped[str] = mapped_column(
         String(320), primary_key=True, comment="Normalized lowercase user email"
     )
