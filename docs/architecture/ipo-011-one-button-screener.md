@@ -108,8 +108,25 @@ exists to prevent.
 Auto-approval is scoped to the same selection the pipeline processed. Approval
 writes evidence and mutates the issue row, so an unscoped pass would convert
 proposals belonging to issues the run never touched and will not rescore,
-leaving them approved but stale. When the run covers every issue the scope is
-`None`, which means the same thing for both.
+leaving them approved but stale. The Streamlit adapter always passes one
+explicit ID list — including an empty or all-issues selection — so processing,
+approval, follow-up scoring, and reported rows cannot assign different meanings
+to `None` or a falsy empty list.
+
+**Superseded by IPO-012:** `ACTIVE_ISSUE_STATUSES` became
+`UPCOMING_ISSUE_STATUSES` and no longer includes `CLOSED`, and the filter is
+applied once at issue selection rather than only inside the enrichment loop — so
+downloads, enrichment, extraction and scoring now skip finished offers together.
+An explicitly named `issue_ids` bypasses the filter. See
+[ipo-009-serpapi-enrichment](ipo-009-serpapi-enrichment.md) for why it mattered:
+enrichment costs 8 searches per issue against a hard monthly cap.
+
+The durable parameter key remains `only_active_issues` for historical scan
+receipts, but its sidebar label is **Only upcoming IPOs** with help explaining
+that closed/listed offers are excluded. The selection change bumps
+`IpoScreener.SCREENER_VERSION` to `1.1.0`. The shared job also caps paid
+enrichment at 25 issues per run by default; free stages still process every ID
+the UI selected.
 
 ## Naming
 

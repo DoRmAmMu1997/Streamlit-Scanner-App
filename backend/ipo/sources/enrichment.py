@@ -1,10 +1,11 @@
 """IPO-009: low-confidence SerpAPI web enrichment for sentiment and red flags.
 
-This adapter runs fixed discovery queries (GMP, news, promoter reputation,
-litigation, anchor commentary, brokerage reviews, peer discovery) through the
-shared SerpAPI client and persists what it finds as ``ipo_enrichment_signals``
-rows. It lives under ``backend/ipo/sources`` because that package is the only
-reviewed network zone in the IPO domain.
+This adapter runs eight fixed discovery queries (GMP, news, promoter
+reputation, litigation, anchor commentary, brokerage reviews, peer discovery,
+and subscription demand) through the shared SerpAPI client and persists what
+it finds as ``ipo_enrichment_signals`` rows. It lives under
+``backend/ipo/sources`` because that package is the only reviewed network zone
+in the IPO domain.
 
 Beginner note — the trust rules, stated once:
 Web search results can never override official documents, can never supply a
@@ -60,7 +61,10 @@ from backend.security import (
 )
 from backend.sixty_seven.search_client import (
     SearchResult,
+    SerpApiAuthError,
     SerpApiClient,
+    SerpApiQuotaError,
+    SerpApiRateLimitError,
     SerpApiSearchError,
     SerpApiSetupError,
 )
@@ -146,6 +150,11 @@ _NEGATION_PATTERN: Final = re.compile(
 
 _TWO_PLACES = Decimal("0.01")
 
+# How many back-to-back provider throttles end the batch. One throttle is
+# worth continuing past; a streak means the burst pattern itself is the
+# problem, and the queries fire with no pause between them.
+_RATE_LIMIT_STREAK_LIMIT: Final = 3
+
 
 def _normalize_enrichment_text(value: str) -> str:
     """Normalize web text without erasing newline clause boundaries.
@@ -206,6 +215,19 @@ class IpoEnrichmentOutcome:
         IpoEnrichmentBatchUsability.USABLE
     )
     human_review_required: bool = False
+    # Set when the provider reported the plan is spent. Unlike an ordinary
+    # failure this is not per-issue: nothing else in the run can succeed
+    # either, so orchestration stops rather than issuing hundreds of calls
+    # that are all going to be refused.
+    quota_exhausted: bool = False
+    # Set when a run of consecutive throttles proves the provider is
+    # refusing this account's burst; the caller stops rather than emitting
+    # hundreds of identical refusals.
+    rate_limited: bool = False
+    # A supplied key was rejected. This is distinct from ``skipped_no_key``:
+    # the latter is an intentional optional configuration, while this state
+    # requires an operator to repair the credential.
+    auth_failed: bool = False
 
 
 def _semantic_item_hash(entry: dict[str, Any]) -> str:
@@ -627,6 +649,10 @@ def collect_enrichment_signals(
     when = captured_at if captured_at is not None else dt.datetime.now(dt.UTC)
     signals: list[IpoEnrichmentSignalData] = []
     error_types: list[str] = []
+    quota_exhausted = False
+    rate_limited = False
+    auth_failed = False
+    consecutive_rate_limits = 0
     for signal_type in IpoEnrichmentSignalType:
         query = _QUERY_TEMPLATES[signal_type].format(
             company=persisted_company_name
@@ -635,6 +661,9 @@ def collect_enrichment_signals(
             results = active_client.search(query, max_results=max_results)
         except SerpApiSearchError as exc:
             error_types.append(type(exc).__name__)
+            # The class name and the status are the whole diagnosis. The
+            # exception *message* is deliberately not logged: it can echo
+            # provider text, which is untrusted upstream input.
             log_event(
                 logger,
                 EVENT_IPO_ENRICHMENT_FAILED,
@@ -642,8 +671,32 @@ def collect_enrichment_signals(
                 issue_id=issue_id,
                 signal_type=signal_type.value,
                 error_type=type(exc).__name__,
+                status_code=exc.status_code,
             )
+            if isinstance(exc, SerpApiAuthError):
+                # A rejected credential cannot recover on the next signal type.
+                # Stop after one call so the job can report the configuration
+                # fault once instead of multiplying it across eight queries and
+                # every remaining issue.
+                auth_failed = True
+                break
+            if isinstance(exc, SerpApiQuotaError):
+                # Every remaining query would be refused the same way, so stop
+                # here and let the caller stop too.
+                quota_exhausted = True
+                break
+            if isinstance(exc, SerpApiRateLimitError):
+                consecutive_rate_limits += 1
+                if consecutive_rate_limits >= _RATE_LIMIT_STREAK_LIMIT:
+                    # A throttle is transient, so one is worth continuing past.
+                    # A run of them is not: the queries fire back-to-back with
+                    # no pause, so the pattern persists and the batch would
+                    # otherwise emit hundreds of identical refusals. Stopping
+                    # is not pacing -- nothing here sleeps.
+                    rate_limited = True
+                    break
             continue
+        consecutive_rate_limits = 0
         entries, usability = _normalize_entries(results)
         clean_entries = tuple(
             entry
@@ -704,4 +757,7 @@ def collect_enrichment_signals(
             overall_usability is not IpoEnrichmentBatchUsability.USABLE
             or bool(error_types)
         ),
+        quota_exhausted=quota_exhausted,
+        rate_limited=rate_limited,
+        auth_failed=auth_failed,
     )

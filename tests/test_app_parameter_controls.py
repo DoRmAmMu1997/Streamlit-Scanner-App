@@ -40,7 +40,7 @@ class _FakeStreamlit:
         self.session_state: dict = {}
         self.expanders: list[str] = []
         self.captions: list[str] = []
-        self.checkboxes: list[tuple[str, str]] = []
+        self.checkboxes: list[tuple[str, str, str | None]] = []
         self.number_inputs: list[dict] = []
         # Programmed return for the reset button (True = user clicked).
         self.button_clicked = False
@@ -55,8 +55,8 @@ class _FakeStreamlit:
     def button(self, _label, **_kwargs):
         return self.button_clicked
 
-    def checkbox(self, label, *, key):
-        self.checkboxes.append((str(label), key))
+    def checkbox(self, label, *, key, help=None):
+        self.checkboxes.append((str(label), key, help))
 
     def number_input(self, label, *, key, **kwargs):
         self.number_inputs.append({"label": str(label), "key": key, **kwargs})
@@ -66,7 +66,13 @@ class _FakeStreamlit:
         raise _RerunCalled()
 
 
-def _definition(default_params: dict) -> ScreenerDefinition:
+def _definition(
+    default_params: dict,
+    *,
+    parameter_labels: dict[str, str] | None = None,
+    parameter_help: dict[str, str] | None = None,
+) -> ScreenerDefinition:
+    """Build a small definition with optional user-facing parameter metadata."""
     return ScreenerDefinition(
         key="demo",
         name="Demo screener",
@@ -77,6 +83,8 @@ def _definition(default_params: dict) -> ScreenerDefinition:
         default_params=default_params,
         module_name="demo",
         run=lambda **_kwargs: pd.DataFrame(),
+        parameter_labels=parameter_labels or {},
+        parameter_help=parameter_help or {},
     )
 
 
@@ -113,10 +121,40 @@ def test_first_render_seeds_state_and_dispatches_widget_per_type(fake_st):
         state_key = parameter_controls._param_state_key("demo", param_key)
         assert fake_st.session_state[state_key] == default_value
     # The bool went to a checkbox even though isinstance(True, int) is True.
-    assert fake_st.checkboxes == [("use_filter", "param_override::demo::use_filter")]
+    assert fake_st.checkboxes == [
+        ("use_filter", "param_override::demo::use_filter", None)
+    ]
     assert [entry["label"] for entry in fake_st.number_inputs] == ["period", "discount_pct"]
     assert fake_st.number_inputs[0]["step"] == 1
     assert fake_st.number_inputs[1]["format"] == "%.4f"
+
+
+def test_custom_parameter_label_and_help_reach_the_checkbox(fake_st) -> None:
+    """A stable storage key may still have truthful user-facing copy.
+
+    Beginner note:
+        `only_active_issues` is already stored in historical scan parameters,
+        but IPO-012 narrowed its meaning to upcoming offers. Display metadata
+        lets the sidebar say that plainly without renaming the durable key or
+        teaching this generic renderer about one specific screener.
+    """
+    definition = _definition(
+        {"only_active_issues": True},
+        parameter_labels={"only_active_issues": "Only upcoming IPOs"},
+        parameter_help={
+            "only_active_issues": "Exclude closed and listed offers from this run."
+        },
+    )
+
+    parameter_controls._render_parameter_overrides(definition)
+
+    assert fake_st.checkboxes == [
+        (
+            "Only upcoming IPOs",
+            "param_override::demo::only_active_issues",
+            "Exclude closed and listed offers from this run.",
+        )
+    ]
 
 
 def test_rerender_preserves_user_edited_values(fake_st):

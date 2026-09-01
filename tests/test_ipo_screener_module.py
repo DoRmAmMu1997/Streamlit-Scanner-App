@@ -113,6 +113,15 @@ def test_registry_metadata_declares_an_event_driven_screener() -> None:
     assert metadata["requires_candles"] is False
     # Paid AI work must be opt-in for an analyst-accessible button.
     assert metadata["default_params"]["draft_ai_extractions"] is False
+    assert metadata["parameter_labels"]["only_active_issues"] == (
+        "Only upcoming IPOs"
+    )
+    assert "closed and listed" in metadata["parameter_help"][
+        "only_active_issues"
+    ]
+    # The lifecycle-selection semantics changed, so provenance must not keep
+    # claiming this is the original IPO-011 strategy contract.
+    assert ipo_screener.IpoScreener.SCREENER_VERSION == "1.1.0"
 
 
 def test_toggles_map_onto_the_pipeline_stages(monkeypatch) -> None:
@@ -351,33 +360,48 @@ def test_auto_approval_is_scoped_to_the_issues_this_run_selected(
     assert captured["approval_calls"] == [{"issue_ids": [7]}]
 
 
-def test_an_unnarrowed_run_lets_auto_approval_see_the_whole_queue(
-    monkeypatch,
-) -> None:
-    """``None`` means "every issue" for both the pipeline and approval."""
-    captured = _install(monkeypatch, [_row(issue_id=7)])
+def test_unticking_active_only_actually_widens_the_run(monkeypatch) -> None:
+    """Opting into every issue must process every issue, not just upcoming ones.
+
+    Beginner note:
+        This is the regression that made the toggle a lie. The screener used to
+        return ``None`` whenever the toggles happened not to narrow anything,
+        meaning "let the pipeline choose" -- and the pipeline's own default is
+        upcoming-only. So unticking the box to *widen* the run silently kept it
+        narrow, while the results table still listed the finished issues.
+
+        It was order-dependent too: with a cap that bit, an explicit list was
+        sent and finished issues inside the cap were processed. The selection is
+        now always explicit, so what the table reports is exactly what ran.
+    """
+    rows = [_row(issue_id=7), _row(issue_id=8, issue_status=IpoStatus.LISTED)]
+    captured = _install(monkeypatch, rows)
     scanner = ipo_screener.IpoScreener()
 
-    scanner.run(
+    frame = scanner.run(
         None,
         None,
         {"run_ingestion": False, "only_active_issues": False, "max_issues": 0},
     )
 
-    assert captured["approval_calls"] == [{"issue_ids": None}]
-    assert _work_pass(captured)["issue_ids"] is None
+    # The finished issue is named explicitly, so the pipeline cannot filter it
+    # back out, and approval is scoped to the same set.
+    assert _work_pass(captured)["issue_ids"] == [7, 8]
+    assert captured["approval_calls"] == [{"issue_ids": [7, 8]}]
+    # Reported set == processed set, which is the invariant that broke.
+    assert sorted(frame["symbol"]) == ["IPO:7", "IPO:8"]
 
 
 @pytest.mark.parametrize(
     ("only_active", "max_issues", "expected_ids"),
     [
         (True, 0, [7]),
-        (False, 0, None),
+        (False, 0, [7, 8]),
         (True, 1, [7]),
     ],
 )
 def test_issue_selection_narrows_the_run(
-    monkeypatch, only_active: bool, max_issues: int, expected_ids: list[int] | None
+    monkeypatch, only_active: bool, max_issues: int, expected_ids: list[int]
 ) -> None:
     """Active-only and the cap both narrow which issues the pipeline touches."""
     rows = [_row(), _row(issue_id=8, issue_status=IpoStatus.LISTED)]
