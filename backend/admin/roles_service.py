@@ -92,9 +92,11 @@ def _normalize_email(email: str) -> str:
 # "a@b.c.") are now rejected too, exactly the typo'd grants SEC-001 targets.
 _EMAIL_SHAPE = re.compile(r"^[^@\s]+@[^@\s.]+(?:\.[^@\s.]+)+$")
 
-# RFC 5321 caps a full address at 254 characters. Checking the length before the
-# regex bounds the work no matter how the pattern is edited later — cheap belt
-# and braces so a future loosening cannot quietly reintroduce a ReDoS.
+# This service uses 254 Unicode code points as a conservative application-level
+# work bound. SMTP's wire limits are measured in octets, so this is deliberately
+# not a claim of full RFC validation; it is a simple upper limit for form input.
+# Checking it before the regex means a future pattern edit cannot quietly make
+# an arbitrarily large address consume unbounded matching work.
 _MAX_EMAIL_LENGTH = 254
 
 
