@@ -117,6 +117,114 @@ def test_ensure_daily_history_backfill_writes_no_duplicates(tmp_path: Path):
     _assert_cache_is_clean(loader)
 
 
+def test_ensure_daily_history_missing_timestamp_cache_recovery_writes_no_duplicates(tmp_path: Path):
+    """A malformed cache is replaced through the full-download write path."""
+    loader = DailyDataLoader(
+        cast(DhanDataClient, DuplicatingClient()),
+        cache_dir=tmp_path,
+        request_delay_seconds=0.0,
+    )
+    pd.DataFrame(
+        {
+            "open": [100.0],
+            "high": [105.0],
+            "low": [99.0],
+            "close": [104.0],
+            "volume": [1_000.0],
+        }
+    ).to_parquet(loader.cache_path(ROW["symbol"], ROW["security_id"]), index=False)
+
+    _frame, status = loader.ensure_daily_history(ROW, years_back=1, today=TODAY)
+
+    assert status == "fresh_download"
+    assert len(_assert_cache_is_clean(loader)) == 9
+
+
+def test_ensure_daily_history_all_nat_cache_recovery_writes_no_duplicates(tmp_path: Path):
+    """An all-NaT timestamp column is replaced through the same guarded write path."""
+    loader = DailyDataLoader(
+        cast(DhanDataClient, DuplicatingClient()),
+        cache_dir=tmp_path,
+        request_delay_seconds=0.0,
+    )
+    pd.DataFrame(
+        {
+            # Explicit dtype keeps the malformed fixture all-NaT while making
+            # the intended datetime64 column clear to static type checking.
+            "timestamp": pd.Series([None], dtype="datetime64[ns]"),
+            "open": [100.0],
+            "high": [105.0],
+            "low": [99.0],
+            "close": [104.0],
+            "volume": [1_000.0],
+        }
+    ).to_parquet(loader.cache_path(ROW["symbol"], ROW["security_id"]), index=False)
+
+    _frame, status = loader.ensure_daily_history(ROW, years_back=1, today=TODAY)
+
+    assert status == "fresh_download"
+    assert len(_assert_cache_is_clean(loader)) == 9
+
+
+def test_incremental_merge_drops_exact_rows_but_preserves_conflicting_rows(tmp_path: Path):
+    """Incremental storage removes only exact rows across all six canonical columns.
+
+    The new response includes an exact repeated current candle and a different
+    correction for the previous cached date. The write must remove the repeated
+    row but retain both values for the conflicting date so DATA-001 can report it.
+    """
+
+    class CanonicalButDuplicatingClient:
+        def fetch_daily_candles(self, **_kwargs) -> pd.DataFrame:
+            repeated_current = {
+                "timestamp": pd.Timestamp(TODAY),
+                "open": 100.0,
+                "high": 105.0,
+                "low": 99.0,
+                "close": 104.0,
+                "volume": 1_000.0,
+            }
+            return pd.DataFrame(
+                [
+                    {
+                        "timestamp": pd.Timestamp(TODAY - timedelta(days=1)),
+                        "open": 120.0,
+                        "high": 125.0,
+                        "low": 119.0,
+                        "close": 124.0,
+                        "volume": 2_000.0,
+                    },
+                    repeated_current,
+                    repeated_current,
+                ]
+            )
+
+    loader = DailyDataLoader(
+        cast(DhanDataClient, CanonicalButDuplicatingClient()),
+        cache_dir=tmp_path,
+        request_delay_seconds=0.0,
+    )
+    pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime([date(2025, 8, 24), TODAY - timedelta(days=1)]),
+            "open": [100.0, 100.0],
+            "high": [105.0, 105.0],
+            "low": [99.0, 99.0],
+            "close": [104.0, 104.0],
+            "volume": [1_000.0, 1_000.0],
+        }
+    ).to_parquet(loader.cache_path(ROW["symbol"], ROW["security_id"]), index=False)
+
+    _frame, status = loader.ensure_daily_history(ROW, years_back=1, today=TODAY)
+
+    assert status == "incremental"
+    stored = pd.read_parquet(loader.cache_path(ROW["symbol"], ROW["security_id"]))
+    report = validate_candles(stored, symbol="DEMO", expected_latest_date=TODAY)
+    assert "DUPLICATE_DATE" in {finding.code for finding in report.findings}
+    assert len(stored.loc[stored["timestamp"].eq(pd.Timestamp(TODAY))]) == 1
+    assert len(stored.loc[stored["timestamp"].eq(pd.Timestamp(TODAY - timedelta(days=1)))]) == 2
+
+
 def test_a_conflicting_bar_still_reaches_the_cache_to_be_reported(tmp_path: Path):
     """The guard must not become a silent price-picker.
 
