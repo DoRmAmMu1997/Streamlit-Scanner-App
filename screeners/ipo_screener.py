@@ -86,6 +86,25 @@ class IpoScreener(BaseScanner):
             # Bounds a Streamlit run, which blocks the tab while it works.
             "max_issues": 25,
         },
+        # Keep durable parameter keys stable while making the sidebar speak in
+        # domain terms. In particular, ``only_active_issues`` now means the
+        # narrower upcoming lifecycle set, not every non-listed record.
+        "parameter_labels": {
+            "run_ingestion": "Refresh SEBI filings",
+            "download_documents": "Download prospectuses",
+            "collect_enrichment": "Collect web enrichment",
+            "draft_ai_extractions": "Draft AI extraction proposals",
+            "only_active_issues": "Only upcoming IPOs",
+            "max_issues": "Maximum IPOs per run",
+        },
+        "parameter_help": {
+            "run_ingestion": "Refresh the official SEBI filing inventory before selection.",
+            "download_documents": "Cache missing DRHP/RHP prospectuses for selected IPOs.",
+            "collect_enrichment": "Use optional, advisory SerpAPI evidence for selected IPOs.",
+            "draft_ai_extractions": "Spend AI plan credit to draft human-review proposals.",
+            "only_active_issues": "Exclude closed and listed offers; clear to include history.",
+            "max_issues": "Limit the selected pipeline/result rows; 0 means no issue cap.",
+        },
     }
     EXTRA_RESULT_COLUMNS: ClassVar[list[str]] = [
         "company_name",
@@ -105,7 +124,9 @@ class IpoScreener(BaseScanner):
         "documents",
         "evaluation_stale",
     ]
-    SCREENER_VERSION = "1.0.0"
+    # IPO-012 changes which issue lifecycle states a default run selects. Bump
+    # provenance so historical rows do not claim the original IPO-011 contract.
+    SCREENER_VERSION = "1.1.0"
 
     def compute_signal(
         self, symbol: str, candles: pd.DataFrame, params: dict

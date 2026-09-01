@@ -113,6 +113,15 @@ def test_registry_metadata_declares_an_event_driven_screener() -> None:
     assert metadata["requires_candles"] is False
     # Paid AI work must be opt-in for an analyst-accessible button.
     assert metadata["default_params"]["draft_ai_extractions"] is False
+    assert metadata["parameter_labels"]["only_active_issues"] == (
+        "Only upcoming IPOs"
+    )
+    assert "closed and listed" in metadata["parameter_help"][
+        "only_active_issues"
+    ]
+    # The lifecycle-selection semantics changed, so provenance must not keep
+    # claiming this is the original IPO-011 strategy contract.
+    assert ipo_screener.IpoScreener.SCREENER_VERSION == "1.1.0"
 
 
 def test_toggles_map_onto_the_pipeline_stages(monkeypatch) -> None:

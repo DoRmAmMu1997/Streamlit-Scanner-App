@@ -31,7 +31,7 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, TextIO
+from typing import Any, Final, TextIO
 
 from backend.ipo.agents.financial_extractor import (
     IpoExtractionErrorReceipt,
@@ -95,6 +95,11 @@ UPCOMING_ISSUE_STATUSES = (
     IpoStatus.OPEN,
 )
 
+# A default headless run must fit comfortably inside the documented 250-search
+# plan. Eight fixed signals x 25 issues = 200 calls, leaving room for manual or
+# 67-ka research. This is a per-run safety rail, not a monthly quota ledger.
+DEFAULT_MAX_ENRICHMENT_ISSUES: Final = 25
+
 
 @dataclass(frozen=True)
 class IpoScreenerIssueOutcome:
@@ -145,6 +150,13 @@ class IpoScreenerJobOutcome:
     # reported but never counted toward the exit code.
     enrichment_quota_exhausted: bool = False
     enrichment_rate_limited: bool = False
+    # Invalid credentials are actionable configuration failure. The stage stops
+    # after the first rejection and the normal ``enrichment_failed`` counter
+    # keeps the process exit nonzero for schedulers.
+    enrichment_auth_failed: bool = False
+    # Issues omitted only from the paid search stage by the per-run budget.
+    # They still proceed through download, extraction, and deterministic score.
+    enrichment_skipped_budget: int = 0
     issues_skipped_finished: int = 0
     proposals_created: int = 0
     proposals_skipped: int = 0
@@ -252,6 +264,7 @@ def run_ipo_screener(
     skip_enrich: bool = False,
     skip_score: bool = False,
     include_finished: bool = False,
+    max_enrichment_issues: int | None = DEFAULT_MAX_ENRICHMENT_ISSUES,
     extract: bool = False,
     force_extract: bool = False,
     issue_ids: Sequence[int] | None = None,
@@ -283,6 +296,10 @@ def run_ipo_screener(
     hand, and back-applying a scoring change to every closed issue would mean
     enumerating them all.
 
+    ``max_enrichment_issues`` limits only the paid web-search stage. ``None``
+    explicitly removes that per-run cap; downloads, optional extraction, and
+    scoring always keep the complete selected issue set.
+
     Beginner note:
         Stage isolation is per unit of work (one document, one issue, one
         query batch). A malformed PDF or one flaky search can therefore never
@@ -290,6 +307,8 @@ def run_ipo_screener(
         the summary and a nonzero exit code at the end.
     """
     out = output or sys.stdout
+    if max_enrichment_issues is not None and max_enrichment_issues < 0:
+        raise ValueError("max_enrichment_issues must be non-negative or None.")
     try:
         if ensure_schema() is False:
             raise RuntimeError("database schema bootstrap failed")
@@ -376,8 +395,16 @@ def run_ipo_screener(
     enrichment_skipped_no_key = False
     enrichment_quota_exhausted = False
     enrichment_rate_limited = False
+    enrichment_auth_failed = False
+    enrichment_skipped_budget = 0
     if not skip_enrich:
-        for issue in issues:
+        enrichment_issues = (
+            issues
+            if max_enrichment_issues is None
+            else issues[:max_enrichment_issues]
+        )
+        enrichment_skipped_budget = len(issues) - len(enrichment_issues)
+        for issue in enrichment_issues:
             # No status check here: ``issues`` was already narrowed to upcoming
             # offers above. Re-checking would also override an explicitly named
             # issue, which is the one case an operator has said they want.
@@ -411,6 +438,20 @@ def run_ipo_screener(
                 )
                 break
             enrichment_collected += len(enrichment.signals)
+            if enrichment.auth_failed:
+                # Unlike an intentionally absent optional key, a supplied but
+                # rejected credential is a real configuration failure. Count it
+                # once so schedulers alert, then stop because every later call
+                # would be refused identically.
+                enrichment_auth_failed = True
+                enrichment_failed += 1
+                print(
+                    "[ipo-screener] enrichment=auth_failed "
+                    "(SERPAPI_API_KEY was rejected; continuing without web signals)",
+                    file=out,
+                    flush=True,
+                )
+                break
             if enrichment.quota_exhausted or enrichment.rate_limited:
                 # Whole-run conditions, like the missing key above: the
                 # provider is refusing further work, so every remaining issue
@@ -509,6 +550,8 @@ def run_ipo_screener(
         enrichment_skipped_no_key=enrichment_skipped_no_key,
         enrichment_quota_exhausted=enrichment_quota_exhausted,
         enrichment_rate_limited=enrichment_rate_limited,
+        enrichment_auth_failed=enrichment_auth_failed,
+        enrichment_skipped_budget=enrichment_skipped_budget,
         issues_skipped_finished=issues_skipped_finished,
         proposals_created=proposals_created,
         proposals_skipped=proposals_skipped,
@@ -530,6 +573,7 @@ def run_ipo_screener(
         f"skipped_unchanged={totals['skipped_unchanged']} "
         f"insufficient={totals['insufficient']} failed={totals['failed']} "
         f"downloads_failed={downloads_failed} proposals={proposals_created} "
+        f"enrichment_skipped_budget={enrichment_skipped_budget} "
         f"skipped_finished={issues_skipped_finished} "
         f"exit_code={result.exit_code}",
         file=out,
@@ -549,6 +593,8 @@ def run_ipo_screener(
         enrichment_skipped_no_key=enrichment_skipped_no_key,
         enrichment_quota_exhausted=enrichment_quota_exhausted,
         enrichment_rate_limited=enrichment_rate_limited,
+        enrichment_auth_failed=enrichment_auth_failed,
+        enrichment_skipped_budget=enrichment_skipped_budget,
         issues_skipped_finished=issues_skipped_finished,
         proposals_created=proposals_created,
         proposals_failed=proposals_failed,
@@ -563,6 +609,17 @@ def _parse_iso_date(value: str) -> dt.date:
         return dt.date.fromisoformat(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError("must be an ISO date YYYY-MM-DD") from exc
+
+
+def _parse_non_negative_int(value: str) -> int:
+    """Parse a CLI count while reserving zero for the documented uncapped mode."""
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a non-negative integer") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return parsed
 
 
 def main(
@@ -626,6 +683,17 @@ def main(
             "on; use it to retry a failed download or re-score history."
         ),
     )
+    parser.add_argument(
+        "--max-enrichment-issues",
+        type=_parse_non_negative_int,
+        default=DEFAULT_MAX_ENRICHMENT_ISSUES,
+        metavar="N",
+        help=(
+            "Limit paid SerpAPI enrichment to the first N selected issues "
+            f"(default {DEFAULT_MAX_ENRICHMENT_ISSUES}; 0 disables the cap). "
+            "Other stages still process the complete selection."
+        ),
+    )
     parser.add_argument("--to-date", type=_parse_iso_date, default=None)
     args = parser.parse_args(argv)
 
@@ -635,6 +703,11 @@ def main(
         skip_download=args.skip_download,
         skip_enrich=args.skip_enrich,
         include_finished=args.include_finished,
+        max_enrichment_issues=(
+            None
+            if args.max_enrichment_issues == 0
+            else args.max_enrichment_issues
+        ),
         extract=args.extract or args.force_extract,
         force_extract=args.force_extract,
         issue_ids=args.issue_ids,

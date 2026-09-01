@@ -1,10 +1,11 @@
 """IPO-009: low-confidence SerpAPI web enrichment for sentiment and red flags.
 
-This adapter runs fixed discovery queries (GMP, news, promoter reputation,
-litigation, anchor commentary, brokerage reviews, peer discovery) through the
-shared SerpAPI client and persists what it finds as ``ipo_enrichment_signals``
-rows. It lives under ``backend/ipo/sources`` because that package is the only
-reviewed network zone in the IPO domain.
+This adapter runs eight fixed discovery queries (GMP, news, promoter
+reputation, litigation, anchor commentary, brokerage reviews, peer discovery,
+and subscription demand) through the shared SerpAPI client and persists what
+it finds as ``ipo_enrichment_signals`` rows. It lives under
+``backend/ipo/sources`` because that package is the only reviewed network zone
+in the IPO domain.
 
 Beginner note — the trust rules, stated once:
 Web search results can never override official documents, can never supply a
@@ -60,6 +61,7 @@ from backend.security import (
 )
 from backend.sixty_seven.search_client import (
     SearchResult,
+    SerpApiAuthError,
     SerpApiClient,
     SerpApiQuotaError,
     SerpApiRateLimitError,
@@ -222,6 +224,10 @@ class IpoEnrichmentOutcome:
     # refusing this account's burst; the caller stops rather than emitting
     # hundreds of identical refusals.
     rate_limited: bool = False
+    # A supplied key was rejected. This is distinct from ``skipped_no_key``:
+    # the latter is an intentional optional configuration, while this state
+    # requires an operator to repair the credential.
+    auth_failed: bool = False
 
 
 def _semantic_item_hash(entry: dict[str, Any]) -> str:
@@ -645,6 +651,7 @@ def collect_enrichment_signals(
     error_types: list[str] = []
     quota_exhausted = False
     rate_limited = False
+    auth_failed = False
     consecutive_rate_limits = 0
     for signal_type in IpoEnrichmentSignalType:
         query = _QUERY_TEMPLATES[signal_type].format(
@@ -666,6 +673,13 @@ def collect_enrichment_signals(
                 error_type=type(exc).__name__,
                 status_code=exc.status_code,
             )
+            if isinstance(exc, SerpApiAuthError):
+                # A rejected credential cannot recover on the next signal type.
+                # Stop after one call so the job can report the configuration
+                # fault once instead of multiplying it across eight queries and
+                # every remaining issue.
+                auth_failed = True
+                break
             if isinstance(exc, SerpApiQuotaError):
                 # Every remaining query would be refused the same way, so stop
                 # here and let the caller stop too.
@@ -745,4 +759,5 @@ def collect_enrichment_signals(
         ),
         quota_exhausted=quota_exhausted,
         rate_limited=rate_limited,
+        auth_failed=auth_failed,
     )

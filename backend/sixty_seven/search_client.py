@@ -85,13 +85,19 @@ class SerpApiAuthError(SerpApiSearchError):
     """
 
 
-# SerpAPI answers a query Google found nothing for with HTTP 200 and an
-# ``error`` field, which is not a failure at all — it is an empty result set.
-# Matched narrowly on purpose: mistaking a real provider error for "no results"
-# would silently hide it, so anything unrecognised keeps raising.
-_NO_RESULTS_MARKERS: Final = (
-    "hasn't returned any results",
-    "has not returned any results",
+# SerpAPI answers a query Google found nothing for with HTTP 200 and one of
+# these exact ``error`` strings. This is an empty result set, not an outage.
+#
+# Beginner note:
+#     These are complete normalized messages rather than substrings. A response
+#     such as "...no results... account disabled" carries additional meaning
+#     and must stay an error. The caller also verifies the HTTP status before
+#     applying this allowlist, so body prose can never turn a 401 into success.
+_NO_RESULTS_MESSAGES: Final = frozenset(
+    {
+        "google hasn't returned any results for this query.",
+        "google has not returned any results for this query.",
+    }
 )
 # Quota exhaustion wording, checked against the provider's error text.
 #
@@ -125,17 +131,30 @@ def _classify_status(message: str, status_code: int | None) -> SerpApiSearchErro
 
 
 def _classify_provider_error(
-    detail: str, folded: str, status_code: int | None
+    folded: str, status_code: int | None
 ) -> SerpApiSearchError:
     """Pick the error type for a response whose body names the problem.
 
     The body is authoritative where it is explicit: SerpAPI says outright when
     an account is out of searches, which upgrades an otherwise ambiguous 429
     from "throttled, try later" to "spent, nothing will work until it resets".
+
+    Beginner note:
+        Provider prose is used only as a private classification input. It never
+        becomes the exception message because this shared client also feeds an
+        AI research tool; a fixed application-owned message prevents reflected
+        queries, secrets, or instructions from crossing that model boundary.
     """
+    # Auth status wins because it is already unambiguous. Other APIs sometimes
+    # return application-level errors with HTTP 200, so explicit terminal quota
+    # wording remains authoritative for success/429/other generic statuses.
+    if status_code in (401, 403):
+        return _classify_status("SerpAPI rejected the request.", status_code)
     if any(marker in folded for marker in _QUOTA_MARKERS):
-        return SerpApiQuotaError(detail, status_code=status_code)
-    return _classify_status(detail, status_code)
+        return SerpApiQuotaError(
+            "SerpAPI quota is exhausted.", status_code=status_code
+        )
+    return _classify_status("SerpAPI rejected the request.", status_code)
 
 
 @dataclass(frozen=True)
@@ -268,9 +287,14 @@ class SerpApiClient:
             )
             status_code = getattr(response, "status_code", None)
             if provider_error:
-                detail = redact_text(provider_error, extra_secrets=[self.api_key])
-                folded = provider_error.casefold()
-                if any(marker in folded for marker in _NO_RESULTS_MARKERS):
+                # Collapse whitespace for exact provider-shape matching without
+                # deleting punctuation or additional words that change meaning.
+                folded = " ".join(provider_error.casefold().split())
+                if (
+                    status_code is not None
+                    and 200 <= status_code < 300
+                    and folded in _NO_RESULTS_MESSAGES
+                ):
                     # Not a failure: Google simply had nothing for this query.
                     # Returning empty lets the caller persist an honest "no
                     # observations" record instead of dropping the signal.
@@ -278,14 +302,24 @@ class SerpApiClient:
                         response, api_key=self.api_key, suppress_errors=False
                     )
                     return []
-                raise _classify_provider_error(detail, folded, status_code)
+                raise _classify_provider_error(folded, status_code)
             # No error field, so a non-2xx status is the only thing left that
             # can make this response unusable.
             response.raise_for_status()
+        except requests.HTTPError:
+            # A response-derived HTTPError can carry provider-controlled reason
+            # prose. The numeric status is enough to classify it; copying or
+            # chaining the exception would let that text reach the 67-ka model.
+            status_code = getattr(response, "status_code", None)
+            _close_response(response, api_key=self.api_key, suppress_errors=True)
+            raise _classify_status(
+                "SerpAPI request failed.", status_code
+            ) from None
         except requests.RequestException as exc:
-            # A requests error can echo the full request URL — including the
-            # api_key query param — so scrub through the same utility used by
-            # Streamlit errors and scanner failure details.
+            # Streaming/transport failures are locally generated diagnostics,
+            # not HTTP reason prose. Preserve their redacted detail so an
+            # operator can distinguish timeout/reset/stream failures, while
+            # cleanup still cannot replace the primary exception.
             detail = redact_text(str(exc), extra_secrets=[self.api_key])
             status_code = getattr(response, "status_code", None)
             _close_response(response, api_key=self.api_key, suppress_errors=True)

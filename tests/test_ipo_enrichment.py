@@ -42,6 +42,7 @@ from backend.ipo.sources.enrichment import (
 from backend.security import BLOCKED_EVIDENCE_TEXT
 from backend.sixty_seven.search_client import (
     SearchResult,
+    SerpApiAuthError,
     SerpApiQuotaError,
     SerpApiRateLimitError,
     SerpApiSearchError,
@@ -647,6 +648,43 @@ def test_an_exhausted_plan_stops_the_batch_instead_of_grinding_on(
     # Stopped at the failure rather than attempting all eight query types.
     assert len(client.queries) == 2
     assert len(client.queries) < len(IpoEnrichmentSignalType)
+
+
+def test_rejected_credentials_stop_after_the_first_query(
+    file_session_factory,
+) -> None:
+    """An invalid key is permanent, so sibling queries must not be attempted.
+
+    Beginner note:
+        Unlike an intentionally missing optional key, a rejected key is a
+        configuration fault that operators need to repair.  Retrying the seven
+        remaining signal types cannot change the answer; it only multiplies
+        request latency and warning noise before the job reaches the next IPO.
+    """
+    issue = create_issue(_issue_data(), session_factory=file_session_factory)
+
+    class _RejectedClient(_FakeClient):
+        """Reject every request while retaining the fake's query ledger."""
+
+        def search(self, query: str, *, max_results: int = 5) -> list[SearchResult]:
+            """Record one attempt and report the permanent auth failure."""
+            self.queries.append(query)
+            raise SerpApiAuthError("SerpAPI rejected the request.", status_code=401)
+
+    client = _RejectedClient({})
+
+    outcome = collect_enrichment_signals(
+        issue.id,
+        client=client,
+        captured_at=_CAPTURED_AT,
+        session_factory=file_session_factory,
+    )
+
+    assert len(client.queries) == 1
+    assert outcome.auth_failed is True
+    assert outcome.quota_exhausted is False
+    assert outcome.rate_limited is False
+    assert outcome.error_type == "SerpApiAuthError"
 
 
 def test_a_run_of_throttles_stops_the_batch_but_a_single_one_does_not(

@@ -103,6 +103,7 @@ def _enrichment(
     error_type: str | None = None,
     quota_exhausted: bool = False,
     rate_limited: bool = False,
+    auth_failed: bool = False,
 ) -> Any:
     """Build one enrichment outcome carrying every field the job reads.
 
@@ -118,6 +119,7 @@ def _enrichment(
         error_type=error_type,
         quota_exhausted=quota_exhausted,
         rate_limited=rate_limited,
+        auth_failed=auth_failed,
     )
 
 
@@ -471,6 +473,117 @@ def test_a_refusing_provider_stops_the_stage_and_still_exits_zero(
     assert result.exit_code == 0
 
 
+def test_rejected_credentials_stop_later_issues_and_exit_nonzero() -> None:
+    """An invalid key is terminal for the stage and actionable to schedulers.
+
+    Beginner note:
+        Missing credentials can be an intentional no-enrichment deployment, so
+        that path exits zero.  Rejected credentials are different: a key was
+        supplied but is unusable, and the nonzero exit tells automation that
+        configuration needs attention while still allowing scoring to finish.
+    """
+    issues = [_issue(1, "Acme Ltd"), _issue(2, "Beta Ltd")]
+    enrich_calls: list[int] = []
+
+    def _enricher(issue_id: int, **_kwargs: Any) -> Any:
+        """Return the collector's permanent-auth receipt."""
+        enrich_calls.append(issue_id)
+        return _enrichment(error_type="SerpApiAuthError", auth_failed=True)
+
+    out = io.StringIO()
+    result = run_ipo_screener(
+        skip_scan=True,
+        skip_download=True,
+        ensure_schema=lambda: True,
+        issue_lister=lambda **_kwargs: issues,
+        document_lister=lambda *_args, **_kwargs: [],
+        enricher=_enricher,
+        rescorer=lambda issue_id, **_kwargs: _rescore(
+            next(issue for issue in issues if issue.id == issue_id),
+            "insufficient_inputs",
+            missing=("manual_extraction",),
+        ),
+        session_factory=object,
+        output=out,
+    )
+
+    assert enrich_calls == [1]
+    assert result.enrichment_auth_failed is True
+    assert result.enrichment_failed == 1
+    assert result.exit_code == 1
+    assert "enrichment=auth_failed" in out.getvalue()
+
+
+def test_default_enrichment_budget_caps_paid_work_but_scores_every_issue() -> None:
+    """The safe default limits search calls without narrowing free stages.
+
+    With eight signal queries per issue, 25 issues consume 200 searches and
+    leave headroom on the documented 250-search plan.  Downloading and scoring
+    the rest of the selected inventory remain useful and do not spend SerpAPI
+    quota, so the budget applies only to enrichment.
+    """
+    issues = [_issue(index, f"Company {index}") for index in range(1, 28)]
+    enriched: list[int] = []
+    rescored: list[int] = []
+
+    def _enricher(issue_id: int, **_kwargs: Any) -> Any:
+        """Record the bounded paid-work prefix."""
+        enriched.append(issue_id)
+        return _enrichment()
+
+    def _rescorer(issue_id: int, **_kwargs: Any) -> IpoRescoreOutcome:
+        """Record that free scoring still covers the full selection."""
+        rescored.append(issue_id)
+        issue = next(item for item in issues if item.id == issue_id)
+        return _rescore(issue, "insufficient_inputs", missing=("manual_extraction",))
+
+    out = io.StringIO()
+    result = run_ipo_screener(
+        skip_scan=True,
+        skip_download=True,
+        ensure_schema=lambda: True,
+        issue_lister=lambda **_kwargs: issues,
+        document_lister=lambda *_args, **_kwargs: [],
+        enricher=_enricher,
+        rescorer=_rescorer,
+        session_factory=object,
+        output=out,
+    )
+
+    assert enriched == list(range(1, 26))
+    assert rescored == list(range(1, 28))
+    assert result.enrichment_skipped_budget == 2
+    assert "enrichment_skipped_budget=2" in out.getvalue()
+    assert result.exit_code == 0
+
+
+def test_none_enrichment_budget_explicitly_processes_the_whole_selection() -> None:
+    """Programmatic callers can deliberately opt out of the safe default."""
+    issues = [_issue(index, f"Company {index}") for index in range(1, 28)]
+    enriched: list[int] = []
+
+    def _enricher(issue_id: int, **_kwargs: Any) -> Any:
+        """Record every paid lookup when the caller removes the cap."""
+        enriched.append(issue_id)
+        return _enrichment()
+
+    result = run_ipo_screener(
+        skip_scan=True,
+        skip_download=True,
+        skip_score=True,
+        max_enrichment_issues=None,
+        ensure_schema=lambda: True,
+        issue_lister=lambda **_kwargs: issues,
+        document_lister=lambda *_args, **_kwargs: [],
+        enricher=_enricher,
+        session_factory=object,
+        output=io.StringIO(),
+    )
+
+    assert enriched == list(range(1, 28))
+    assert result.enrichment_skipped_budget == 0
+
+
 def test_fatal_schema_bootstrap_prints_and_exits_one() -> None:
     """A dead database aborts before any stage with the fatal grammar."""
     out = io.StringIO()
@@ -671,6 +784,8 @@ def test_main_wires_cli_flags_into_the_runner() -> None:
             "7",
             "--issue-id",
             "9",
+            "--max-enrichment-issues",
+            "0",
             "--to-date",
             "2026-07-13",
         ],
@@ -683,5 +798,17 @@ def test_main_wires_cli_flags_into_the_runner() -> None:
     assert received["skip_enrich"] is True
     assert received["extract"] is True
     assert received["force_extract"] is True
+    assert received["max_enrichment_issues"] is None
     assert received["issue_ids"] == [7, 9]
     assert str(received["to_date"]) == "2026-07-13"
+
+
+def test_main_rejects_a_negative_enrichment_issue_budget() -> None:
+    """A negative cap must not acquire Python slicing's surprising meaning."""
+
+    def _runner(**_kwargs: Any) -> IpoScreenerJobOutcome:
+        """Fail if argparse lets an invalid budget reach orchestration."""
+        raise AssertionError("argument validation must stop before the job runs")
+
+    with pytest.raises(SystemExit):
+        main(["--max-enrichment-issues", "-1"], job_runner=_runner)
