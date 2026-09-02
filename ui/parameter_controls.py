@@ -65,7 +65,12 @@ def _render_parameter_overrides(selected: ScreenerDefinition) -> None:
             st.rerun()
 
         for param_key, default_value in defaults.items():
-            state_key = _param_state_key(selected.key, param_key)
+            param_name = str(param_key)
+            state_key = _param_state_key(selected.key, param_name)
+            # The persisted key is the fallback for backwards compatibility;
+            # a screener opts into clearer copy through validated metadata.
+            label = selected.parameter_labels.get(param_name) or param_name
+            help_text = selected.parameter_help.get(param_name)
             # Seed the session_state on the first render. Without this seed,
             # the number_input would use `value=default_value` only once and
             # then store its own state, which gets messy on screener switch.
@@ -73,16 +78,18 @@ def _render_parameter_overrides(selected: ScreenerDefinition) -> None:
                 st.session_state[state_key] = default_value
 
             if isinstance(default_value, bool):
-                st.checkbox(param_key, key=state_key)
+                st.checkbox(label, key=state_key, help=help_text)
             elif isinstance(default_value, int):
                 # Integer parameters: step=1 keeps the widget arrows
                 # incrementing cleanly. The default value (already in state)
                 # tells Streamlit it is an int widget.
-                st.number_input(param_key, step=1, key=state_key)
+                st.number_input(label, step=1, key=state_key, help=help_text)
             else:
                 # Float parameters: 4-decimal format covers percentages like
                 # 0.0150 cleanly. The user can still type a wider value.
-                st.number_input(param_key, key=state_key, format="%.4f")
+                st.number_input(
+                    label, key=state_key, format="%.4f", help=help_text
+                )
 
 
 def _apply_param_overrides(selected: ScreenerDefinition, params: dict[str, Any]) -> dict[str, Any]:

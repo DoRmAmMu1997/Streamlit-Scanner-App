@@ -26,7 +26,7 @@ import importlib
 import inspect
 import pkgutil
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import ModuleType
 from typing import cast
 
@@ -77,6 +77,11 @@ class ScreenerDefinition:
     # setup instead of aborting on missing credentials. The default is True so
     # every existing screener keeps its exact behaviour.
     requires_candles: bool = True
+    # Optional user-facing copy for durable parameter keys. A scanner can keep
+    # a stable storage/provenance key while giving the Streamlit widget a clearer
+    # label and explanation. Empty maps preserve every legacy screener exactly.
+    parameter_labels: dict[str, str] = field(default_factory=dict)
+    parameter_help: dict[str, str] = field(default_factory=dict)
 
 
 def _find_scanner_class(module: ModuleType) -> type[BaseScanner] | None:
@@ -129,6 +134,47 @@ def _validate_run_signature(run_func: object, module_name: str) -> None:
     # should advertise that the screener returns a pandas DataFrame.
     if return_type not in (inspect.Signature.empty, pd.DataFrame, "pd.DataFrame"):
         raise ScreenerRegistryError(f"{module_name}.run should return a pandas DataFrame")
+
+
+def _parameter_display_metadata(
+    metadata: dict,
+    module_name: str,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Validate optional labels/help against the declared parameter contract.
+
+    Beginner note:
+        Widget copy is keyed by the same durable names stored in scan history.
+        Rejecting unknown keys and empty text turns a typo into an actionable
+        registry error instead of silently falling back to misleading UI copy.
+    """
+    defaults = dict(metadata.get("default_params", {}))
+    validated: list[dict[str, str]] = []
+    for field_name in ("parameter_labels", "parameter_help"):
+        raw = metadata.get(field_name, {})
+        if not isinstance(raw, dict):
+            raise ScreenerRegistryError(
+                f"{module_name} SCREENER {field_name} must be a dict"
+            )
+        output: dict[str, str] = {}
+        for raw_key, raw_value in raw.items():
+            if not isinstance(raw_key, str):
+                raise ScreenerRegistryError(
+                    f"{module_name} SCREENER {field_name} keys must be strings"
+                )
+            key = raw_key
+            if key not in defaults:
+                raise ScreenerRegistryError(
+                    f"{module_name} SCREENER {field_name} contains undeclared "
+                    f"parameter: {key}"
+                )
+            if not isinstance(raw_value, str) or not raw_value.strip():
+                raise ScreenerRegistryError(
+                    f"{module_name} SCREENER {field_name}[{key}] must be a "
+                    "non-empty string"
+                )
+            output[key] = raw_value.strip()
+        validated.append(output)
+    return validated[0], validated[1]
 
 
 def validate_screener_module(module: ModuleType) -> ScreenerDefinition:
@@ -186,6 +232,9 @@ def validate_screener_module(module: ModuleType) -> ScreenerDefinition:
         # BaseScanner default so downstream cache keys stay well-formed.
         version = BaseScanner.SCREENER_VERSION
 
+    parameter_labels, parameter_help = _parameter_display_metadata(
+        metadata, module.__name__
+    )
     return ScreenerDefinition(
         key=str(metadata["key"]),
         name=str(metadata["name"]),
@@ -201,6 +250,8 @@ def validate_screener_module(module: ModuleType) -> ScreenerDefinition:
         # Absent metadata means "this screener scans candles", which is what
         # every screener written before IPO-011 does.
         requires_candles=bool(metadata.get("requires_candles", True)),
+        parameter_labels=parameter_labels,
+        parameter_help=parameter_help,
     )
 
 

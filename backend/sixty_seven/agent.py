@@ -369,6 +369,11 @@ def _research_payload_has_prompt_injection(payload: dict[str, Any]) -> bool:
     external_evidence = {
         "screener": payload.get("screener"),
         "search_results": payload.get("search_results"),
+        # Error text can originate at Screener.in, SerpAPI, or an intermediary.
+        # It is not application policy, so it belongs behind the same quarantine
+        # even though the evidence validator later rejects error-bearing payloads.
+        # The model sees the tool response *before* that later check runs.
+        "error": payload.get("error"),
     }
     return contains_injection(external_evidence)
 

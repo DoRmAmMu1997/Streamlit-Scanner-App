@@ -199,9 +199,10 @@ technology issuers remain unsupported.
 Pick **IPO Screener** in the screener dropdown and press **Run screener**. It
 runs the same pipeline as the CLI below, needs no Dhan credentials or stock
 universe, and reports one row per IPO issue. The sidebar's *Tune parameters*
-expander maps one checkbox to each stage: `run_ingestion`,
-`download_documents`, `collect_enrichment`, `draft_ai_extractions`,
-`only_active_issues`, `max_issues`.
+expander maps one checkbox to each stage using human-readable labels. **Only
+upcoming IPOs** retains the durable `only_active_issues` storage key but means
+`drhp_filed`, `rhp_filed`, or `open`; **Maximum IPOs per run** stores
+`max_issues`.
 
 `draft_ai_extractions` is **off by default** because the button is
 analyst-accessible and AI extraction spends Claude plan credit. The run blocks
@@ -239,6 +240,9 @@ python -m backend.jobs.run_ipo_screener --force-extract --issue-id 42
 # Re-score existing evidence without filing, download, or web network work.
 python -m backend.jobs.run_ipo_screener \
   --skip-scan --skip-download --skip-enrich --issue-id 42
+
+# Deliberately remove the 25-issue paid-enrichment safety cap.
+python -m backend.jobs.run_ipo_screener --max-enrichment-issues 0
 ```
 
 `--extract` is deliberately opt-in because it spends Claude plan credit.
@@ -285,6 +289,53 @@ The shared provider client streams at most 1 MiB before JSON decoding and caps
 each string field at 2,000 characters. Missing, malformed, or understated
 `Content-Length` does not bypass the streamed limit. Cleanup is always attempted
 without replacing the primary redacted error or cancellation.
+
+### Reading an `ipo_enrichment_failed` warning
+
+The log records the exception's class name and HTTP status, never the provider's
+message (upstream text is untrusted). The class is the diagnosis:
+
+| `error_type` | What happened | What to do |
+|---|---|---|
+| `SerpApiQuotaError` | The plan has no searches left. | Nothing until the quota resets. The run stops enriching and prints `enrichment=quota_exhausted`. Reduce run size or raise the plan. |
+| `SerpApiRateLimitError` | Throttled (HTTP 429, no quota message). | Transient; re-run later, and consider fewer issues per run. A run of consecutive throttles stops the stage and prints `enrichment=rate_limited`. |
+| `SerpApiAuthError` | Key rejected (HTTP 401/403). | The first rejection stops enrichment, prints `enrichment=auth_failed`, and exits nonzero. Fix `SERPAPI_API_KEY`. |
+| `SerpApiSearchError` | Transport failure, timeout, 5xx, oversize or non-JSON body. | Usually transient; check the `status_code` field. |
+
+A query Google simply had no results for is **not** a failure only when the
+known exact message arrives with an HTTP-success status. Substring lookalikes or
+failing statuses keep their typed error. Provider prose is never copied into an
+exception or log; it is used privately for classification and callers receive
+fixed application-owned messages.
+
+**Budget note.** Enrichment issues one search per signal type (8) per issue on
+every run, with no freshness reuse. Both the Streamlit default and headless job
+enrich at most 25 issues (200 searches); download, extraction, and scoring still
+cover the complete selected set. The totals line reports
+`enrichment_skipped_budget=N`. Pass `--max-enrichment-issues 0` only when an
+operator deliberately accepts an uncapped run. This remains a per-run guard, so
+size schedules and other SerpAPI consumers against the monthly plan too. Only
+issues whose offer has not finished are selected by default — see "Which issues
+a run touches" below.
+
+### Which issues a run touches
+
+A run processes issues in `drhp_filed`, `rhp_filed`, and `open` only. SEBI's
+final-offer filing maps to `closed`, and that document is filed *after* the issue
+completes, so scanning those spends quota on a decision nobody can act on. Listed
+issues are archived history and are likewise skipped.
+
+This is a lifecycle-stage rule, not a date comparison: the issue row carries no
+listing date, and `open_date`/`close_date` are never populated by ingestion.
+
+Naming issues explicitly overrides the filter — `--issue-id N` still reaches a
+finished issue, so it can be deliberately re-downloaded, re-extracted, or
+re-scored after a rule change. `--include-finished` lifts the filter for a whole
+run, which is the way to retry a failed download or back-apply a scoring change
+across every finished issue without enumerating ids by hand.
+
+Each run reports `skipped_finished=N` in its totals line, so a drop in the
+evaluated count is never silent.
 
 Scoring reads issue, approved profile, ratio receipts, subscription, and
 enrichment as one immutable snapshot. The semantic fingerprint excludes

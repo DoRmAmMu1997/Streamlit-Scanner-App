@@ -31,7 +31,7 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, TextIO
+from typing import Any, Final, TextIO
 
 from backend.ipo.agents.financial_extractor import (
     IpoExtractionErrorReceipt,
@@ -70,14 +70,35 @@ _TYPE_TOKENS = {
     INSUFFICIENT_VERIFIED_DATA: "insufficient_verified_data",
 }
 
-# Issues in these states can still change (new filings, demand, listings), so
-# enrichment queries and re-scores target them; listed issues stay archived.
-ACTIVE_ISSUE_STATUSES = (
+# The issue states worth spending a run on: the offer has not finished yet, so
+# fresh evidence can still change the verdict.
+#
+# Beginner note — why ``closed`` is NOT here:
+#     SEBI's filing categories map DRHP -> drhp_filed, RHP -> rhp_filed, and
+#     final offer -> ``closed`` (see backend/ipo/sources/sebi.py). A final offer
+#     document is filed *after* the issue completes, so ``closed`` means "this
+#     IPO is over", and scanning it spends a hard-capped SerpAPI quota on a
+#     decision nobody can act on any more.
+#
+#     There is deliberately no date comparison here. The issue row carries no
+#     listing date at all, and ``open_date``/``close_date`` are never populated
+#     by ingestion, so lifecycle stage is the only signal that actually exists.
+#
+#     One consequence to leave alone: ``_weak_qib_demand_near_close`` judges
+#     issues whose status is OPEN or CLOSED, so its evidence stops refreshing
+#     for closed issues. That is correct — the vocabulary overloads ``closed``,
+#     and the one produced by ingestion means "final offer filed", long past
+#     the book close that flag is about.
+UPCOMING_ISSUE_STATUSES = (
     IpoStatus.DRHP_FILED,
     IpoStatus.RHP_FILED,
     IpoStatus.OPEN,
-    IpoStatus.CLOSED,
 )
+
+# A default headless run must fit comfortably inside the documented 250-search
+# plan. Eight fixed signals x 25 issues = 200 calls, leaving room for manual or
+# 67-ka research. This is a per-run safety rail, not a monthly quota ledger.
+DEFAULT_MAX_ENRICHMENT_ISSUES: Final = 25
 
 
 @dataclass(frozen=True)
@@ -124,6 +145,19 @@ class IpoScreenerJobOutcome:
     enrichment_collected: int = 0
     enrichment_failed: int = 0
     enrichment_skipped_no_key: bool = False
+    # The provider refused further work for the whole run. Like a missing key
+    # this is a configuration/quota state rather than a fault, so it is
+    # reported but never counted toward the exit code.
+    enrichment_quota_exhausted: bool = False
+    enrichment_rate_limited: bool = False
+    # Invalid credentials are actionable configuration failure. The stage stops
+    # after the first rejection and the normal ``enrichment_failed`` counter
+    # keeps the process exit nonzero for schedulers.
+    enrichment_auth_failed: bool = False
+    # Issues omitted only from the paid search stage by the per-run budget.
+    # They still proceed through download, extraction, and deterministic score.
+    enrichment_skipped_budget: int = 0
+    issues_skipped_finished: int = 0
     proposals_created: int = 0
     proposals_skipped: int = 0
     proposals_failed: int = 0
@@ -135,9 +169,11 @@ class IpoScreenerJobOutcome:
         """Return nonzero when any stage or issue genuinely failed.
 
         Beginner note:
-            Missing optional SerpAPI configuration and insufficient verified
-            IPO data are expected states, so neither is counted as a process
-            failure.
+            Missing optional SerpAPI configuration, an exhausted search quota,
+            a provider throttle, and insufficient verified IPO data are all
+            expected states, so none is counted as a process failure. A spent
+            quota would otherwise alarm a scheduler every run for the rest of
+            the billing period, indistinguishably from a real outage.
         """
         return int(
             self.fatal
@@ -227,6 +263,8 @@ def run_ipo_screener(
     skip_download: bool = False,
     skip_enrich: bool = False,
     skip_score: bool = False,
+    include_finished: bool = False,
+    max_enrichment_issues: int | None = DEFAULT_MAX_ENRICHMENT_ISSUES,
     extract: bool = False,
     force_extract: bool = False,
     issue_ids: Sequence[int] | None = None,
@@ -252,6 +290,16 @@ def run_ipo_screener(
     lets that caller invoke the pipeline again with the selection it could only
     compute once the new filings existed.
 
+    ``include_finished`` disables the upcoming-only filter for a whole run. It
+    is the mechanism-level escape hatch: without it, a finished issue whose
+    prospectus download failed could only ever be retried by naming its id by
+    hand, and back-applying a scoring change to every closed issue would mean
+    enumerating them all.
+
+    ``max_enrichment_issues`` limits only the paid web-search stage. ``None``
+    explicitly removes that per-run cap; downloads, optional extraction, and
+    scoring always keep the complete selected issue set.
+
     Beginner note:
         Stage isolation is per unit of work (one document, one issue, one
         query batch). A malformed PDF or one flaky search can therefore never
@@ -259,6 +307,8 @@ def run_ipo_screener(
         the summary and a nonzero exit code at the end.
     """
     out = output or sys.stdout
+    if max_enrichment_issues is not None and max_enrichment_issues < 0:
+        raise ValueError("max_enrichment_issues must be non-negative or None.")
     try:
         if ensure_schema() is False:
             raise RuntimeError("database schema bootstrap failed")
@@ -281,6 +331,7 @@ def run_ipo_screener(
         skip_download=skip_download,
         skip_enrich=skip_enrich,
         skip_score=skip_score,
+        include_finished=include_finished,
         extract=extract,
         force_extract=force_extract,
     )
@@ -292,9 +343,25 @@ def run_ipo_screener(
         )
 
     issues = issue_lister(session_factory=session_factory)
-    if issue_ids:
+    issues_skipped_finished = 0
+    # ``None`` means "no explicit selection, apply the default filter"; an empty
+    # list means "explicitly nothing". Testing truthiness would collapse those
+    # two into each other and turn a deliberately empty selection into a run
+    # over every upcoming issue -- the worst available reading.
+    if issue_ids is not None:
+        # An explicitly named set is an operator decision and wins outright, so
+        # a finished issue can still be re-downloaded, re-extracted, or
+        # re-scored on purpose. Without this the documented
+        # ``--force-extract --issue-id N`` workflow could never reach one.
         wanted = set(issue_ids)
         issues = [issue for issue in issues if issue.id in wanted]
+    elif not include_finished:
+        # Filter once, here, so every stage below inherits it: downloads,
+        # enrichment, extraction, and scoring all skip finished issues
+        # together rather than each stage deciding for itself.
+        kept = [issue for issue in issues if issue.status in UPCOMING_ISSUE_STATUSES]
+        issues_skipped_finished = len(issues) - len(kept)
+        issues = kept
 
     downloads_attempted = 0
     downloads_failed = 0
@@ -326,10 +393,21 @@ def run_ipo_screener(
     enrichment_collected = 0
     enrichment_failed = 0
     enrichment_skipped_no_key = False
+    enrichment_quota_exhausted = False
+    enrichment_rate_limited = False
+    enrichment_auth_failed = False
+    enrichment_skipped_budget = 0
     if not skip_enrich:
-        for issue in issues:
-            if issue.status not in ACTIVE_ISSUE_STATUSES:
-                continue
+        enrichment_issues = (
+            issues
+            if max_enrichment_issues is None
+            else issues[:max_enrichment_issues]
+        )
+        enrichment_skipped_budget = len(issues) - len(enrichment_issues)
+        for issue in enrichment_issues:
+            # No status check here: ``issues`` was already narrowed to upcoming
+            # offers above. Re-checking would also override an explicitly named
+            # issue, which is the one case an operator has said they want.
             # One issue's search failure must not stop the sibling batches.
             try:
                 enrichment = enricher(
@@ -360,6 +438,44 @@ def run_ipo_screener(
                 )
                 break
             enrichment_collected += len(enrichment.signals)
+            if enrichment.auth_failed:
+                # Unlike an intentionally absent optional key, a supplied but
+                # rejected credential is a real configuration failure. Count it
+                # once so schedulers alert, then stop because every later call
+                # would be refused identically.
+                enrichment_auth_failed = True
+                enrichment_failed += 1
+                print(
+                    "[ipo-screener] enrichment=auth_failed "
+                    "(SERPAPI_API_KEY was rejected; continuing without web signals)",
+                    file=out,
+                    flush=True,
+                )
+                break
+            if enrichment.quota_exhausted or enrichment.rate_limited:
+                # Whole-run conditions, like the missing key above: the
+                # provider is refusing further work, so every remaining issue
+                # would be refused the same way. Stopping turns ~20 minutes of
+                # identical warnings into one actionable line.
+                #
+                # Neither counts toward enrichment_failed. A spent quota is a
+                # configuration state, not a fault, and counting it would drive
+                # the exit code nonzero on every scheduled run for the rest of
+                # the billing period.
+                enrichment_quota_exhausted = enrichment.quota_exhausted
+                enrichment_rate_limited = enrichment.rate_limited
+                reason = (
+                    "quota_exhausted (the SerpAPI plan has no searches left"
+                    if enrichment.quota_exhausted
+                    else "rate_limited (the provider is throttling this account"
+                )
+                print(
+                    f"[ipo-screener] enrichment={reason}; continuing without "
+                    "web signals)",
+                    file=out,
+                    flush=True,
+                )
+                break
             if enrichment.error_type is not None:
                 enrichment_failed += 1
 
@@ -432,6 +548,11 @@ def run_ipo_screener(
         enrichment_collected=enrichment_collected,
         enrichment_failed=enrichment_failed,
         enrichment_skipped_no_key=enrichment_skipped_no_key,
+        enrichment_quota_exhausted=enrichment_quota_exhausted,
+        enrichment_rate_limited=enrichment_rate_limited,
+        enrichment_auth_failed=enrichment_auth_failed,
+        enrichment_skipped_budget=enrichment_skipped_budget,
+        issues_skipped_finished=issues_skipped_finished,
         proposals_created=proposals_created,
         proposals_skipped=proposals_skipped,
         proposals_failed=proposals_failed,
@@ -452,6 +573,8 @@ def run_ipo_screener(
         f"skipped_unchanged={totals['skipped_unchanged']} "
         f"insufficient={totals['insufficient']} failed={totals['failed']} "
         f"downloads_failed={downloads_failed} proposals={proposals_created} "
+        f"enrichment_skipped_budget={enrichment_skipped_budget} "
+        f"skipped_finished={issues_skipped_finished} "
         f"exit_code={result.exit_code}",
         file=out,
         flush=True,
@@ -468,6 +591,11 @@ def run_ipo_screener(
         enrichment_collected=enrichment_collected,
         enrichment_failed=enrichment_failed,
         enrichment_skipped_no_key=enrichment_skipped_no_key,
+        enrichment_quota_exhausted=enrichment_quota_exhausted,
+        enrichment_rate_limited=enrichment_rate_limited,
+        enrichment_auth_failed=enrichment_auth_failed,
+        enrichment_skipped_budget=enrichment_skipped_budget,
+        issues_skipped_finished=issues_skipped_finished,
         proposals_created=proposals_created,
         proposals_failed=proposals_failed,
         exit_code=result.exit_code,
@@ -481,6 +609,17 @@ def _parse_iso_date(value: str) -> dt.date:
         return dt.date.fromisoformat(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError("must be an ISO date YYYY-MM-DD") from exc
+
+
+def _parse_non_negative_int(value: str) -> int:
+    """Parse a CLI count while reserving zero for the documented uncapped mode."""
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a non-negative integer") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return parsed
 
 
 def main(
@@ -535,6 +674,26 @@ def main(
         help="Limit downloads/enrichment/extraction/scoring to this issue id "
         "(repeatable).",
     )
+    parser.add_argument(
+        "--include-finished",
+        action="store_true",
+        help=(
+            "Process finished IPOs too (closed/listed). Off by default because "
+            "enrichment spends a capped search quota on offers nobody can act "
+            "on; use it to retry a failed download or re-score history."
+        ),
+    )
+    parser.add_argument(
+        "--max-enrichment-issues",
+        type=_parse_non_negative_int,
+        default=DEFAULT_MAX_ENRICHMENT_ISSUES,
+        metavar="N",
+        help=(
+            "Limit paid SerpAPI enrichment to the first N selected issues "
+            f"(default {DEFAULT_MAX_ENRICHMENT_ISSUES}; 0 disables the cap). "
+            "Other stages still process the complete selection."
+        ),
+    )
     parser.add_argument("--to-date", type=_parse_iso_date, default=None)
     args = parser.parse_args(argv)
 
@@ -543,6 +702,12 @@ def main(
         skip_scan=args.skip_scan,
         skip_download=args.skip_download,
         skip_enrich=args.skip_enrich,
+        include_finished=args.include_finished,
+        max_enrichment_issues=(
+            None
+            if args.max_enrichment_issues == 0
+            else args.max_enrichment_issues
+        ),
         extract=args.extract or args.force_extract,
         force_extract=args.force_extract,
         issue_ids=args.issue_ids,

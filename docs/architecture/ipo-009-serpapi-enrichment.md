@@ -2,9 +2,9 @@
 
 ## Decision
 
-`backend/ipo/sources/enrichment.py` runs seven fixed discovery query
+`backend/ipo/sources/enrichment.py` runs eight fixed discovery query
 templates (GMP, news, promoter reputation, litigation red flags, anchor
-commentary, brokerage reviews, peer discovery) through the shared
+commentary, brokerage reviews, peer discovery, subscription demand) through the shared
 `backend.sixty_seven.search_client.SerpApiClient` and persists one
 `ipo_enrichment_signals` row per type. The adapter lives under
 `backend/ipo/sources/` — the only reviewed network zone in the IPO domain —
@@ -50,6 +50,53 @@ follow-up, not part of this change.
 - Rows are stamped `confidence='low'` and
   `source_policy='serpapi-low-confidence-v2'`, and each batch
   persists atomically per issue with per-type query isolation.
+
+## Failure taxonomy (IPO-012)
+
+Callers log an exception's *class name* and never its message, because a
+provider message is untrusted upstream text. A single flat `SerpApiSearchError`
+therefore made every failure read identically: an exhausted plan looked exactly
+like a two-second network blip. The client now raises subclasses — all still
+inheriting `SerpApiSearchError`, so existing handlers are unaffected:
+
+| Type | Condition | Nature |
+|---|---|---|
+| `SerpApiQuotaError` | body says the account is out of searches | permanent for the billing period |
+| `SerpApiRateLimitError` | HTTP 429 with no quota wording | transient |
+| `SerpApiAuthError` | HTTP 401 / 403 | configuration fault |
+| `SerpApiSearchError` | transport, timeout, 5xx, oversize, non-JSON | catch-all |
+
+Every instance raised *from a response* carries `status_code`, which is logged
+alongside the class — including one whose body was not JSON, since an error page
+from a CDN or WAF is exactly the case the taxonomy has to survive. A transport
+failure raised before any response exists has no status, and reports `None`. A
+status code is safe metadata; the response body is not, and stays private. The
+body may choose an exception subtype, but callers see only fixed
+application-owned messages. The 67-ka consumer also scans any error field for
+prompt injection as a second boundary.
+
+Two behaviours follow from the taxonomy:
+
+- **A no-results response is not a failure.** SerpAPI answers a query Google had
+  no coverage for with HTTP 200 and an `error` field. Only that exact normalized
+  message on an HTTP-success response returns an empty list, so the signal
+  persists an honest empty observation instead of being dropped. Substring
+  lookalikes and 401/403/429/5xx responses retain their typed failures.
+- **The body is read before the status is checked.** Plan exhaustion arrives as
+  HTTP 429 *with* a JSON body, so raising on the status first discarded the only
+  field that explains it. On quota exhaustion the collector stops the batch and
+  the job stops enriching, rather than issuing hundreds of calls that are all
+  going to be refused.
+- **Rejected credentials stop immediately.** A 401/403 is permanent until the
+  key changes, so the first rejection stops the issue batch and every later
+  issue. The job reports `enrichment=auth_failed` and exits nonzero so scheduled
+  automation alerts on the misconfiguration.
+
+Headless orchestration enriches at most 25 issues by default (200 searches at
+eight signals each) while download, extraction, and scoring continue across the
+full selection. `--max-enrichment-issues 0` is the explicit uncapped override;
+the emitted `enrichment_skipped_budget` count makes the omission visible. This
+is a per-run safety rail, not a cross-run monthly quota ledger.
 
 ## Testing
 
