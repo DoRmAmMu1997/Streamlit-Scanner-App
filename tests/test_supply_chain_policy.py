@@ -246,6 +246,31 @@ def test_runtime_requirements_install_the_documented_postgres_driver():
     assert re.search(r"^psycopg\[binary\]$", text, flags=re.IGNORECASE | re.MULTILINE)
 
 
+def test_developer_tools_stay_out_of_the_runtime_requirements():
+    """Verification tooling must not ship inside the production image.
+
+    Beginner note (SEC-004):
+    `Dockerfile` installs `requirements.txt` and nothing else, so every name in
+    that file lands in the deployed container. `pytest` was listed there under a
+    "Test runner." heading as well as in `requirements-dev.txt`, so the test
+    runner and its dependency tree were shipped to production for no benefit.
+    Each of the names below has a legitimate home in `requirements-dev.txt`; the
+    point of this guard is that they only have one home.
+    """
+    runtime = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    dev = (ROOT / "requirements-dev.txt").read_text(encoding="utf-8")
+
+    dev_only = ("pytest", "pytest-cov", "ruff", "bandit", "pip-audit", "mypy", "pre-commit")
+    for name in dev_only:
+        pattern = rf"^{re.escape(name)}(?:\[[^\]]+\])?\s*$"
+        assert not re.search(pattern, runtime, flags=re.IGNORECASE | re.MULTILINE), (
+            f"{name} is a developer tool and must not be in requirements.txt"
+        )
+        assert re.search(pattern, dev, flags=re.IGNORECASE | re.MULTILINE), (
+            f"{name} should still be declared in requirements-dev.txt"
+        )
+
+
 def test_readme_documents_local_quality_and_security_commands():
     """The README should teach users how to reproduce the CI checks locally."""
     text = (ROOT / "README.md").read_text(encoding="utf-8")
