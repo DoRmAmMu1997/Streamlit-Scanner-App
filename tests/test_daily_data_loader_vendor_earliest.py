@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import cast
 
 import pandas as pd
+import pytest
 
 from backend.daily_data_loader import DailyDataLoader
 from backend.dhan_client import DhanDataClient
@@ -74,7 +75,10 @@ class ListedLateClient:
         # Monthly bars keep the fixture small; only the date bounds matter. The
         # listing date itself is forced in because "MS" snaps to month starts,
         # and the first bar being exactly the listing date is the whole point.
-        dates = _month_series(self.listed_on, self.through)
+        first_returned_date = max(self.listed_on, from_date)
+        if first_returned_date > self.through:
+            return pd.DataFrame()
+        dates = _month_series(first_returned_date, self.through)
         return pd.DataFrame(
             {
                 "timestamp": dates,
@@ -379,3 +383,219 @@ def test_a_recent_marker_is_honoured_against_the_clock(tmp_path: Path):
     assert loader._vendor_earliest_for(
         ROW["symbol"], ROW["security_id"], HISTORY_START
     ) == LISTED_ON
+
+
+# ---------------------------------------------------------------------------
+# Marker hardening: evidence is useful only when it is self-consistent
+# ---------------------------------------------------------------------------
+
+
+def test_a_future_dated_marker_fails_open_to_a_backfill(tmp_path: Path):
+    """Future evidence must not certify a cache before that day has arrived.
+
+    Beginner note:
+    The marker is only an optimisation. Treating a future stamp as fresh would
+    let a clock error or manually edited sidecar hide missing history, whereas
+    rejecting it merely asks the vendor again.
+    """
+    client = ListedLateClient()
+    loader = _loader(tmp_path, client)
+    _write_cache(loader, first=LISTED_ON, last=TODAY)
+    loader._write_vendor_earliest(
+        ROW["symbol"], ROW["security_id"], requested_from=HISTORY_START,
+        earliest_available=LISTED_ON, recorded_on=TODAY + timedelta(days=1),
+    )
+
+    _frame, from_cache = loader.get_daily_history(
+        ROW, start_date=HISTORY_START, end_date=TODAY
+    )
+
+    assert from_cache is False
+    assert client.calls == [(HISTORY_START, TODAY)]
+
+
+def test_invalid_utf8_marker_fails_open_to_a_backfill(tmp_path: Path):
+    """Undecodable marker bytes must trigger a safe refetch, not escape parsing."""
+    client = ListedLateClient()
+    loader = _loader(tmp_path, client)
+    _write_cache(loader, first=LISTED_ON, last=TODAY)
+    _marker(loader).write_bytes(b"\xff")
+
+    _frame, from_cache = loader.get_daily_history(
+        ROW, start_date=HISTORY_START, end_date=TODAY
+    )
+
+    assert from_cache is False
+    assert client.calls == [(HISTORY_START, TODAY)]
+
+
+def test_a_marker_must_match_the_cached_first_bar_to_avoid_a_backfill(tmp_path: Path):
+    """Contradictory cache and marker starts must trigger a refetch."""
+    client = ListedLateClient()
+    loader = _loader(tmp_path, client)
+    _write_cache(loader, first=LISTED_ON - timedelta(days=1), last=TODAY)
+    loader._write_vendor_earliest(
+        ROW["symbol"], ROW["security_id"], requested_from=HISTORY_START,
+        earliest_available=LISTED_ON, recorded_on=TODAY,
+    )
+
+    _frame, from_cache = loader.get_daily_history(
+        ROW, start_date=HISTORY_START, end_date=TODAY
+    )
+
+    assert from_cache is False
+    assert client.calls == [(HISTORY_START, TODAY)]
+
+
+def test_noncanonical_non_string_or_impossible_marker_fields_are_rejected(tmp_path: Path):
+    """The parser accepts only a coherent object with canonical ISO dates."""
+    loader = _loader(tmp_path, ListedLateClient())
+    invalid_payloads = [
+        {
+            "requested_from": 20160824,
+            "earliest_available": LISTED_ON.isoformat(),
+            "recorded_on": TODAY.isoformat(),
+        },
+        {
+            "requested_from": "20160824",
+            "earliest_available": LISTED_ON.isoformat(),
+            "recorded_on": TODAY.isoformat(),
+        },
+        {
+            "requested_from": HISTORY_START.isoformat(),
+            "earliest_available": HISTORY_START.isoformat(),
+            "recorded_on": TODAY.isoformat(),
+        },
+        {
+            "requested_from": HISTORY_START.isoformat(),
+            "earliest_available": (TODAY + timedelta(days=1)).isoformat(),
+            "recorded_on": TODAY.isoformat(),
+        },
+    ]
+
+    for payload in invalid_payloads:
+        _marker(loader).write_text(json.dumps(payload), encoding="utf-8")
+
+        assert loader._vendor_earliest_for(
+            ROW["symbol"], ROW["security_id"], HISTORY_START
+        ) is None
+
+
+def test_a_fresh_deeper_marker_survives_a_shallower_qualifying_probe(tmp_path: Path):
+    """A shallower response cannot replace or renew fresh stronger evidence."""
+    loader = _loader(tmp_path, ListedLateClient())
+    loader._write_vendor_earliest(
+        ROW["symbol"], ROW["security_id"], requested_from=HISTORY_START,
+        earliest_available=LISTED_ON, recorded_on=TODAY - timedelta(days=2),
+    )
+    original = _marker(loader).read_text(encoding="utf-8")
+    shallow_start = HISTORY_START + timedelta(days=100)
+    shallow_candles = pd.DataFrame(
+        {"timestamp": _month_series(date(2020, 1, 1), TODAY)}
+    )
+
+    loader._record_vendor_earliest(
+        ROW["symbol"], ROW["security_id"], requested_from=shallow_start,
+        candles=shallow_candles,
+    )
+
+    assert _marker(loader).read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize(
+    "recorded_on",
+    [TODAY - timedelta(days=30), TODAY + timedelta(days=1)],
+    ids=["expired", "future-dated"],
+)
+def test_expired_or_future_deeper_marker_does_not_block_a_shallower_probe(
+    tmp_path: Path, recorded_on: date
+):
+    """Non-fresh deeper evidence must not suppress a new shallower answer.
+
+    Beginner note:
+    A deeper marker is stronger only while its 30-day wall-clock TTL is valid.
+    Once it is expired or dated in the future, keeping it would let old or
+    clock-skewed evidence block a new probe forever. The new probe therefore
+    replaces it, just as it would when no marker existed.
+    """
+    loader = _loader(tmp_path, ListedLateClient())
+    loader._write_vendor_earliest(
+        ROW["symbol"], ROW["security_id"], requested_from=HISTORY_START,
+        earliest_available=LISTED_ON, recorded_on=recorded_on,
+    )
+    shallow_start = HISTORY_START + timedelta(days=100)
+    shallow_candles = pd.DataFrame(
+        {"timestamp": _month_series(date(2020, 1, 1), TODAY)}
+    )
+
+    loader._record_vendor_earliest(
+        ROW["symbol"], ROW["security_id"], requested_from=shallow_start,
+        candles=shallow_candles,
+    )
+
+    payload = json.loads(_marker(loader).read_text(encoding="utf-8"))
+    assert payload["requested_from"] == shallow_start.isoformat()
+    assert payload["earliest_available"] == date(2020, 1, 1).isoformat()
+    assert payload["recorded_on"] == TODAY.isoformat()
+
+
+def test_a_full_equally_deep_probe_removes_obsolete_marker(tmp_path: Path):
+    """A response reaching the requested start makes its old marker obsolete."""
+    loader = _loader(tmp_path, ListedLateClient())
+    loader._write_vendor_earliest(
+        ROW["symbol"], ROW["security_id"], requested_from=HISTORY_START,
+        earliest_available=LISTED_ON, recorded_on=TODAY,
+    )
+    complete_candles = pd.DataFrame(
+        {"timestamp": _month_series(HISTORY_START, TODAY)}
+    )
+
+    loader._record_vendor_earliest(
+        ROW["symbol"], ROW["security_id"], requested_from=HISTORY_START,
+        candles=complete_candles,
+    )
+
+    assert not _marker(loader).exists()
+
+
+def test_marker_age_29_days_is_fresh_but_age_30_days_is_rejected(tmp_path: Path):
+    """The 30-day wall-clock TTL is inclusive at its expiration boundary."""
+    loader = _loader(tmp_path, ListedLateClient())
+    loader._write_vendor_earliest(
+        ROW["symbol"], ROW["security_id"], requested_from=HISTORY_START,
+        earliest_available=LISTED_ON, recorded_on=TODAY - timedelta(days=29),
+    )
+
+    assert loader._vendor_earliest_for(
+        ROW["symbol"], ROW["security_id"], HISTORY_START
+    ) == LISTED_ON
+
+    loader._write_vendor_earliest(
+        ROW["symbol"], ROW["security_id"], requested_from=HISTORY_START,
+        earliest_available=LISTED_ON, recorded_on=TODAY - timedelta(days=30),
+    )
+
+    assert loader._vendor_earliest_for(
+        ROW["symbol"], ROW["security_id"], HISTORY_START
+    ) is None
+
+
+def test_listed_late_client_respects_the_requested_start_and_end_dates() -> None:
+    """The fixture must model a bounded vendor response, not a full cache read."""
+    client = ListedLateClient()
+    requested_start = TODAY - timedelta(days=10)
+    frame = client.fetch_daily_candles(from_date=requested_start, to_date=TODAY)
+
+    assert frame["timestamp"].min().date() == requested_start
+    assert frame["timestamp"].max().date() == TODAY
+
+
+def test_listed_late_client_returns_no_rows_after_its_configured_through_date() -> None:
+    """A request beginning after the fixture's vendor horizon is empty evidence."""
+    client = ListedLateClient()
+
+    frame = client.fetch_daily_candles(
+        from_date=TODAY + timedelta(days=1), to_date=TODAY + timedelta(days=2)
+    )
+
+    assert frame.empty

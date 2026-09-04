@@ -57,6 +57,79 @@ DEFAULT_HISTORY_YEARS_BACK = 10
 VENDOR_EARLIEST_RECHECK_DAYS = 30
 
 
+@dataclass(frozen=True)
+class _VendorEarliestEvidence:
+    """Validated `.firstbar` evidence that bounds a vendor's history.
+
+    Beginner note:
+    This small immutable object separates untrusted JSON on disk from the dates
+    the cache-coverage decision is allowed to trust. Once constructed, no caller
+    can accidentally change one date and leave the chronology inconsistent.
+    """
+
+    requested_from: date
+    earliest_available: date
+    recorded_on: date
+
+
+def _read_vendor_earliest_evidence(path: Path) -> _VendorEarliestEvidence | None:
+    """Read one coherent `.firstbar` sidecar, or return no evidence.
+
+    The sidecar is deliberately fail-open: malformed content cannot certify an
+    incomplete cache, so callers treat it as absent and refetch if necessary.
+    Its three dates must use canonical ``YYYY-MM-DD`` form and establish the
+    exact chronology ``requested_from < earliest_available <= recorded_on``.
+    Unknown JSON object fields are ignored to allow future metadata additions.
+
+    Args:
+        path: Sidecar path next to the daily-cache parquet file.
+
+    Returns:
+        Immutable evidence when all required fields are valid; otherwise ``None``.
+
+    Beginner note:
+    ``date.fromisoformat`` also accepts compact and ISO-week strings. Checking
+    ``isoformat()`` after parsing prevents those alternate spellings from becoming
+    an undocumented on-disk format that future readers might interpret differently.
+    """
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    requested_from = payload.get("requested_from")
+    earliest_available = payload.get("earliest_available")
+    recorded_on = payload.get("recorded_on")
+    if (
+        not isinstance(requested_from, str)
+        or not isinstance(earliest_available, str)
+        or not isinstance(recorded_on, str)
+    ):
+        return None
+
+    try:
+        parsed_requested_from = date.fromisoformat(requested_from)
+        parsed_earliest_available = date.fromisoformat(earliest_available)
+        parsed_recorded_on = date.fromisoformat(recorded_on)
+    except ValueError:
+        return None
+    if (
+        parsed_requested_from.isoformat() != requested_from
+        or parsed_earliest_available.isoformat() != earliest_available
+        or parsed_recorded_on.isoformat() != recorded_on
+    ):
+        return None
+    if not parsed_requested_from < parsed_earliest_available <= parsed_recorded_on:
+        return None
+    return _VendorEarliestEvidence(
+        requested_from=parsed_requested_from,
+        earliest_available=parsed_earliest_available,
+        recorded_on=parsed_recorded_on,
+    )
+
+
 def history_start_date(
     years_back: int = DEFAULT_HISTORY_YEARS_BACK, today: date | None = None
 ) -> date:
@@ -235,15 +308,16 @@ def _cache_reaches_back_far_enough(
 
     ``vendor_earliest`` is the earliest bar the vendor actually served for a probe
     that reached at least as far back as this request (see
-    ``DailyDataLoader._vendor_earliest_for``). When the cache already starts at or
-    before that bar, it is as complete as it can ever be, so asking again is pure
-    waste. ``None`` means we have no such evidence and the strict rule applies —
-    which keeps an interrupted prefetch's partial file being refetched, since
-    there the vendor genuinely does have the missing years.
+    ``DailyDataLoader._vendor_earliest_for``). It must match the cache's literal
+    first date: accepting an earlier or later cache start would let contradictory
+    evidence certify an incomplete or corrupted cache. ``None`` means we have no
+    such evidence and the strict rule applies — which keeps an interrupted
+    prefetch's partial file being refetched, since there the vendor genuinely has
+    the missing years.
     """
     if first_date <= requested_start:
         return True
-    return vendor_earliest is not None and first_date <= vendor_earliest
+    return vendor_earliest is not None and first_date == vendor_earliest
 
 
 def _date_bounds(candles: pd.DataFrame) -> tuple[date | None, date | None]:
@@ -483,22 +557,29 @@ class DailyDataLoader:
 
         Any read or parse problem returns ``None``, so a corrupt marker can only
         ever cost an extra request — never hide history that really is missing.
+
+        Args:
+            symbol: Instrument symbol used to locate the sidecar.
+            security_id: Vendor identifier paired with the symbol in cache paths.
+            requested_start: Earliest date the current caller needs covered.
+
+        Returns:
+            The qualifying earliest available date, or ``None`` for no authority.
+
+        Beginner note:
+        A marker that is too new in the future is no more trustworthy than a stale
+        one: both have a clock relationship that cannot describe a completed
+        vendor request, so the cache takes the safe (refetch) path.
         """
-        path = self.first_bar_path(symbol, security_id)
-        if not path.exists():
+        evidence = _read_vendor_earliest_evidence(self.first_bar_path(symbol, security_id))
+        if evidence is None:
             return None
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            requested_from = _coerce_date(str(payload["requested_from"]))
-            earliest_available = _coerce_date(str(payload["earliest_available"]))
-            recorded_on = _coerce_date(str(payload["recorded_on"]))
-        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        age_days = (self.today_func() - evidence.recorded_on).days
+        if age_days < 0 or age_days >= VENDOR_EARLIEST_RECHECK_DAYS:
             return None
-        if (self.today_func() - recorded_on).days >= VENDOR_EARLIEST_RECHECK_DAYS:
+        if evidence.requested_from > requested_start:
             return None
-        if requested_from > requested_start:
-            return None
-        return earliest_available
+        return evidence.earliest_available
 
     def _write_vendor_earliest(
         self,
@@ -535,21 +616,52 @@ class DailyDataLoader:
     ) -> None:
         """Record the vendor's earliest bar when it fell short of what we asked for.
 
-        Called after any full-window download. A response that *does* reach the
-        requested start teaches us nothing worth storing, and an empty response is
-        no evidence at all, so both are skipped.
+        Called after any full-window download. Empty or invalid frames are
+        inconclusive and leave an existing marker untouched. A shallower probe
+        cannot replace or renew fresh deeper evidence. Expired or future-dated
+        evidence is not authoritative and may be replaced. An equally
+        deep/deeper response that reaches the requested start invalidates its
+        old marker; otherwise a later first bar becomes new evidence.
 
         ``recorded_on`` is stamped from the injected wall clock rather than from the
         caller's requested window, so the marker ages in real time whatever range
         was asked for.
+
+        Args:
+            symbol: Instrument symbol used to locate the sidecar.
+            security_id: Vendor identifier paired with the symbol in cache paths.
+            requested_from: Inclusive beginning of the completed vendor probe.
+            candles: Raw non-empty response used to learn its first bar.
+
+        Beginner note:
+        The depth comparison is between what the vendor was asked, not what it
+        returned. A late-listed stock can return the same first bar for many
+        windows, but only the request that began furthest back proves the stronger
+        "nothing exists earlier" statement.
         """
+        start = _coerce_date(requested_from)
         if candles.empty:
             return
         first_date, _last_date = _date_bounds(candles)
         if first_date is None:
             return
-        start = _coerce_date(requested_from)
+
+        path = self.first_bar_path(symbol, security_id)
+        existing = _read_vendor_earliest_evidence(path)
+        # A probe beginning later asks less of the vendor. Preserve evidence
+        # collected by a deeper request only while its wall-clock TTL is valid;
+        # expired/future-dated evidence is not authoritative and must not block
+        # this fresh answer from replacing it.
+        if existing is not None and existing.requested_from < start:
+            age_days = (self.today_func() - existing.recorded_on).days
+            if 0 <= age_days < VENDOR_EARLIEST_RECHECK_DAYS:
+                return
         if first_date <= start:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                # The marker is optional, so a locked sidecar must not fail a fetch.
+                logger.warning("Could not remove obsolete daily-cache first-bar marker for %s", symbol)
             return
         self._write_vendor_earliest(
             symbol,
