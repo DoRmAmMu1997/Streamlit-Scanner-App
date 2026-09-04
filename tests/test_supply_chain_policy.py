@@ -114,6 +114,55 @@ def test_qual_007_mypy_ignore_errors_guard_rejects_new_modules():
         _assert_qual_007_ignore_errors_only_shrinks(expanded)
 
 
+def _ruff_pin_from_constraints() -> str:
+    """Return the exact ruff version CI installs, e.g. ``0.16.3``."""
+    text = (ROOT / "constraints.txt").read_text(encoding="utf-8")
+    match = re.search(r"^ruff==(?P<version>[^\s#]+)\s*$", text, flags=re.MULTILINE)
+    assert match is not None, "constraints.txt must pin ruff with an exact =="
+    return match.group("version")
+
+
+def _ruff_pre_commit_rev(config: dict) -> str:
+    """Return the rev the local ruff hook is pinned to, without its ``v``."""
+    repos = [
+        repository
+        for repository in config["repos"]
+        if repository["repo"].rstrip("/").endswith("astral-sh/ruff-pre-commit")
+    ]
+    assert len(repos) == 1, "expected exactly one ruff-pre-commit repo entry"
+    rev = str(repos[0]["rev"])
+    assert rev.startswith("v"), f"expected a vX.Y.Z tag, got {rev!r}"
+    return rev[1:]
+
+
+def test_pre_commit_ruff_rev_matches_the_constraints_pin():
+    """The commit hook must lint with the same ruff version CI installs.
+
+    Beginner note (QUAL-008):
+    `.pre-commit-config.yaml` pins its own copy of ruff by git tag, while CI
+    installs the `ruff==` pin from `constraints.txt`. Nothing tied the two
+    together, and they drifted a whole minor version apart (hook v0.15.1 vs
+    CI 0.16.3) - so the hook could pass code that CI then rejected, which
+    defeats the point of having a commit-time check at all. The config file
+    already asked for this invariant in a comment; this test is what actually
+    holds it.
+    """
+    config = yaml.safe_load((ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
+
+    assert _ruff_pre_commit_rev(config) == _ruff_pin_from_constraints()
+
+
+def test_pre_commit_ruff_rev_guard_rejects_a_drifted_pin():
+    """Prove the guard fails when the hook and the constraints pin disagree."""
+    config = yaml.safe_load((ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
+    drifted = copy.deepcopy(config)
+    for repository in drifted["repos"]:
+        if repository["repo"].rstrip("/").endswith("astral-sh/ruff-pre-commit"):
+            repository["rev"] = "v0.0.1"
+
+    assert _ruff_pre_commit_rev(drifted) != _ruff_pin_from_constraints()
+
+
 def test_ci_workflow_runs_quality_and_dependency_security_checks():
     """CI should run the same checks maintainers run locally."""
     workflow = ROOT / ".github" / "workflows" / "quality-and-security.yml"
