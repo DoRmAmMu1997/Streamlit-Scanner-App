@@ -120,6 +120,20 @@ def normalize_daily_payload(data: Any) -> pd.DataFrame:
     out["timestamp"] = timestamps.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
     out = out.drop(columns=["timestamp_raw"]).dropna(subset=["timestamp", "open", "high", "low", "close"])
     out = out[["timestamp", "open", "high", "low", "close", "volume"]]
+    # DATA-003: drop bars the vendor repeated verbatim. DhanHQ occasionally returns
+    # the same candle twice (observed live for AEGISLOG on 2024-06-05, two
+    # byte-identical rows), and every cache-write path used to persist that copy —
+    # which then failed DATA-001's DUPLICATE_DATE check and dropped the symbol from
+    # every scan.
+    #
+    # ``drop_duplicates()`` here compares ALL six columns, so it only removes rows
+    # that are identical in every respect. Two identical bars for one day cannot
+    # both be real observations, so removing one loses nothing and costs no trading
+    # day. Bars that share a date but differ in ANY value — including volume alone,
+    # which is a partial-vs-final bar — deliberately survive: choosing between them
+    # would fabricate a price series that never existed. Those still surface as
+    # DUPLICATE_DATE for the DATA-002 repair to resolve against the vendor.
+    out = out.drop_duplicates()
     return out.sort_values("timestamp").reset_index(drop=True)
 
 

@@ -58,7 +58,7 @@ flowchart TD
 |---|---|
 | `DailyDataLoader(client, cache_dir, request_delay_seconds, rate_limit_retry_delays, fetch_timeout_seconds, max_consecutive_failures, fetch_workers, sleep_func)` | `client=None` ⇒ cache-only mode (fetches fail loudly). `fetch_workers` (1–8, default 1 via `SCANNER_DHAN_FETCH_WORKERS`) opts into parallel fetch behind a shared `_RequestPacer` (PERF-001). |
 | `.read_cached_history(symbol, security_id)` | Disk-only read (chart UI path); empty frame if missing/corrupt. |
-| `.get_daily_history(instrument, start, end, force_refresh=False)` | `(frame, served_from_cache)`; **cache hit only when the file covers the entire requested range.** |
+| `.get_daily_history(instrument, start, end, force_refresh=False, *, allow_unpublished_tail=False)` | `(frame, served_from_cache)`; direct and historical callers require complete weekday coverage. Only scanner universe loading explicitly opts into a bounded current-session/weekend/marker tail. |
 | `.ensure_daily_history(instrument, years_back=10, today=None)` | `(frame, status)` where status ∈ `fresh`/`incremental`/`fresh_download`/`backfilled`. The prefetch engine. |
 | `.fetch_window(instrument, start, end)` | Network-only fetch (same pacing, DH-904 backoff, and optional timeout) that **does not write the cache**. Added for the DATA-002 repair, which merges a bounded window *over* existing history — writing it directly would truncate a ten-year file to that window. An empty frame means the vendor has no rows there, not an error. |
 | `.iter_universe_history(...)` | Yields `HistoryLoadItem` per symbol (streaming — compute as you load). |
@@ -67,14 +67,46 @@ flowchart TD
 | `history_start_date(years_back, today)` | Leap-safe "subtract whole years" (Feb 29 → Feb 28). |
 | `safe_file_stem(value)` | Path-traversal-safe filename fragment. |
 
+### DATA-004 `.firstbar` earliest-history evidence
+
+When a vendor request begins before a stock listed, the returned frame begins at
+the stock's earliest available candle. `DailyDataLoader` stores that answer next
+to the parquet as `<symbol>_<security-id>.firstbar`, a JSON object with canonical
+`requested_from`, `earliest_available`, and `recorded_on` dates. The public cache
+contract remains strict: a request is front-complete only when the parquet first
+date literally reaches `requested_start`, or a fresh qualifying `.firstbar`
+exists **and its `earliest_available` exactly equals the parquet first date**.
+The exact binding prevents contradictory cache/sidecar dates from certifying
+history that cannot be proved complete.
+
+The marker is internal, optional evidence—not a user input or a database record.
+Its JSON reader accepts only a JSON object with string `YYYY-MM-DD` fields and
+the chronology `requested_from < earliest_available <= recorded_on`; extra fields
+are ignored for forwards compatibility. Its 30-day TTL is measured against the
+injected wall clock, not the requested data window. Future, stale (age 30 days or
+more), malformed, noncanonical, or shallower-than-request evidence is ignored and
+therefore causes a safe refetch. A shallow probe preserves a deeper marker only
+while that marker is fresh; expired or future-dated evidence is replaced by the
+new probe, without renewing a fresh marker's timestamp. An equally deep/deeper
+non-empty response that still starts late replaces the marker; one that reaches
+the requested start removes the now-obsolete marker best-effort. Empty/invalid
+frames leave prior evidence unchanged.
+
+`.firstbar` shares the cache lifecycle: it travels with its parquet and
+`cleanup_stale_cache_files()` removes it when orphaned or when the associated
+cache ages out. `tests/test_daily_data_loader_vendor_earliest.py` covers marker
+creation, strict parsing/chronology, exact cache binding, wall-clock TTL,
+shallower/equally-deep update rules, cleanup, and the request-bounded late-listing
+vendor fixture.
+
 ## 4. Key design decisions & trade-offs
 
 | Decision | Rationale | Alternative rejected |
 |---|---|---|
-| **Normalize at the boundary** | Screeners get one stable 6-col frame; SDK wire-shape changes are absorbed here. | Per-screener parsing — duplicated, fragile. |
+| **Normalize exact rows at the boundary** | Screeners get one stable `timestamp, open, high, low, close, volume` frame; exact duplicates across all six canonical columns are removed before every cache write. Same-date rows that differ in any column remain for DATA-001/DATA-002 rather than silently picking a price. | Per-screener parsing or date-only de-duplication — duplicated, fragile, or able to hide a vendor conflict. |
 | **One file per `(symbol, security_id)`, no date in name** | Different scan windows reuse one growing cache; incremental top-up only fetches missing tail. | Date-range filenames (legacy) — duplicate files, re-fetches. `cleanup_legacy_cache_files` removes those. |
-| **Cache hit requires full-range coverage** | A partial parquet (interrupted prefetch) would silently run a long-lookback screener on too little data. | Slice whatever exists — silent wrong results. |
-| **`.checked` sidecar marker** | Remembers a no-new-rows tail (weekend/holiday) so the next launch doesn't re-pay for the same empty request. | Re-request every launch — wasted quota. |
+| **Conservative direct cache coverage** | Historical and direct `get_daily_history` callers require every requested weekday candle; they ignore `.checked` evidence. Weekend-only gaps remain valid because no daily bar exists on those dates. | Infer that every request is a live scanner session — can silently feed incomplete history to forward-return calculations. |
+| **Explicit scanner unpublished-tail opt-in** | Only the sequential and parallel universe-loading paths pass `allow_unpublished_tail=True`, allowing the current session's requested end and a `.checked`-verified weekday-holiday gap. The marker may rescue at most seven calendar days (`_MAX_TOLERABLE_GAP_DAYS = 7`), preventing a stale cache from being certified indefinitely. | Depend on a trading calendar or apply the relaxation to all callers — extra dependency or unsafe historical behavior. |
 | **Deterministic DH-904 backoff `[2,5,10]s`** | Predictable, testable retry without random jitter; raises after the list is exhausted. | Infinite/exponential random retry — unbounded, flaky tests. |
 | **Optional wall-clock timeout via worker thread** | The SDK exposes no timeout; a thread + `future.result(timeout)` lets a stuck call not freeze the Streamlit run (Python can't kill it, but `shutdown(wait=False)` moves on). | Block forever — frozen UI. |
 | **`client=None` cache-only mode fails loudly on fetch** | Chart UI / cleanup can build a loader without creds, but a real fetch attempt raises a clear error not `AttributeError`. | Silent no-op — confusing empty results. |
@@ -100,7 +132,8 @@ flowchart TD
 ## 7. Testing
 
 - [`tests/test_dhan_client.py`](../../../tests/test_dhan_client.py) — payload normalization, epoch inference, rate-limit detection, "no data".
-- [`tests/test_daily_data_loader.py`](../../../tests/test_daily_data_loader.py) — cache hit/miss, incremental/backfill statuses, `.checked` marker, retries, circuit breaker, cleanup, streaming.
+- [`tests/test_daily_data_loader.py`](../../../tests/test_daily_data_loader.py) — cache hit/miss, conservative direct historical coverage, explicit sequential/parallel scanner tail opt-in, seven-day `.checked` marker bound, incremental/backfill statuses, retries, circuit breaker, cleanup, streaming.
+- [`tests/test_candle_cache_write_paths.py`](../../../tests/test_candle_cache_write_paths.py) — all six cache-write paths, including malformed-cache recovery and incremental exact-row normalization while preserving conflicting same-date rows for data-quality reporting.
 
 ## 8. Extension points
 
