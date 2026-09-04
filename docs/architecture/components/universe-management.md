@@ -33,7 +33,7 @@ flowchart TD
       N100["NIFTY 100/500 CSV"] --> IDX["build_index_universe"]
       MASTER["Dhan instrument master"] --> EQ["build_equity_lookup"]
       MASTER --> FNO["build_fno_universe"]
-      HEM["data/universes/hemant_*.csv"] --> SYM["build_symbol_list_universe"]
+      HEM["data/universes/sources/hemant_*.csv"] --> SYM["build_symbol_list_universe"]
       EQ --> IDX & FNO & SYM
       IDX & FNO & SYM --> FIN["finalize_universe → uniform CSV"]
     end
@@ -46,7 +46,7 @@ flowchart TD
 ## 3. Public interface
 
 ### Builder
-`UNIVERSE_CONFIG` (the single registry of every universe key) · `refresh_universe_files(keys=None, ...)` (the orchestrator: routes each key to `fno` / `union_of` / `source_file` / index branch) · `load_instrument_master` · `build_equity_lookup` · `build_index_universe` · `build_fno_universe` · `build_symbol_list_universe` · `finalize_universe` · `download_csv` (capped at `MAX_DOWNLOAD_BYTES=50MB`) · `prune_old_instrument_master_snapshots` · `universe_file_path` · `strip_fno_suffix` / `normalize_manual_symbol`.
+`UNIVERSE_CONFIG` (the single registry of every universe key) · `HEMANT_SOURCE_FILES` (pinned inputs, resolved from `UNIVERSE_SOURCE_DIR`) · `repo_relative_source_label` (keeps the committed `source` column machine-independent) · `refresh_universe_files(keys=None, ...)` (the orchestrator: routes each key to `fno` / `union_of` / `source_file` / index branch) · `load_instrument_master` · `build_equity_lookup` · `build_index_universe` · `build_fno_universe` · `build_symbol_list_universe` · `finalize_universe` · `download_csv` (capped at `MAX_DOWNLOAD_BYTES=50MB`) · `prune_old_instrument_master_snapshots` · `universe_file_path` · `strip_fno_suffix` / `normalize_manual_symbol`.
 
 ### Loader
 `REQUIRED_UNIVERSE_COLUMNS = [symbol, security_id, exchange_segment, instrument_type]` · `load_universe(key, dir)` · `mapped_only(df)` · `list_known_universes()` · `universe_status(key)` / `all_universe_statuses()` · `union_of_mapped_universes(dir)`.
@@ -62,7 +62,8 @@ flowchart TD
 | **Keep unmapped rows + `mapping_status`** | A symbol that didn't resolve stays visible for debugging in the status table rather than silently vanishing. | Drop unmapped — invisible data gaps. |
 | **One Dhan master snapshot per refresh, prune the rest** | Write-then-prune ordering guarantees a failed download never deletes the last usable master. | Prune-then-write — could leave zero snapshots. |
 | **Dedupe union by `security_id`, not symbol** | The same security id is always the same Dhan instrument; symbol strings can collide. | Dedupe by symbol — possible double fetch. |
-| **Local Hemant lists, not remote** | No stable public CSV endpoint; pinned source lists live beside generated files. | Hardcode in Python — harder to edit. |
+| **Local Hemant lists, not remote** | No stable public CSV endpoint, so the pinned lists are committed CSVs under `data/universes/sources/`. | Hardcode in Python — harder to edit. |
+| **Sources anchor to `PROJECT_ROOT`, outputs to `DATA_DIR`** (DEPLOY-005) | Pinned lists are *code* and ship inside the image; generated universes are deployment state and belong on the data volume. When both followed `DATA_DIR`, a container looked for its inputs on an empty volume and `refresh_universe_files()` raised `FileNotFoundError`, taking the daily-scan cron with it. | One directory for both — simpler, but unbuildable in any deployment that sets `DATA_DIR`. |
 | **`source_symbol` retained on custom universes** | Preserves the original Google-Doc token (e.g. `UTLTRACEMCO`) after alias mapping to `ULTRACEMCO`. | Overwrite symbol — loses provenance. |
 | **Legacy `SEM_*` column normalization** | Accept old and new Dhan master schemas via `LEGACY_COLUMN_CANDIDATES`. | Hard-code current names — breaks on old files. |
 | **Don't alphabetize custom lists** | Pinned-list order may be meaningful to the reviewer. | Always sort — loses intent. |
