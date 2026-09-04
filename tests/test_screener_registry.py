@@ -139,6 +139,8 @@ def test_validate_screener_module_handles_basescanner_subclass():
             "timeframe": "daily",
             "lookback_days": 30,
             "default_params": {"period": 14},
+            "parameter_labels": {"period": "Lookback period"},
+            "parameter_help": {"period": "Number of daily candles."},
         }
 
         def compute_signal(self, symbol, candles, params):
@@ -160,6 +162,68 @@ def test_validate_screener_module_handles_basescanner_subclass():
     assert definition.build_chart is not None
     # The bound method's signature still validates as (universe_df, data_loader, params).
     assert callable(definition.run)
+    assert definition.parameter_labels == {"period": "Lookback period"}
+    assert definition.parameter_help == {"period": "Number of daily candles."}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("parameter_labels", {"undeclared": "Unknown"}),
+        ("parameter_help", {"period": ""}),
+        ("parameter_labels", []),
+        ("parameter_help", {"period": 123}),
+    ],
+)
+def test_parameter_display_metadata_must_match_declared_defaults(
+    field: str,
+    value: object,
+) -> None:
+    """Typos and empty UI copy fail registry validation instead of disappearing."""
+    module = ModuleType("invalid_parameter_metadata")
+    module.SCREENER = {
+        "key": "invalid_parameter_metadata",
+        "name": "Invalid parameter metadata",
+        "description": "Test-only screener metadata.",
+        "universe": "nifty_500",
+        "timeframe": "daily",
+        "lookback_days": 30,
+        "default_params": {"period": 14},
+    }
+    module.SCREENER[field] = value
+
+    def run(universe_df, data_loader, params) -> pd.DataFrame:
+        """Satisfy the registry run contract; behavior is irrelevant here."""
+        return pd.DataFrame()
+
+    module.run = run
+
+    with pytest.raises(ScreenerRegistryError, match=field):
+        validate_screener_module(module)
+
+
+def test_parameter_display_metadata_rejects_non_string_keys() -> None:
+    """Numeric keys are malformed even if string coercion could find a default."""
+    module = ModuleType("numeric_parameter_metadata")
+    module.SCREENER = {
+        "key": "numeric_parameter_metadata",
+        "name": "Numeric parameter metadata",
+        "description": "Test-only screener metadata.",
+        "universe": "nifty_500",
+        "timeframe": "daily",
+        "lookback_days": 30,
+        "default_params": {"1": 14},
+        "parameter_labels": {1: "Numeric key"},
+    }
+
+    def run(universe_df, data_loader, params) -> pd.DataFrame:
+        """Satisfy the registry run contract; behavior is irrelevant here."""
+        return pd.DataFrame()
+
+    module.run = run
+
+    with pytest.raises(ScreenerRegistryError, match="parameter_labels"):
+        validate_screener_module(module)
 
 
 def test_validate_screener_module_hides_default_basescanner_chart():

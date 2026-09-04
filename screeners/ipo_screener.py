@@ -30,19 +30,19 @@ import pandas as pd
 
 from backend.ipo.agents.auto_approval import auto_approve_ready_proposals
 from backend.ipo.dashboard import IpoDashboardRow, build_dashboard_snapshot
-from backend.jobs.run_ipo_screener import ACTIVE_ISSUE_STATUSES, run_ipo_screener
+from backend.jobs.run_ipo_screener import UPCOMING_ISSUE_STATUSES, run_ipo_screener
 from backend.scanner_base import BaseScanner
 
 logger = logging.getLogger(__name__)
 
-# Issues in these states can still change (new filings, fresh demand, a
-# listing). ``listed`` issues are archived history and are skipped when the
-# operator leaves ``only_active_issues`` on.
+# Offers that have not finished yet. A ``closed`` issue (SEBI's final offer
+# document is filed after the issue completes) and a ``listed`` one are both
+# history, and are skipped when the operator leaves ``only_active_issues`` on.
 #
 # Imported from the pipeline rather than restated here: the button and the
-# terminal must agree on what "active" means, and a second copy of the tuple
-# would let them drift apart the first time either side is edited alone.
-_ACTIVE_STATUSES = ACTIVE_ISSUE_STATUSES
+# terminal must agree on which issues are worth a run, and a second copy of the
+# tuple would let them drift apart the first time either side is edited alone.
+_UPCOMING_STATUSES = UPCOMING_ISSUE_STATUSES
 
 # The pipeline stages reported through the shared progress callback, in order.
 _STAGES = (
@@ -78,9 +78,32 @@ class IpoScreener(BaseScanner):
             # OFF by default: this screener is analyst-accessible and AI
             # extraction spends Claude plan credit. Opting in is per run.
             "draft_ai_extractions": False,
+            # Upcoming offers only: skip issues whose IPO is already over.
+            # The key is deliberately NOT renamed even though "active" is now
+            # the narrower "upcoming" — it is persisted in
+            # ``scan_runs.params_json``, so a rename would orphan history.
             "only_active_issues": True,
             # Bounds a Streamlit run, which blocks the tab while it works.
             "max_issues": 25,
+        },
+        # Keep durable parameter keys stable while making the sidebar speak in
+        # domain terms. In particular, ``only_active_issues`` now means the
+        # narrower upcoming lifecycle set, not every non-listed record.
+        "parameter_labels": {
+            "run_ingestion": "Refresh SEBI filings",
+            "download_documents": "Download prospectuses",
+            "collect_enrichment": "Collect web enrichment",
+            "draft_ai_extractions": "Draft AI extraction proposals",
+            "only_active_issues": "Only upcoming IPOs",
+            "max_issues": "Maximum IPOs per run",
+        },
+        "parameter_help": {
+            "run_ingestion": "Refresh the official SEBI filing inventory before selection.",
+            "download_documents": "Cache missing DRHP/RHP prospectuses for selected IPOs.",
+            "collect_enrichment": "Use optional, advisory SerpAPI evidence for selected IPOs.",
+            "draft_ai_extractions": "Spend AI plan credit to draft human-review proposals.",
+            "only_active_issues": "Exclude closed and listed offers; clear to include history.",
+            "max_issues": "Limit the selected pipeline/result rows; 0 means no issue cap.",
         },
     }
     EXTRA_RESULT_COLUMNS: ClassVar[list[str]] = [
@@ -101,7 +124,9 @@ class IpoScreener(BaseScanner):
         "documents",
         "evaluation_stale",
     ]
-    SCREENER_VERSION = "1.0.0"
+    # IPO-012 changes which issue lifecycle states a default run selects. Bump
+    # provenance so historical rows do not claim the original IPO-011 contract.
+    SCREENER_VERSION = "1.1.0"
 
     def compute_signal(
         self, symbol: str, candles: pd.DataFrame, params: dict
@@ -192,22 +217,36 @@ class IpoScreener(BaseScanner):
         let the processed set and the reported set drift apart silently.
         """
         if bool(params.get("only_active_issues", True)):
-            rows = [row for row in rows if row.issue_status in _ACTIVE_STATUSES]
+            rows = [row for row in rows if row.issue_status in _UPCOMING_STATUSES]
         max_issues = int(params.get("max_issues", 0) or 0)
         if max_issues > 0:
             rows = rows[:max_issues]
         return rows
 
-    def _selected_issue_ids(self, params: dict) -> list[int] | None:
-        """Narrow the run to active issues and the configured cap.
+    def _selected_issue_ids(self, params: dict) -> list[int]:
+        """Name every issue this run should process, explicitly.
 
-        Returning ``None`` means "every issue", which is what the CLI does.
+        Beginner note:
+            This deliberately never returns "no selection". It used to return
+            ``None`` whenever the toggles happened not to narrow anything,
+            meaning "let the pipeline decide" -- and the pipeline's own default
+            is upcoming-only. So an operator who *unticked* ``only_active_issues``
+            to widen the run silently got upcoming-only processing, while the
+            results table still reported every row.
+
+            It was worse than a plain bug because it was order-dependent: with a
+            cap that happened to bite, an explicit list was sent and finished
+            issues inside the cap *were* processed. Whether the toggle worked
+            depended on whether the cap bit.
+
+            Sending the list the table will report makes the button's selection
+            authoritative in every combination, so the processed set and the
+            reported set cannot diverge.
         """
         snapshot = build_dashboard_snapshot()
-        rows = self._apply_selection(list(snapshot.rows), params)
-        if len(rows) == len(snapshot.rows):
-            return None
-        return [row.issue_id for row in rows]
+        return [
+            row.issue_id for row in self._apply_selection(list(snapshot.rows), params)
+        ]
 
     def _result_rows(
         self, params: dict, *, failed_issue_ids: set[int]

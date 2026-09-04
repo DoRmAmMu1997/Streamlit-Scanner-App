@@ -117,30 +117,42 @@ def safe_file_stem(value: object) -> str:
 _MAX_TOLERABLE_GAP_DAYS = 7
 
 
-def _only_unpublished_days_missing(last_date: date, requested_end: date) -> bool:
-    """True when nothing the market has actually published is missing from the cache.
+def _only_unpublished_days_missing(
+    last_date: date,
+    requested_end: date,
+    *,
+    allow_requested_end: bool = False,
+) -> bool:
+    """Return whether the cache misses only days with no published candle.
 
     Two kinds of day may be absent without the cache being out of date:
 
     - **weekends**, when the exchange did not trade at all; and
-    - **``requested_end`` itself**, because the current session's end-of-day bar is
-      routinely not published yet when a scan runs.
+    - ``requested_end`` itself, but only when the caller explicitly says it is
+      running a current scanner session whose end-of-day bar may not exist yet.
 
-    That second carve-out is load-bearing. Without it every weekday scan would be a
-    miss again, which is the whole problem DATA-003 set out to fix.
+    Args:
+        last_date: The newest valid candle date in the cached Parquet frame.
+        requested_end: The inclusive end date requested by the caller.
+        allow_requested_end: Whether this caller may treat a missing weekday at
+            exactly ``requested_end`` as an unpublished current-session candle.
 
-    Any *other* missing weekday means a bar the market really did publish is absent,
-    so the cache is genuinely behind and must be refreshed. This replaces an earlier
-    blanket "tolerate four calendar days" rule, which silently served a cache ending
-    on Thursday to a Monday scan even though Friday's bar existed.
+    Beginner note:
+        A direct caller can ask for a historical date where every weekday candle
+        is already expected to exist. The scanner alone knows it is asking for
+        the still-publishing current session, so this helper requires that
+        caller to grant ``allow_requested_end`` deliberately. Any other missing
+        weekday means the cache is behind and must be refreshed.
     """
     if last_date >= requested_end:
         return True
     if (requested_end - last_date).days > _MAX_TOLERABLE_GAP_DAYS:
         return False
     day = last_date + timedelta(days=1)
-    while day < requested_end:
-        if day.weekday() < 5:  # Monday-Friday
+    while day <= requested_end:
+        # Weekends never have daily exchange candles. The requested weekday may
+        # be absent only for the scanner's explicitly authorised live tail.
+        if day.weekday() < 5 and (day != requested_end or not allow_requested_end):
             return False
         day += timedelta(days=1)
     return True
@@ -151,32 +163,38 @@ def _cache_covers_range(
     last_date: date | None,
     requested_start: date,
     requested_end: date,
+    *,
     vendor_earliest: date | None = None,
     checked_through: date | None = None,
+    allow_unpublished_tail: bool = False,
 ) -> bool:
-    """Return True when a cached range is good enough to answer a request.
+    """Return whether a cached range has the authority to answer a request.
 
     The **start** is compared strictly: a parquet missing early history (common
     after an interrupted prefetch) must never silently run a long-lookback
     screener on too little data.
 
-    The **end** is satisfied by evidence rather than by a time window, in one of
-    two ways:
+    By default, a weekday ``requested_end`` must be present and ``.checked``
+    evidence is ignored. A caller that is actively loading the scanner universe
+    may opt into a bounded unpublished tail. That opt-in permits the requested
+    end itself to be unpublished and accepts a recent ``.checked`` marker for a
+    short weekday-holiday gap.
 
-    - ``_only_unpublished_days_missing`` — nothing absent but weekends and possibly
-      the current session's own unpublished bar; or
-    - ``checked_through`` — the loader's existing ``.checked`` marker, written by
-      the prefetch precisely when it asked Dhan for this tail and got nothing back.
-      That covers market holidays, which are weekdays and so fail the arithmetic
-      above despite there being no bar to fetch. It is bounded by
-      ``_MAX_TOLERABLE_GAP_DAYS`` too, so it can only ever rescue a short gap.
+    Args:
+        first_date: Oldest valid candle date in the candidate cache.
+        last_date: Newest valid candle date in the candidate cache.
+        requested_start: Inclusive requested start date.
+        requested_end: Inclusive requested end date.
+        vendor_earliest: Earliest bar a qualifying vendor probe returned.
+        checked_through: Optional prefetch sidecar date recording an empty tail.
+        allow_unpublished_tail: Scanner-only authority to use current-session
+            and sidecar-marker tail relaxation.
 
-    Note this rule and DATA-001's ``STALE_LATEST_CANDLE`` warning cover **disjoint**
-    ranges: the warning fires only when the newest bar trails by *more* than
-    ``STALE_LATEST_TOLERANCE_DAYS``, so anything served here is below its threshold
-    and passes silently. An earlier version of this docstring claimed the warning
-    still fired as a backstop — it does not, which is exactly why the end test has
-    to stand on its own evidence rather than on a tolerance window.
+    Beginner note:
+        A `.checked` marker means a previous prefetch received no newer rows; it
+        does not prove a historical request is complete. Keeping this authority
+        at the scanner call site prevents forward-return and other historical
+        calculations from silently using an incomplete weekday range.
     """
     if first_date is None or last_date is None:
         return False
@@ -184,8 +202,14 @@ def _cache_covers_range(
     # goes (DATA-004) and which recent days it has actually published (DATA-003).
     if not _cache_reaches_back_far_enough(first_date, requested_start, vendor_earliest):
         return False
-    if _only_unpublished_days_missing(last_date, requested_end):
+    if _only_unpublished_days_missing(
+        last_date,
+        requested_end,
+        allow_requested_end=allow_unpublished_tail,
+    ):
         return True
+    if not allow_unpublished_tail:
+        return False
     # The marker exists to rescue market holidays, which are by definition short
     # gaps, so it is bounded by the same window as the weekday walk above. Without
     # that bound a vendor outage answering "no data" instead of erroring would have
@@ -574,12 +598,28 @@ class DailyDataLoader:
         start_date: date | datetime | str,
         end_date: date | datetime | str,
         force_refresh: bool = False,
+        *,
+        allow_unpublished_tail: bool = False,
     ) -> tuple[pd.DataFrame, bool]:
-        """
-        Return daily candles for one instrument, sliced to the requested range.
+        """Return daily candles for one instrument, sliced to the requested range.
 
-        The boolean indicates whether the result was answered without hitting
-        Dhan (i.e., served entirely from the local Parquet cache).
+        Args:
+            instrument: Universe row containing symbol, security ID, and Dhan
+                instrument metadata.
+            start_date: Inclusive first date required by the caller.
+            end_date: Inclusive final date required by the caller.
+            force_refresh: Bypass a usable cache and fetch the requested range.
+            allow_unpublished_tail: Scanner-only authority to accept a bounded
+                current-session/weekend/marker cache tail.
+
+        Returns:
+            The requested candle frame and whether it was served from cache.
+
+        Beginner note:
+            This public method also serves historical consumers such as
+            forward-return validation. They must receive complete weekday data,
+            so the current-session relaxation is opt-in rather than inferred
+            from dates or the machine clock.
         """
         row = dict(instrument)
         # Universe CSV rows are the source of truth for how to ask Dhan for a
@@ -596,7 +636,8 @@ class DailyDataLoader:
 
         path = self.cache_path(symbol, security_id)
         if path.exists() and not force_refresh:
-            # Cache hit only when the file covers the entire requested range.
+            # A cache hit requires complete coverage unless this scanner caller
+            # explicitly grants the bounded unpublished-tail exception below.
             # A partial parquet is common after interrupted prefetches; slicing
             # it would silently run long-lookback screeners on too little data.
             #
@@ -625,8 +666,9 @@ class DailyDataLoader:
                 last_date,
                 requested_start,
                 requested_end,
-                vendor_earliest,
-                checked_through,
+                vendor_earliest=vendor_earliest,
+                checked_through=checked_through,
+                allow_unpublished_tail=allow_unpublished_tail,
             ):
                 if cached is None:
                     # The footer is only an advisory index. The file can be
@@ -639,8 +681,9 @@ class DailyDataLoader:
                     actual_last,
                     requested_start,
                     requested_end,
-                    vendor_earliest,
-                    checked_through,
+                    vendor_earliest=vendor_earliest,
+                    checked_through=checked_through,
+                    allow_unpublished_tail=allow_unpublished_tail,
                 ):
                     return self._slice_to_range(cached, start_date, end_date), True
 
@@ -838,7 +881,9 @@ class DailyDataLoader:
 
         merged = (
             pd.concat([cached, new_rows], ignore_index=True)
-            .drop_duplicates(subset=["timestamp"], keep="last")
+            # Keep same-date disagreements for DATA-001/DATA-002 to investigate;
+            # only a row identical across all six canonical columns is redundant.
+            .drop_duplicates()
             .sort_values("timestamp")
             .reset_index(drop=True)
         )
@@ -1152,7 +1197,13 @@ class DailyDataLoader:
         force_refresh: bool,
         progress_callback: ProgressCallback | None,
     ):
-        """The long-standing one-symbol-at-a-time path (fetch_workers == 1)."""
+        """The long-standing one-symbol-at-a-time path (fetch_workers == 1).
+
+        Beginner note:
+            This is a scanner-owned caller, so it explicitly permits a short
+            current-session or checked-marker tail. Direct historical callers
+            use ``get_daily_history`` without that authority and remain strict.
+        """
         consecutive_failures = 0
         for index, row in enumerate(rows, start=1):
             symbol = str(row.get("symbol", "")).strip().upper() or "UNKNOWN"
@@ -1168,6 +1219,7 @@ class DailyDataLoader:
                         start_date=start_date,
                         end_date=end_date,
                         force_refresh=force_refresh,
+                        allow_unpublished_tail=True,
                     )
                     consecutive_failures = 0
                     if from_cache:
@@ -1207,6 +1259,11 @@ class DailyDataLoader:
         consumed normally (the request already happened; discarding the data
         would help nobody). Rows never submitted yield breaker items, exactly
         like the sequential path.
+
+        Beginner note:
+            Parallel workers receive the same explicit scanner-only tail
+            authority as the sequential path. Keeping the flag here, rather
+            than making it the public default, protects historical consumers.
         """
         window = self.fetch_workers * 2
         pending: deque[tuple[int, dict, str, concurrent.futures.Future]] = deque()
@@ -1229,6 +1286,7 @@ class DailyDataLoader:
                     start_date=start_date,
                     end_date=end_date,
                     force_refresh=force_refresh,
+                    allow_unpublished_tail=True,
                 )
                 pending.append((index, row, symbol, future))
                 return True

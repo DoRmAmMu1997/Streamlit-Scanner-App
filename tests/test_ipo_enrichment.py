@@ -42,6 +42,9 @@ from backend.ipo.sources.enrichment import (
 from backend.security import BLOCKED_EVIDENCE_TEXT
 from backend.sixty_seven.search_client import (
     SearchResult,
+    SerpApiAuthError,
+    SerpApiQuotaError,
+    SerpApiRateLimitError,
     SerpApiSearchError,
     SerpApiSetupError,
 )
@@ -601,6 +604,156 @@ def test_one_failing_query_does_not_abort_the_other_types(file_session_factory) 
     assert IpoEnrichmentSignalType.LITIGATION_RED_FLAG not in collected_types
     assert IpoEnrichmentSignalType.GMP in collected_types
     assert len(collected_types) == len(IpoEnrichmentSignalType) - 1
+    assert outcome.quota_exhausted is False
+
+
+def test_an_exhausted_plan_stops_the_batch_instead_of_grinding_on(
+    file_session_factory,
+) -> None:
+    """Quota exhaustion is a whole-run condition, not a per-query failure.
+
+    Beginner note:
+        An ordinary search failure is isolated so its siblings still run. An
+        exhausted plan is different in kind: every remaining query would be
+        refused too, so continuing only produces a wall of identical warnings.
+        The batch stops and says so once.
+    """
+    issue = create_issue(_issue_data(), session_factory=file_session_factory)
+
+    class _ExhaustedClient(_FakeClient):
+        """Answer the first query, then report the plan is spent."""
+
+        def search(self, query: str, *, max_results: int = 5) -> list[SearchResult]:
+            """Raise the typed quota error after one successful lookup."""
+            self.queries.append(query)
+            if len(self.queries) > 1:
+                raise SerpApiQuotaError(
+                    "Your account has run out of searches.", status_code=429
+                )
+            return []
+
+    client = _ExhaustedClient({})
+
+    outcome = collect_enrichment_signals(
+        issue.id,
+        company_name="Example Ltd",
+        price_band_high=Decimal("100.00"),
+        client=client,
+        captured_at=_CAPTURED_AT,
+        session_factory=file_session_factory,
+    )
+
+    assert outcome.quota_exhausted is True
+    assert outcome.error_type == "SerpApiQuotaError"
+    # Stopped at the failure rather than attempting all eight query types.
+    assert len(client.queries) == 2
+    assert len(client.queries) < len(IpoEnrichmentSignalType)
+
+
+def test_rejected_credentials_stop_after_the_first_query(
+    file_session_factory,
+) -> None:
+    """An invalid key is permanent, so sibling queries must not be attempted.
+
+    Beginner note:
+        Unlike an intentionally missing optional key, a rejected key is a
+        configuration fault that operators need to repair.  Retrying the seven
+        remaining signal types cannot change the answer; it only multiplies
+        request latency and warning noise before the job reaches the next IPO.
+    """
+    issue = create_issue(_issue_data(), session_factory=file_session_factory)
+
+    class _RejectedClient(_FakeClient):
+        """Reject every request while retaining the fake's query ledger."""
+
+        def search(self, query: str, *, max_results: int = 5) -> list[SearchResult]:
+            """Record one attempt and report the permanent auth failure."""
+            self.queries.append(query)
+            raise SerpApiAuthError("SerpAPI rejected the request.", status_code=401)
+
+    client = _RejectedClient({})
+
+    outcome = collect_enrichment_signals(
+        issue.id,
+        client=client,
+        captured_at=_CAPTURED_AT,
+        session_factory=file_session_factory,
+    )
+
+    assert len(client.queries) == 1
+    assert outcome.auth_failed is True
+    assert outcome.quota_exhausted is False
+    assert outcome.rate_limited is False
+    assert outcome.error_type == "SerpApiAuthError"
+
+
+def test_a_run_of_throttles_stops_the_batch_but_a_single_one_does_not(
+    file_session_factory,
+) -> None:
+    """One throttle is worth continuing past; a streak of them is not.
+
+    Beginner note:
+        A rate limit is transient, so treating the first one as fatal would
+        abandon a run that just needed to carry on. But the queries fire
+        back-to-back with no pause, so a *sustained* throttle produces hundreds
+        of immediately-refused requests and an unreadable wall of identical
+        warnings. The streak counter is the middle ground -- and it resets on
+        any success, so intermittent throttling never trips it.
+    """
+    issue = create_issue(_issue_data(), session_factory=file_session_factory)
+
+    class _ThrottlingClient(_FakeClient):
+        """Throttle on a caller-chosen set of query positions."""
+
+        def __init__(self, failing_positions: set[int]) -> None:
+            """Record which 1-based query positions should be refused."""
+            super().__init__({})
+            self.failing_positions = failing_positions
+
+        def search(self, query: str, *, max_results: int = 5) -> list[SearchResult]:
+            """Raise a throttle for the configured positions, else succeed."""
+            self.queries.append(query)
+            if len(self.queries) in self.failing_positions:
+                raise SerpApiRateLimitError("Too Many Requests", status_code=429)
+            return []
+
+    # An unbroken run of throttles from the first query stops the batch.
+    streak = _ThrottlingClient({1, 2, 3, 4, 5, 6, 7, 8})
+    stopped = _collect(issue.id, streak, file_session_factory)
+
+    assert stopped.rate_limited is True
+    assert stopped.quota_exhausted is False
+    assert len(streak.queries) < len(IpoEnrichmentSignalType)
+
+    # A success in between resets the counter, so the batch runs to completion.
+    intermittent = _ThrottlingClient({1, 3, 5})
+    finished = _collect(issue.id, intermittent, file_session_factory)
+
+    assert finished.rate_limited is False
+    assert len(intermittent.queries) == len(IpoEnrichmentSignalType)
+
+
+def test_a_query_with_no_google_results_records_an_empty_observation(
+    file_session_factory,
+) -> None:
+    """"Nothing found" is an honest result, not a dropped signal.
+
+    Beginner note:
+        The client now returns ``[]`` for a query Google had no coverage for,
+        so the signal flows down the success path and persists an
+        empty-payload row. Previously that raised, and the ``continue`` meant
+        the issue silently lost the signal type altogether -- which read
+        exactly like a provider outage.
+    """
+    issue = create_issue(_issue_data(), session_factory=file_session_factory)
+    # _FakeClient returns [] for any query it has no canned answer for, which
+    # is the shape the real client now produces for a no-results response.
+    outcome = _collect(issue.id, _FakeClient({}), file_session_factory)
+
+    assert outcome.error_type is None
+    assert outcome.quota_exhausted is False
+    collected_types = {signal.signal_type for signal in outcome.signals}
+    assert len(collected_types) == len(IpoEnrichmentSignalType)
 
 
 def test_missing_issue_raises_typed_not_found(file_session_factory) -> None:
