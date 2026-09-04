@@ -79,6 +79,10 @@ class DailyScanReport:
     # renderer omits the per-stock results block. Defaults True (full) so existing
     # constructions keep the ALERT-001 behaviour.
     include_results: bool = True
+    # OBS-004: one line per universe that lost mapped symbols since the previous
+    # run. Rendered even at the summary-only content level - a shrinking universe
+    # is a data-integrity warning about the scan itself, not a per-stock result.
+    universe_warnings: tuple[str, ...] = ()
 
 
 def _status_label(outcome: DailyScanOutcome) -> str:
@@ -216,4 +220,7 @@ def build_daily_scan_report(
         top_results=top_results,
         app_url=settings.app_url,
         include_results=include_results,
+        # OBS-004: getattr keeps this tolerant of a DailyScanSummary built by
+        # older code (or a test fake) that predates the field.
+        universe_warnings=tuple(getattr(summary, "universe_warnings", ()) or ()),
     )

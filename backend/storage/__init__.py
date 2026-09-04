@@ -51,6 +51,7 @@ from backend.storage.models import (
     ScanRun,
     ScanStatus,
     SignalForwardReturn,
+    UniverseHealthSnapshot,
     UserRole,
 )
 from backend.storage.repository import (
@@ -112,6 +113,7 @@ __all__ = [
     "ScanStatus",
     "SessionLocal",
     "SignalForwardReturn",
+    "UniverseHealthSnapshot",
     "UserRole",
     "count_scan_results_for_runs",
     "count_user_role_admins",

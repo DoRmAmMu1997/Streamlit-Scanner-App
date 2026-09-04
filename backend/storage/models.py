@@ -1795,6 +1795,89 @@ class CandleRepairRun(Base):
         )
 
 
+class UniverseHealthSnapshot(Base):
+    """OBS-004 - one row per universe per health check (the mapping baseline).
+
+    A symbol that Dhan's instrument master no longer contains is written into the
+    universe CSV as ``mapping_status='missing_security_id'`` and then filtered out
+    of every scan by ``mapped_only()``. Nothing outside the interactive Streamlit
+    sidebar ever reported that, so a universe could quietly shrink for weeks -
+    ~3% of the Hemant Good 200 list was already unscanned when OBS-004 was
+    written, and two more names dropped out mid-audit without a peep.
+
+    Beginner note:
+    This table exists purely so the daily job can answer *"is this worse than last
+    time?"*. Detecting an increase needs a previous number to compare against, and
+    the Render cron runs on an ephemeral filesystem with no disk - the shared
+    Postgres is the only thing that survives between runs. Hence a table rather
+    than a file next to the CSVs.
+
+    Rows are an append-only history: the check reads the newest row per universe
+    and then writes today's. Keeping the history (rather than upserting one row
+    per universe) means an operator can see *when* a symbol dropped out, which is
+    usually the question that follows the alert.
+
+    ``unmapped_symbols_json`` holds a bounded, sorted list of the symbol strings
+    that are currently unmapped, so the alert can name what changed instead of
+    just reporting a count. Symbols only - no prices, no credentials.
+    """
+
+    __tablename__ = "universe_health_snapshots"
+
+    # Same BigInt/SQLite-Integer variant as every other surrogate key here.
+    id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
+
+    # Indexed together with universe_key: every read is "newest row for universe X".
+    captured_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: dt.datetime.now(dt.UTC),
+        index=True,
+        comment="UTC time this universe was inspected",
+    )
+
+    universe_key: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        index=True,
+        comment="Universe registry key, e.g. 'hemant_good_200'",
+    )
+
+    total_rows: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="Rows in the universe CSV"
+    )
+    mapped_rows: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="Rows the scanner can actually fetch"
+    )
+    # Stored rather than derived so a reader (and the comparison) never has to
+    # trust that total_rows and mapped_rows came from the same read.
+    unmapped_rows: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="Rows with no usable Dhan security_id"
+    )
+
+    # Bounded, sorted list of the unmapped symbols. Nullable so a universe whose
+    # CSV could not be read still leaves its header row behind as evidence.
+    unmapped_symbols_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True, comment="Capped, sorted list of currently unmapped symbols"
+    )
+
+    __table_args__ = (
+        # The comparison query is "newest row for this universe", so lead with
+        # universe_key and let captured_at order within it.
+        Index(
+            "ix_universe_health_snapshots_key_captured",
+            "universe_key",
+            "captured_at",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"UniverseHealthSnapshot(universe_key={self.universe_key!r}, "
+            f"unmapped_rows={self.unmapped_rows!r})"
+        )
+
+
 # ============================================================================
 # NEXT: SCAN-002 (owner: Codex) — implement the database layer on top of this
 # schema. This file gives you the tables; SCAN-002 gives the app a way to talk
