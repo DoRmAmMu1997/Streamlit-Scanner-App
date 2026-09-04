@@ -962,7 +962,9 @@ The disk attaches to `scanner-web` only (Render disks are single-attach) and is
 mounted at `DATA_DIR`. Both default to `/data`; change them together to
 relocate the persistent path. The disk starts empty, so after the first deploy
 open a **Render Shell** on `scanner-web` and seed the universe CSVs the UI needs
-for screener selection:
+for screener selection. This works on an empty disk because the pinned Hemant
+symbol lists ship inside the image under `data/universes/sources/` and are
+resolved relative to the code, not to `DATA_DIR` (DEPLOY-005):
 
 ```bash
 python -c "from backend.universe_builder import refresh_universe_files; refresh_universe_files()"

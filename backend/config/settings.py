@@ -30,6 +30,21 @@ ENV_PATH = DEPENDENCIES_DIR / ".env"
 DEFAULT_DATA_DIR = PROJECT_ROOT / "data"
 SCREENERS_DIR = PROJECT_ROOT / "screeners"
 
+# The pinned universe *source* lists (the Hemant Google Doc snapshots) are code,
+# not runtime state: they ship inside the image and are only ever edited by a
+# reviewed commit. They therefore anchor to PROJECT_ROOT and deliberately do NOT
+# follow DATA_DIR.
+#
+# Beginner note (DEPLOY-005):
+# Generated universe CSVs live under `settings.universe_dir`, which follows
+# DATA_DIR so a deployment can point them at a persistent volume. Before
+# DEPLOY-005 the pinned sources were resolved the same way, so a container that
+# set DATA_DIR=/data looked for its source lists on the (empty) volume instead of
+# at /app/data/universes where COPY had actually put them - and
+# `refresh_universe_files()` died with FileNotFoundError. Keeping the two paths
+# on separate anchors is what makes that impossible rather than merely unlikely.
+UNIVERSE_SOURCE_DIR = DEFAULT_DATA_DIR / "universes" / "sources"
+
 # Default Claude model used by the Claude Agent SDK features (Check
 # Fundamentals, Technical Analysis AI, and 67 Ka Funda AI).
 DEFAULT_FUNDAMENTALS_MODEL = "claude-sonnet-4-6"
