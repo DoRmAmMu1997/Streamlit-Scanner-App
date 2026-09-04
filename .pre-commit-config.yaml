@@ -10,8 +10,11 @@
 
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    # Keep this rev aligned with the ruff pin in constraints.txt.
-    rev: v0.15.1
+    # Keep this rev aligned with the ruff pin in constraints.txt. This is not a
+    # convention any more: test_supply_chain_policy.py enforces it, because the
+    # two drifted (v0.15.1 vs ruff==0.16.3) and the hook spent a release linting
+    # with different rules than CI.
+    rev: v0.16.3
     hooks:
       - id: ruff
         name: ruff check (no fixes)
