@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import datetime as dt
 import sys
 import threading
 import time
@@ -206,3 +207,79 @@ def test_injected_raw_client_calls_are_serialized():
     assert client.dhan is raw_client
     assert all(not frame.empty for frame in frames)
     assert raw_client.max_active_calls == 1
+
+
+# ---------------------------------------------------------------------------
+# DATA-003: vendor duplicates must not reach the cache
+# ---------------------------------------------------------------------------
+
+
+def test_exact_duplicate_bars_are_collapsed():
+    """DhanHQ sometimes repeats a bar verbatim; one copy carries all the info.
+
+    Observed live for AEGISLOG on 2024-06-05 — two byte-identical rows. Persisting
+    both makes the symbol fail DATA-001's DUPLICATE_DATE check and drops it from
+    every scan, so the redundant copy is removed at the vendor boundary.
+    """
+    payload = [
+        {"timestamp": "2024-06-04", "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5, "volume": 10},
+        {"timestamp": "2024-06-05", "open": 700.0, "high": 730.1, "low": 664.75, "close": 705.45, "volume": 1122766},
+        {"timestamp": "2024-06-05", "open": 700.0, "high": 730.1, "low": 664.75, "close": 705.45, "volume": 1122766},
+    ]
+
+    frame = normalize_daily_payload(payload)
+
+    assert len(frame.index) == 2
+    # No trading day may be lost to the dedupe.
+    assert list(pd.to_datetime(frame["timestamp"]).dt.date) == [
+        dt.date(2024, 6, 4),
+        dt.date(2024, 6, 5),
+    ]
+
+
+def test_conflicting_bars_for_one_date_are_preserved():
+    """Two *different* bars for one day must survive to be reported, not guessed at.
+
+    Collapsing these would stitch together a price series that never existed. They
+    stay so DATA-001 quarantines the symbol and the DATA-002 repair resolves them
+    against the vendor instead.
+    """
+    payload = [
+        {"timestamp": "2024-06-05", "open": 700.0, "high": 730.0, "low": 664.0, "close": 705.0, "volume": 1_000},
+        {"timestamp": "2024-06-05", "open": 12.0, "high": 13.0, "low": 11.0, "close": 12.5, "volume": 2_000},
+    ]
+
+    frame = normalize_daily_payload(payload)
+
+    assert len(frame.index) == 2
+
+
+def test_duplicate_bars_differing_only_in_volume_are_preserved():
+    """Same OHLC, different volume is a partial-vs-final bar, not a redundant copy.
+
+    Only the DATA-002 repair may resolve that (highest volume wins); the vendor
+    boundary must not silently pick one.
+    """
+    payload = [
+        {"timestamp": "2024-06-05", "open": 700.0, "high": 730.0, "low": 664.0, "close": 705.0, "volume": 1_122_766},
+        {"timestamp": "2024-06-05", "open": 700.0, "high": 730.0, "low": 664.0, "close": 705.0, "volume": 2_245},
+    ]
+
+    frame = normalize_daily_payload(payload)
+
+    assert len(frame.index) == 2
+
+
+def test_deduped_payload_passes_the_data_quality_gate():
+    """The end-to-end point: an exact-duplicate payload no longer quarantines."""
+    from backend.data_quality.candles import validate_candles
+
+    payload = [
+        {"timestamp": "2024-06-04", "open": 100.0, "high": 105.0, "low": 99.0, "close": 104.0, "volume": 10},
+        {"timestamp": "2024-06-05", "open": 100.0, "high": 105.0, "low": 99.0, "close": 104.0, "volume": 20},
+        {"timestamp": "2024-06-05", "open": 100.0, "high": 105.0, "low": 99.0, "close": 104.0, "volume": 20},
+    ]
+
+    report = validate_candles(normalize_daily_payload(payload), symbol="AEGISLOG")
+
+    assert "DUPLICATE_DATE" not in {finding.code for finding in report.findings}
