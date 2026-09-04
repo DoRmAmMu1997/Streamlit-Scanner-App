@@ -126,7 +126,7 @@ Reproduce it locally — these are the exact commands; **all must pass**:
 python -m pip install -r requirements.txt -r requirements-dev.txt -c constraints.txt
 
 python -m pre_commit validate-config .pre-commit-config.yaml
-python -m pytest -q --cov=backend --cov=screeners --cov=ui --cov-fail-under=89
+python -m pytest -q --cov=app --cov=backend --cov=screeners --cov=ui --cov-fail-under=89
 python -m compileall -q app.py backend screeners ui tests
 python -m ruff check app.py backend screeners ui Dependencies tests
 python -m mypy
@@ -142,6 +142,10 @@ docker compose down --volumes --remove-orphans
 
 Coverage floor is **89%** (measured ~89.7%). Headroom is deliberately thin, so a
 sizeable untested addition fails the gate rather than quietly eroding the suite.
+The measured set includes `app.py` (QUAL-009); it sits at ~76%, which is the main
+reason the headroom is as tight as it is. `Dependencies/` and `migrations/` remain
+unmeasured on purpose - the first is an interactive credential helper, the second
+is hand-written migrations that the Alembic drift guard covers instead.
 `pre-commit` hooks are **non-rewriting**
 (check-only, no `--fix`) so commits stay author-reviewed.
 
