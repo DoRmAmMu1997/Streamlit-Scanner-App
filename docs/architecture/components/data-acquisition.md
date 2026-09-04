@@ -67,6 +67,38 @@ flowchart TD
 | `history_start_date(years_back, today)` | Leap-safe "subtract whole years" (Feb 29 → Feb 28). |
 | `safe_file_stem(value)` | Path-traversal-safe filename fragment. |
 
+### DATA-004 `.firstbar` earliest-history evidence
+
+When a vendor request begins before a stock listed, the returned frame begins at
+the stock's earliest available candle. `DailyDataLoader` stores that answer next
+to the parquet as `<symbol>_<security-id>.firstbar`, a JSON object with canonical
+`requested_from`, `earliest_available`, and `recorded_on` dates. The public cache
+contract remains strict: a request is front-complete only when the parquet first
+date literally reaches `requested_start`, or a fresh qualifying `.firstbar`
+exists **and its `earliest_available` exactly equals the parquet first date**.
+The exact binding prevents contradictory cache/sidecar dates from certifying
+history that cannot be proved complete.
+
+The marker is internal, optional evidence—not a user input or a database record.
+Its JSON reader accepts only a JSON object with string `YYYY-MM-DD` fields and
+the chronology `requested_from < earliest_available <= recorded_on`; extra fields
+are ignored for forwards compatibility. Its 30-day TTL is measured against the
+injected wall clock, not the requested data window. Future, stale (age 30 days or
+more), malformed, noncanonical, or shallower-than-request evidence is ignored and
+therefore causes a safe refetch. A shallow probe preserves a deeper marker only
+while that marker is fresh; expired or future-dated evidence is replaced by the
+new probe, without renewing a fresh marker's timestamp. An equally deep/deeper
+non-empty response that still starts late replaces the marker; one that reaches
+the requested start removes the now-obsolete marker best-effort. Empty/invalid
+frames leave prior evidence unchanged.
+
+`.firstbar` shares the cache lifecycle: it travels with its parquet and
+`cleanup_stale_cache_files()` removes it when orphaned or when the associated
+cache ages out. `tests/test_daily_data_loader_vendor_earliest.py` covers marker
+creation, strict parsing/chronology, exact cache binding, wall-clock TTL,
+shallower/equally-deep update rules, cleanup, and the request-bounded late-listing
+vendor fixture.
+
 ## 4. Key design decisions & trade-offs
 
 | Decision | Rationale | Alternative rejected |
