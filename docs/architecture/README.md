@@ -85,6 +85,7 @@ and dashboard freshness/provenance.
 - **[scan-run-persistence.md](scan-run-persistence.md)** — SCAN-001 scan-run persistence schema (the column-by-column rationale the Storage LLD links to).
 - **[scan-002-handoff.md](scan-002-handoff.md)** — SCAN-002 database-layer implementation handoff brief.
 - **[obs-003-audit-log.md](obs-003-audit-log.md)** — OBS-003 audit log + runtime-config schema, recorder design, and the seven tracked events.
+- **[obs-004-universe-health-alerts.md](obs-004-universe-health-alerts.md)** — OBS-004 universe mapping-health baseline: why the alert needs a database table, the two quiet rules (no baseline never regresses; only an increase counts), and why only the daily job owns the baseline.
 - **[valid-001-forward-return-validation.md](valid-001-forward-return-validation.md)** — VALID-001 methodology, no-lookahead rules, and schema rationale.
 - **[valid-002-handoff.md](valid-002-handoff.md)** — VALID-002 build brief plus resolved implementation decisions.
 - **[rank-001-final-scoring-model.md](rank-001-final-scoring-model.md)** — RANK-001 scoring methodology: the four v1 components, normalization, weighting, score ranges, missing-data behaviour, and the no-hidden-reasons invariant (no schema/migration).

@@ -145,6 +145,10 @@ class DailyScanSummary:
     """
 
     outcomes: list[DailyScanOutcome]
+    # OBS-004: one line per universe that lost mapped symbols since the previous
+    # run. Defaulted so every existing construction (including the pre-scan
+    # failure paths below) keeps working unchanged.
+    universe_warnings: tuple[str, ...] = ()
 
     @property
     def exit_code(self) -> int:
@@ -257,6 +261,11 @@ def run_daily_scan(
         flush=True,
     )
 
+    # OBS-004: check mapping health BEFORE scanning, so an operator reading the
+    # log sees "this run covered a universe that just lost two symbols" rather
+    # than discovering it after the results look thin.
+    universe_warnings = _check_universe_health(session_factory, out)
+
     outcomes: list[DailyScanOutcome] = []
     for entry in enabled_entries:
         definition = registry.get(entry.screener_key)
@@ -287,12 +296,45 @@ def run_daily_scan(
         outcomes.append(outcome)
         _print_outcome(out, outcome)
 
-    summary = DailyScanSummary(outcomes=outcomes)
+    summary = DailyScanSummary(outcomes=outcomes, universe_warnings=universe_warnings)
     if summary.exit_code:
         print("[daily-scan] Finished with fatal failure(s).", file=out, flush=True)
     else:
         print("[daily-scan] Finished successfully.", file=out, flush=True)
     return summary
+
+
+def _check_universe_health(
+    session_factory: SessionFactory, out: TextIO
+) -> tuple[str, ...]:
+    """Best-effort OBS-004 mapping-health check; never affects the exit code.
+
+    Returns one human-readable line per universe that lost mapped symbols since
+    the previous recorded check, ready to paste into the daily alert.
+
+    Beginner note:
+    This owns the durable baseline (it writes today's snapshot), which is why the
+    Streamlit prefetch only *logs* health and does not record it - if two writers
+    moved the baseline, a symbol that dropped out in the morning would already be
+    "known" by the evening and the alert would never fire.
+
+    Wrapped in a broad except on purpose: a universe CSV that will not parse is a
+    reason to warn, never a reason to skip the night's scan.
+    """
+    try:
+        from backend.data_quality.universe_health import check_universe_health
+
+        with session_factory() as session:
+            report = check_universe_health(session)
+            session.commit()
+    except Exception:  # noqa: BLE001 - a health check must never fail the job
+        logger.warning("universe health check failed", exc_info=True)
+        return ()
+
+    warnings = tuple(regression.describe() for regression in report.regressions)
+    for warning in warnings:
+        print(f"[daily-scan] Universe mapping regressed - {warning}", file=out, flush=True)
+    return warnings
 
 
 def _send_scan_notification(summary: DailyScanSummary) -> None:

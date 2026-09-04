@@ -34,6 +34,7 @@ from backend.storage.models import (
     ScanRun,
     ScanStatus,
     SignalForwardReturn,
+    UniverseHealthSnapshot,
     UserRole,
 )
 
@@ -830,6 +831,66 @@ def get_latest_candle_repair_run(session: Session) -> CandleRepairRun | None:
         .limit(1)
     )
     return session.scalars(stmt).first()
+
+
+def record_universe_health_snapshots(
+    session: Session,
+    snapshots: Sequence[Mapping[str, Any]],
+) -> list[UniverseHealthSnapshot]:
+    """Append one OBS-004 mapping-health row per universe and return them.
+
+    Beginner note:
+    Rows are appended, never updated. The comparison only ever reads the newest
+    row per universe, and keeping the history means an operator can answer "when
+    did this symbol drop out?" - which is the question that always follows the
+    alert. ``flush`` assigns the ids without ending the caller's transaction
+    (the caller owns it, per REFACTOR-002).
+
+    Each mapping needs ``universe_key``, ``total_rows``, ``mapped_rows`` and
+    ``unmapped_rows``; ``unmapped_symbols`` is optional and stored as JSON.
+    """
+    rows = [
+        UniverseHealthSnapshot(
+            universe_key=str(snapshot["universe_key"]),
+            total_rows=int(snapshot.get("total_rows", 0)),
+            mapped_rows=int(snapshot.get("mapped_rows", 0)),
+            unmapped_rows=int(snapshot.get("unmapped_rows", 0)),
+            unmapped_symbols_json=(
+                {"symbols": list(snapshot["unmapped_symbols"])}
+                if snapshot.get("unmapped_symbols") is not None
+                else None
+            ),
+        )
+        for snapshot in snapshots
+    ]
+    session.add_all(rows)
+    session.flush()
+    return rows
+
+
+def get_latest_universe_health_snapshots(
+    session: Session,
+) -> dict[str, UniverseHealthSnapshot]:
+    """Return the newest mapping-health row per universe, keyed by universe key.
+
+    Beginner note:
+    This is the baseline the daily job compares today's counts against. The rows
+    are read newest-first and the first one seen per universe wins, so a universe
+    with a long history still yields exactly one row. The primary-key tie-breaker
+    keeps the order deterministic when two checks land in the same millisecond.
+
+    An empty result means the check has never run - the caller must treat that as
+    "no baseline", not as "zero unmapped", or the very first run would alert on
+    every pre-existing unmapped symbol.
+    """
+    stmt = select(UniverseHealthSnapshot).order_by(
+        UniverseHealthSnapshot.captured_at.desc(),
+        UniverseHealthSnapshot.id.desc(),
+    )
+    latest: dict[str, UniverseHealthSnapshot] = {}
+    for row in session.scalars(stmt):
+        latest.setdefault(row.universe_key, row)
+    return latest
 
 
 def get_recent_audit_logs(

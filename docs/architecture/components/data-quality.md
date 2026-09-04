@@ -3,9 +3,9 @@
 | | |
 |---|---|
 | **Component** | Reusable OHLCV candle-quality validation + scan-time quarantine, receipt, health surfacing, and prefetch-time repair |
-| **Source** | [`backend/data_quality/candles.py`](../../../backend/data_quality/candles.py), [`repair.py`](../../../backend/data_quality/repair.py), [`cache_repair.py`](../../../backend/data_quality/cache_repair.py), [`backend/data_quality/__init__.py`](../../../backend/data_quality/__init__.py); integrated in [`daily_data_loader.py`](../../../backend/daily_data_loader.py), [`scanning/service.py`](../../../backend/scanning/service.py), [`jobs/repair_candle_cache.py`](../../../backend/jobs/repair_candle_cache.py), [`health.py`](../../../backend/health.py), [`ui/health_page.py`](../../../ui/health_page.py) |
+| **Source** | [`backend/data_quality/candles.py`](../../../backend/data_quality/candles.py), [`repair.py`](../../../backend/data_quality/repair.py), [`cache_repair.py`](../../../backend/data_quality/cache_repair.py), [`universe_health.py`](../../../backend/data_quality/universe_health.py), [`backend/data_quality/__init__.py`](../../../backend/data_quality/__init__.py); integrated in [`daily_data_loader.py`](../../../backend/daily_data_loader.py), [`scanning/service.py`](../../../backend/scanning/service.py), [`jobs/repair_candle_cache.py`](../../../backend/jobs/repair_candle_cache.py), [`health.py`](../../../backend/health.py), [`ui/health_page.py`](../../../ui/health_page.py) |
 | **Layer** | Foundation checker + repair planner (pure, no I/O) + boundary integration in the data/scan layers |
-| **Status** | Stable (DATA-001A checker · DATA-001B integration · DATA-002 repair) |
+| **Status** | Stable (DATA-001A checker · DATA-001B integration · DATA-002 repair · OBS-004 universe mapping health) |
 | **Related** | [HLD](../high-level-design.md) · [data-002 repair design](../data-002-candle-cache-repair.md) · [data-acquisition.md](data-acquisition.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [storage-persistence.md](storage-persistence.md) · [health-monitoring.md](health-monitoring.md) · [observability.md](observability.md) · [security.md](security.md) |
 
 ## 1. Purpose & responsibilities
@@ -20,7 +20,7 @@ repair pass then runs at the end of the `python app.py` prefetch, so the app
 starts against the cleanest cache we can produce rather than silently dropping
 corrupt symbols from every scan.
 
-**Three parts:**
+**Four parts:**
 - **DATA-001A — checker** (`candles.py`): `validate_candles(...)` → an immutable
   `CandleQualityReport` of `DataQualityFinding`s with stable codes/severities.
   Pure, dependency-light (stdlib + pandas), never mutates the caller's frame, no
@@ -33,6 +33,15 @@ corrupt symbols from every scan.
   only the vendor can answer, **re-validates its own work**, and writes the cache
   back atomically. Full rationale in
   [data-002-candle-cache-repair.md](../data-002-candle-cache-repair.md).
+- **OBS-004 — universe mapping health** (`universe_health.py`): a different
+  question from the three above. They ask *"is this symbol's candle data sound?"*;
+  this asks *"is this symbol still in the scannable set at all?"*. A symbol that
+  leaves Dhan's instrument master is filtered out by `mapped_only()` and was
+  previously invisible to every headless path. The check compares today's
+  per-universe unmapped count against a persisted baseline
+  (`universe_health_snapshots`) and alerts only on an *increase*. Full rationale,
+  including why the prefetch logs but never records, in
+  [obs-004-universe-health-alerts.md](../obs-004-universe-health-alerts.md).
 
 ### Repair, in one paragraph
 
