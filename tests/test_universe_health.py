@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -76,13 +77,16 @@ def test_collect_reports_counts_and_names_the_unmapped_symbols(universe_dir):
     assert health.unmapped_symbols == ("GUJGASLTD",)
 
 
-def test_collect_survives_a_missing_universe_file(universe_dir):
+def test_collect_survives_a_missing_universe_file(universe_dir, caplog):
     """A health check must never be the reason the daily job dies."""
-    (health,) = collect_universe_health(universe_dir)
+    with caplog.at_level(logging.WARNING):
+        (health,) = collect_universe_health(universe_dir)
 
     assert health.total_rows == 0
     assert health.mapped_rows == 0
     assert health.unmapped_symbols == ()
+    assert health.observation_status == "missing"
+    assert "source is missing" in caplog.text
 
 
 def test_collect_caps_the_reported_symbol_list(universe_dir):
@@ -94,6 +98,58 @@ def test_collect_caps_the_reported_symbol_list(universe_dir):
 
     assert health.unmapped_rows == MAX_REPORTED_SYMBOLS + 10
     assert len(health.unmapped_symbols) == MAX_REPORTED_SYMBOLS
+    assert health.unmapped_symbols_truncated is True
+
+
+def test_collect_reads_each_csv_once_for_consistent_counts_and_names(
+    universe_dir, monkeypatch
+):
+    """One changing file must not produce counts from one read and names from another.
+
+    A second ``read_csv`` call is the production mutation this catches. In real
+    life the universe refresh replaces CSVs atomically, so two reads can observe
+    different generations even though each individual read is valid.
+    """
+    _write_universe(
+        universe_dir,
+        "nifty_100",
+        [("RELIANCE", "mapped"), ("TCS", "missing_security_id")],
+    )
+    real_read_csv = pd.read_csv
+    calls = 0
+
+    def counted_read_csv(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_read_csv(*args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_csv", counted_read_csv)
+
+    (health,) = collect_universe_health(universe_dir)
+
+    assert calls == 1
+    assert health.observation_status == "valid"
+    assert (health.total_rows, health.mapped_rows, health.unmapped_symbols) == (
+        2,
+        1,
+        ("TCS",),
+    )
+
+
+def test_collect_marks_an_unreadable_csv_without_inventing_a_zero_baseline(
+    universe_dir, monkeypatch, caplog
+):
+    """A parse failure must be distinguishable from a valid empty universe."""
+    _write_universe(universe_dir, "nifty_100", [("RELIANCE", "mapped")])
+    monkeypatch.setattr(pd, "read_csv", lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad csv")))
+
+    with caplog.at_level(logging.WARNING):
+        (health,) = collect_universe_health(universe_dir)
+
+    assert health.observation_status == "unreadable"
+    assert health.total_rows == 0
+    assert health.mapped_rows == 0
+    assert "source is unreadable" in caplog.text
 
 
 def test_no_baseline_never_regresses():
@@ -119,7 +175,11 @@ def test_steady_state_and_recovery_do_not_regress():
 
     class _Baseline:
         unmapped_rows = 3
-        unmapped_symbols_json = {"symbols": ["A", "B", "C"]}
+        unmapped_symbols_json = {
+            "symbols": ["A", "B", "C"],
+            "truncated": False,
+            "membership_complete": True,
+        }
 
     steady = [
         UniverseHealth(
@@ -139,7 +199,11 @@ def test_steady_state_and_recovery_do_not_regress():
 def test_regression_names_only_the_newly_unmapped_symbols():
     class _Baseline:
         unmapped_rows = 1
-        unmapped_symbols_json = {"symbols": ["A"]}
+        unmapped_symbols_json = {
+            "symbols": ["A"],
+            "truncated": False,
+            "membership_complete": True,
+        }
 
     current = [
         UniverseHealth(
@@ -153,6 +217,34 @@ def test_regression_names_only_the_newly_unmapped_symbols():
     assert regression.current_unmapped == 2
     # "A" was already known; only the new drop-out is worth naming.
     assert regression.newly_unmapped == ("GUJGASLTD",)
+
+
+@pytest.mark.parametrize("current_incomplete", [True, False])
+def test_regression_suppresses_names_when_either_membership_is_incomplete(
+    current_incomplete,
+):
+    """A capped side of the comparison cannot prove exact set membership."""
+    baseline = SimpleNamespace(
+        observation_status="valid",
+        unmapped_rows=1,
+        unmapped_symbols_json={
+            "symbols": ["A"],
+            "truncated": not current_incomplete,
+            "membership_complete": current_incomplete,
+        },
+    )
+    current = UniverseHealth(
+        universe_key="nifty_100",
+        total_rows=10,
+        mapped_rows=8,
+        unmapped_symbols=("A", "B"),
+        unmapped_symbols_truncated=current_incomplete,
+        membership_complete=not current_incomplete,
+    )
+
+    (regression,) = detect_mapping_regressions([current], {"nifty_100": baseline})
+
+    assert regression.newly_unmapped == ()
 
 
 def test_describe_is_a_single_actionable_line():
@@ -191,6 +283,8 @@ def test_log_universe_health_emits_one_event_per_universe(caplog):
         "rows": 10,
         "mapped": 8,
         "unmapped": 2,
+        "observation_status": "valid",
+        "unmapped_symbols_truncated": False,
     }
 
 
@@ -204,7 +298,11 @@ def test_check_records_a_baseline_and_stays_quiet_on_the_first_run(db_session, u
     assert report.regressions == ()
     stored = repository.get_latest_universe_health_snapshots(db_session)
     assert stored["nifty_100"].unmapped_rows == 1
-    assert stored["nifty_100"].unmapped_symbols_json == {"symbols": ["GUJGASLTD"]}
+    assert stored["nifty_100"].unmapped_symbols_json == {
+        "symbols": ["GUJGASLTD"],
+        "truncated": False,
+        "membership_complete": True,
+    }
 
 
 def test_check_alerts_exactly_once_when_a_symbol_drops_out(db_session, universe_dir, caplog):
@@ -246,6 +344,44 @@ def test_check_reads_the_baseline_before_writing_todays_snapshot(db_session, uni
     assert len(report.regressions) == 1
     rows = db_session.query(repository.UniverseHealthSnapshot).all()
     assert len(rows) == 2
+
+
+@pytest.mark.parametrize("failed_status", ["missing", "unreadable"])
+def test_failed_read_does_not_replace_the_last_valid_baseline(
+    db_session, universe_dir, monkeypatch, failed_status
+):
+    """Missing/corrupt observations remain history while recovery uses valid data.
+
+    The regression on recovery proves the unreadable observation was recorded
+    for diagnosis but never promoted to comparison authority.
+    """
+    _write_universe(universe_dir, "nifty_100", [("RELIANCE", "mapped"), ("TCS", "mapped")])
+    check_universe_health(db_session, universe_dir=universe_dir)
+
+    real_read_csv = pd.read_csv
+    if failed_status == "missing":
+        (universe_dir / "nifty_100.csv").unlink()
+    else:
+        monkeypatch.setattr(
+            pd,
+            "read_csv",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad csv")),
+        )
+    failed = check_universe_health(db_session, universe_dir=universe_dir)
+    assert failed.regressions == ()
+    assert failed.snapshots[0].observation_status == failed_status
+
+    monkeypatch.setattr(pd, "read_csv", real_read_csv)
+    _write_universe(
+        universe_dir,
+        "nifty_100",
+        [("RELIANCE", "mapped"), ("TCS", "missing_security_id")],
+    )
+    recovered = check_universe_health(db_session, universe_dir=universe_dir)
+
+    assert recovered.regressions[0].newly_unmapped == ("TCS",)
+    rows = db_session.query(repository.UniverseHealthSnapshot).order_by(repository.UniverseHealthSnapshot.id).all()
+    assert [row.observation_status for row in rows] == ["valid", failed_status, "valid"]
 
 
 # ---------------------------------------------------------------------------

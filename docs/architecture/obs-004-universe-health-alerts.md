@@ -4,7 +4,7 @@
 |---|---|
 | **Ticket** | OBS-004 (issue [#119](https://github.com/DoRmAmMu1997/Streamlit-Scanner-App/issues/119)) |
 | **Source** | [`backend/data_quality/universe_health.py`](../../backend/data_quality/universe_health.py) · [`backend/storage/models.py`](../../backend/storage/models.py) (`UniverseHealthSnapshot`) · [`backend/jobs/run_daily_scan.py`](../../backend/jobs/run_daily_scan.py) · [`backend/notifications/`](../../backend/notifications/) · [`app.py`](../../app.py) |
-| **Migration** | `20260904obs004_create_universe_health_snapshots` |
+| **Migration** | `20260904obs004_create_universe_health_snapshots` + `20260906obs004a_harden_universe_health_validity` |
 | **Status** | Shipped |
 | **Related** | [data-quality.md](components/data-quality.md) · [universe-management.md](components/universe-management.md) · [observability.md](components/observability.md) · [notifications.md](components/notifications.md) · [storage-persistence.md](components/storage-persistence.md) · [audit-2026-06.md](audit-2026-06.md) |
 
@@ -58,6 +58,21 @@ and keeping the history answers it for free. The read path only ever wants the
 newest row per universe, which `ix_universe_health_snapshots_key_captured`
 serves directly.
 
+The follow-up OBS-004A correction makes baseline authority explicit. Each row
+has an `observation_status`: `valid`, `missing`, `unreadable`, or
+`legacy_unknown`. Only `valid` rows participate in comparison. Existing rows are
+backfilled as `legacy_unknown`, because they predate the single-read guarantee
+and cannot prove that their count and name evidence describe the same CSV
+generation. Missing and unreadable observations remain in the append-only
+history for diagnosis without replacing the last valid baseline.
+
+The latest-valid lookup uses `row_number()` partitioned by `universe_key` and
+ordered by `captured_at DESC, id DESC`. Ranking happens in SQL, so a long history
+returns one ORM row per universe instead of materializing the entire table in
+Python. The composite
+`ix_universe_health_snapshots_key_status_captured_id` index matches its filter
+and deterministic tie-break order.
+
 ### 2.3 The two quiet rules
 
 Both exist to keep the alert credible enough that nobody mutes the channel:
@@ -93,13 +108,21 @@ alone tells the story. Only symbol strings and counts are stored — never price
 never credentials — and the alert text still goes through `redact_text` like
 every other notification.
 
+The stored JSON now carries explicit `truncated` and `membership_complete`
+flags. Counts can still alert when either side exceeds the cap, but exact
+newly-missing names are suppressed unless both current and previous memberships
+are complete. This prevents a name omitted from yesterday's capped sample from
+being falsely presented as a new dropout today.
+
 ## 3. Failure posture
 
-Every entry point is wrapped: `_check_universe_health()` in the daily job catches
-broadly and returns `()`, and the prefetch helper does the same. A universe CSV
-that will not parse is a reason to warn, never a reason to skip the night's scan.
-The health check can therefore never change the job's exit code — the same
-contract ALERT-001 gives notifications.
+Every CSV is read once per collection. Counts and names therefore come from one
+in-memory frame even if an atomic refresh replaces the file while the health
+pass is running. Every entry point remains wrapped: `_check_universe_health()`
+in the daily job catches broadly and returns `()`, and the prefetch helper does
+the same. A missing or unparsable CSV records a warning-status observation and
+never becomes baseline authority. The health check can therefore never change
+the job's exit code — the same contract ALERT-001 gives notifications.
 
 ## 4. What an operator sees
 

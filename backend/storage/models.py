@@ -1843,6 +1843,18 @@ class UniverseHealthSnapshot(Base):
         comment="Universe registry key, e.g. 'hemant_good_200'",
     )
 
+    # Read failures remain useful history, but only ``valid`` rows may become a
+    # comparison baseline. ``legacy_unknown`` is assigned by the follow-up
+    # migration because rows created before this field existed cannot prove that
+    # both counts and names came from one successful CSV read.
+    observation_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="valid",
+        server_default="valid",
+        comment="valid | missing | unreadable | legacy_unknown",
+    )
+
     total_rows: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, comment="Rows in the universe CSV"
     )
@@ -1862,12 +1874,15 @@ class UniverseHealthSnapshot(Base):
     )
 
     __table_args__ = (
-        # The comparison query is "newest row for this universe", so lead with
-        # universe_key and let captured_at order within it.
+        # The comparison query filters valid rows per universe and orders by
+        # captured_at/id. One composite index serves that full lookup shape on
+        # both SQLite and Postgres.
         Index(
-            "ix_universe_health_snapshots_key_captured",
+            "ix_universe_health_snapshots_key_status_captured_id",
             "universe_key",
+            "observation_status",
             "captured_at",
+            "id",
         ),
     )
 

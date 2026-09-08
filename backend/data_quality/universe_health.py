@@ -40,7 +40,7 @@ import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from backend.config import UNIVERSE_DIR
 from backend.observability import (
@@ -60,15 +60,28 @@ logger = logging.getLogger(__name__)
 #: alert; past this point the count alone tells the story.
 MAX_REPORTED_SYMBOLS = 25
 
+UniverseObservationStatus = Literal["valid", "missing", "unreadable", "legacy_unknown"]
+
 
 @dataclass(frozen=True)
 class UniverseHealth:
-    """Mapping health for one universe at one point in time."""
+    """Mapping health for one universe at one point in time.
+
+    Beginner note:
+    ``observation_status`` separates a real empty CSV from a failed read. A
+    failed read carries zero counts only because no counts were available; it
+    must never be treated as evidence that the universe recovered to zero.
+    ``membership_complete`` separately says whether the bounded symbol tuple is
+    sufficient for an exact set difference.
+    """
 
     universe_key: str
     total_rows: int
     mapped_rows: int
     unmapped_symbols: tuple[str, ...]
+    observation_status: UniverseObservationStatus = "valid"
+    unmapped_symbols_truncated: bool = False
+    membership_complete: bool = True
 
     @property
     def unmapped_rows(self) -> int:
@@ -108,26 +121,23 @@ class UniverseHealthReport:
     regressions: tuple[MappingRegression, ...] = ()
 
 
-def _unmapped_symbols(frame: Any) -> tuple[str, ...]:
-    """Return the sorted, capped symbols in ``frame`` that cannot be fetched.
+def _unmapped_symbols(frame: Any, unmapped_mask: Any) -> tuple[tuple[str, ...], bool, bool]:
+    """Return bounded names plus explicit truncation/completeness evidence.
 
-    Beginner note: ``universe_status()`` gives us counts but not names, and a
-    count alone makes for a useless alert ("one more symbol is missing" - which
-    one?). This re-reads the same frame for the names. Sorted so the stored list
-    is stable and two runs are directly comparable.
+    Beginner note:
+    The count and names come from the same frame so an atomic universe refresh
+    cannot make them describe different file generations. Exact newly-missing
+    names are safe only when every unmapped row had a name and the 25-name cap
+    did not discard any member. The booleans preserve that distinction instead
+    of letting a short tuple masquerade as a complete set.
     """
     if "symbol" not in frame.columns:
-        return ()
-    if "mapping_status" in frame.columns:
-        unmapped = frame.loc[
-            ~frame["mapping_status"].astype(str).str.lower().eq("mapped")
-        ]
-    elif "security_id" in frame.columns:
-        unmapped = frame.loc[frame["security_id"].astype(str).str.strip().eq("")]
-    else:
-        return ()
-    symbols = sorted({str(value).strip() for value in unmapped["symbol"] if str(value).strip()})
-    return tuple(symbols[:MAX_REPORTED_SYMBOLS])
+        return (), False, not bool(unmapped_mask.any())
+    raw_names = [str(value).strip() for value in frame.loc[unmapped_mask, "symbol"]]
+    symbols = sorted({value for value in raw_names if value})
+    truncated = len(symbols) > MAX_REPORTED_SYMBOLS
+    membership_complete = not truncated and all(raw_names)
+    return tuple(symbols[:MAX_REPORTED_SYMBOLS]), truncated, membership_complete
 
 
 def collect_universe_health(
@@ -135,11 +145,11 @@ def collect_universe_health(
 ) -> tuple[UniverseHealth, ...]:
     """Read every universe CSV and return its mapping health. Never raises.
 
-    Reuses :func:`backend.universe_loader.universe_status` for the counts rather
-    than re-deriving them, so the numbers here and the numbers in the Streamlit
-    status panel can never disagree. A universe whose CSV is missing or
-    unreadable yields a zero row instead of an exception - a health check that
-    can take the daily job down would be worse than the problem it reports.
+    Each CSV is opened exactly once and that one frame supplies both counts and
+    names. Missing and unreadable files still produce explicit observations so
+    operators can diagnose the gap, but their zero placeholders are never valid
+    baselines. A health check that can take the daily job down would be worse
+    than the problem it reports.
     """
     # Imported here rather than at module scope: universe_loader pulls in pandas
     # and the universe registry, and this module is imported by the storage-aware
@@ -148,27 +158,58 @@ def collect_universe_health(
     import pandas as pd
 
     from backend.universe_builder import UNIVERSE_CONFIG, universe_file_path
-    from backend.universe_loader import universe_status
-
     results: list[UniverseHealth] = []
     for universe_key in UNIVERSE_CONFIG:
-        status = universe_status(universe_key, universe_dir)
-        total_rows = int(status.get("rows", 0) or 0)
-        mapped_rows = int(status.get("mapped_rows", 0) or 0)
-
-        symbols: tuple[str, ...] = ()
-        # Only worth re-reading the file when it exists, parsed cleanly, and
-        # actually has something unmapped to name.
-        if status.get("exists") and not status.get("error") and total_rows > mapped_rows:
-            try:
-                frame = pd.read_csv(
-                    universe_file_path(universe_key, universe_dir), dtype=str
-                ).fillna("")
-                symbols = _unmapped_symbols(frame)
-            except Exception:  # noqa: BLE001 - a health check must never break the caller
-                logger.warning(
-                    "could not read unmapped symbols for universe %s", universe_key, exc_info=True
+        path = universe_file_path(universe_key, universe_dir)
+        if not path.exists():
+            logger.warning("universe health source is missing for %s", universe_key)
+            results.append(
+                UniverseHealth(
+                    universe_key=universe_key,
+                    total_rows=0,
+                    mapped_rows=0,
+                    unmapped_symbols=(),
+                    observation_status="missing",
+                    membership_complete=False,
                 )
+            )
+            continue
+
+        try:
+            frame = pd.read_csv(path, dtype=str).fillna("")
+        except FileNotFoundError:
+            # An atomic refresh can move the file between ``exists`` and open.
+            # That race is semantically missing, not a malformed CSV.
+            logger.warning("universe health source disappeared for %s", universe_key)
+            status: UniverseObservationStatus = "missing"
+            frame = None
+        except Exception:  # noqa: BLE001 - best-effort observation boundary
+            logger.warning("universe health source is unreadable for %s", universe_key, exc_info=True)
+            status = "unreadable"
+            frame = None
+
+        if frame is None:
+            results.append(
+                UniverseHealth(
+                    universe_key=universe_key,
+                    total_rows=0,
+                    mapped_rows=0,
+                    unmapped_symbols=(),
+                    observation_status=status,
+                    membership_complete=False,
+                )
+            )
+            continue
+
+        total_rows = len(frame)
+        if "mapping_status" in frame.columns:
+            mapped_mask = frame["mapping_status"].astype(str).str.lower().eq("mapped")
+        elif "security_id" in frame.columns:
+            mapped_mask = frame["security_id"].astype(str).str.strip().ne("")
+        else:
+            mapped_mask = pd.Series(False, index=frame.index)
+        mapped_rows = int(mapped_mask.sum())
+        symbols, truncated, membership_complete = _unmapped_symbols(frame, ~mapped_mask)
 
         results.append(
             UniverseHealth(
@@ -176,6 +217,9 @@ def collect_universe_health(
                 total_rows=total_rows,
                 mapped_rows=mapped_rows,
                 unmapped_symbols=symbols,
+                observation_status="valid",
+                unmapped_symbols_truncated=truncated,
+                membership_complete=membership_complete,
             )
         )
     return tuple(results)
@@ -192,10 +236,13 @@ def log_universe_health(snapshots: Sequence[UniverseHealth]) -> None:
         log_event(
             logger,
             EVENT_UNIVERSE_HEALTH_CHECKED,
+            level=(logging.INFO if snapshot.observation_status == "valid" else logging.WARNING),
             universe_key=snapshot.universe_key,
             rows=snapshot.total_rows,
             mapped=snapshot.mapped_rows,
             unmapped=snapshot.unmapped_rows,
+            observation_status=snapshot.observation_status,
+            unmapped_symbols_truncated=snapshot.unmapped_symbols_truncated,
         )
 
 
@@ -219,6 +266,8 @@ def detect_mapping_regressions(
     """
     regressions: list[MappingRegression] = []
     for snapshot in current:
+        if snapshot.observation_status != "valid":
+            continue
         baseline = previous.get(snapshot.universe_key)
         if baseline is None:
             continue
@@ -227,8 +276,17 @@ def detect_mapping_regressions(
             continue
 
         stored = getattr(baseline, "unmapped_symbols_json", None) or {}
+        memberships_complete = (
+            snapshot.membership_complete
+            and stored.get("membership_complete") is True
+            and stored.get("truncated") is False
+        )
         known = {str(value) for value in stored.get("symbols", [])}
-        newly = tuple(symbol for symbol in snapshot.unmapped_symbols if symbol not in known)
+        newly = (
+            tuple(symbol for symbol in snapshot.unmapped_symbols if symbol not in known)
+            if memberships_complete
+            else ()
+        )
         regressions.append(
             MappingRegression(
                 universe_key=snapshot.universe_key,
@@ -285,6 +343,9 @@ def check_universe_health(
                 "mapped_rows": snapshot.mapped_rows,
                 "unmapped_rows": snapshot.unmapped_rows,
                 "unmapped_symbols": list(snapshot.unmapped_symbols),
+                "unmapped_symbols_truncated": snapshot.unmapped_symbols_truncated,
+                "membership_complete": snapshot.membership_complete,
+                "observation_status": snapshot.observation_status,
             }
             for snapshot in snapshots
         ],

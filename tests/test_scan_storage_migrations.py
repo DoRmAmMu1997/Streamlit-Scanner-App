@@ -29,6 +29,47 @@ from backend.storage import database
 from backend.storage.models import Base, IpoIssue, IpoManualExtraction, IpoScore
 
 
+def test_obs004a_backfills_legacy_rows_and_restores_original_shape(
+    monkeypatch, tmp_path: Path
+):
+    """Old snapshots lose baseline authority while retaining their history.
+
+    The failure this catches is a migration that labels pre-single-read rows as
+    valid, or edits the original OBS-004 migration instead of providing an
+    upgrade path for databases that already ran it.
+    """
+    db_path = tmp_path / "obs004a.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
+    config = Config("alembic.ini")
+    command.upgrade(config, "20260904obs004")
+    engine = create_engine(f"sqlite:///{db_path.as_posix()}", future=True)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO universe_health_snapshots "
+                "(captured_at, universe_key, total_rows, mapped_rows, unmapped_rows, "
+                "unmapped_symbols_json) VALUES "
+                "('2026-09-05 00:00:00', 'nifty_100', 100, 99, 1, NULL)"
+            )
+        )
+
+    command.upgrade(config, "head")
+    with engine.connect() as connection:
+        status = connection.execute(
+            text("SELECT observation_status FROM universe_health_snapshots")
+        ).scalar_one()
+    assert status == "legacy_unknown"
+    assert {
+        index["name"] for index in inspect(engine).get_indexes("universe_health_snapshots")
+    } >= {"ix_universe_health_snapshots_key_status_captured_id"}
+
+    command.downgrade(config, "20260904obs004")
+    assert "observation_status" not in {
+        column["name"] for column in inspect(engine).get_columns("universe_health_snapshots")
+    }
+    engine.dispose()
+
+
 def test_alembic_cli_does_not_echo_percent_encoded_database_password():
     """Alembic errors must not print credentials from a URL-encoded password.
 

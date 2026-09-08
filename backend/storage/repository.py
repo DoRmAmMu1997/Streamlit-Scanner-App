@@ -43,6 +43,9 @@ if TYPE_CHECKING:
     from backend.validation.forward_return import ForwardReturnPoint
 
 _AI_EVALUATION_OUTCOMES = frozenset({"approved", "rejected", "error"})
+_UNIVERSE_OBSERVATION_STATUSES = frozenset(
+    {"valid", "missing", "unreadable", "legacy_unknown"}
+)
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
@@ -848,15 +851,29 @@ def record_universe_health_snapshots(
 
     Each mapping needs ``universe_key``, ``total_rows``, ``mapped_rows`` and
     ``unmapped_rows``; ``unmapped_symbols`` is optional and stored as JSON.
+    Failed reads are persisted with an explicit status for diagnosis, while the
+    read helper below deliberately excludes them from baseline authority.
     """
+    invalid_statuses = {
+        str(snapshot.get("observation_status", "valid"))
+        for snapshot in snapshots
+    } - _UNIVERSE_OBSERVATION_STATUSES
+    if invalid_statuses:
+        raise ValueError(f"Unsupported universe observation status: {sorted(invalid_statuses)!r}")
+
     rows = [
         UniverseHealthSnapshot(
             universe_key=str(snapshot["universe_key"]),
+            observation_status=str(snapshot.get("observation_status", "valid")),
             total_rows=int(snapshot.get("total_rows", 0)),
             mapped_rows=int(snapshot.get("mapped_rows", 0)),
             unmapped_rows=int(snapshot.get("unmapped_rows", 0)),
             unmapped_symbols_json=(
-                {"symbols": list(snapshot["unmapped_symbols"])}
+                {
+                    "symbols": list(snapshot["unmapped_symbols"]),
+                    "truncated": bool(snapshot.get("unmapped_symbols_truncated", False)),
+                    "membership_complete": bool(snapshot.get("membership_complete", False)),
+                }
                 if snapshot.get("unmapped_symbols") is not None
                 else None
             ),
@@ -871,26 +888,51 @@ def record_universe_health_snapshots(
 def get_latest_universe_health_snapshots(
     session: Session,
 ) -> dict[str, UniverseHealthSnapshot]:
-    """Return the newest mapping-health row per universe, keyed by universe key.
+    """Return the newest valid mapping-health row per universe.
 
     Beginner note:
-    This is the baseline the daily job compares today's counts against. The rows
-    are read newest-first and the first one seen per universe wins, so a universe
-    with a long history still yields exactly one row. The primary-key tie-breaker
-    keeps the order deterministic when two checks land in the same millisecond.
+    This is the baseline the daily job compares today's counts against. A window
+    function ranks valid rows inside each universe in the database, so Python
+    receives one row per key even when years of append-only history exist. The
+    primary-key tie-breaker keeps the winner deterministic when two checks share
+    a timestamp.
+
+    Beginner note:
+    Missing, unreadable, and migrated ``legacy_unknown`` rows remain in history
+    as operational evidence, but do not replace a previously valid baseline.
+    Otherwise a temporary read failure recorded as zero could make the next good
+    read look like a false mapping regression.
 
     An empty result means the check has never run - the caller must treat that as
     "no baseline", not as "zero unmapped", or the very first run would alert on
     every pre-existing unmapped symbol.
     """
-    stmt = select(UniverseHealthSnapshot).order_by(
-        UniverseHealthSnapshot.captured_at.desc(),
-        UniverseHealthSnapshot.id.desc(),
+    ranked = (
+        select(
+            UniverseHealthSnapshot.id.label("snapshot_id"),
+            func.row_number()
+            .over(
+                partition_by=UniverseHealthSnapshot.universe_key,
+                order_by=(
+                    UniverseHealthSnapshot.captured_at.desc(),
+                    UniverseHealthSnapshot.id.desc(),
+                ),
+            )
+            .label("baseline_rank"),
+        )
+        .where(UniverseHealthSnapshot.observation_status == "valid")
+        .subquery()
     )
-    latest: dict[str, UniverseHealthSnapshot] = {}
-    for row in session.scalars(stmt):
-        latest.setdefault(row.universe_key, row)
-    return latest
+    stmt = (
+        select(UniverseHealthSnapshot)
+        .join(ranked, UniverseHealthSnapshot.id == ranked.c.snapshot_id)
+        .where(ranked.c.baseline_rank == 1)
+        .order_by(
+            UniverseHealthSnapshot.captured_at.desc(),
+            UniverseHealthSnapshot.id.desc(),
+        )
+    )
+    return {row.universe_key: row for row in session.scalars(stmt)}
 
 
 def get_recent_audit_logs(

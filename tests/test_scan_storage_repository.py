@@ -11,12 +11,109 @@ import datetime as dt
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import event
 
 from backend.scanning.result_contract import AIEvaluationRecord, AIProvenance
 from backend.storage.models import ScanStatus
 
 # The ``db_session`` fixture these tests use lives in tests/conftest.py,
 # shared with the other scan-history test modules.
+
+
+def test_universe_health_latest_valid_query_handles_ties_and_long_history(
+    db_session, db_engine
+):
+    """The database returns one valid baseline per key with an id tie-breaker.
+
+    One hundred older rows plus the emitted ``row_number`` query guard against
+    accidental Python-side history materialization, while equal timestamps
+    prove the larger id wins deterministically.
+    """
+    from backend.storage.models import UniverseHealthSnapshot
+    from backend.storage.repository import get_latest_universe_health_snapshots
+
+    captured = dt.datetime(2026, 9, 6, tzinfo=dt.UTC)
+    rows = [
+        UniverseHealthSnapshot(
+            captured_at=captured - dt.timedelta(days=offset + 1),
+            universe_key="nifty_100",
+            total_rows=100,
+            mapped_rows=100,
+            unmapped_rows=0,
+            unmapped_symbols_json={"symbols": [], "truncated": False, "membership_complete": True},
+            observation_status="valid",
+        )
+        for offset in range(100)
+    ]
+    rows.extend(
+        [
+            UniverseHealthSnapshot(
+                captured_at=captured,
+                universe_key="nifty_100",
+                total_rows=100,
+                mapped_rows=99,
+                unmapped_rows=value,
+                unmapped_symbols_json={"symbols": [f"S{value}"], "truncated": False, "membership_complete": True},
+                observation_status="valid",
+            )
+            for value in (1, 2)
+        ]
+    )
+    rows.append(
+        UniverseHealthSnapshot(
+            captured_at=captured + dt.timedelta(days=1),
+            universe_key="nifty_100",
+            total_rows=0,
+            mapped_rows=0,
+            unmapped_rows=0,
+            unmapped_symbols_json=None,
+            observation_status="unreadable",
+        )
+    )
+    db_session.add_all(rows)
+    db_session.flush()
+    expected_id = rows[-2].id
+    statements: list[str] = []
+
+    def capture_statement(_connection, _cursor, statement, _parameters, _context, _many):
+        statements.append(statement)
+
+    event.listen(db_engine, "before_cursor_execute", capture_statement)
+    try:
+        latest = get_latest_universe_health_snapshots(db_session)
+    finally:
+        event.remove(db_engine, "before_cursor_execute", capture_statement)
+
+    assert latest["nifty_100"].id == expected_id
+    assert latest["nifty_100"].observation_status == "valid"
+    assert any("row_number" in statement.lower() for statement in statements)
+
+
+def test_record_universe_health_snapshot_leaves_commit_to_the_caller(db_session):
+    """A repository flush must remain rollback-safe inside its caller's unit of work."""
+    from backend.storage.models import UniverseHealthSnapshot
+    from backend.storage.repository import record_universe_health_snapshots
+
+    record_universe_health_snapshots(
+        db_session,
+        [
+            {
+                "universe_key": "nifty_100",
+                "total_rows": 100,
+                "mapped_rows": 99,
+                "unmapped_rows": 1,
+                "unmapped_symbols": ["TCS"],
+                "unmapped_symbols_truncated": False,
+                "membership_complete": True,
+                "observation_status": "valid",
+            }
+        ],
+    )
+    assert db_session.query(UniverseHealthSnapshot).count() == 1
+
+    db_session.rollback()
+
+    assert db_session.query(UniverseHealthSnapshot).count() == 0
 
 
 def test_repository_creates_run_results_and_failed_status(db_session):
