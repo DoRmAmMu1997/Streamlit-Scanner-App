@@ -63,6 +63,9 @@ CI_COMMANDS = (
     "docker compose up --build --wait --wait-timeout 180",
     "docker compose down --volumes --remove-orphans",
 )
+DEVELOPMENT_TOOLS = frozenset(
+    {"pytest", "pytest-cov", "ruff", "bandit", "pip-audit", "mypy", "pre-commit"}
+)
 
 
 def _assert_qual_007_ignore_errors_only_shrinks(config: dict) -> None:
@@ -260,15 +263,207 @@ def test_developer_tools_stay_out_of_the_runtime_requirements():
     runtime = (ROOT / "requirements.txt").read_text(encoding="utf-8")
     dev = (ROOT / "requirements-dev.txt").read_text(encoding="utf-8")
 
-    dev_only = ("pytest", "pytest-cov", "ruff", "bandit", "pip-audit", "mypy", "pre-commit")
-    for name in dev_only:
-        pattern = rf"^{re.escape(name)}(?:\[[^\]]+\])?\s*$"
-        assert not re.search(pattern, runtime, flags=re.IGNORECASE | re.MULTILINE), (
+    _assert_developer_tools_stay_out_of_runtime_requirements(runtime, dev)
+
+
+def _normalize_requirement_name(name: str) -> str:
+    """Return the canonical spelling used when comparing requirement names.
+
+    Beginner note: Python package names are case-insensitive, and packaging
+    treats runs of dots, hyphens, and underscores as equivalent. Canonicalizing
+    them before comparison prevents a policy bypass through cosmetic spelling.
+
+    Args:
+        name: The project name token extracted from a requirements line.
+
+    Returns:
+        A case-folded name with equivalent separators represented as hyphens.
+    """
+    return re.sub(r"[-_.]+", "-", name).casefold()
+
+
+def _requirement_names(text: str) -> set[str]:
+    """Extract normalized project names from simple requirements-file text.
+
+    Beginner note: this guard only needs the project token, not dependency
+    resolution. Removing comments and environment markers keeps the check small
+    while still covering the requirement forms maintainers use. The leading-name
+    match naturally leaves extras and version syntax out of the name; lines
+    beginning with an option are ignored because they do not name a project.
+
+    Args:
+        text: Requirements-file contents to inspect.
+
+    Returns:
+        The normalized project names found in the supplied text.
+    """
+    names: set[str] = set()
+    for raw_line in text.splitlines():
+        line = raw_line.split("#", maxsplit=1)[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        line = line.split(";", maxsplit=1)[0].strip()
+        match = re.match(r"([A-Za-z0-9][A-Za-z0-9._-]*)", line)
+        if match:
+            names.add(_normalize_requirement_name(match.group(1)))
+    return names
+
+
+def _assert_developer_tools_stay_out_of_runtime_requirements(
+    runtime: str, dev: str
+) -> None:
+    """Assert that developer tools have only a development-requirements home.
+
+    Beginner note: ``Dockerfile`` installs the runtime file into production,
+    while CI installs both files. Checking both sides catches accidentally
+    shipping a test tool and accidentally deleting the tool from CI at once.
+
+    Args:
+        runtime: Contents of the production requirements file.
+        dev: Contents of the development requirements file.
+
+    Raises:
+        AssertionError: If a development tool is in the runtime set or absent
+            from the development set.
+    """
+    runtime_names = _requirement_names(runtime)
+    dev_names = _requirement_names(dev)
+    for name in DEVELOPMENT_TOOLS:
+        normalized_name = _normalize_requirement_name(name)
+        assert normalized_name not in runtime_names, (
             f"{name} is a developer tool and must not be in requirements.txt"
         )
-        assert re.search(pattern, dev, flags=re.IGNORECASE | re.MULTILINE), (
+        assert normalized_name in dev_names, (
             f"{name} should still be declared in requirements-dev.txt"
         )
+
+
+@pytest.mark.parametrize(
+    "runtime_line",
+    (
+        "pytest==9.1.1",
+        "pytest # inline comment",
+        'pytest ; python_version >= "3.11"',
+        "pytest_cov",
+        "pytest.cov",
+        "pytest[extra]>=9",
+    ),
+)
+def test_developer_tool_guard_rejects_requirement_syntax_variants(
+    monkeypatch: pytest.MonkeyPatch, runtime_line: str
+):
+    """The guard must reject tool declarations hidden by requirement syntax.
+
+    Beginner note: the original guard matched an entire line such as exactly
+    ``pytest``. A version, comment, marker, extra, or alternate separator made
+    the same project invisible to that check, allowing it back into production.
+    """
+    runtime = f"requests\n{runtime_line}\npsycopg[binary]\n"
+    dev = "pytest\npytest-cov\nruff\nbandit\npip-audit\nmypy\npre-commit\n"
+
+    with pytest.raises(AssertionError, match="pytest"):
+        _run_developer_tool_guard_with_sources(monkeypatch, runtime, dev)
+
+
+def test_developer_tool_guard_ignores_benign_runtime_requirements(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Runtime packages must not be mistaken for development tooling.
+
+    Beginner note: a parser that flags every requirement, or matches partial
+    names, could reject legitimate runtime packages and hide the real policy
+    failure. This case proves ordinary runtime dependencies remain allowed.
+    """
+    runtime = "requests>=2\nPyYAML\npsycopg[binary]\n"
+    dev = "pytest\npytest-cov\nruff\nbandit\npip-audit\nmypy\npre-commit\n"
+
+    _run_developer_tool_guard_with_sources(monkeypatch, runtime, dev)
+
+
+def test_developer_tool_guard_accepts_requirement_syntax_in_development_file(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The presence check accepts normal requirement syntax in the dev file.
+
+    Beginner note: the policy has two halves. It must reject tools in the image
+    inputs and still recognize them when CI declares versions, extras, markers,
+    comments, or equivalent project-name spelling in its own input.
+    """
+    runtime = "requests>=2\nPyYAML\npsycopg[binary]\n"
+    dev = (
+        "pytest==9.1.1 # pinned test runner\n"
+        'pytest.cov[plugin]>=7 ; python_version >= "3.11"\n'
+        "Ruff\n"
+        'BANDIT ; python_version >= "3.11"\n'
+        "pip_audit[security]\n"
+        "MyPy # static types\n"
+        "pre.commit\n"
+    )
+
+    _run_developer_tool_guard_with_sources(monkeypatch, runtime, dev)
+
+
+def test_developer_tool_guard_requires_each_tool_in_development_requirements(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Removing a tool from the development file must fail the policy guard.
+
+    Beginner note: a clean runtime file alone does not prove CI is configured;
+    silently dropping a tool from the development file would make its checks
+    unavailable. The missing ``mypy`` declaration must therefore fail loudly.
+    """
+    runtime = "requests\n"
+    dev = "pytest\npytest-cov\nruff\nbandit\npip-audit\npre-commit\n"
+
+    with pytest.raises(AssertionError, match="mypy"):
+        _run_developer_tool_guard_with_sources(monkeypatch, runtime, dev)
+
+
+def test_developer_tool_guard_normalizes_case_and_name_separators(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Case and separator spelling must not bypass the guard.
+
+    Beginner note: if only one spelling were normalized, an equivalent name
+    such as ``pytest_cov`` or ``pre_commit`` could bypass the development-file
+    presence check. This verifies those alternate forms remain recognized.
+    """
+    runtime = "requests\n"
+    dev = "PyTeSt\npytest_cov\nruff\nbandit\npip-audit\nmypy\npre_commit\n"
+
+    _run_developer_tool_guard_with_sources(monkeypatch, runtime, dev)
+
+
+def _run_developer_tool_guard_with_sources(
+    monkeypatch: pytest.MonkeyPatch, runtime: str, dev: str
+) -> None:
+    """Run the policy guard against supplied text without touching files.
+
+    Beginner note: replacing only the two file reads keeps these regressions
+    focused on the real guard while avoiding temporary files or edits to the
+    checked-in dependency declarations.
+
+    Args:
+        monkeypatch: Pytest fixture that restores ``Path.read_text`` afterward.
+        runtime: In-memory production requirements contents.
+        dev: In-memory development requirements contents.
+
+    Returns:
+        None. The wrapped guard raises ``AssertionError`` for a policy failure.
+    """
+    original_read_text = Path.read_text
+
+    def read_text(
+        path: Path, encoding: str | None = None, errors: str | None = None
+    ) -> str:
+        if path == ROOT / "requirements.txt":
+            return runtime
+        if path == ROOT / "requirements-dev.txt":
+            return dev
+        return original_read_text(path, encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    test_developer_tools_stay_out_of_the_runtime_requirements()
 
 
 def test_readme_documents_local_quality_and_security_commands():
