@@ -82,6 +82,7 @@ and dashboard freshness/provenance.
 - **[ipo-010-ai-extraction-proposals.md](ipo-010-ai-extraction-proposals.md)** — bounded PDF extraction, deterministic section classification, and the fail-closed AI proposal/review trust model.
 - **[ipo-011-one-button-screener.md](ipo-011-one-button-screener.md)** — dispatching the whole IPO pipeline from the Run screener button: the `requires_candles` framework opt-out, opt-in auto-approval, web-sourced QIB demand and its containment rule.
 - **[ipo-010-security-integrity-hardening.md](ipo-010-security-integrity-hardening.md)** — PR #108 follow-up ADR: killable PDF parsing, citation-bound financial facts, advisory web-evidence precedence, and atomic/idempotent review and scoring.
+- **[sec-transcript-egress.md](sec-transcript-egress.md)** — transcript PDF egress ADR: validate every public destination and pin each request to its inspected numeric address while preserving TLS hostname verification.
 - **[scan-run-persistence.md](scan-run-persistence.md)** — SCAN-001 scan-run persistence schema (the column-by-column rationale the Storage LLD links to).
 - **[scan-002-handoff.md](scan-002-handoff.md)** — SCAN-002 database-layer implementation handoff brief.
 - **[obs-003-audit-log.md](obs-003-audit-log.md)** — OBS-003 audit log + runtime-config schema, recorder design, and the seven tracked events.

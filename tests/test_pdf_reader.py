@@ -1,6 +1,6 @@
 """Tests for the concall transcript PDF downloader / extractor.
 
-No live HTTP is involved. `requests.Session.get` is monkey-patched, and
+No live HTTP is involved. Downloads inject explicit offline resolver/transport functions, and
 `pdfplumber.open` is patched to return a fake document so the test does
 not depend on having a real PDF on disk.
 """
@@ -85,8 +85,8 @@ class _FakeResponse:
 
 
 class _FakeSession:
-    """Minimal stand-in for requests.Session — records GETs and returns a canned
-    streamed response."""
+    """Explicit offline transport — records validated targets and returns a
+    canned streamed response. The historical helper name is kept for test continuity."""
 
     def __init__(
         self,
@@ -102,8 +102,8 @@ class _FakeSession:
         self.headers = headers
         self.calls: list[str] = []
 
-    def get(self, url, **kwargs):
-        self.calls.append(url)
+    def __call__(self, target, **kwargs):
+        self.calls.append(target.url)
         return _FakeResponse(
             self.status,
             self.body,
@@ -119,14 +119,14 @@ def test_download_pdf_writes_file_and_is_idempotent(tmp_path: Path):
     session = _FakeSession(status=200, body=b"%PDF-1.4 fake bytes")
     url = "https://bse.example.com/concall/q1fy26.pdf"
 
-    path1 = pdf_reader.download_pdf(url, cache_dir=tmp_path, session=session)
+    path1 = pdf_reader.download_pdf(url, cache_dir=tmp_path, transport=session, resolver=lambda *_: ["8.8.8.8"])
     assert path1 is not None
     assert path1.exists()
     assert path1.read_bytes().startswith(b"%PDF-1.4")
     assert len(session.calls) == 1
 
     # Second call: cache hit, no new HTTP request.
-    path2 = pdf_reader.download_pdf(url, cache_dir=tmp_path, session=session)
+    path2 = pdf_reader.download_pdf(url, cache_dir=tmp_path, transport=session, resolver=lambda *_: ["8.8.8.8"])
     assert path2 == path1
     assert len(session.calls) == 1, "Second download_pdf call should hit the cache"
 
@@ -134,7 +134,7 @@ def test_download_pdf_writes_file_and_is_idempotent(tmp_path: Path):
 def test_download_pdf_returns_none_on_404(tmp_path: Path):
     session = _FakeSession(status=404, body=b"")
     path = pdf_reader.download_pdf(
-        "https://example.com/missing.pdf", cache_dir=tmp_path, session=session
+        "https://example.com/missing.pdf", cache_dir=tmp_path, transport=session, resolver=lambda *_: ["8.8.8.8"]
     )
     assert path is None
 
@@ -142,7 +142,7 @@ def test_download_pdf_returns_none_on_404(tmp_path: Path):
 def test_download_pdf_returns_none_on_empty_body(tmp_path: Path):
     session = _FakeSession(status=200, body=b"")
     path = pdf_reader.download_pdf(
-        "https://example.com/empty.pdf", cache_dir=tmp_path, session=session
+        "https://example.com/empty.pdf", cache_dir=tmp_path, transport=session, resolver=lambda *_: ["8.8.8.8"]
     )
     assert path is None
 
@@ -153,7 +153,9 @@ def test_download_pdf_rejects_non_http_scheme(tmp_path: Path):
     # and writes nothing.
     session = _FakeSession(status=200, body=b"should-not-be-read")
     assert (
-        pdf_reader.download_pdf("file:///etc/passwd", cache_dir=tmp_path, session=session)
+        pdf_reader.download_pdf(
+            "file:///etc/passwd", cache_dir=tmp_path, transport=session, resolver=lambda *_: ["8.8.8.8"]
+        )
         is None
     )
     assert session.calls == []
@@ -169,7 +171,7 @@ def test_download_pdf_rejects_private_network_hosts(tmp_path: Path):
     session = _FakeSession(status=200, body=b"%PDF-1.4 should-not-be-read")
 
     path = pdf_reader.download_pdf(
-        "http://127.0.0.1:8080/admin.pdf", cache_dir=tmp_path, session=session
+        "http://127.0.0.1:8080/admin.pdf", cache_dir=tmp_path, transport=session, resolver=lambda *_: ["8.8.8.8"]
     )
 
     assert path is None
@@ -178,15 +180,15 @@ def test_download_pdf_rejects_private_network_hosts(tmp_path: Path):
 
 
 def test_download_pdf_rejects_unsafe_redirect_targets(tmp_path: Path):
-    """Validate the final response URL, not only the initial URL."""
+    """Reject the redirect Location before contacting an internal destination."""
     session = _FakeSession(
-        status=200,
+        status=302,
         body=b"%PDF-1.4 should-not-be-written",
-        response_url="http://169.254.169.254/latest/meta-data/report.pdf",
+        headers={"Location": "http://169.254.169.254/latest/meta-data/report.pdf"},
     )
 
     path = pdf_reader.download_pdf(
-        "https://example.com/safe-looking.pdf", cache_dir=tmp_path, session=session
+        "https://example.com/safe-looking.pdf", cache_dir=tmp_path, transport=session, resolver=lambda *_: ["8.8.8.8"]
     )
 
     assert path is None
@@ -203,7 +205,7 @@ def test_download_pdf_requires_pdf_content_type_and_magic(tmp_path: Path):
     )
 
     path = pdf_reader.download_pdf(
-        "https://example.com/not-really.pdf", cache_dir=tmp_path, session=session
+        "https://example.com/not-really.pdf", cache_dir=tmp_path, transport=session, resolver=lambda *_: ["8.8.8.8"]
     )
 
     assert path is None
@@ -221,7 +223,7 @@ def test_download_pdf_aborts_when_body_exceeds_cap(tmp_path: Path, monkeypatch):
     session = _FakeSession(status=200, body=oversized)
 
     path = pdf_reader.download_pdf(
-        "https://example.com/huge.pdf", cache_dir=tmp_path, session=session
+        "https://example.com/huge.pdf", cache_dir=tmp_path, transport=session, resolver=lambda *_: ["8.8.8.8"]
     )
 
     assert path is None

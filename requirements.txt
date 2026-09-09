@@ -25,6 +25,8 @@ psycopg[binary]
 
 # Dhan API and environment loading.
 requests
+# The transcript transport imports urllib3 directly to pin its IP-bound pool API.
+urllib3
 python-dotenv
 dhanhq
 

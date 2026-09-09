@@ -32,11 +32,12 @@ import re
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urljoin
 
 import requests
 
 from backend.config import FUNDAMENTALS_PDF_DIR
-from backend.url_safety import is_safe_http_url
+from backend.fundamentals.pdf_transport import Resolver, Transport, open_pinned_response, resolve_public_target
 
 logger = logging.getLogger(__name__)
 
@@ -96,74 +97,86 @@ def download_pdf(
     *,
     cache_dir: Path | str | None = None,
     session: requests.Session | None = None,
+    resolver: Resolver | None = None,
+    transport: Transport | None = None,
 ) -> Path | None:
-    """Download ``url`` to disk and return the path, or ``None`` on failure.
+    """Download a public transcript to disk, returning ``None`` on refusal/failure.
 
-    Cache hits return the existing path without re-fetching.
+    Args:
+        url: Untrusted transcript URL scraped from a third-party page.
+        cache_dir: Optional destination for the existing PDF cache.
+        session: Legacy injection, unsupported without an explicit transport.
+        resolver: Trusted DNS resolver seam for offline tests, never URL input.
+        transport: Trusted single-hop response seam for offline tests.
+
+    Returns:
+        Cached/downloaded PDF path, or ``None`` if validation or fetching fails.
+
+    Beginner note: each redirect is a fresh untrusted destination. Validate it
+    before opening a response, and pin the socket to that validated IP. Passing
+    a Session no longer waives DNS checks; legacy session-only injection fails
+    safely instead of inheriting its proxies, credentials or unsafe adapters.
     """
+    if session is not None and transport is None:
+        logger.warning("PDF Session injection is unsupported; use explicit resolver/transport injection")
+        return None
     if not url:
         return None
-    owned_session = session is None
-    # Transcript URLs are scraped from third-party pages, so they are untrusted.
-    # A safe URL must be public HTTP(S). Real network fetches also resolve DNS
-    # to reject domains pointing at private/link-local addresses; injected test
-    # sessions skip DNS so unit tests stay offline.
-    if not is_safe_http_url(url, resolve_dns=owned_session):
-        logger.warning("Refusing to fetch unsafe PDF URL: %s", url)
-        return None
-    cache_root = Path(cache_dir) if cache_dir else FUNDAMENTALS_PDF_DIR
-    cache_root.mkdir(parents=True, exist_ok=True)
-
-    stem = _safe_filename(url)
-    pdf_path = cache_root / f"{stem}.pdf"
-    if pdf_path.exists() and pdf_path.stat().st_size > 0:
-        return pdf_path
-
-    sess = session or requests.Session()
+    fetch = transport or open_pinned_response
     try:
-        # stream=True + a chunked read so an oversized response can never be
-        # pulled into memory all at once. The response is a context manager so
-        # an early return (bad status, oversized body) closes the connection on
-        # the way out — same idiom as the capped download in universe_builder.
-        with sess.get(
-            url,
-            headers={"User-Agent": _PDF_USER_AGENT, "Accept": "application/pdf,*/*"},
-            timeout=_REQUEST_TIMEOUT_SECONDS,
-            allow_redirects=True,
-            stream=True,
-        ) as response:
-            if response.status_code != 200:
-                logger.warning("PDF fetch %s returned HTTP %s", url, response.status_code)
-                return None
-            final_url = getattr(response, "url", url) or url
-            if not is_safe_http_url(final_url, resolve_dns=owned_session):
-                logger.warning("PDF fetch %s redirected to unsafe URL %s", url, final_url)
-                return None
-            buffer = bytearray()
-            for chunk in response.iter_content(chunk_size=65536):  # 64 KiB
-                if not chunk:
-                    continue
-                buffer.extend(chunk)
-                if len(buffer) > _MAX_PDF_BYTES:
-                    logger.warning(
-                        "PDF fetch %s exceeded the %d-byte cap; aborting download",
-                        url,
-                        _MAX_PDF_BYTES,
-                    )
-                    return None
-            if not buffer:
-                return None
-            if not _looks_like_pdf(response.headers.get("Content-Type"), bytes(buffer[:1024])):
-                logger.warning("PDF fetch %s did not return a PDF-like response", url)
-                return None
-            pdf_path.write_bytes(bytes(buffer))
+        target = resolve_public_target(url, resolver=resolver)
+        cache_root = Path(cache_dir) if cache_dir else FUNDAMENTALS_PDF_DIR
+        cache_root.mkdir(parents=True, exist_ok=True)
+        pdf_path = cache_root / f"{_safe_filename(url)}.pdf"
+        if pdf_path.exists() and pdf_path.stat().st_size > 0:
             return pdf_path
-    except requests.RequestException:
-        logger.warning("PDF fetch %s failed", url, exc_info=True)
+
+        visited: set[str] = set()
+        # Three redirects permit at most four requests. A fourth redirect is
+        # refused without even resolving or contacting its destination.
+        for hop in range(4):
+            if target.url in visited:
+                return None
+            visited.add(target.url)
+            with fetch(
+                target,
+                headers={"User-Agent": _PDF_USER_AGENT, "Accept": "application/pdf,*/*"},
+                timeout=_REQUEST_TIMEOUT_SECONDS,
+            ) as response:
+                if response.status_code in {301, 302, 303, 307, 308}:
+                    location = response.headers.get("Location")
+                    if hop == 3 or not location or not location.strip():
+                        return None
+                    # urljoin accepts relative links. Validate raw Location first
+                    # because it otherwise strips some leading control bytes.
+                    if any(ord(char) <= 32 or ord(char) == 127 for char in location) or "\\" in location:
+                        return None
+                    next_url = urljoin(target.url, location)
+                elif response.status_code == 200:
+                    buffer = bytearray()
+                    for chunk in response.iter_content(chunk_size=65536):
+                        if not chunk:
+                            continue
+                        if len(buffer) + len(chunk) > _MAX_PDF_BYTES:
+                            logger.warning("PDF fetch exceeded the %d-byte cap", _MAX_PDF_BYTES)
+                            return None
+                        buffer.extend(chunk)
+                    if not buffer or not _looks_like_pdf(response.headers.get("Content-Type"), bytes(buffer[:1024])):
+                        return None
+                    pdf_path.write_bytes(buffer)
+                    return pdf_path
+                else:
+                    logger.warning("PDF fetch returned HTTP %s", response.status_code)
+                    return None
+            # Leave the response context before DNS validation of the next hop,
+            # so refusal and resolution failures never retain an open socket.
+            target = resolve_public_target(next_url, resolver=resolver)
         return None
-    finally:
-        if owned_session:
-            sess.close()
+    except (requests.RequestException, OSError, ValueError):
+        # Do not put signed query strings, userinfo or HTTP exception bodies in
+        # logs. The caller deliberately treats absent transcripts as no evidence.
+        logger.warning("PDF fetch failed or destination was refused")
+        return None
 
 
 def _append_limited(
