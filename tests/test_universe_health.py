@@ -485,10 +485,15 @@ def test_daily_job_health_check_uses_context_owned_commit(capsys):
             events.append("rollback")
             raise
 
+    def successful_check(session: object) -> UniverseHealthReport:
+        if session is not test_session:
+            raise AssertionError("test factory yielded an unexpected session")
+        return UniverseHealthReport()
+
     warnings = job._check_universe_health(
         test_factory,
         sys.stdout,
-        health_checker=lambda session: UniverseHealthReport() if session is test_session else None,
+        health_checker=successful_check,
     )
 
     assert warnings == ()
