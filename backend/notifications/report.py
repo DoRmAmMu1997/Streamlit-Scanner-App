@@ -13,12 +13,13 @@ import logging
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.orm import Session
 
 from backend.notifications.config import NotificationSettings
+from backend.numeric import finite_decimal
 from backend.storage import get_scan_runs, get_top_ranked_results, session_scope
 
 if TYPE_CHECKING:
@@ -114,19 +115,14 @@ def _failed_symbols_or_findings(outcome: DailyScanOutcome) -> int:
 
 
 def _finite_decimal(value: Any) -> Decimal | None:
-    """Parse a finite numeric score from typed columns or raw JSON.
+    """Compatibility wrapper for report score parsing.
 
-    Raw scanner JSON can contain strings, ints, floats, ``None``, or accidental
-    values such as ``"nan"``. The notification should simply treat bad values as
-    unscored, not fail the whole alert.
+    Beginner note:
+    Keeping this helper name avoids breaking private-path consumers. The shared
+    leaf makes an invalid score consistently become ``unscored`` instead of
+    reaching a notification renderer as NaN or Infinity.
     """
-    if value is None:
-        return None
-    try:
-        score = Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return None
-    return score if score.is_finite() else None
+    return finite_decimal(value)
 
 
 def _score_and_source(row: Any) -> tuple[float | None, str]:

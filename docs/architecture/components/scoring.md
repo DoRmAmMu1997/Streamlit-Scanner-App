@@ -24,7 +24,9 @@ The scorer is additive:
 
 **Non-responsibilities**
 - No live Dhan fetches. Liquidity/risk read only existing cached candles via
-  `DailyDataLoader.read_cached_history(...)`.
+  `DailyDataLoader.read_cached_history(...)`, then keep trustworthy market dates
+  at or before the stored scan snapshot. Timezone-aware timestamps are converted
+  to `Asia/Kolkata`; naive daily timestamps retain their market-calendar date.
 - No fundamental or valuation scores yet. Those remain RANK-003 scope.
 - No portfolio-aware allocation logic. This layer only ranks the current
   shortlist.
@@ -63,8 +65,8 @@ Components follow the RANK-001 formula:
 | Component | Source | Score behavior |
 |---|---|---|
 | `technical` | `confidence` first, then known deterministic strength/proximity fields | Cross-sectional min-max; equal/single present values score neutral 50. |
-| `liquidity` | Cached trailing `mean(volume * close)`, log-scaled | Cross-sectional min-max; missing cache/volume/window drops the component. |
-| `risk` | Cached trailing log-return volatility | Absolute `100 * clamp(1 - sigma / risk_vol_cap, 0, 1)`. |
+| `liquidity` | Snapshot-bounded cached trailing `mean(volume * close)`, log-scaled | Cross-sectional min-max; missing cache/snapshot/trustworthy dates/volume/window drops the component. |
+| `risk` | Snapshot-bounded cached trailing log-return volatility | Absolute `100 * clamp(1 - sigma / risk_vol_cap, 0, 1)`; the same missing-data boundary applies. |
 | `freshness` | Stored `data_snapshot_date - signal_date` | Absolute exponential decay; never uses wall-clock time. |
 
 For each row:
@@ -81,7 +83,7 @@ The receipt shape is:
 
 ```json
 {
-  "model_version": "rank-1.0",
+  "model_version": "rank-1.1",
   "scale": "0-100",
   "final_score": 87.06,
   "components": {"freshness": 87.06},
@@ -96,6 +98,9 @@ The receipt shape is:
 - Scoring raises inside `run_scan` -> `scan_scoring_failed` warning event,
   null `final_score` column, rows/status/persistence continue.
 - Missing cached candles -> liquidity/risk omitted for that row.
+- Missing snapshot date or any unparseable candle date -> liquidity/risk omitted;
+  later cache rows never enter a historical score. The whole candle sample fails
+  closed because silently dropping an unknown-date row could omit in-scope data.
 - Malformed result numbers -> the affected component is treated as missing.
 - Empty result frame -> returned unchanged except for an empty `final_score`
   column when needed.
@@ -120,7 +125,9 @@ Technical, Liquidity, Risk, Freshness, Coverage, and Missing. CSV exports keep
   covers missing/malformed/null YAML and safe weight normalization.
 - [`tests/test_scoring_model.py`](../../../tests/test_scoring_model.py)
   covers aggregation, renormalization, deterministic ordering, cache-only reads,
-  immutable inputs, and preserved raw columns.
+  snapshot isolation, immutable inputs, and preserved raw columns.
+- [`tests/test_numeric.py`](../../../tests/test_numeric.py) covers the shared
+  finite-Decimal boundary, compatibility wrappers, and money quantization.
 - [`tests/test_scan_service.py`](../../../tests/test_scan_service.py)
   covers persistence of `final_score`/`score_breakdown` and non-fatal scoring
   failure logging.

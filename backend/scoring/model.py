@@ -22,6 +22,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, cast
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -36,6 +37,7 @@ from backend.scoring.config import ScoringConfig
 from backend.scoring.ordering import sort_by_final_score
 
 _COMPONENT_ORDER = ("technical", "liquidity", "risk", "freshness")
+_MARKET_TIMEZONE = ZoneInfo("Asia/Kolkata")
 _SECURITY_ID_COLUMNS = (
     "security_id",
     "dhan_security_id",
@@ -101,7 +103,12 @@ def score_candidates(
     records = cast(list[dict[str, Any]], ranked.to_dict("records"))
     symbol_to_security_id = _security_id_lookup(context.universe_df)
     cached_candles = [
-        _read_cached_candles(row, symbol_to_security_id, context.data_loader)
+        _read_cached_candles(
+            row,
+            symbol_to_security_id,
+            context.data_loader,
+            snapshot_date=context.data_snapshot_date,
+        )
         for row in records
     ]
 
@@ -278,13 +285,25 @@ def _read_cached_candles(
     row: Mapping[str, Any],
     symbol_to_security_id: Mapping[str, str],
     data_loader: Any,
+    *,
+    snapshot_date: dt.date | None,
 ) -> pd.DataFrame:
-    """Read cached candles for one row, never falling back to a live fetch.
+    """Read trustworthy cached candles at or before the stored snapshot.
 
     RANK-002 is allowed to use data the scan already prepared, but it must not
     surprise the user with extra Dhan calls. That is why this helper only looks
     for ``read_cached_history`` and deliberately ignores live loader methods.
+
+    Beginner note:
+    Cache files grow after a scan finishes. Filtering by the scan's saved date
+    before liquidity and risk are calculated prevents tomorrow's candle from
+    rewriting yesterday's ranking. With no snapshot or no parseable daily dates,
+    returning an empty frame deliberately drops those components and lets the
+    existing per-row weight renormalization handle the missing evidence.
     """
+    if snapshot_date is None:
+        return pd.DataFrame()
+
     symbol = _clean_text(row.get("symbol"))
     if not symbol:
         return pd.DataFrame()
@@ -308,7 +327,53 @@ def _read_cached_candles(
         # A corrupt cache file or a test fake should drop only liquidity/risk for
         # this row. The final score can still be computed from other components.
         return pd.DataFrame()
-    return candles if isinstance(candles, pd.DataFrame) else pd.DataFrame()
+    if not isinstance(candles, pd.DataFrame) or candles.empty or "timestamp" not in candles.columns:
+        return pd.DataFrame()
+
+    market_dates = candles["timestamp"].map(_trusted_market_date)
+    if market_dates.isna().any():
+        # We cannot safely decide whether an unclassifiable row belongs before
+        # or after the snapshot. Dropping only that row could silently omit an
+        # in-scope price, so both candle-derived components fail closed.
+        return pd.DataFrame()
+    within_snapshot = market_dates.map(
+        lambda market_date: market_date is not None and market_date <= snapshot_date
+    )
+    if not within_snapshot.any():
+        return pd.DataFrame()
+    return candles.loc[within_snapshot].copy().reset_index(drop=True)
+
+
+def _trusted_market_date(value: Any) -> dt.date | None:
+    """Return a trustworthy daily candle date in the India market calendar.
+
+    Beginner note:
+    The same instant can be June 2 in UTC and June 3 in India. Aware timestamps
+    are therefore converted to ``Asia/Kolkata`` before taking their date. Naive
+    datetimes and plain dates keep their recorded value because daily Dhan cache
+    rows already use the India market calendar without timezone metadata.
+
+    Numeric and boolean scalars are rejected because pandas would otherwise
+    interpret them as nanoseconds from 1970, which is not a credible daily
+    candle timestamp. Missing pandas values are checked before the datetime
+    branch because ``pd.NaT`` behaves like a datetime but is not a valid date.
+    """
+    if value is None or (pd.api.types.is_scalar(value) and bool(pd.isna(value))):
+        return None
+    if isinstance(value, (bool, int, float)):
+        return None
+    if isinstance(value, dt.datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            return value.date()
+        return value.astimezone(_MARKET_TIMEZONE).date()
+    if isinstance(value, dt.date):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return None
+    timestamp = pd.to_datetime(value, errors="coerce")
+    if pd.isna(timestamp):
+        return None
+    return _trusted_market_date(timestamp)
 
 
 def _security_id_lookup(universe_df: pd.DataFrame | None) -> dict[str, str]:

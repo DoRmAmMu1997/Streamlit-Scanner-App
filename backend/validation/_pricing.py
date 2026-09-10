@@ -18,6 +18,7 @@ from decimal import Decimal, InvalidOperation
 import pandas as pd
 
 from backend.indicators import prepare_ohlc
+from backend.numeric import finite_decimal
 
 # Prices and percentages are quantized to four decimal places to match the
 # Numeric(18, 4) / Numeric(9, 4) columns the results land in (design §5.1).
@@ -53,13 +54,17 @@ def prepared_frame(candles: pd.DataFrame) -> pd.DataFrame:
 def as_money(value: object) -> Decimal | None:
     """Convert a price to an exact Decimal quantized to 4 dp; ``None`` for NaN/garbage.
 
-    Going through ``Decimal(str(value))`` keeps prices exact (no binary-float drift)
-    and naturally rejects NaN/Inf — ``Decimal('NaN').quantize(...)`` raises
-    ``InvalidOperation``, which we map to ``None``.
+    Beginner note:
+    ``Decimal('NaN').quantize(...)`` can return another NaN instead of raising.
+    The shared finite check must therefore run before quantization so validation
+    takes its missing-price branch for every NaN or infinity representation.
     """
+    parsed = finite_decimal(value)
+    if parsed is None:
+        return None
     try:
-        return Decimal(str(value)).quantize(MONEY_QUANT)
-    except (InvalidOperation, ValueError):
+        return parsed.quantize(MONEY_QUANT)
+    except InvalidOperation:
         return None
 
 

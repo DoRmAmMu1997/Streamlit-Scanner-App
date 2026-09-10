@@ -27,12 +27,13 @@ from __future__ import annotations
 import datetime as dt
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any
 
 import pandas as pd
 from sqlalchemy.orm import Session
 
+from backend.numeric import finite_decimal
 from backend.storage.models import ScanResult, ScanRun
 from backend.storage.repository import (
     get_latest_finalized_scan_runs,
@@ -356,21 +357,14 @@ def _result_score(result: ScanResult) -> tuple[Decimal | None, str | None]:
 
 
 def _decimal_or_none(value: Any) -> Decimal | None:
-    """Best-effort parse of an arbitrary JSON value into a finite ``Decimal``.
+    """Compatibility wrapper around the shared finite-Decimal parser.
 
-    ``raw_result_json`` is free-form, so ``confidence`` could be a number, a
-    numeric string, ``None``, or junk. We convert via ``str(value)`` (so 4 and
-    "4" behave the same) and reject anything unparseable or non-finite
-    (``NaN``/``inf``) by returning ``None``, which keeps such symbols out of the
-    improved/degraded buckets.
+    Beginner note:
+    This private name may still be imported by older tests or callers. Keeping
+    the wrapper preserves that path while the shared leaf ensures comparison,
+    persistence, notifications, and validation interpret bad numbers equally.
     """
-    if value is None:
-        return None
-    try:
-        score = Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return None
-    return score if score.is_finite() else None
+    return finite_decimal(value)
 
 
 def _comparison_row(

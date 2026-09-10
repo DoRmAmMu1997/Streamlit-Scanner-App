@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, cast
 from sqlalchemy import exists, func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
+from backend.numeric import finite_decimal
 from backend.storage.models import (
     AIEvaluation,
     AppConfig,
@@ -451,20 +452,13 @@ def get_scan_runs(session: Session, run_ids: Sequence[int]) -> list[ScanRun]:
 
 
 def _finite_decimal(value: Any) -> Decimal | None:
-    """Parse only finite numeric values for score ordering.
+    """Compatibility wrapper for finite numeric score ordering.
 
-    Stored raw JSON is intentionally flexible, so ``confidence`` may be a
-    number, a numeric string, ``None``, or junk. The repository should make bad
-    values sort as unscored instead of letting ``Decimal('NaN')`` or a string
-    parsing error make the notification job fail.
+    Beginner note:
+    Repository callers keep the established helper name while the shared leaf
+    prevents numeric boundary rules from drifting between backend packages.
     """
-    if value is None:
-        return None
-    try:
-        parsed = Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return None
-    return parsed if parsed.is_finite() else None
+    return finite_decimal(value)
 
 
 def _rank_score_and_source(result: ScanResult) -> tuple[Decimal | None, str | None]:
