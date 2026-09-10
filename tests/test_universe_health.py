@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pandas as pd
@@ -21,6 +22,7 @@ from backend.data_quality.universe_health import (
     MAX_REPORTED_SYMBOLS,
     MappingRegression,
     UniverseHealth,
+    UniverseHealthReport,
     check_universe_health,
     collect_universe_health,
     detect_mapping_regressions,
@@ -387,6 +389,65 @@ def test_failed_read_does_not_replace_the_last_valid_baseline(
 # ---------------------------------------------------------------------------
 # Wiring: the daily job, the alert, and the Streamlit prefetch.
 # ---------------------------------------------------------------------------
+
+
+def test_daily_job_health_check_uses_context_owned_commit(capsys):
+    """The session factory commits once after the health checker succeeds.
+
+    Beginner note:
+    The fake session deliberately has no ``commit`` method. Calling it directly
+    would bypass the repository-layer boundary and turn the context manager's
+    one transaction into a second, independently managed transaction.
+    """
+    from backend.jobs import run_daily_scan as job
+
+    events: list[str] = []
+    test_session = object()
+
+    @contextmanager
+    def test_factory():
+        try:
+            yield test_session
+            events.append("commit")
+        except Exception:
+            events.append("rollback")
+            raise
+
+    warnings = job._check_universe_health(
+        test_factory,
+        sys.stdout,
+        health_checker=lambda session: UniverseHealthReport() if session is test_session else None,
+    )
+
+    assert warnings == ()
+    assert events == ["commit"]
+    assert "health check failed" not in capsys.readouterr().out
+
+
+def test_daily_job_health_check_context_rolls_back_on_error():
+    """A checker exception reaches the context so it can roll back before swallowing."""
+    from backend.jobs import run_daily_scan as job
+
+    events: list[str] = []
+
+    @contextmanager
+    def test_factory():
+        try:
+            yield object()
+            events.append("commit")
+        except Exception:
+            events.append("rollback")
+            raise
+
+    def fail_check(_session):
+        raise RuntimeError("broken health read")
+
+    assert job._check_universe_health(
+        test_factory,
+        sys.stdout,
+        health_checker=fail_check,
+    ) == ()
+    assert events == ["rollback"]
 
 
 def test_daily_job_surfaces_regressions_without_ever_failing(

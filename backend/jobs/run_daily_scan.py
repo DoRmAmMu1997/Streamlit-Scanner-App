@@ -337,6 +337,11 @@ def _check_universe_health(
     moved the baseline, a symbol that dropped out in the morning would already be
     "known" by the evening and the alert would never fire.
 
+    ``session_factory`` owns the transaction boundary: it commits when this
+    block exits normally and rolls back when the checker raises. Calling
+    ``session.commit()`` here would duplicate that ownership and violate the
+    repository-layer rule that keeps transaction policy at one outer boundary.
+
     Wrapped in a broad except on purpose: a universe CSV that will not parse is a
     reason to warn, never a reason to skip the night's scan.
     """
@@ -348,7 +353,6 @@ def _check_universe_health(
 
         with session_factory() as session:
             report = health_checker(session)
-            session.commit()
     except Exception:  # noqa: BLE001 - a health check must never fail the job
         logger.warning("universe health check failed", exc_info=True)
         return ()
