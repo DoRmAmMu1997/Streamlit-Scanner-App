@@ -45,8 +45,10 @@ corrupt symbols from every scan.
   Collection reads each CSV once so counts and names describe one file
   generation. Observations record `valid`, `missing`, `unreadable`, or
   `legacy_unknown`; only the latest valid row per universe is baseline
-  authority. Bounded name evidence carries explicit completeness/truncation, so
-  an incomplete set can raise a count alert without claiming an exact new name.
+  authority. Valid observations must be non-empty and satisfy the runtime
+  loader's required-column contract. Bounded name evidence carries explicit
+  completeness/truncation, so an incomplete set can raise a count alert without
+  claiming an exact new name.
 
 ### Repair, in one paragraph
 
@@ -121,7 +123,7 @@ The persisted receipt (`scan_runs.data_quality_json`, `schema_version=1`) carrie
 - Warning-only frame → passes through, recorded in the receipt, `candle_data_quality_warning` logged.
 - No reports (e.g. cached-only run with no fetches) → receipt is `None`; health shows "No scan has recorded … findings yet."
 - Old runs / pre-DATA-001 receipts → nullable column + defensive `_copy_data_quality_run` parsing → health simply omits them.
-- Missing/unreadable universe CSV → warning observation retained, previous valid mapping baseline preserved; recovery compares against that valid row.
+- Missing, unparsable, empty, or loader-incompatible universe CSV → warning observation retained, previous valid mapping baseline preserved; recovery compares against that valid row.
 
 ## 6. Configuration & dependencies
 

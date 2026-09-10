@@ -55,8 +55,8 @@ Postgres is the only state that survives between runs.
 `universe_health_snapshots` is **append-only** rather than one upserted row per
 universe. The question that always follows "GUJGASLTD dropped out" is "when?",
 and keeping the history answers it for free. The read path only ever wants the
-newest row per universe, which `ix_universe_health_snapshots_key_captured`
-serves directly.
+newest valid row per universe; the query and current composite index are
+described below.
 
 The follow-up OBS-004A correction makes baseline authority explicit. Each row
 has an `observation_status`: `valid`, `missing`, `unreadable`, or
@@ -65,6 +65,13 @@ backfilled as `legacy_unknown`, because they predate the single-read guarantee
 and cannot prove that their count and name evidence describe the same CSV
 generation. Missing and unreadable observations remain in the append-only
 history for diagnosis without replacing the last valid baseline.
+
+`valid` also means usable by the runtime universe loader: the frame has at least
+one stock row and includes `symbol`, `security_id`, `exchange_segment`, and
+`instrument_type`. A header-only CSV or a parseable file missing any of those
+columns is recorded as `unreadable`. This closes the false-baseline case where a
+temporary zero/unloadable snapshot could make restoration look like a new
+mapping regression. Validation reuses the single already-read frame.
 
 The latest-valid lookup uses `row_number()` partitioned by `universe_key` and
 ordered by `captured_at DESC, id DESC`. Ranking happens in SQL, so a long history

@@ -145,11 +145,17 @@ def collect_universe_health(
 ) -> tuple[UniverseHealth, ...]:
     """Read every universe CSV and return its mapping health. Never raises.
 
-    Each CSV is opened exactly once and that one frame supplies both counts and
-    names. Missing and unreadable files still produce explicit observations so
-    operators can diagnose the gap, but their zero placeholders are never valid
-    baselines. A health check that can take the daily job down would be worse
-    than the problem it reports.
+    Each CSV is opened exactly once and that one frame supplies both validation,
+    counts, and names. Missing, unparsable, empty, and loader-incompatible files
+    still produce explicit observations so operators can diagnose the gap, but
+    their zero placeholders are never valid baselines. A health check that can
+    take the daily job down would be worse than the problem it reports.
+
+    Beginner note:
+    "Pandas parsed it" is weaker than "a screener can load it." Baseline
+    authority therefore applies the runtime loader's required-column contract
+    and also requires at least one stock row, using the already-read frame so the
+    consistency guarantee does not introduce a second file read.
     """
     # Imported here rather than at module scope: universe_loader pulls in pandas
     # and the universe registry, and this module is imported by the storage-aware
@@ -158,6 +164,7 @@ def collect_universe_health(
     import pandas as pd
 
     from backend.universe_builder import UNIVERSE_CONFIG, universe_file_path
+    from backend.universe_loader import REQUIRED_UNIVERSE_COLUMNS
     results: list[UniverseHealth] = []
     for universe_key in UNIVERSE_CONFIG:
         path = universe_file_path(universe_key, universe_dir)
@@ -196,6 +203,34 @@ def collect_universe_health(
                     mapped_rows=0,
                     unmapped_symbols=(),
                     observation_status=status,
+                    membership_complete=False,
+                )
+            )
+            continue
+
+        missing_columns = tuple(
+            column for column in REQUIRED_UNIVERSE_COLUMNS if column not in frame.columns
+        )
+        if frame.empty or missing_columns:
+            # A parsed CSV is not automatically a usable universe. The runtime
+            # loader rejects these same missing columns, and an empty stock list
+            # gives a screener nothing to scan. Persisting either as ``valid``
+            # would let placeholder zero counts replace the last sound baseline
+            # and manufacture a regression when the file is restored.
+            logger.warning(
+                "universe health source is not usable by the universe loader for %s "
+                "(empty=%s, missing_columns=%s)",
+                universe_key,
+                frame.empty,
+                list(missing_columns),
+            )
+            results.append(
+                UniverseHealth(
+                    universe_key=universe_key,
+                    total_rows=0,
+                    mapped_rows=0,
+                    unmapped_symbols=(),
+                    observation_status="unreadable",
                     membership_complete=False,
                 )
             )

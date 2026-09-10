@@ -1817,9 +1817,10 @@ class UniverseHealthSnapshot(Base):
     per universe) means an operator can see *when* a symbol dropped out, which is
     usually the question that follows the alert.
 
-    ``unmapped_symbols_json`` holds a bounded, sorted list of the symbol strings
-    that are currently unmapped, so the alert can name what changed instead of
-    just reporting a count. Symbols only - no prices, no credentials.
+    ``unmapped_symbols_json`` is a bounded object containing the sorted symbol
+    strings plus explicit truncation and membership-completeness flags. That
+    lets the alert name exact changes only when both compared sets are complete.
+    Symbols and booleans only - no prices, no credentials.
     """
 
     __tablename__ = "universe_health_snapshots"

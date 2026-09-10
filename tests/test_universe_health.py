@@ -39,6 +39,8 @@ def _write_universe(directory, universe_key, rows):
                 "universe": universe_key,
                 "symbol": symbol,
                 "security_id": "1234" if status == "mapped" else "",
+                "exchange_segment": "NSE_EQ",
+                "instrument_type": "EQUITY",
                 "mapping_status": status,
             }
             for symbol, status in rows
@@ -141,7 +143,7 @@ def test_collect_reads_each_csv_once_for_consistent_counts_and_names(
 def test_collect_marks_an_unreadable_csv_without_inventing_a_zero_baseline(
     universe_dir, monkeypatch, caplog
 ):
-    """A parse failure must be distinguishable from a valid empty universe."""
+    """A parse failure must be distinguishable from a successful observation."""
     _write_universe(universe_dir, "nifty_100", [("RELIANCE", "mapped")])
     monkeypatch.setattr(pd, "read_csv", lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad csv")))
 
@@ -152,6 +154,76 @@ def test_collect_marks_an_unreadable_csv_without_inventing_a_zero_baseline(
     assert health.total_rows == 0
     assert health.mapped_rows == 0
     assert "source is unreadable" in caplog.text
+
+
+def test_header_only_csv_does_not_replace_the_last_valid_baseline(
+    db_session, universe_dir, caplog
+):
+    """An empty stock list is non-authoritative even when its header parses.
+
+    Beginner note:
+    A header-only generated file cannot be scanned. If its zero counts became
+    the baseline, restoring the unchanged universe would look like a new missing
+    symbol. The recovery assertion catches that exact false alert.
+    """
+    baseline_rows = [("RELIANCE", "mapped"), ("TCS", "missing_security_id")]
+    _write_universe(universe_dir, "nifty_100", baseline_rows)
+    check_universe_health(db_session, universe_dir=universe_dir)
+
+    pd.DataFrame(
+        columns=[
+            "universe",
+            "symbol",
+            "security_id",
+            "exchange_segment",
+            "instrument_type",
+            "mapping_status",
+        ]
+    ).to_csv(universe_dir / "nifty_100.csv", index=False)
+    with caplog.at_level(logging.WARNING):
+        invalid = check_universe_health(db_session, universe_dir=universe_dir)
+
+    assert invalid.snapshots[0].observation_status == "unreadable"
+    assert "not usable by the universe loader" in caplog.text
+    _write_universe(universe_dir, "nifty_100", baseline_rows)
+    assert check_universe_health(db_session, universe_dir=universe_dir).regressions == ()
+
+
+@pytest.mark.parametrize(
+    "missing_column",
+    ["symbol", "security_id", "exchange_segment", "instrument_type"],
+)
+def test_loader_incompatible_csv_does_not_replace_the_last_valid_baseline(
+    db_session, universe_dir, missing_column, caplog
+):
+    """Every loader-required column is also required for baseline authority.
+
+    The invalid fixture otherwise reports two mapped rows. Restoring the
+    unchanged baseline would therefore emit a false 0-to-1 regression if the
+    structurally unusable observation were promoted to ``valid``.
+    """
+    baseline_rows = [("RELIANCE", "mapped"), ("TCS", "missing_security_id")]
+    _write_universe(universe_dir, "nifty_100", baseline_rows)
+    check_universe_health(db_session, universe_dir=universe_dir)
+
+    invalid_frame = pd.DataFrame(
+        {
+            "universe": ["nifty_100", "nifty_100"],
+            "symbol": ["RELIANCE", "TCS"],
+            "security_id": ["1", "2"],
+            "exchange_segment": ["NSE_EQ", "NSE_EQ"],
+            "instrument_type": ["EQUITY", "EQUITY"],
+            "mapping_status": ["mapped", "mapped"],
+        }
+    ).drop(columns=[missing_column])
+    invalid_frame.to_csv(universe_dir / "nifty_100.csv", index=False)
+    with caplog.at_level(logging.WARNING):
+        invalid = check_universe_health(db_session, universe_dir=universe_dir)
+
+    assert invalid.snapshots[0].observation_status == "unreadable"
+    assert missing_column in caplog.text
+    _write_universe(universe_dir, "nifty_100", baseline_rows)
+    assert check_universe_health(db_session, universe_dir=universe_dir).regressions == ()
 
 
 def test_no_baseline_never_regresses():
