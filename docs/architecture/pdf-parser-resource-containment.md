@@ -10,6 +10,12 @@ short-lived interpreter with a shared 60-second wall budget and 512 MiB memory
 budget. The parent never retries parsing in-process. Failure returns unavailable
 transcript text, preserving the existing agent behavior.
 
+A thread would still share the application's address space, and timing out a
+future does not stop the underlying parser thread. A separate process lets the
+parent enforce an OS memory ceiling and terminate stalled parsing without
+terminating the Streamlit process. The compressed download-size cap remains a
+separate network boundary: a small PDF can expand into much larger parser objects.
+
 `extract_text` retains at most the first 30 pages and 40,000 characters. Callers
 can request smaller limits but cannot increase these ceilings. New bounded text
 caches use `.transcript-v1.txt`; legacy `.txt` files cannot prove page coverage

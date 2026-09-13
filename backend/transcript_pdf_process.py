@@ -29,6 +29,15 @@ def run_transcript_worker(pdf_path: Path, *, max_chars: int, max_pages: int) -> 
     Returns:
         JSON bytes; failures propagate to the caller's unavailable-text policy.
 
+    Raises:
+        OSError: The platform cannot enforce containment, a job cannot attach,
+            or the private result file cannot be read.
+        subprocess.TimeoutExpired: The child exceeds its execution or cleanup
+            deadline. The cleanup path kills and reaps it before returning.
+        ChildProcessError: The child cannot receive its start grant or exits
+            unsuccessfully.
+        OverflowError: The serialized receipt exceeds 256 KiB.
+
     Beginner note:
         The deadline includes child startup and assignment. The child receives
         its GO token only after Windows memory containment succeeds. Its stdout

@@ -16,7 +16,21 @@ from backend.fundamentals import pdf_reader
 
 
 def _fake_worker(tmp_path: Path, monkeypatch, body: str) -> list:
-    """Capture real bounded child lifetimes using benign replacement scripts."""
+    """Capture real child lifetimes while substituting a benign worker script.
+
+    Args:
+        tmp_path: Private pytest directory for the replacement script.
+        monkeypatch: Fixture that restores the production launch seams afterward.
+        body: Trusted test source describing a bounded failure scenario.
+
+    Returns:
+        A list filled with the actual Popen objects as the launcher creates them.
+
+    Beginner note:
+        Saving the real constructor before patching avoids recursive fakes. We
+        retain the real process lifecycle so cleanup assertions prove termination,
+        rather than merely observing that a mock kill method was called.
+    """
     script = tmp_path / "fake_worker.py"
     script.write_text("import sys, time\nfrom pathlib import Path\n" + body, encoding="utf-8")
     monkeypatch.setattr(launcher, "_WORKER_PATH", script)
@@ -33,7 +47,13 @@ def _fake_worker(tmp_path: Path, monkeypatch, body: str) -> list:
 
 
 def test_stalled_child_is_killed_and_private_directory_removed(tmp_path: Path, monkeypatch):
-    """A blocked parser must not outlive the request or retain private files."""
+    """A blocked parser must not outlive the request or retain private files.
+
+    Beginner note:
+        The original in-process parser could stall indefinitely. A harmless
+        sleeping child reproduces that failure without a hostile PDF; the test
+        requires both an exited process and removal of its private result path.
+    """
     processes = _fake_worker(tmp_path, monkeypatch, "sys.stdin.buffer.read(3)\ntime.sleep(30)\n")
     monkeypatch.setattr(launcher, "WALL_TIME_SECONDS", 0.2)
     with pytest.raises(launcher.subprocess.TimeoutExpired):
@@ -43,7 +63,13 @@ def test_stalled_child_is_killed_and_private_directory_removed(tmp_path: Path, m
 
 
 def test_parent_rejects_large_result_file_and_cleans_up(tmp_path: Path, monkeypatch):
-    """A buggy child cannot make the parent read more than the receipt cap."""
+    """A buggy child cannot make the parent read more than the receipt cap.
+
+    Beginner note:
+        A child-side check alone does not protect the receiving app from a
+        malformed result. One byte beyond the cap must trigger rejection while
+        still closing the child and deleting the temporary output directory.
+    """
     processes = _fake_worker(tmp_path, monkeypatch,
                              "sys.stdin.buffer.read(3)\nPath(sys.argv[2]).write_bytes(b'x' * 262145)\n")
     with pytest.raises(OverflowError):
@@ -53,7 +79,13 @@ def test_parent_rejects_large_result_file_and_cleans_up(tmp_path: Path, monkeypa
 
 
 def test_windows_assignment_failure_never_releases_child(tmp_path: Path, monkeypatch):
-    """Job setup failure leaves the waiting child unable to open its PDF."""
+    """Job setup failure leaves the waiting child unable to open its PDF.
+
+    Beginner note:
+        Starting a parser before attaching its job creates an unbounded race.
+        The marker represents parsing: failed assignment must leave it absent
+        and the waiting process must be reaped, rather than granted a fallback.
+    """
     if launcher.sys.platform != "win32":
         pytest.skip("Windows Job Object integration")
     marker = tmp_path / "parsed"
@@ -71,7 +103,13 @@ def test_windows_assignment_failure_never_releases_child(tmp_path: Path, monkeyp
 
 
 def test_ipo_worker_waits_for_parent_before_parsing(monkeypatch):
-    """IPO parsing must share the attach-before-parse ordering on Windows."""
+    """IPO parsing must share the attach-before-parse ordering on Windows.
+
+    Beginner note:
+        A child that starts immediately could parse before the memory policy
+        exists. A denied start event must prevent the parser call entirely and
+        close its pipe so the parent can observe a safe failure.
+    """
     from backend import ipo_pdf_worker
 
     class ClosedGate:
@@ -94,7 +132,13 @@ def test_ipo_worker_waits_for_parent_before_parsing(monkeypatch):
 
 
 def test_memory_setup_failure_prevents_both_parsers(tmp_path: Path, monkeypatch):
-    """A failed limit installation must not fall through to either PDF library."""
+    """A failed limit installation must not fall through to either PDF library.
+
+    Beginner note:
+        Treating OS setup as best-effort would recreate the original unbounded
+        parser path. The failing setup seam therefore must produce no result
+        file and must never call the helper that selects either parser.
+    """
     def fail_limit():
         raise OSError("limit unavailable")
 
@@ -111,7 +155,17 @@ def test_memory_setup_failure_prevents_both_parsers(tmp_path: Path, monkeypatch)
 
 
 def _write_pdf(path: Path, texts: list[str]) -> None:
-    """Build a tiny valid PDF fixture without optional authoring dependencies."""
+    """Build a tiny valid PDF fixture without optional authoring dependencies.
+
+    Args:
+        path: Private fixture output path.
+        texts: Trusted short ASCII labels, one per generated page.
+
+    Beginner note:
+        Explicit object offsets keep this a real parseable PDF while avoiding a
+        new document-authoring dependency. This helper is limited to controlled
+        labels; it is not an encoder for arbitrary external PDF content.
+    """
     objects = [b"<< /Type /Catalog /Pages 2 0 R >>", b""]
     objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
     page_ids = []
@@ -166,7 +220,13 @@ def test_real_child_preserves_first_thirty_pages_and_character_limit(tmp_path: P
 
 
 def test_windows_job_enforces_policy_and_kills_child_on_close(tmp_path: Path):
-    """Read back the OS limit and prove close kills an attached benign sleeper."""
+    """Read back the OS limit and prove close kills an attached benign sleeper.
+
+    Beginner note:
+        Mocking a successful API call could miss a wrong ctypes field offset.
+        Reading the real configured memory value and observing actual process
+        exit protect both the binary layout and kill-on-close invariants.
+    """
     if launcher.sys.platform != "win32":
         pytest.skip("Windows Job Object integration")
     from backend.pdf_process_limits import WindowsPdfJob, _ExtendedLimits
@@ -196,7 +256,13 @@ def test_windows_job_enforces_policy_and_kills_child_on_close(tmp_path: Path):
 
 
 def test_real_ipo_child_keeps_existing_page_budget(tmp_path: Path):
-    """Adding Windows containment must preserve IPO's all-or-review page rule."""
+    """Adding Windows containment must preserve IPO's all-or-review page rule.
+
+    Beginner note:
+        Transcript parsing retains an initial page slice, whereas IPO evidence
+        requires a complete receipt within its own budget. A two-page fixture
+        under a one-page IPO limit must still require review with no pages.
+    """
     from backend.ipo.documents.table_extractor import PdfExtractionBudget, PdfParseStatus, parse_document_pages
 
     path = tmp_path / "ipo.pdf"
@@ -209,7 +275,13 @@ def test_real_ipo_child_keeps_existing_page_budget(tmp_path: Path):
 
 @pytest.mark.skipif(launcher.sys.platform != "linux", reason="Linux RLIMIT integration")
 def test_linux_real_child_installs_limits_before_extraction(tmp_path: Path, monkeypatch):
-    """Read the actual child rlimits without allocating hostile amounts of memory."""
+    """Read the actual child rlimits without allocating hostile amounts of memory.
+
+    Beginner note:
+        Platform-specific code can pass Windows tests while doing nothing on
+        Linux. The extraction seam observes its own active address-space limit,
+        proving installation happened before the parser would begin.
+    """
     driver = tmp_path / "limits_driver.py"
     driver.write_text(
         f"import runpy, resource\ng = runpy.run_path({str(launcher._WORKER_PATH)!r})\n"
@@ -237,7 +309,13 @@ def test_extract_text_uses_only_bounded_worker(tmp_path: Path, monkeypatch):
 
 
 def test_extract_text_rejects_oversized_child_text(tmp_path: Path, monkeypatch):
-    """The parent independently rejects a worker that violates its text budget."""
+    """The parent independently rejects a worker that violates its text budget.
+
+    Beginner note:
+        A stale or faulty worker may return valid JSON with too much text. The
+        caller must return unavailable evidence, and must not accept the text
+        or invoke a parent-process parser after rejecting the receipt.
+    """
     path = tmp_path / "document.pdf"
     path.write_bytes(b"%PDF-fake")
     monkeypatch.setattr(pdf_reader, "_extract_with_pdfplumber", lambda *a, **kw: "unsafe parent text", raising=False)
@@ -247,7 +325,13 @@ def test_extract_text_rejects_oversized_child_text(tmp_path: Path, monkeypatch):
 
 @pytest.mark.parametrize("encoded", [b"not json", b'{"text":4}', b'{"text":"ok","extra":1}', b"\xff"])
 def test_parent_rejects_malformed_primitive_receipt(tmp_path: Path, monkeypatch, encoded: bytes):
-    """Malformed and wrongly typed child data must not become transcript evidence."""
+    """Malformed and wrongly typed child data must not become transcript evidence.
+
+    Beginner note:
+        Successful child exit does not establish a valid result. Invalid UTF-8,
+        invalid JSON, wrong field types, and unexpected fields must all produce
+        empty evidence at the parent boundary instead of reaching the AI prompt.
+    """
     path = tmp_path / "document.pdf"
     path.write_bytes(b"%PDF-fake")
     monkeypatch.setattr(pdf_reader, "_run_transcript_worker", lambda *a, **kw: encoded)
@@ -255,7 +339,13 @@ def test_parent_rejects_malformed_primitive_receipt(tmp_path: Path, monkeypatch,
 
 
 def test_large_requested_limits_cannot_override_transcript_ceiling(tmp_path: Path, monkeypatch):
-    """The parent caps user-supplied limits and ignores legacy full-text caches."""
+    """The parent caps user-supplied limits and ignores legacy full-text caches.
+
+    Beginner note:
+        Old caches cannot establish that only the first 30 pages were used.
+        Neither an old cache nor an oversized caller request may bypass the
+        new hard page/text ceilings, including when defaults are requested.
+    """
     path = tmp_path / "document.pdf"
     path.write_bytes(b"%PDF-fake")
     path.with_suffix(".txt").write_text("legacy unbounded text", encoding="utf-8")

@@ -14,6 +14,12 @@ from typing import Any
 
 
 class _BasicLimits(ctypes.Structure):
+    """Mirror the fixed Win32 basic-limit layout, including pointer-sized sizes.
+
+    Beginner note:
+        Field order and widths are part of the OS ABI. A Python-looking size
+        substitution could move every later field and silently change policy.
+    """
     _fields_ = [
         ("PerProcessUserTimeLimit", ctypes.c_longlong),
         ("PerJobUserTimeLimit", ctypes.c_longlong),
@@ -28,6 +34,12 @@ class _BasicLimits(ctypes.Structure):
 
 
 class _IoCounters(ctypes.Structure):
+    """Reserve the OS I/O counters embedded before the extended memory fields.
+
+    Beginner note:
+        We do not use these counters, but omitting them would put the memory
+        ceiling at the wrong byte offset in the structure sent to Windows.
+    """
     _fields_ = [(name, ctypes.c_ulonglong) for name in (
         "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
         "ReadTransferCount", "WriteTransferCount", "OtherTransferCount",
@@ -35,6 +47,12 @@ class _IoCounters(ctypes.Structure):
 
 
 class _ExtendedLimits(ctypes.Structure):
+    """Match JOBOBJECT_EXTENDED_LIMIT_INFORMATION for the Windows API call.
+
+    Beginner note:
+        Memory fields use SIZE_T rather than a fixed 32-bit integer so the same
+        declaration preserves the contract on 32-bit and 64-bit Python.
+    """
     _fields_ = [
         ("BasicLimitInformation", _BasicLimits),
         ("IoInfo", _IoCounters),
@@ -51,6 +69,9 @@ class WindowsPdfJob:
     Args:
         maximum_bytes: Maximum committed bytes for each assigned PDF child.
 
+    Raises:
+        OSError: Windows refuses job creation or the process memory policy.
+
     Beginner note:
         Handle argument and return types are explicit because Windows handles
         are pointer-sized on 64-bit Python. ctypes' default integer return type
@@ -58,6 +79,18 @@ class WindowsPdfJob:
     """
 
     def __init__(self, maximum_bytes: int) -> None:
+        """Create the owned job and install its memory and cleanup policy.
+
+        Args:
+            maximum_bytes: Trusted, positive process commit limit in bytes.
+
+        Raises:
+            OSError: A required Windows job operation fails.
+
+        Beginner note:
+            Configure the job before assigning a waiting child, then release
+            that child only after assignment. Callers own closing this handle.
+        """
         # Linux's ctypes/type stubs omit WinDLL. This Windows-only constructor
         # is never called there; accidental use still raises fail-closed.
         self._api: Any = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined, unused-ignore]
@@ -83,7 +116,19 @@ class WindowsPdfJob:
             raise OSError("PDF job memory limit failed")
 
     def assign(self, pid: int) -> None:
-        """Attach a waiting child, or raise before its start signal is sent."""
+        """Attach a waiting child, or raise before its start signal is sent.
+
+        Args:
+            pid: Identifier of the caller's newly spawned, waiting PDF child.
+
+        Raises:
+            OSError: The process cannot be opened or assigned to this job.
+
+        Beginner note:
+            The temporary process handle is closed on every path. The job
+            retains the association, so releasing that handle does not release
+            the memory restriction or the job's kill-on-close behavior.
+        """
         process_handle = self._api.OpenProcess(0x100 | 0x1, False, pid)  # SET_QUOTA | TERMINATE
         if not process_handle:
             raise OSError("PDF process handle unavailable")
@@ -94,7 +139,13 @@ class WindowsPdfJob:
             self._api.CloseHandle(process_handle)
 
     def close(self) -> None:
-        """Release the job and terminate any remaining assigned processes."""
+        """Release the job and terminate any remaining assigned processes.
+
+        Beginner note:
+            Clearing our handle makes repeated cleanup calls harmless. The
+            parent still explicitly reaps its child to collect the exit status;
+            job closure protects against surviving assigned descendants.
+        """
         if self._handle:
             self._api.CloseHandle(self._handle)
             self._handle = None

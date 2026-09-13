@@ -24,9 +24,20 @@ def _append_limited(
 ) -> bool:
     """Append text and return False once the caller has enough characters.
 
-    Both PDF extractors join pages with blank lines. This helper keeps the
-    limit logic identical across pdfplumber and pypdf, and lets parsing stop as
-    soon as the model prompt has enough transcript text.
+    Args:
+        chunks: Page fragments retained so far; modified in place.
+        page_text: Text from the next page, produced inside the bounded child.
+        max_chars: Maximum characters including separators. None is supported
+            for pure helper tests; production always supplies a bounded integer.
+
+    Returns:
+        True when another page can contribute text, otherwise False.
+
+    Beginner note:
+        Both extractors join pages with blank lines. Counting those separators
+        prevents individually valid pages from exceeding the combined prompt
+        budget. Stopping here saves work, while the OS limits still protect the
+        extraction of a single unusually expensive page.
     """
     if not page_text:
         return True
@@ -48,7 +59,21 @@ def _extract_with_pdfplumber(
     max_chars: int | None = None,
     max_pages: int | None = None,
 ) -> str:
-    """Primary extractor — pure-Python, MIT, works for typeset PDFs."""
+    """Extract the bounded leading pages with pdfplumber inside the child.
+
+    Args:
+        pdf_path: Parent-selected local PDF path.
+        max_chars: Retained character limit, including page separators.
+        max_pages: Maximum leading pages to visit.
+
+    Returns:
+        Joined text, or an empty string if the library is absent or parsing fails.
+
+    Beginner note:
+        Importing the parser here lets the worker install OS limits first.
+        Page selection alone cannot bound compressed-object expansion, which is
+        why this helper must remain behind the process launcher in production.
+    """
     try:
         import pdfplumber  # type: ignore[import-untyped, unused-ignore]
     except ImportError:
@@ -75,7 +100,21 @@ def _extract_with_pypdf(
     max_chars: int | None = None,
     max_pages: int | None = None,
 ) -> str:
-    """Fallback extractor — ``pypdf`` if available, otherwise empty."""
+    """Try the optional pypdf reader under the same child resource limits.
+
+    Args:
+        pdf_path: Parent-selected local PDF path.
+        max_chars: Retained character limit, including page separators.
+        max_pages: Maximum leading pages to visit.
+
+    Returns:
+        Joined text, or an empty string if pypdf is absent or cannot parse it.
+
+    Beginner note:
+        A fallback is useful for differences between PDF libraries, but it must
+        not escape containment. This call shares the first parser's process,
+        remaining wall time, memory ceiling, and text/page limits.
+    """
     try:
         from pypdf import PdfReader  # type: ignore[import-untyped, unused-ignore]
     except ImportError:
@@ -97,6 +136,15 @@ def _extract_with_pypdf(
 def extract_payload(pdf_path: Path, *, max_chars: int, max_pages: int) -> bytes:
     """Extract bounded text with both parsers inside the same worker.
 
+    Args:
+        pdf_path: Parent-selected PDF, opened only after the start grant.
+        max_chars: Validated retained text ceiling, at most 40,000 characters.
+        max_pages: Validated leading-page ceiling, at most 30 pages.
+
+    Returns:
+        UTF-8 JSON containing only text, bounded to 256 KiB. An oversized result
+        is replaced by an empty-text receipt so it cannot become evidence.
+
     Beginner note:
         Pure unit tests may call this helper with fake parser modules. Production
         reaches it only through main after the operating-system limits succeed.
@@ -111,8 +159,14 @@ def extract_payload(pdf_path: Path, *, max_chars: int, max_pages: int) -> bytes:
 def _install_memory_limit() -> None:
     """Fail closed unless this supported platform has its memory policy active.
 
-    Linux sets RLIMIT_AS before pdfplumber/pypdf imports. Windows relies on the
-    parent's Job Object and cannot proceed until the parent grants its token.
+    Raises:
+        OSError: Resource limits cannot be installed or the OS is unsupported.
+        ValueError: The OS rejects the requested resource-limit values.
+
+    Beginner note:
+        Linux sets RLIMIT_AS before pdfplumber/pypdf imports. Windows relies on
+        the parent's Job Object and cannot proceed until the parent grants its
+        token. The file-size limit also bounds a faulty result writer on Linux.
     """
     if sys.platform == "linux":
         import resource

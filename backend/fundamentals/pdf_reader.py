@@ -194,6 +194,10 @@ def extract_text(
         max_chars: Optional stricter limit within the 40,000-character ceiling.
         max_pages: Optional stricter limit within the first-30-page ceiling.
 
+    Returns:
+        Validated transcript text within both ceilings, or an empty string if
+        the file, parsers, resource containment, or worker receipt is unavailable.
+
     Beginner note:
         Both parsers run in the same killable child with a 60-second deadline
         and a 512 MiB OS memory limit. There is no in-process fallback. A new
