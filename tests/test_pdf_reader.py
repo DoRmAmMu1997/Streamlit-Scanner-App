@@ -263,6 +263,10 @@ def _patched_pdfplumber(monkeypatch, pages_text: Iterable[str] | None = None):
         return _FakePdfDoc(pages_text)
 
     monkeypatch.setattr(pdfplumber, "open", _fake_open)
+    # Explicit pure-parser seam: production never selects this based on Session.
+    from backend.transcript_pdf_worker import extract_payload
+
+    monkeypatch.setattr(pdf_reader, "_run_transcript_worker", extract_payload)
     yield
 
 
@@ -283,7 +287,7 @@ def test_extract_text_caches_alongside_pdf(tmp_path: Path, monkeypatch):
 
     with _patched_pdfplumber(monkeypatch, ["Hello, transcript."]):
         text1 = pdf_reader.extract_text(pdf_path)
-    text_cache_path = pdf_path.with_suffix(".txt")
+    text_cache_path = pdf_path.with_suffix(".transcript-v1.txt")
     assert text_cache_path.exists()
     assert "Hello, transcript." in text_cache_path.read_text(encoding="utf-8")
 
