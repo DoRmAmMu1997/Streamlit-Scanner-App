@@ -307,6 +307,8 @@ def _run_worker(pdf_path: Path, budget: PdfExtractionBudget) -> bytes:
         Raw JSON bytes emitted by the worker.
 
     Raises:
+        OSError: Windows job creation or assignment cannot establish the memory
+            policy. The waiting child is cleaned up without starting its parser.
         TimeoutError: If the worker exceeds its wall-time budget.
         ChildProcessError: If the worker exits abnormally or cannot finish
             cleanup.
@@ -316,6 +318,8 @@ def _run_worker(pdf_path: Path, budget: PdfExtractionBudget) -> bytes:
         ``spawn`` starts a fresh interpreter on every platform. That is slower
         than ``fork`` but avoids inheriting parser state and matches Windows,
         which makes timeout and cleanup behavior consistent in production.
+        The parent grants the start event only after Windows assignment succeeds;
+        failed setup never releases an uncontained parser as a fallback.
     """
     context = multiprocessing.get_context("spawn")
     job: WindowsPdfJob | None = None
