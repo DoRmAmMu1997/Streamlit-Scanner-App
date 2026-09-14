@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from backend.candle_cache import atomic_write_parquet, cache_write_lock
 from backend.config import (
     DAILY_CACHE_DIR,
     dhan_fetch_workers,
@@ -643,7 +644,7 @@ class DailyDataLoader:
         if candles.empty:
             return
         first_date, _last_date = _date_bounds(candles)
-        if first_date is None:
+        if first_date is None or first_date > self.today_func():
             return
 
         path = self.first_bar_path(symbol, security_id)
@@ -686,6 +687,72 @@ class DailyDataLoader:
         except Exception:
             logger.exception("Failed to read cached parquet for %s", symbol)
             return pd.DataFrame()
+
+    def _store_fetched_window(
+        self,
+        symbol: str,
+        security_id: str | int,
+        candles: pd.DataFrame,
+        *,
+        start_date: date | datetime | str,
+        end_date: date | datetime | str,
+        record_earliest: bool = True,
+        clip_to_window: bool = False,
+    ) -> pd.DataFrame:
+        """Overlay a vendor interval on the latest full cache, then publish it.
+
+        Args:
+            symbol: Instrument symbol locating the shared parquet.
+            security_id: Vendor identifier paired with the symbol.
+            candles: Completed vendor response; network work is already over.
+            start_date: Inclusive start of the interval the vendor was asked for.
+            end_date: Inclusive end of that interval.
+            record_earliest: Whether this was a history probe, rather than a
+                tail-only top-up that cannot establish the vendor's first bar.
+            clip_to_window: Direct callers restrict storage to their interval.
+                Prefetch retains unsolicited overlapping vendor corrections so
+                the quality gate can compare them with the prior cached rows.
+
+        Returns:
+            The full merged frame, or the empty response without a disk write.
+
+        Beginner note:
+        Re-read inside the lock: another caller may have downloaded different
+        dates during our network request. Only the requested interval is ours
+        to replace. Conflicting rows inside the new answer and outside-window
+        overlaps survive for the quality gate; only exact rows are redundant.
+        Unreadable parquet raises before replacement, preserving evidence for
+        repair. Readable empty/missing-axis/all-NaT caches retain the existing
+        full-download recovery behavior because they contain no dated history.
+        """
+        if candles.empty:
+            return candles
+        raw_response = candles
+        if clip_to_window:
+            candles = self._slice_to_range(candles, start_date, end_date)
+            if candles.empty:
+                return candles
+        path = self.cache_path(symbol, security_id)
+        with cache_write_lock(path):
+            cached = pd.read_parquet(path) if path.exists() else pd.DataFrame()
+            if not cached.empty and "timestamp" in cached and _date_bounds(cached)[0] is not None:
+                dates = pd.to_datetime(cached["timestamp"], errors="coerce").dt.date
+                inside = dates.between(_coerce_date(start_date), _coerce_date(end_date)).fillna(False)
+                # Keep unparseable rows too: a refresh is not permission to
+                # remove dirty evidence outside the interval we can identify.
+                kept = cached.loc[~inside]
+                merged = pd.concat([kept, candles], ignore_index=True)
+            else:
+                merged = candles.copy()
+            merged = merged.drop_duplicates().sort_values("timestamp", kind="stable").reset_index(drop=True)
+            atomic_write_parquet(merged, path)
+            if record_earliest:
+                # Evidence comes from what the vendor actually returned, not
+                # older rows preserved from a different request in the cache.
+                self._record_vendor_earliest(
+                    symbol, security_id, requested_from=start_date, candles=raw_response
+                )
+            return merged
 
     def _slice_to_range(
         self,
@@ -808,11 +875,8 @@ class DailyDataLoader:
             from_date=start_date,
             to_date=end_date,
         )
-        if not candles.empty:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            candles.to_parquet(path, index=False)
-        self._record_vendor_earliest(
-            symbol, security_id, requested_from=start_date, candles=candles
+        self._store_fetched_window(
+            symbol, security_id, candles, start_date=start_date, end_date=end_date, clip_to_window=True
         )
         return self._slice_to_range(candles, start_date, end_date), False
 
@@ -824,11 +888,9 @@ class DailyDataLoader:
     ) -> pd.DataFrame:
         """Fetch one date window from Dhan **without touching the cache file**.
 
-        Every other fetch path here writes what it downloads straight to the
-        symbol's parquet. That is exactly wrong for the DATA-002 repair, which
-        needs to pull a bounded window (say, the day around a corrupt bar) and
-        merge it *over* ten years of otherwise-good history — writing the window
-        directly would truncate the file to those few days.
+        The DATA-002 repair needs to validate a candidate before publication.
+        Normal loader writes preserve dates outside their requested interval,
+        but cannot apply the repair's improvement and dropped-day checks.
 
         So this method deliberately does the network half only: the same
         rate-limit pacing, DH-904 backoff, and optional timeout as every other
@@ -869,6 +931,14 @@ class DailyDataLoader:
         This is the engine behind the CLI prefetch. The Streamlit UI never
         calls it directly; it reads whatever is already on disk via
         `read_cached_history(...)` or `get_daily_history(...)`.
+
+        Beginner note:
+        The initial read only plans the vendor request. Every nonempty answer
+        is merged with a new read under the shared disk lock, preserving dates
+        outside the requested window even if another process wrote during I/O.
+        Unsolicited older corrections remain beside old values for quality
+        review; only exact duplicates are removed. An unreadable parquet raises
+        before fetching so repair can report its original bytes intact.
         """
         row = dict(instrument)
         symbol = str(row.get("symbol", "")).strip().upper()
@@ -892,11 +962,8 @@ class DailyDataLoader:
                 from_date=start,
                 to_date=today,
             )
-            if not candles.empty:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                candles.to_parquet(path, index=False)
-            self._record_vendor_earliest(
-                symbol, security_id, requested_from=start, candles=candles
+            candles = self._store_fetched_window(
+                symbol, security_id, candles, start_date=start, end_date=today
             )
             return candles, "fresh_download"
 
@@ -911,10 +978,8 @@ class DailyDataLoader:
                 from_date=start,
                 to_date=today,
             )
-            if not candles.empty:
-                candles.to_parquet(path, index=False)
-            self._record_vendor_earliest(
-                symbol, security_id, requested_from=start, candles=candles
+            candles = self._store_fetched_window(
+                symbol, security_id, candles, start_date=start, end_date=today
             )
             return candles, "fresh_download"
 
@@ -930,10 +995,8 @@ class DailyDataLoader:
                 from_date=start,
                 to_date=today,
             )
-            if not candles.empty:
-                candles.to_parquet(path, index=False)
-            self._record_vendor_earliest(
-                symbol, security_id, requested_from=start, candles=candles
+            candles = self._store_fetched_window(
+                symbol, security_id, candles, start_date=start, end_date=today
             )
             return candles, "fresh_download"
 
@@ -954,11 +1017,10 @@ class DailyDataLoader:
                 from_date=start,
                 to_date=today,
             )
-            self._record_vendor_earliest(
-                symbol, security_id, requested_from=start, candles=candles
-            )
             if not candles.empty:
-                candles.to_parquet(path, index=False)
+                candles = self._store_fetched_window(
+                    symbol, security_id, candles, start_date=start, end_date=today
+                )
                 return candles, "backfilled"
             return cached, "fresh"
         # Falling through on purpose: a later listing still needs its daily
@@ -991,15 +1053,9 @@ class DailyDataLoader:
             self._write_checked_through(symbol, security_id, today)
             return cached, "fresh"
 
-        merged = (
-            pd.concat([cached, new_rows], ignore_index=True)
-            # Keep same-date disagreements for DATA-001/DATA-002 to investigate;
-            # only a row identical across all six canonical columns is redundant.
-            .drop_duplicates()
-            .sort_values("timestamp")
-            .reset_index(drop=True)
+        merged = self._store_fetched_window(
+            symbol, security_id, new_rows, start_date=incremental_start, end_date=today, record_earliest=False
         )
-        merged.to_parquet(path, index=False)
         return merged, "incremental"
 
     def _sleep(self, seconds: float) -> None:

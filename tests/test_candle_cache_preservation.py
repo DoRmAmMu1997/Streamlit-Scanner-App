@@ -1,0 +1,278 @@
+"""Regressions for preserving shared candle history during bounded refreshes.
+
+Beginner note:
+A caller owns its requested date interval, not the whole symbol file. These
+tests use real parquet files and fake vendors to catch history loss on disk.
+"""
+
+from __future__ import annotations
+
+import concurrent.futures
+import multiprocessing
+import threading
+from datetime import date
+from pathlib import Path
+from typing import cast
+
+import pandas as pd
+import pytest
+
+from backend.daily_data_loader import DailyDataLoader
+from backend.data_quality.cache_repair import repair_symbol
+from backend.dhan_client import DhanDataClient
+
+ROW = {"symbol": "TEST", "security_id": "123"}
+TODAY = date(2026, 6, 10)
+
+
+def _frame(dates: list[str], *, close: float = 104.0) -> pd.DataFrame:
+    """Build valid candles whose dates make preservation failures obvious."""
+    return pd.DataFrame({
+        "timestamp": pd.to_datetime(dates), "open": 100.0, "high": 110.0,
+        "low": 99.0, "close": close, "volume": 1000.0,
+    })
+
+
+class _Client:
+    """Return a fresh copy so caller-side normalization cannot alter fixtures."""
+
+    def __init__(self, frame: pd.DataFrame) -> None:
+        self.frame = frame
+
+    def fetch_daily_candles(self, **_kwargs: object) -> pd.DataFrame:
+        return self.frame.copy()
+
+
+def _loader(tmp_path: Path, client: object) -> DailyDataLoader:
+    return DailyDataLoader(
+        cast(DhanDataClient, client), cache_dir=tmp_path,
+        request_delay_seconds=0.0, today_func=lambda: TODAY,
+    )
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_bounded_refresh_keeps_both_ends_and_replaces_inclusive_interval(tmp_path: Path, force: bool):
+    """A missing earlier boundary or forced refresh must never shrink history.
+
+    Beginner note:
+    June 8 is deliberately absent from the answer: replacing the interval must
+    remove that old row, while June 1 and June 15 survive outside the interval.
+    The non-forced case asks before the old cache's first date to force a miss.
+    """
+    response = _frame(["2026-06-05", "2026-06-09"], close=106.0)
+    loader = _loader(tmp_path, _Client(response))
+    path = loader.cache_path("TEST", "123")
+    old_dates = ["2026-06-01", "2026-06-08", "2026-06-15"] if force else ["2026-06-08", "2026-06-15"]
+    _frame(old_dates).to_parquet(path, index=False)
+
+    result, hit = loader.get_daily_history(ROW, "2026-06-05", "2026-06-09", force_refresh=force)
+
+    assert hit is False
+    pd.testing.assert_frame_equal(result, response)
+    stored = pd.read_parquet(path)
+    expected = (["2026-06-01"] if force else []) + ["2026-06-05", "2026-06-09", "2026-06-15"]
+    assert stored.timestamp.dt.strftime("%Y-%m-%d").tolist() == expected
+
+
+def test_empty_refresh_keeps_cache_bytes_and_marker(tmp_path: Path):
+    """No vendor rows are no authority to erase existing history or evidence."""
+    loader = _loader(tmp_path, _Client(pd.DataFrame()))
+    path = loader.cache_path("TEST", "123")
+    _frame(["2026-06-01", "2026-06-10"]).to_parquet(path, index=False)
+    marker = loader.first_bar_path("TEST", "123")
+    marker.write_text("prior evidence", encoding="utf-8")
+    before = path.read_bytes()
+
+    result, hit = loader.get_daily_history(ROW, "2026-06-05", "2026-06-09", force_refresh=True)
+
+    assert result.empty and not hit
+    assert path.read_bytes() == before
+    assert marker.read_text(encoding="utf-8") == "prior evidence"
+
+
+def test_direct_fetch_clips_vendor_extras_but_records_raw_first_bar(tmp_path: Path):
+    """Out-of-request vendor corrections cannot modify another caller's dates.
+
+    Beginner note:
+    The vendor's June 1 bar proves it ignored the June 5 lower bound. Keep the
+    old June 1 price, and do not claim June 5 is the vendor's first available bar
+    merely because clipping made it the first row that this caller stores.
+    """
+    loader = _loader(tmp_path, _Client(_frame(["2026-06-01", "2026-06-05", "2026-06-15"], close=106.0)))
+    path = loader.cache_path("TEST", "123")
+    original = _frame(["2026-06-01", "2026-06-15"])
+    original.to_parquet(path, index=False)
+
+    result, _hit = loader.get_daily_history(ROW, "2026-06-05", "2026-06-09", force_refresh=True)
+
+    assert result.timestamp.tolist() == [pd.Timestamp("2026-06-05")]
+    stored = pd.read_parquet(path)
+    assert stored.close.tolist() == [104.0, 106.0, 104.0]
+    assert not loader.first_bar_path("TEST", "123").exists()
+
+
+@pytest.mark.parametrize("mode", ["incremental", "backfilled", "fresh_download"])
+def test_ensure_rereads_cache_after_fetch_before_merging(tmp_path: Path, mode: str):
+    """Every prefetch branch must preserve a download that completes during I/O.
+
+    Beginner note:
+    Completing the other writer inside the fake vendor gives a deterministic
+    lost-update interleaving without a scheduler-dependent sleep. A lock around
+    network work would deadlock this test; a stale merge would erase June 15.
+    """
+    concurrent = _loader(tmp_path, _Client(_frame(["2026-06-15"])))
+
+    class Client:
+        def fetch_daily_candles(self, **_kwargs: object) -> pd.DataFrame:
+            concurrent.get_daily_history(ROW, "2026-06-15", "2026-06-15", force_refresh=True)
+            return _frame(["2026-06-10"])
+
+    loader = _loader(tmp_path, Client())
+    path = loader.cache_path("TEST", "123")
+    if mode != "fresh_download":
+        first = "2025-06-10" if mode == "incremental" else "2026-06-08"
+        _frame([first, "2026-06-09"]).to_parquet(path, index=False)
+
+    _result, status = loader.ensure_daily_history(ROW, years_back=1, today=TODAY)
+
+    assert status == mode
+    assert pd.Timestamp("2026-06-15") in pd.read_parquet(path).timestamp.tolist()
+
+
+def _process_refresh(cache_dir, day, barrier):
+    """Use an independent interpreter so a Python thread lock cannot suffice."""
+    class Client:
+        def fetch_daily_candles(self, **_kwargs):
+            barrier.wait(timeout=30)
+            return _frame([day])
+
+    _loader(Path(cache_dir), Client()).get_daily_history(ROW, day, day, force_refresh=True)
+
+
+def test_disjoint_process_fetches_preserve_each_others_rows(tmp_path: Path):
+    """Spawned CLI writers share the on-disk lock even with separate registries."""
+    context = multiprocessing.get_context("spawn")
+    barrier = context.Barrier(2)
+    loader = _loader(tmp_path, _Client(pd.DataFrame()))
+    path = loader.cache_path("TEST", "123")
+    _frame(["2026-06-01"]).to_parquet(path, index=False)
+    workers = [context.Process(target=_process_refresh, args=(str(tmp_path), day, barrier))
+               for day in ["2026-06-05", "2026-06-09"]]
+    try:
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=45)
+            assert worker.exitcode == 0
+    finally:
+        for worker in workers:
+            if worker.is_alive():
+                worker.terminate()
+                worker.join(timeout=10)
+    assert pd.read_parquet(path).timestamp.dt.strftime("%Y-%m-%d").tolist() == [
+        "2026-06-01", "2026-06-05", "2026-06-09",
+    ]
+
+
+def test_refresh_preserves_conflicts_in_vendor_answer(tmp_path: Path):
+    """Two vendor prices on one date stay visible to the quality quarantine."""
+    response = pd.concat([_frame(["2026-06-05"]), _frame(["2026-06-05"], close=106.0)], ignore_index=True)
+    loader = _loader(tmp_path, _Client(response))
+    path = loader.cache_path("TEST", "123")
+    _frame(["2026-06-01", "2026-06-10"]).to_parquet(path, index=False)
+
+    loader.get_daily_history(ROW, "2026-06-05", "2026-06-05", force_refresh=True)
+
+    stored = pd.read_parquet(path)
+    assert len(stored) == 4
+    assert stored.loc[stored.timestamp.eq(pd.Timestamp("2026-06-05")), "close"].tolist() == [104.0, 106.0]
+
+
+def test_disjoint_thread_fetches_preserve_each_others_rows(tmp_path: Path):
+    """Both calls finish their network request before either may publish.
+
+    Beginner note:
+    The barrier makes both writers start from the same old file. Re-reading
+    under the shared lock is necessary; serializing just the rename still loses
+    the first writer's interval when the second publishes its stale snapshot.
+    """
+    barrier = threading.Barrier(2)
+
+    class Client:
+        def fetch_daily_candles(self, *, from_date: str, **_kwargs: object) -> pd.DataFrame:
+            barrier.wait(timeout=10)
+            return _frame([from_date])
+
+    first = _loader(tmp_path, Client())
+    second = _loader(tmp_path, Client())
+    path = first.cache_path("TEST", "123")
+    _frame(["2026-06-01"]).to_parquet(path, index=False)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(loader.get_daily_history, ROW, day, day, True)
+                   for loader, day in [(first, "2026-06-05"), (second, "2026-06-09")]]
+        for future in futures:
+            future.result(timeout=20)
+    assert pd.read_parquet(path).timestamp.dt.strftime("%Y-%m-%d").tolist() == [
+        "2026-06-01", "2026-06-05", "2026-06-09",
+    ]
+
+
+def test_repair_refuses_to_overwrite_download_completed_during_vendor_call(tmp_path: Path):
+    """A repair validated against an old file cannot replace a newer download."""
+    concurrent = _loader(tmp_path, _Client(_frame(["2026-06-10"])))
+
+    class Client:
+        def fetch_daily_candles(self, **_kwargs: object) -> pd.DataFrame:
+            concurrent.get_daily_history(ROW, "2026-06-10", "2026-06-10", force_refresh=True)
+            return _frame(["2026-06-08", "2026-06-09"])
+
+    loader = _loader(tmp_path, Client())
+    path = loader.cache_path("TEST", "123")
+    pd.concat([_frame(["2026-06-08"]), _frame(["2026-06-08"], close=106.0)]).to_parquet(path, index=False)
+
+    outcome = repair_symbol(loader, ROW, today=TODAY, force=True)
+
+    assert outcome.status == "skipped"
+    assert "changed" in (outcome.message or "")
+    assert pd.Timestamp("2026-06-10") in pd.read_parquet(path).timestamp.tolist()
+    assert not path.with_suffix(".repaired").exists()
+
+
+def test_forced_refresh_leaves_unreadable_cache_untouched(tmp_path: Path):
+    """A failed old-file read must not turn a narrow fetch into destructive recovery."""
+    loader = _loader(tmp_path, _Client(_frame(["2026-06-09"])))
+    path = loader.cache_path("TEST", "123")
+    path.write_bytes(b"unreadable original cache")
+
+    with pytest.raises(Exception):
+        loader.get_daily_history(ROW, "2026-06-09", "2026-06-09", force_refresh=True)
+
+    assert path.read_bytes() == b"unreadable original cache"
+
+
+def test_future_vendor_first_bar_never_creates_evidence(tmp_path: Path):
+    """An impossible future candle cannot produce a future-dated evidence marker."""
+    loader = _loader(tmp_path, _Client(_frame(["2026-06-15"])))
+
+    loader.get_daily_history(ROW, "2026-06-01", "2026-06-15")
+
+    assert not loader.first_bar_path("TEST", "123").exists()
+
+
+def test_interrupted_serialization_keeps_original_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A serializer that fails after writing its header cannot damage the live file."""
+    loader = _loader(tmp_path, _Client(_frame(["2026-06-09"])))
+    path = loader.cache_path("TEST", "123")
+    _frame(["2026-06-01"]).to_parquet(path, index=False)
+    before = path.read_bytes()
+
+    def interrupted(_frame: pd.DataFrame, target: Path, **_kwargs: object) -> None:
+        Path(target).write_bytes(b"partial parquet header")
+        raise OSError("simulated interrupted write")
+
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", interrupted)
+    with pytest.raises(OSError, match="interrupted"):
+        loader.get_daily_history(ROW, "2026-06-09", "2026-06-09", force_refresh=True)
+
+    assert path.read_bytes() == before
+    assert not list(tmp_path.glob("*.tmp"))
