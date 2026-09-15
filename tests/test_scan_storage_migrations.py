@@ -944,3 +944,49 @@ def _reflect_schema(engine) -> dict[str, dict[str, object]]:
         schema[table] = {"columns": columns, "indexes": indexes, "foreign_keys": foreign_keys}
     engine.dispose()
     return schema
+
+
+def test_valid005_backfills_attempts_and_only_missing_computed_benchmarks(monkeypatch, tmp_path: Path):
+    """Upgrade retries legacy missing benchmarks without changing stock facts.
+
+    Beginner note:
+        Old pending rows have no computed timestamp, so creation time is their
+        fair scheduling fallback. Computed rows use their later measurement time.
+        Downgrade removes metadata only and preserves every receipt row.
+    """
+    url = f"sqlite:///{(tmp_path / 'valid005.db').as_posix()}"
+    monkeypatch.setenv("DATABASE_URL", url)
+    config = Config("alembic.ini")
+    command.upgrade(config, "20260906obs004a")
+    engine = create_engine(url)
+    with engine.begin() as connection:
+        connection.execute(text("INSERT INTO scan_runs (id, started_at, status, screener_key, universe_key) "
+                                "VALUES (1, '2026-01-01', 'success', 'test', 'nifty_500')"))
+        connection.execute(text("INSERT INTO scan_results (id, run_id, symbol, signal_date, created_at) "
+                                "VALUES (1, 1, 'TEST', '2026-01-05', '2026-01-05')"))
+        for horizon, status, computed, benchmark in [
+            (1, "computed", "2026-01-08", None), (2, "computed", "2026-01-08", 2),
+            (20, "pending", None, None), (60, "insufficient_data", "2026-01-08", None),
+        ]:
+            connection.execute(text(
+                "INSERT INTO signal_forward_returns "
+                "(result_id, horizon_days, status, computed_at, benchmark_return_pct, created_at) "
+                "VALUES (1, :horizon, :status, :computed, :benchmark, '2026-01-06')"
+            ), dict(horizon=horizon, status=status, computed=computed, benchmark=benchmark))
+    command.upgrade(config, "20260909valid005")
+    with engine.connect() as connection:
+        rows = connection.execute(text(
+            "SELECT horizon_days, last_attempted_at, benchmark_retry_pending "
+            "FROM signal_forward_returns ORDER BY horizon_days"
+        )).all()
+    assert rows == [(1, "2026-01-08", 1), (2, "2026-01-08", 0),
+                    (20, "2026-01-06", 0), (60, "2026-01-08", 0)]
+    command.downgrade(config, "20260906obs004a")
+    assert "last_attempted_at" not in {c["name"] for c in inspect(engine).get_columns("signal_forward_returns")}
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT COUNT(*) FROM signal_forward_returns")) == 4
+        benchmark = connection.scalar(
+            text("SELECT benchmark_return_pct FROM signal_forward_returns WHERE horizon_days=2")
+        )
+        assert benchmark == 2
+    engine.dispose()

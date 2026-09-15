@@ -5,9 +5,11 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import dataclass
 from decimal import Decimal
+from numbers import Integral
 
 import pandas as pd
 
+from backend.data_quality import validate_candles
 from backend.storage.models import ForwardReturnStatus
 from backend.validation._pricing import as_money, pct, prepared_frame
 
@@ -51,20 +53,29 @@ def compute_forward_return(
     open, exit is the ``horizon_days`` bar's close, and an exit after ``as_of``
     stays pending instead of being guessed.
     """
+    normalized_horizon = positive_integral(horizon_days, name="horizon_days")
     as_of_date = as_of or dt.date.today()
+    quality = validate_candles(
+        candles,
+        symbol="FORWARD_RETURN",
+        required_columns=("open", "high", "low", "close"),
+        allow_identical_daily_duplicates=True,
+    )
+    if quality.has_fatal_findings:
+        return _empty_point(normalized_horizon, ForwardReturnStatus.INSUFFICIENT_DATA)
     frame = prepared_frame(candles)
     if frame.empty:
-        return _empty_point(horizon_days, ForwardReturnStatus.INSUFFICIENT_DATA)
+        return _empty_point(normalized_horizon, ForwardReturnStatus.INSUFFICIENT_DATA)
 
     signal_index = _position_for_date(frame, signal_date)
     if signal_index is None:
-        return _empty_point(horizon_days, ForwardReturnStatus.INSUFFICIENT_DATA)
+        return _empty_point(normalized_horizon, ForwardReturnStatus.INSUFFICIENT_DATA)
 
     entry_index = signal_index + 1
-    exit_index = signal_index + int(horizon_days)
+    exit_index = signal_index + normalized_horizon
     if entry_index >= len(frame) or exit_index >= len(frame):
         return _empty_point(
-            horizon_days,
+            normalized_horizon,
             _missing_future_status(frame, as_of_date, missing_data_grace_days),
         )
 
@@ -73,21 +84,21 @@ def compute_forward_return(
     entry_date = entry_row["_date"]
     exit_date = exit_row["_date"]
     if exit_date > as_of_date:
-        return _empty_point(horizon_days, ForwardReturnStatus.PENDING)
+        return _empty_point(normalized_horizon, ForwardReturnStatus.PENDING)
 
     entry_price = as_money(entry_row["open"])
     exit_price = as_money(exit_row["close"])
     if entry_price is None or exit_price is None or entry_price <= 0:
-        return _empty_point(horizon_days, ForwardReturnStatus.INSUFFICIENT_DATA)
+        return _empty_point(normalized_horizon, ForwardReturnStatus.INSUFFICIENT_DATA)
 
     window = frame.iloc[entry_index : exit_index + 1]
     low_price = as_money(window["low"].min())
     high_price = as_money(window["high"].max())
     if low_price is None or high_price is None:
-        return _empty_point(horizon_days, ForwardReturnStatus.INSUFFICIENT_DATA)
+        return _empty_point(normalized_horizon, ForwardReturnStatus.INSUFFICIENT_DATA)
 
     return ForwardReturnPoint(
-        horizon_days=int(horizon_days),
+        horizon_days=normalized_horizon,
         status=ForwardReturnStatus.COMPUTED,
         entry_date=entry_date,
         exit_date=exit_date,
@@ -97,6 +108,27 @@ def compute_forward_return(
         max_adverse_excursion_pct=pct(low_price - entry_price, entry_price),
         max_favorable_excursion_pct=pct(high_price - entry_price, entry_price),
     )
+
+
+def positive_integral(value: object, *, name: str) -> int:
+    """Return a positive integer while rejecting booleans and numeric coercion.
+
+    Args:
+        value: runtime value to validate.
+        name: argument name used in the error message.
+
+    Raises:
+        ValueError: if ``value`` is not a positive ``numbers.Integral``.
+
+    Beginner note:
+        ``bool`` is a subclass of ``int`` in Python and ``int(1.5)`` silently
+        truncates. Either behavior would turn a caller mistake into a different
+        trading horizon, so this boundary accepts integral objects explicitly
+        and rejects booleans before any database or network work starts.
+    """
+    if isinstance(value, bool) or not isinstance(value, Integral) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return int(value)
 
 
 def _position_for_date(frame: pd.DataFrame, wanted: dt.date) -> int | None:

@@ -28,6 +28,7 @@ from backend.validation.metrics import (
 )
 from backend.validation.sectors import load_universe_sector_lookup
 from backend.validation.service import (
+    ForwardReturnBatchError,
     ForwardReturnRunSummary,
     compute_pending_forward_returns,
 )
@@ -38,6 +39,7 @@ __all__ = [
     "BenchmarkLeg",
     "BenchmarkSpec",
     "BestWorstSignal",
+    "ForwardReturnBatchError",
     "ForwardReturnPoint",
     "ForwardReturnRunSummary",
     "ValidationBenchmarkRow",

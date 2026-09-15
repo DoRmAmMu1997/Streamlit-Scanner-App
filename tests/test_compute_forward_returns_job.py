@@ -7,6 +7,8 @@ import importlib
 import io
 from contextlib import contextmanager
 
+import pytest
+
 from backend.validation import ForwardReturnRunSummary
 
 
@@ -62,7 +64,7 @@ def test_run_compute_forward_returns_bootstraps_schema_then_calls_service(monkey
         ("loader", fake_client),
         (
             "compute",
-            "session",
+            _fake_session_scope,
             "loader",
             {
                 "as_of": dt.date(2026, 1, 31),
@@ -136,3 +138,42 @@ def test_run_compute_forward_returns_reports_redacted_fatal_setup_errors(monkeyp
     assert outcome.fatal is True
     assert "[REDACTED]" in output.getvalue()
     assert "super-secret" not in output.getvalue()
+
+
+def test_job_preserves_committed_summary_after_later_failure():
+    """A later rolled-back signal must not hide earlier committed progress."""
+    from backend.validation.service import ForwardReturnBatchError
+
+    job = importlib.import_module("backend.jobs.compute_forward_returns")
+    progress = ForwardReturnRunSummary(total_signals=1, computed=2)
+
+    def broken(*_args, **_kwargs):
+        raise ForwardReturnBatchError(progress)
+
+    outcome = job.run_compute_forward_returns(
+        ensure_schema=lambda: None, data_client_factory=object,
+        data_loader_factory=lambda client: client, compute_service=broken,
+        output=io.StringIO(),
+    )
+    assert outcome.fatal
+    assert outcome.summary == progress
+
+
+@pytest.mark.parametrize("horizons,limit", [((True,), 500), ((1.2,), 500), ((0,), 500),
+                                           ((-1,), 500), ((20,), True), ((20,), 0),
+                                           ((20,), -1), ((20,), 1.5)])
+def test_job_rejects_invalid_arguments_before_bootstrap(horizons, limit):
+    """Coercion must not silently schedule a different horizon or open providers."""
+    job = importlib.import_module("backend.jobs.compute_forward_returns")
+    with pytest.raises(ValueError, match="positive integer"):
+        job.run_compute_forward_returns(horizons=horizons, limit=limit,
+            ensure_schema=lambda: pytest.fail("invalid argument initialized schema"))
+
+
+def test_job_empty_horizons_does_not_initialize_schema_or_provider():
+    """Empty requested work is a successful no-op, even without credentials."""
+    job = importlib.import_module("backend.jobs.compute_forward_returns")
+    result = job.run_compute_forward_returns(horizons=(),
+        ensure_schema=lambda: pytest.fail("empty work initialized schema"), output=io.StringIO())
+    assert not result.fatal
+    assert result.summary.total_signals == 0

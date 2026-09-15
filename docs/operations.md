@@ -94,6 +94,22 @@ also silently freezes the candle cache at the date the token expired. Re-run
 The command bootstraps the database schema, builds the same Dhan-backed
 `DailyDataLoader` used by scans, calls the idempotent
 `compute_pending_forward_returns()` service, and prints a secret-safe summary.
+The worker reads detached work, closes its read transaction before any provider
+call, and commits all horizons for each signal atomically. If a later signal fails,
+the nonzero job outcome includes earlier committed progress; rerunning safely
+continues unresolved work. Default batches contain at most 500 distinct signals,
+rotating by oldest unresolved attempt time rather than repeatedly choosing the
+same oldest signal. Configured benchmark failures remain eligible even after the
+stock return completes; these retries fetch only the index and preserve stock facts.
+An intentionally unconfigured benchmark exits that retry queue.
+
+Apply `alembic upgrade head` before running the updated worker against an existing
+database. VALID-005 adds attempt timing and benchmark retry metadata and backfills
+legacy computed rows with missing benchmarks. History requests stop at `--as-of`;
+future signals remain pending without a request. Positive integral horizons and
+limits are required, repeated horizons are deduplicated, and the Python service
+accepts an empty horizon sequence as a no-op. See the
+[VALID-005 ADR](architecture/valid-005-forward-return-integrity.md) for details.
 It does not re-run screeners, mutate scan history, or enable any AI jobs. Render
 does not get a second cron service in this task; deployments can schedule this
 command explicitly when they are ready for validation backfills.

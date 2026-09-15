@@ -845,6 +845,154 @@ def test_upsert_forward_return_updates_pending_row_in_place(db_session):
     assert rows[0].computed_at is not None
 
 
+def test_forward_return_work_items_split_stock_and_benchmark_only_horizons(db_session):
+    """The worker receives immutable facts and never carries live ORM rows to I/O.
+
+    Beginner note:
+    The worker closes its read transaction before loading files or market data.
+    A detached value object makes that safe: everything needed for stock work or
+    benchmark-only repair is copied while the session is open.
+    """
+    from backend.storage.models import ForwardReturnStatus, SignalForwardReturn
+    from backend.storage.repository import (
+        create_scan_run,
+        get_forward_return_work_items,
+        save_scan_results,
+    )
+
+    run = create_scan_run(db_session, screener_key="envelope", universe_key="nifty_500")
+    [result] = save_scan_results(
+        db_session,
+        run,
+        [{"symbol": "RELIANCE", "signal_date": dt.date(2026, 1, 5)}],
+    )
+    db_session.add_all(
+        [
+            SignalForwardReturn(result_id=result.id, horizon_days=20),
+            SignalForwardReturn(
+                result_id=result.id,
+                horizon_days=60,
+                status=ForwardReturnStatus.COMPUTED,
+                entry_date=dt.date(2026, 1, 6),
+                exit_date=dt.date(2026, 4, 1),
+                forward_return_pct=Decimal("8.5000"),
+                benchmark_retry_pending=True,
+            ),
+            SignalForwardReturn(
+                result_id=result.id,
+                horizon_days=120,
+                status=ForwardReturnStatus.COMPUTED,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    [work] = get_forward_return_work_items(db_session, horizons=(20, 60, 120))
+
+    assert work.result_id == result.id
+    assert work.symbol == "RELIANCE"
+    assert work.signal_date == dt.date(2026, 1, 5)
+    assert work.universe_key == "nifty_500"
+    assert work.stock_horizons == (20,)
+    assert len(work.benchmark_horizons) == 1
+    benchmark = work.benchmark_horizons[0]
+    assert benchmark.horizon_days == 60
+    assert benchmark.entry_date == dt.date(2026, 1, 6)
+    assert benchmark.exit_date == dt.date(2026, 4, 1)
+    assert benchmark.forward_return_pct == Decimal("8.5000")
+
+
+def test_forward_return_work_selection_rotates_oldest_attempted_signal(db_session):
+    """A small limit cannot permanently starve a later signal.
+
+    Beginner note:
+    Missing rows use the signal creation time and attempted rows use their last
+    attempt time. Once signal A is attempted, signal B becomes older and gets the
+    next slot instead of an ID-first query choosing A forever.
+    """
+    from backend.storage.models import SignalForwardReturn
+    from backend.storage.repository import (
+        create_scan_run,
+        get_forward_return_work_items,
+        save_scan_results,
+    )
+
+    run = create_scan_run(db_session, screener_key="envelope", universe_key="nifty_500")
+    first, second = save_scan_results(
+        db_session,
+        run,
+        [
+            {"symbol": "FIRST", "signal_date": dt.date(2026, 1, 5)},
+            {"symbol": "SECOND", "signal_date": dt.date(2026, 1, 5)},
+        ],
+    )
+    attempted = dt.datetime.now(dt.UTC) + dt.timedelta(days=1)
+    db_session.add(
+        SignalForwardReturn(
+            result_id=first.id,
+            horizon_days=20,
+            last_attempted_at=attempted,
+        )
+    )
+    db_session.commit()
+
+    [work] = get_forward_return_work_items(db_session, horizons=(20,), limit=1)
+
+    assert work.result_id == second.id
+
+
+def test_upsert_forward_return_never_replaces_a_terminal_stock_receipt(db_session):
+    """A stale retry cannot erase a row another worker terminalized first."""
+    from sqlalchemy import select
+
+    from backend.storage.models import ForwardReturnStatus, SignalForwardReturn
+    from backend.storage.repository import create_scan_run, save_scan_results, upsert_forward_return
+    from backend.validation.forward_return import ForwardReturnPoint
+
+    run = create_scan_run(db_session, screener_key="envelope", universe_key="nifty_500")
+    [result] = save_scan_results(
+        db_session,
+        run,
+        [{"symbol": "RELIANCE", "signal_date": dt.date(2026, 1, 5)}],
+    )
+    completed_at = dt.datetime(2026, 2, 3, 12, 0, tzinfo=dt.UTC)
+    db_session.add(
+        SignalForwardReturn(
+            result_id=result.id,
+            horizon_days=20,
+            status=ForwardReturnStatus.COMPUTED,
+            entry_date=dt.date(2026, 1, 6),
+            exit_date=dt.date(2026, 2, 3),
+            entry_price=Decimal("100"),
+            exit_price=Decimal("112.5"),
+            forward_return_pct=Decimal("12.5"),
+            max_adverse_excursion_pct=Decimal("-4.2"),
+            max_favorable_excursion_pct=Decimal("15.1"),
+            computed_at=completed_at,
+        )
+    )
+    db_session.commit()
+
+    upsert_forward_return(
+        db_session,
+        result_id=result.id,
+        point=ForwardReturnPoint(horizon_days=20, status=ForwardReturnStatus.PENDING),
+    )
+    db_session.commit()
+    db_session.expire_all()
+
+    row = db_session.scalars(select(SignalForwardReturn)).one()
+    assert row.status is ForwardReturnStatus.COMPUTED
+    assert row.entry_date == dt.date(2026, 1, 6)
+    assert row.exit_date == dt.date(2026, 2, 3)
+    assert row.entry_price == Decimal("100.0000")
+    assert row.exit_price == Decimal("112.5000")
+    assert row.forward_return_pct == Decimal("12.5000")
+    assert row.max_adverse_excursion_pct == Decimal("-4.2000")
+    assert row.max_favorable_excursion_pct == Decimal("15.1000")
+    assert row.computed_at.replace(tzinfo=dt.UTC) == completed_at
+
+
 def test_get_forward_return_metric_records_joins_and_filters_signal_dates(db_session):
     """VALID-003A aggregate code should consume repository-owned joined rows."""
     from backend.storage.models import ForwardReturnStatus, SignalForwardReturn
@@ -1029,3 +1177,31 @@ def test_no_candle_repair_run_yet_returns_none(db_session):
     from backend.storage.repository import get_latest_candle_repair_run
 
     assert get_latest_candle_repair_run(db_session) is None
+
+
+def test_stale_benchmark_failure_cannot_erase_concurrent_success(db_session):
+    """A retry selected before another worker's success must preserve that winner."""
+    from backend.storage.models import ForwardReturnStatus
+    from backend.storage.repository import (
+        create_scan_run,
+        save_scan_results,
+        update_forward_return_benchmark,
+        upsert_forward_return,
+    )
+    from backend.validation.benchmarks import BenchmarkLeg
+    from backend.validation.forward_return import ForwardReturnPoint
+
+    run = create_scan_run(db_session, screener_key="test", universe_key="nifty_500")
+    [signal] = save_scan_results(db_session, run, [{"symbol": "TEST", "signal_date": dt.date(2026, 1, 5)}])
+    row = upsert_forward_return(db_session, result_id=signal.id,
+        point=ForwardReturnPoint(horizon_days=1, status=ForwardReturnStatus.COMPUTED,
+                                 forward_return_pct=Decimal("4")),
+        benchmark=BenchmarkLeg("index", Decimal("100"), Decimal("102"), Decimal("2")))
+    db_session.commit()
+    before = tuple(getattr(row, column.name) for column in row.__table__.columns)
+    changed = update_forward_return_benchmark(db_session, result_id=signal.id,
+        horizon_days=1, benchmark=None, retry_pending=True)
+    db_session.commit()
+    db_session.refresh(row)
+    assert not changed
+    assert tuple(getattr(row, column.name) for column in row.__table__.columns) == before

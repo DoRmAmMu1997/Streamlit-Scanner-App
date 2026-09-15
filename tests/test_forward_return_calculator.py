@@ -11,6 +11,7 @@ import datetime as dt
 from decimal import Decimal
 
 import pandas as pd
+import pytest
 
 from backend.storage.models import ForwardReturnStatus
 from backend.validation.benchmarks import compute_benchmark_leg
@@ -158,3 +159,89 @@ def test_compute_benchmark_leg_keeps_key_and_nulls_prices_when_dates_are_missing
     assert leg.entry_price is None
     assert leg.exit_price is None
     assert leg.return_pct is None
+
+
+@pytest.mark.parametrize(
+    ("mutate", "description"),
+    [
+        (lambda frame: frame.assign(timestamp=["2026-01-05", "not-a-date"]), "invalid timestamp"),
+        (lambda frame: frame.assign(open=["90", "NaN"]), "non-finite open"),
+        (lambda frame: frame.assign(high=["95", "80"]), "high below low"),
+        (lambda frame: frame.assign(close=["92", "120"]), "close outside range"),
+    ],
+)
+def test_compute_forward_return_rejects_malformed_raw_rows_before_preparation(mutate, description):
+    """Malformed raw bars cannot disappear or shift the measured holding window.
+
+    Beginner note:
+    The old preparation helper silently dropped a bad timestamp and coerced bad
+    prices. That could move the "next" row from January 6 to January 7 and still
+    produce a confident-looking return. This test requires a terminal unavailable
+    result before sorting, dropping, or deduplicating can hide the bad source row.
+    """
+    frame = _candles(
+        [
+            ("2026-01-05", "90", "95", "88", "92"),
+            ("2026-01-06", "100", "106", "98", "104"),
+        ]
+    )
+
+    point = compute_forward_return(
+        mutate(frame),
+        dt.date(2026, 1, 5),
+        1,
+        as_of=dt.date(2026, 1, 8),
+    )
+
+    assert point.status is ForwardReturnStatus.INSUFFICIENT_DATA, description
+
+
+def test_compute_forward_return_rejects_conflicting_daily_duplicates():
+    frame = _candles(
+        [
+            ("2026-01-05", "90", "95", "88", "92"),
+            ("2026-01-06", "100", "106", "98", "104"),
+            ("2026-01-06", "101", "107", "99", "105"),
+        ]
+    )
+
+    point = compute_forward_return(frame, dt.date(2026, 1, 5), 1, as_of=dt.date(2026, 1, 8))
+
+    assert point.status is ForwardReturnStatus.INSUFFICIENT_DATA
+
+
+def test_compute_forward_return_accepts_ohlc_without_volume_and_holiday_gaps():
+    frame = _candles(
+        [
+            ("2026-01-05", "90", "95", "88", "92"),
+            ("2026-01-09", "100", "106", "98", "104"),
+        ]
+    ).drop(columns="volume")
+
+    point = compute_forward_return(frame, dt.date(2026, 1, 5), 1, as_of=dt.date(2026, 1, 10))
+
+    assert point.status is ForwardReturnStatus.COMPUTED
+    assert point.entry_date == dt.date(2026, 1, 9)
+
+
+@pytest.mark.parametrize("horizon", [True, False, 0, -1, 1.5, Decimal("2.0")])
+def test_compute_forward_return_rejects_non_positive_non_integral_horizons(horizon):
+    with pytest.raises(ValueError, match="positive integer"):
+        compute_forward_return(
+            _candles([("2026-01-05", "90", "95", "88", "92")]),
+            dt.date(2026, 1, 5),
+            horizon,
+        )
+
+
+def test_identical_daily_rows_with_distinct_times_count_as_one_trading_bar():
+    """Two intraday timestamps for the same daily facts must not shorten a horizon."""
+    frame = pd.DataFrame([
+        {"timestamp": "2026-01-05 00:00", "open": 100, "high": 110, "low": 90, "close": 104},
+        {"timestamp": "2026-01-06 00:00", "open": 100, "high": 110, "low": 90, "close": 104},
+        {"timestamp": "2026-01-06 09:00", "open": 100, "high": 110, "low": 90, "close": 104},
+        {"timestamp": "2026-01-07 00:00", "open": 100, "high": 120, "low": 90, "close": 115},
+    ])
+    point = compute_forward_return(frame, dt.date(2026, 1, 5), 2, as_of=dt.date(2026, 1, 8))
+    assert point.exit_date == dt.date(2026, 1, 7)
+    assert point.forward_return_pct == Decimal("15")

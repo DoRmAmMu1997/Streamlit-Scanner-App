@@ -21,8 +21,10 @@ from dataclasses import asdict, dataclass, is_dataclass
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import exists, func, or_, select
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import exists, func, insert, or_, select, update
+from sqlalchemy.engine import CursorResult
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from backend.storage.models import (
     AIEvaluation,
@@ -66,6 +68,36 @@ class ForwardReturnMetricRecord:
     excess_return_pct: Decimal | None
     max_adverse_excursion_pct: Decimal | None
     max_favorable_excursion_pct: Decimal | None
+
+
+@dataclass(frozen=True)
+class BenchmarkForwardReturnWork:
+    """Stored stock facts needed to retry only one benchmark horizon."""
+
+    horizon_days: int
+    entry_date: dt.date | None
+    exit_date: dt.date | None
+    forward_return_pct: Decimal | None
+
+
+@dataclass(frozen=True)
+class ForwardReturnWorkItem:
+    """Detached work for one signal selected by the validation worker.
+
+    Beginner note:
+    ORM objects remain connected to their database session. This value object
+    copies only stable scalar facts so the service can close its read
+    transaction before loading universe files or calling a market-data provider.
+    ``stock_horizons`` need the symbol history; ``benchmark_horizons`` already
+    have terminal stock facts and therefore must never refetch or rewrite them.
+    """
+
+    result_id: int
+    symbol: str
+    signal_date: dt.date
+    universe_key: str
+    stock_horizons: tuple[int, ...]
+    benchmark_horizons: tuple[BenchmarkForwardReturnWork, ...]
 
 
 def get_scan_run(session: Session, run_id: int) -> ScanRun | None:
@@ -548,6 +580,85 @@ def get_ai_evaluations(session: Session, run_id: int) -> list[AIEvaluation]:
 # ---------------------------------------------------------------------------
 
 
+def get_forward_return_work_items(
+    session: Session,
+    *,
+    horizons: Sequence[int],
+    limit: int | None = None,
+) -> list[ForwardReturnWorkItem]:
+    """Return fairly ordered detached work for unresolved stock or benchmark legs.
+
+    Missing horizons use ``ScanResult.created_at`` as their effective attempt
+    time; persisted unresolved rows use ``last_attempted_at`` when available.
+    Sorting by the oldest effective time rotates bounded batches fairly, with
+    signal date and id as deterministic ties.
+
+    Beginner note:
+    The limit counts signals, not horizon rows. One chosen signal carries all of
+    its requested unresolved horizons, so a batch never processes the same
+    signal twice or partially hides work behind a row-level SQL limit.
+    """
+    normalized_horizons = tuple(dict.fromkeys(int(horizon) for horizon in horizons))
+    if not normalized_horizons:
+        return []
+
+    rows = session.scalars(
+        select(ScanResult)
+        .options(joinedload(ScanResult.run), selectinload(ScanResult.forward_returns))
+        .where(ScanResult.signal_date.is_not(None))
+    ).all()
+    ordered: list[tuple[dt.datetime, dt.date, int, ForwardReturnWorkItem]] = []
+    for result in rows:
+        by_horizon = {
+            row.horizon_days: row
+            for row in result.forward_returns
+            if row.horizon_days in normalized_horizons
+        }
+        stock_horizons: list[int] = []
+        benchmark_horizons: list[BenchmarkForwardReturnWork] = []
+        attempt_times: list[dt.datetime] = []
+        for horizon in normalized_horizons:
+            row = by_horizon.get(horizon)
+            if row is None:
+                stock_horizons.append(horizon)
+                attempt_times.append(result.created_at)
+            elif row.status is ForwardReturnStatus.PENDING:
+                stock_horizons.append(horizon)
+                attempt_times.append(row.last_attempted_at or result.created_at)
+            elif row.benchmark_retry_pending:
+                benchmark_horizons.append(
+                    BenchmarkForwardReturnWork(
+                        horizon_days=horizon,
+                        entry_date=row.entry_date,
+                        exit_date=row.exit_date,
+                        forward_return_pct=row.forward_return_pct,
+                    )
+                )
+                attempt_times.append(row.last_attempted_at or result.created_at)
+        if not stock_horizons and not benchmark_horizons:
+            continue
+        signal_date = cast(dt.date, result.signal_date)
+        work = ForwardReturnWorkItem(
+            result_id=result.id,
+            symbol=result.symbol,
+            signal_date=signal_date,
+            universe_key=result.run.universe_key,
+            stock_horizons=tuple(stock_horizons),
+            benchmark_horizons=tuple(benchmark_horizons),
+        )
+        effective_attempt = min(_as_aware_utc(value) for value in attempt_times)
+        ordered.append((effective_attempt, signal_date, result.id, work))
+
+    ordered.sort(key=lambda item: item[:3])
+    work_items = [item[3] for item in ordered]
+    return work_items if limit is None else work_items[:limit]
+
+
+def _as_aware_utc(value: dt.datetime) -> dt.datetime:
+    """Normalize SQLite-naive timestamps so fairness sorting is portable."""
+    return value.replace(tzinfo=dt.UTC) if value.tzinfo is None else value.astimezone(dt.UTC)
+
+
 def get_signals_needing_forward_returns(
     session: Session,
     *,
@@ -594,58 +705,177 @@ def upsert_forward_return(
     result_id: int,
     point: ForwardReturnPoint,
     benchmark: BenchmarkLeg | None = None,
+    benchmark_retry_pending: bool = False,
+    attempted_at: dt.datetime | None = None,
 ) -> SignalForwardReturn:
-    """Insert or update one ``signal_forward_returns`` horizon row.
+    """Insert missing work or conditionally update a still-pending stock receipt.
 
-    The schema's unique ``(result_id, horizon_days)`` constraint is the durable
-    idempotency contract; this helper mirrors that in ORM code so callers never
-    append duplicate measurements on reruns.
+    Args:
+        session: Caller-owned transaction; this helper never commits it.
+        result_id: Stored signal identity.
+        point: Proposed stock measurement or unresolved status.
+        benchmark: Optional aligned index measurement.
+        benchmark_retry_pending: Whether configured index data still needs work.
+        attempted_at: UTC attempt time, defaulting to now.
+
+    Returns:
+        The durable row, including a concurrent terminal winner if one exists.
+
+    Beginner note:
+        A selection-time Python check is insufficient: another worker can finish
+        while this worker fetches candles. The UPDATE itself requires PENDING.
+        Unique insert conflicts roll back only a savepoint, then conditionally
+        retry that same UPDATE. Completed dates, prices, returns, excursions,
+        benchmark facts and computed_at can therefore never be erased by retries.
     """
-    stmt = select(SignalForwardReturn).where(
+    attempted = attempted_at or dt.datetime.now(dt.UTC)
+    key_predicates = (
         SignalForwardReturn.result_id == result_id,
         SignalForwardReturn.horizon_days == point.horizon_days,
     )
-    row = session.scalar(stmt)
-    if row is None:
-        row = SignalForwardReturn(
-            result_id=result_id,
-            horizon_days=point.horizon_days,
-        )
-        session.add(row)
-
-    row.status = point.status
-    row.entry_date = point.entry_date
-    row.exit_date = point.exit_date
-    row.entry_price = point.entry_price
-    row.exit_price = point.exit_price
-    row.forward_return_pct = point.forward_return_pct
-    row.max_adverse_excursion_pct = point.max_adverse_excursion_pct
-    row.max_favorable_excursion_pct = point.max_favorable_excursion_pct
-    row.computed_at = (
-        dt.datetime.now(dt.UTC)
-        if point.status is not ForwardReturnStatus.PENDING
-        else None
-    )
+    values: dict[str, object] = {
+        "status": point.status,
+        "entry_date": point.entry_date,
+        "exit_date": point.exit_date,
+        "entry_price": point.entry_price,
+        "exit_price": point.exit_price,
+        "forward_return_pct": point.forward_return_pct,
+        "max_adverse_excursion_pct": point.max_adverse_excursion_pct,
+        "max_favorable_excursion_pct": point.max_favorable_excursion_pct,
+        "computed_at": (
+            attempted
+            if point.status is not ForwardReturnStatus.PENDING
+            else None
+        ),
+        "last_attempted_at": attempted,
+        "benchmark_retry_pending": benchmark_retry_pending,
+    }
 
     if benchmark is None:
-        row.benchmark_key = None
-        row.benchmark_entry_price = None
-        row.benchmark_exit_price = None
-        row.benchmark_return_pct = None
-        row.excess_return_pct = None
+        values.update(
+            benchmark_key=None,
+            benchmark_entry_price=None,
+            benchmark_exit_price=None,
+            benchmark_return_pct=None,
+            excess_return_pct=None,
+        )
     else:
-        row.benchmark_key = benchmark.benchmark_key
-        row.benchmark_entry_price = benchmark.entry_price
-        row.benchmark_exit_price = benchmark.exit_price
-        row.benchmark_return_pct = benchmark.return_pct
-        row.excess_return_pct = (
-            point.forward_return_pct - benchmark.return_pct
-            if point.forward_return_pct is not None and benchmark.return_pct is not None
-            else None
+        values.update(
+            benchmark_key=benchmark.benchmark_key,
+            benchmark_entry_price=benchmark.entry_price,
+            benchmark_exit_price=benchmark.exit_price,
+            benchmark_return_pct=benchmark.return_pct,
+            excess_return_pct=(
+                point.forward_return_pct - benchmark.return_pct
+                if point.forward_return_pct is not None and benchmark.return_pct is not None
+                else None
+            ),
         )
 
+    # The status predicate is the concurrency guard. Even if another worker
+    # terminalizes the row after selection, this UPDATE cannot touch any stock
+    # receipt field once status is no longer pending.
+    updated = session.execute(
+        update(SignalForwardReturn)
+        .where(*key_predicates, SignalForwardReturn.status == ForwardReturnStatus.PENDING)
+        .values(**values)
+    )
+    if cast(CursorResult[Any], updated).rowcount == 0:
+        existing = session.scalar(select(SignalForwardReturn).where(*key_predicates))
+        if existing is None:
+            try:
+                with session.begin_nested():
+                    session.execute(
+                        insert(SignalForwardReturn).values(
+                            result_id=result_id,
+                            horizon_days=point.horizon_days,
+                            created_at=attempted,
+                            **values,
+                        )
+                    )
+            except IntegrityError:
+                # A concurrent insert won the unique key. Update only if its row
+                # is still pending; a terminal winner remains immutable.
+                session.execute(
+                    update(SignalForwardReturn)
+                    .where(
+                        *key_predicates,
+                        SignalForwardReturn.status == ForwardReturnStatus.PENDING,
+                    )
+                    .values(**values)
+                )
+
     session.flush()
+    row = session.scalar(select(SignalForwardReturn).where(*key_predicates))
+    if row is None:  # pragma: no cover - defensive invariant after insert/update
+        raise RuntimeError("forward-return persistence produced no row")
     return row
+
+
+def update_forward_return_benchmark(
+    session: Session,
+    *,
+    result_id: int,
+    horizon_days: int,
+    benchmark: BenchmarkLeg | None,
+    retry_pending: bool,
+    attempted_at: dt.datetime | None = None,
+) -> bool:
+    """Update only benchmark retry fields on an existing terminal stock row.
+
+    Beginner note:
+    This statement intentionally omits every stock column. A benchmark provider
+    can fail today and recover tomorrow without changing the historical entry,
+    exit, return, excursions, status, or ``computed_at`` already proven for the
+    stock. The terminal predicate also prevents attaching a benchmark to a stock
+    leg that has not finished. The missing-return and retry predicates protect
+    a benchmark already completed by another worker after work selection.
+    """
+    values: dict[str, object] = {
+        "last_attempted_at": attempted_at or dt.datetime.now(dt.UTC),
+        "benchmark_retry_pending": retry_pending,
+    }
+    if benchmark is None:
+        values.update(
+            benchmark_key=None,
+            benchmark_entry_price=None,
+            benchmark_exit_price=None,
+            benchmark_return_pct=None,
+            excess_return_pct=None,
+        )
+    else:
+        row_return = session.scalar(
+            select(SignalForwardReturn.forward_return_pct).where(
+                SignalForwardReturn.result_id == result_id,
+                SignalForwardReturn.horizon_days == horizon_days,
+                SignalForwardReturn.status == ForwardReturnStatus.COMPUTED,
+                SignalForwardReturn.benchmark_retry_pending.is_(True),
+                SignalForwardReturn.benchmark_return_pct.is_(None),
+            )
+        )
+        values.update(
+            benchmark_key=benchmark.benchmark_key,
+            benchmark_entry_price=benchmark.entry_price,
+            benchmark_exit_price=benchmark.exit_price,
+            benchmark_return_pct=benchmark.return_pct,
+            excess_return_pct=(
+                row_return - benchmark.return_pct
+                if row_return is not None and benchmark.return_pct is not None
+                else None
+            ),
+        )
+    result = session.execute(
+        update(SignalForwardReturn)
+        .where(
+            SignalForwardReturn.result_id == result_id,
+            SignalForwardReturn.horizon_days == horizon_days,
+            SignalForwardReturn.status == ForwardReturnStatus.COMPUTED,
+            SignalForwardReturn.benchmark_retry_pending.is_(True),
+            SignalForwardReturn.benchmark_return_pct.is_(None),
+        )
+        .values(**values)
+    )
+    return bool(cast(CursorResult[Any], result).rowcount)
 
 
 # ---------------------------------------------------------------------------

@@ -24,6 +24,7 @@ Public surface:
 """
 
 from backend.storage.database import (
+    SessionFactory,
     SessionLocal,
     engine,
     ensure_database_schema,
@@ -55,7 +56,9 @@ from backend.storage.models import (
     UserRole,
 )
 from backend.storage.repository import (
+    BenchmarkForwardReturnWork,
     ForwardReturnMetricRecord,
+    ForwardReturnWorkItem,
     count_scan_results_for_runs,
     count_user_role_admins,
     create_audit_log_entry,
@@ -67,6 +70,7 @@ from backend.storage.repository import (
     get_ai_evaluations,
     get_config_overrides,
     get_forward_return_metric_records,
+    get_forward_return_work_items,
     get_latest_candle_repair_run,
     get_latest_finalized_scan_runs,
     get_latest_scan_runs,
@@ -88,6 +92,7 @@ from backend.storage.repository import (
     save_scan_results,
     set_config_override,
     set_user_role,
+    update_forward_return_benchmark,
     upsert_forward_return,
 )
 
@@ -96,9 +101,11 @@ __all__ = [
     "AppConfig",
     "AuditLog",
     "Base",
+    "BenchmarkForwardReturnWork",
     "CandleRepairRun",
     "ForwardReturnMetricRecord",
     "ForwardReturnStatus",
+    "ForwardReturnWorkItem",
     "IpoDocument",
     "IpoFinancial",
     "IpoIssue",
@@ -111,6 +118,7 @@ __all__ = [
     "ScanResult",
     "ScanRun",
     "ScanStatus",
+    "SessionFactory",
     "SessionLocal",
     "SignalForwardReturn",
     "UniverseHealthSnapshot",
@@ -129,6 +137,7 @@ __all__ = [
     "get_config_overrides",
     "get_database_url",
     "get_forward_return_metric_records",
+    "get_forward_return_work_items",
     "get_latest_candle_repair_run",
     "get_latest_finalized_scan_runs",
     "get_latest_scan_runs",
@@ -152,5 +161,6 @@ __all__ = [
     "session_scope",
     "set_config_override",
     "set_user_role",
+    "update_forward_return_benchmark",
     "upsert_forward_return",
 ]
