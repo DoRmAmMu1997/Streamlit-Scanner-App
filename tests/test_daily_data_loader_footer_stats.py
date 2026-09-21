@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import date, timedelta
+from pathlib import Path
 from typing import cast
 
 import pandas as pd
@@ -164,8 +165,8 @@ def test_get_daily_history_miss_decision_reads_no_frame(monkeypatch, tmp_path):
     and an outside-window row still on disk after publication. This protects
     the performance contract without forbidding the required safe merge.
     """
-    phases = []
-    read_paths = []
+    phases: list[str] = []
+    read_paths: list[Path] = []
     locked = False
     fetched = pd.DataFrame(
         {
