@@ -140,7 +140,20 @@ def test_ensure_rereads_cache_after_fetch_before_merging(tmp_path: Path, mode: s
 
 
 def _process_refresh(cache_dir, day, barrier):
-    """Use an independent interpreter so a Python thread lock cannot suffice."""
+    """Refresh one day's interval from a separately spawned worker.
+
+    Args:
+        cache_dir: Shared directory containing the symbol's existing Parquet.
+        day: ISO date used as both inclusive bounds of this worker's request.
+        barrier: Process-shared rendezvous reached inside each fake vendor call.
+
+    Beginner note:
+    Spawn creates a fresh interpreter and its own Python lock registry, so only
+    the OS lock can coordinate these workers. Placing the barrier in the vendor
+    makes both requests reach the network phase before either may publish. It
+    also catches a writer that wrongly holds the cache lock during network I/O:
+    the other worker could not reach the barrier, and the bounded wait fails.
+    """
     class Client:
         def fetch_daily_candles(self, **_kwargs):
             barrier.wait(timeout=30)
@@ -150,7 +163,18 @@ def _process_refresh(cache_dir, day, barrier):
 
 
 def test_disjoint_process_fetches_preserve_each_others_rows(tmp_path: Path):
-    """Spawned CLI writers share the on-disk lock even with separate registries."""
+    """Keep the original history and both disjoint spawned-worker refreshes.
+
+    Beginner note:
+    The June 5 and June 9 requests own different one-day intervals, so neither
+    may erase the other's result or the original June 1 row. The vendor barrier
+    brings both independent processes to publication together; a stale merge
+    or whole-file replacement can lose one of those three days. The final file
+    assertion checks preservation regardless of which worker publishes first.
+    Bounded joins expose deadlocks and worker failures instead of hanging the
+    suite. The finally block terminates any surviving child even when an earlier
+    assertion fails, keeping a failed concurrency test from stranding processes.
+    """
     context = multiprocessing.get_context("spawn")
     barrier = context.Barrier(2)
     loader = _loader(tmp_path, _Client(pd.DataFrame()))
@@ -218,7 +242,18 @@ def test_disjoint_thread_fetches_preserve_each_others_rows(tmp_path: Path):
 
 
 def test_repair_refuses_to_overwrite_download_completed_during_vendor_call(tmp_path: Path):
-    """A repair validated against an old file cannot replace a newer download."""
+    """Reject both a stale repair candidate and its stale retry marker.
+
+    Beginner note:
+    Repair captures the conflicting June 8 cache and its content revision before
+    asking the fake vendor for a correction. Inside that vendor call, a separate
+    loader publishes June 10, changing the file while repair still reasons about
+    its old input. This callback fixes the ordering without timing-based sleeps.
+    Returning skipped after the revision comparison protects the new June 10
+    row from the candidate that contains only June 8 and June 9. The absence of
+    .repaired is equally important: a rejected decision must not leave a retry
+    marker that could suppress a subsequent repair against the current file.
+    """
     concurrent = _loader(tmp_path, _Client(_frame(["2026-06-10"])))
 
     class Client:
