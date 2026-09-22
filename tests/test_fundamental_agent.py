@@ -543,6 +543,85 @@ def test_fundamental_agent_requires_model():
         FundamentalAgent(model="")
 
 
+def test_default_sdk_runner_disables_builtin_tools(monkeypatch, tmp_path):
+    """Only the two declared MCP readers may be available to the model.
+
+    Beginner note:
+        ``allowed_tools`` controls permission for named calls, while the Agent
+        SDK's separate ``tools`` option controls which built-in tool families
+        are loaded. Passing an empty list closes the filesystem and shell
+        surface even if a future SDK default changes.
+    """
+    import sys
+    import types
+
+    captured: dict[str, Any] = {}
+
+    class ClaudeAgentOptions:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    class ResultMessage:
+        def __init__(self) -> None:
+            self.result = "{}"
+            self.total_cost_usd = None
+            self.is_error = False
+
+    class AssistantMessage:
+        pass
+
+    class CLINotFoundError(Exception):
+        pass
+
+    class ProcessError(Exception):
+        pass
+
+    async def query(*, prompt: str, options: object):
+        del prompt, options
+        yield ResultMessage()
+
+    def tool(_name: str, _description: str, _schema: dict[str, type]):
+        return lambda function: function
+
+    def create_sdk_mcp_server(*, name: str, version: str, tools: list[object]):
+        return {"name": name, "version": version, "tools": tools}
+
+    fake_sdk = types.ModuleType("claude_agent_sdk")
+    # ModuleType's static stub cannot name optional SDK attributes. Updating the
+    # runtime namespace mirrors how Python imports expose them without weakening
+    # this test module's type checking with broad ignores.
+    fake_sdk.__dict__.update(
+        {
+            "ClaudeAgentOptions": ClaudeAgentOptions,
+            "ResultMessage": ResultMessage,
+            "AssistantMessage": AssistantMessage,
+            "CLINotFoundError": CLINotFoundError,
+            "ProcessError": ProcessError,
+            "query": query,
+            "tool": tool,
+            "create_sdk_mcp_server": create_sdk_mcp_server,
+        }
+    )
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk)
+
+    agent = FundamentalAgent(
+        model="test-model", cache=FundamentalsCache(cache_dir=tmp_path)
+    )
+    agent._run_sync(
+        agent._default_run(
+            "prompt", system_prompt="system", model="test-model", max_turns=2
+        )
+    )
+
+    assert captured["tools"] == []
+    assert captured["allowed_tools"] == [
+        "mcp__fundamentals__fetch_company_data",
+        "mcp__fundamentals__read_recent_concall_transcript",
+    ]
+    assert captured["permission_mode"] == "dontAsk"
+    assert captured["setting_sources"] == []
+
+
 def test_fundamental_agent_normalize_verdict_fills_blank_fields(tmp_path):
     """If the agent returns a verdict missing model/symbol, stamp them."""
     cache = FundamentalsCache(cache_dir=tmp_path)

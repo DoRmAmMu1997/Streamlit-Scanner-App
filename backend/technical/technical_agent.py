@@ -484,6 +484,10 @@ class TechnicalAnalysisAgent:
             mcp_servers, allowed_tools = build_technical_mcp_server(tool_context)
 
         options_kwargs: dict[str, Any] = {
+            # The SDK's built-in tool selection is independent of the MCP
+            # allowlist below. Keep it empty so only our in-process analyzers
+            # exist even if an SDK release changes its defaults.
+            "tools": [],
             "model": model,
             "system_prompt": system_prompt,
             "max_turns": max_turns,

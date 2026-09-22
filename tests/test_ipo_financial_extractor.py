@@ -40,6 +40,7 @@ from backend.ipo.models import (
 from backend.ipo.repository import (
     create_document,
     create_issue,
+    list_extraction_proposals,
     reject_extraction_proposal,
 )
 from backend.security import BLOCKED_EVIDENCE_RESPONSE
@@ -1069,3 +1070,193 @@ def test_section_chunks_repeat_the_page_marker_without_crossing_pages() -> None:
     assert chunks[1].startswith("[page 1]\n")
     assert chunks[2].startswith("[page 2]\n")
     assert all(chunk.count("[page ") == 1 for chunk in chunks)
+
+
+def _install_ipo_sdk_scenario(
+    monkeypatch, *, scenario: str, final_text: str
+) -> dict[str, Any]:
+    """Install a complete fake SDK stream for one boundary scenario.
+
+    Beginner note:
+        The production runner imports the optional SDK lazily. Replacing that
+        module lets these tests exercise option construction and stream/error
+        handling without a Claude login, subprocess, provider request, or bill.
+        ``final_text`` is intentionally valid proposal JSON even on failures;
+        parsing it would expose the exact fail-open bug these cases prevent.
+    """
+    import sys
+    import types
+
+    captured: dict[str, Any] = {}
+
+    class ClaudeAgentOptions:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    class ResultMessage:
+        def __init__(
+            self,
+            *,
+            result: str | None,
+            is_error: bool,
+            api_error_status: int | None = None,
+            errors: list[str] | None = None,
+        ) -> None:
+            self.result = result
+            self.is_error = is_error
+            self.api_error_status = api_error_status
+            self.errors = errors
+            self.subtype = "error_during_execution" if is_error else "success"
+
+    class AssistantMessage:
+        def __init__(
+            self, *, error: str | None = None, content: list[object] | None = None
+        ) -> None:
+            self.error = error
+            self.content = content or []
+
+    class CLINotFoundError(Exception):
+        pass
+
+    class ProcessError(Exception):
+        def __init__(self, message: str, *, stderr: str | None = None) -> None:
+            super().__init__(message)
+            self.stderr = stderr
+
+    async def query(*, prompt: str, options: object):
+        del prompt, options
+        if scenario == "cli_missing":
+            raise CLINotFoundError("C:/secret/claude.exe missing")
+        if scenario == "process_usage":
+            raise ProcessError("quota exceeded", stderr="billing token=secret")
+        if scenario == "process_failed":
+            raise ProcessError("exit 1 token=secret", stderr="private stderr")
+        if scenario == "billing_message":
+            yield AssistantMessage(
+                error="billing_error",
+                content=[types.SimpleNamespace(text=final_text)],
+            )
+        elif scenario == "rate_event":
+            yield types.SimpleNamespace(
+                rate_limit_info=types.SimpleNamespace(
+                    status="rejected", resets_at=1_800_000_000
+                )
+            )
+        if scenario == "result_error":
+            yield ResultMessage(
+                result=final_text,
+                is_error=True,
+                api_error_status=500,
+                errors=["provider failed api_key=supersecret123456"],
+            )
+        elif scenario == "result_429":
+            yield ResultMessage(
+                result=final_text,
+                is_error=True,
+                api_error_status=429,
+                errors=["rate limited"],
+            )
+        else:
+            yield ResultMessage(result=final_text, is_error=False)
+
+    def tool(_name: str, _description: str, _schema: dict[str, type]):
+        return lambda function: function
+
+    def create_sdk_mcp_server(*, name: str, version: str, tools: list[object]):
+        return {"name": name, "version": version, "tools": tools}
+
+    fake_sdk = types.ModuleType("claude_agent_sdk")
+    # Populate the dynamic module namespace explicitly. ModuleType's type stub
+    # cannot enumerate optional SDK exports, but the import system reads this
+    # same mapping at runtime.
+    fake_sdk.__dict__.update(
+        {
+            "ClaudeAgentOptions": ClaudeAgentOptions,
+            "ResultMessage": ResultMessage,
+            "AssistantMessage": AssistantMessage,
+            "CLINotFoundError": CLINotFoundError,
+            "ProcessError": ProcessError,
+            "query": query,
+            "tool": tool,
+            "create_sdk_mcp_server": create_sdk_mcp_server,
+        }
+    )
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk)
+    return captured
+
+
+def test_default_ipo_sdk_runner_disables_builtin_tools(monkeypatch) -> None:
+    """Only the three bounded prospectus readers are exposed to extraction."""
+    captured = _install_ipo_sdk_scenario(
+        monkeypatch, scenario="success", final_text="{}"
+    )
+    pages = (ExtractedPage(page_number=1, text="Revenue 100", tables=()),)
+    sections = (
+        ClassifiedSection(
+            section=IpoSectionType.FINANCIAL_STATEMENTS,
+            page_numbers=(1,),
+            keyword_hits=("financial statements",),
+        ),
+    )
+
+    assert (
+        financial_extractor._default_run_agent(
+            "prompt", sections=sections, pages=pages, model="test-model"
+        )
+        == "{}"
+    )
+    assert captured["tools"] == []
+    assert captured["allowed_tools"] == [
+        "mcp__ipo_extractor__list_sections",
+        "mcp__ipo_extractor__read_section",
+        "mcp__ipo_extractor__read_tables",
+    ]
+    assert captured["permission_mode"] == "dontAsk"
+    assert captured["setting_sources"] == []
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_code"),
+    [
+        ("result_error", "agent_run_failed"),
+        ("result_429", "usage_limit_reached"),
+        ("billing_message", "usage_limit_reached"),
+        ("rate_event", "usage_limit_reached"),
+        ("cli_missing", "cli_not_found"),
+        ("process_usage", "usage_limit_reached"),
+        ("process_failed", "agent_process_failed"),
+    ],
+)
+def test_failed_ipo_sdk_run_returns_typed_receipt_without_parsing_or_write(
+    file_session_factory,
+    tmp_path: Path,
+    monkeypatch,
+    scenario: str,
+    expected_code: str,
+) -> None:
+    """Provider/CLI failures cannot turn failed output into a pending proposal.
+
+    Beginner note:
+        Some SDK failures carry a JSON-looking final message. The stream status
+        remains authoritative: accepting that text would enqueue financial data
+        from a failed run. Each operational failure must instead become a stable,
+        payload-free receipt and leave the proposal table untouched.
+    """
+    issue, document, _digest = _cached_pdf_document(file_session_factory, tmp_path)
+    _install_ipo_sdk_scenario(
+        monkeypatch, scenario=scenario, final_text=_agent_json()
+    )
+
+    result = propose_extraction(
+        issue.id,
+        document.id,
+        data_dir=tmp_path,
+        session_factory=file_session_factory,
+    )
+
+    assert isinstance(result, IpoExtractionErrorReceipt)
+    assert result.error_type == "IpoExtractionError"
+    assert result.code == expected_code
+    assert list_extraction_proposals(
+        issue_id=issue.id, session_factory=file_session_factory
+    ) == []

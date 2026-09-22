@@ -807,7 +807,13 @@ def main() -> None:
         return
 
     _render_scan_output(
-        selected, cache, can_export=role_has_capability(current_role, EXPORT_RESULTS)
+        selected,
+        cache,
+        can_export=role_has_capability(current_role, EXPORT_RESULTS),
+        # Results may predate a role change. Only the identity resolved at the
+        # start of this rerun can authorize actions underneath those results.
+        current_role=current_role,
+        current_email=current_email,
     )
 
 

@@ -962,6 +962,10 @@ class FundamentalAgent:
         )
 
         options_kwargs: dict[str, Any] = {
+            # Empty built-in tools is a separate SDK boundary from allowed_tools.
+            # The latter keeps our MCP names callable; this prevents SDK defaults
+            # from also loading filesystem, shell, or other built-in capabilities.
+            "tools": [],
             "model": model,
             "system_prompt": system_prompt,
             "max_turns": max_turns,

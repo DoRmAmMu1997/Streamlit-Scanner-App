@@ -90,6 +90,19 @@ _SECTION_CHUNK_CHARS: Final = 12_000
 _MEDIUM_CONFIDENCE_MIN_VERIFIED: Final = 0.9
 _CITED_FACT_SCHEMA_VERSION: Final = "cited-financial-fact/v3"
 
+# Structured SDK events are authoritative where available. These fragments are
+# used only for older CLI ProcessError text and failed ResultMessage fallbacks.
+# They classify the failure without copying provider output into receipts.
+_USAGE_LIMIT_MARKERS: Final = (
+    "rate limit",
+    "usage limit",
+    "limit reached",
+    "out of credit",
+    "credit balance",
+    "quota",
+    "billing",
+)
+
 # Request-local collector for raw text that tripped the injection scanner.
 # The model only ever sees the blocked-evidence marker; the run is failed
 # closed afterwards. Stays None outside propose_extraction so direct tool
@@ -114,6 +127,44 @@ class IpoExtractionError(RuntimeError):
         """Store the stable code alongside the human-readable summary."""
         super().__init__(message)
         self.code = code
+
+
+def _mentions_usage_limit(*texts: str | None) -> bool:
+    """Return whether unstructured CLI text indicates quota or billing refusal.
+
+    Beginner note:
+        Older SDK/CLI combinations can report limits only in exception text.
+        This helper is used for classification, never presentation: the text may
+        contain credentials or command paths, so callers raise a fixed typed
+        error instead of returning the matched provider message.
+    """
+    haystack = " ".join(text for text in texts if text).lower()
+    return any(marker in haystack for marker in _USAGE_LIMIT_MARKERS)
+
+
+def _message_indicates_usage_limit(message: Any) -> bool:
+    """Recognize structured and failed-message quota signals from the Agent SDK.
+
+    Beginner note:
+        A rejected ``RateLimitEvent`` or an assistant ``billing_error`` can
+        arrive before the final result. The runner remembers that signal while
+        draining the stream, then fails before any JSON-looking text is parsed.
+        Free-form text is considered only on an explicitly failed result.
+    """
+    rate_info = getattr(message, "rate_limit_info", None)
+    if rate_info is not None and getattr(rate_info, "status", None) == "rejected":
+        return True
+    if getattr(message, "error", None) in {"rate_limit", "billing_error"}:
+        return True
+    if not getattr(message, "is_error", False):
+        return False
+    if getattr(message, "api_error_status", None) == 429:
+        return True
+    errors = getattr(message, "errors", None) or []
+    return _mentions_usage_limit(
+        *(str(error) for error in errors),
+        str(getattr(message, "result", "") or ""),
+    )
 
 
 class _ExtractionOutputError(Exception):
@@ -1601,6 +1652,8 @@ def _default_run_agent(
         from claude_agent_sdk import (  # type: ignore[import-not-found, unused-ignore]
             AssistantMessage,
             ClaudeAgentOptions,
+            CLINotFoundError,
+            ProcessError,
             ResultMessage,
             create_sdk_mcp_server,
             query,
@@ -1673,6 +1726,9 @@ def _default_run_agent(
         tools=[_list_sections, _read_section, _read_tables],
     )
     options = ClaudeAgentOptions(
+        # ``tools`` controls SDK built-ins separately from allowed_tools. An
+        # explicit empty list ensures the model has only the MCP readers below.
+        tools=[],
         model=model,
         system_prompt=_SYSTEM_PROMPT,
         max_turns=_MAX_TURNS,
@@ -1690,17 +1746,60 @@ def _default_run_agent(
     )
 
     async def _run() -> str:
-        """Drain one SDK query and keep the final assistant/result text."""
+        """Drain one SDK query, rejecting failed runs before returning text.
+
+        Raises:
+            IpoExtractionError: If the CLI is absent, its process fails, the
+                provider rejects usage/billing, or the final result is failed.
+
+        Beginner note:
+            SDK streams may contain a polished JSON answer and still end with
+            ``is_error=True``. The terminal status wins. Returning that text
+            would let a failed provider run enter proposal parsing and storage.
+        """
         final_text = ""
-        async for message in query(prompt=prompt, options=options):
-            if isinstance(message, ResultMessage):
-                if message.result:
-                    final_text = message.result
-            elif isinstance(message, AssistantMessage):
-                for block in getattr(message, "content", None) or []:
-                    block_text = getattr(block, "text", None)
-                    if block_text:
-                        final_text = block_text
+        usage_limit_reached = False
+        failed_result: ResultMessage | None = None
+        try:
+            async for message in query(prompt=prompt, options=options):
+                if _message_indicates_usage_limit(message):
+                    usage_limit_reached = True
+                if isinstance(message, ResultMessage):
+                    if message.is_error and failed_result is None:
+                        failed_result = message
+                    if message.result:
+                        final_text = message.result
+                elif isinstance(message, AssistantMessage):
+                    for block in getattr(message, "content", None) or []:
+                        block_text = getattr(block, "text", None)
+                        if block_text:
+                            final_text = block_text
+        except CLINotFoundError as exc:
+            raise IpoExtractionError(
+                "cli_not_found",
+                "The bundled Claude CLI could not be found; reinstall claude-agent-sdk.",
+            ) from exc
+        except ProcessError as exc:
+            if _mentions_usage_limit(str(exc), getattr(exc, "stderr", None)):
+                raise IpoExtractionError(
+                    "usage_limit_reached",
+                    "The Claude plan usage or billing limit rejected this extraction.",
+                ) from exc
+            raise IpoExtractionError(
+                "agent_process_failed",
+                "The Claude CLI process failed during IPO extraction.",
+            ) from exc
+
+        if usage_limit_reached:
+            raise IpoExtractionError(
+                "usage_limit_reached",
+                "The Claude plan usage or billing limit rejected this extraction.",
+            )
+        if failed_result is not None:
+            raise IpoExtractionError(
+                "agent_run_failed",
+                "The Claude Agent SDK reported a failed IPO extraction run.",
+            )
         return final_text
 
     return run_agent_coroutine(_run())

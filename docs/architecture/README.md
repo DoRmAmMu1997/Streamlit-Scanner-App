@@ -91,6 +91,7 @@ and dashboard freshness/provenance.
 - **[rank-002-handoff.md](rank-002-handoff.md)** — RANK-002 implemented build brief for the `backend/scoring/` scorer (pure components + config + the `run_scan` call + UI sort/components + tests).
 - **[auth-003-role-model.md](auth-003-role-model.md)** — AUTH-003 role model: hierarchical viewer/analyst/admin, the capability→min-role map, the database-driven `user_roles` store with an `ADMIN_EMAILS` bootstrap floor, resolution precedence, defense-in-depth enforcement, and denial logging/audit.
 - **[auth-003-handoff.md](auth-003-handoff.md)** — AUTH-003 build brief for the `backend/auth/roles.py` policy + `user_roles` table/migration + repository + `require_capability` enforcement + the admin Roles page + tests.
+- **[ai-execution-boundaries.md](ai-execution-boundaries.md)** — current-role authorization for retained scan/fundamentals state, explicit no-built-in Agent SDK tools for all four MCP agents, and typed fail-closed IPO SDK outcomes.
 - **[audit-2026-06.md](audit-2026-06.md)** — June–July 2026 codebase audit and hardening register through PR #107: what was found, fixed, rejected, and deferred across both review waves.
 
 ## Conventions

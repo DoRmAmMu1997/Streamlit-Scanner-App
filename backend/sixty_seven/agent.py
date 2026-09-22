@@ -697,6 +697,9 @@ class SixtySevenAgent:
 
         server = create_sdk_mcp_server(name="sixty_seven", version="1.0.0", tools=[_research_tool])
         options_kwargs: dict[str, Any] = {
+            # Explicitly disable SDK built-ins. allowed_tools retains the one
+            # intended MCP research call without granting shell/filesystem access.
+            "tools": [],
             "model": model,
             "system_prompt": system_prompt,
             "max_turns": max_turns,
