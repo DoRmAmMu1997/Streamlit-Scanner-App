@@ -132,6 +132,13 @@ class IpoExtractionError(RuntimeError):
 def _mentions_usage_limit(*texts: str | None) -> bool:
     """Return whether unstructured CLI text indicates quota or billing refusal.
 
+    Args:
+        *texts: Optional exception/diagnostic strings used only for classification.
+
+    Returns:
+        True if a known usage-limit marker occurs, otherwise False. This is a
+        compatibility heuristic, not permission to display the diagnostic text.
+
     Beginner note:
         Older SDK/CLI combinations can report limits only in exception text.
         This helper is used for classification, never presentation: the text may
@@ -144,6 +151,13 @@ def _mentions_usage_limit(*texts: str | None) -> bool:
 
 def _message_indicates_usage_limit(message: Any) -> bool:
     """Recognize structured and failed-message quota signals from the Agent SDK.
+
+    Args:
+        message: SDK stream event inspected through its optional status fields.
+
+    Returns:
+        Whether structured rejection or an explicitly failed result identifies
+        a usage/billing limit. Ordinary successful answer text is not classified.
 
     Beginner note:
         A rejected ``RateLimitEvent`` or an assistant ``billing_error`` can
@@ -1759,6 +1773,10 @@ def _default_run_agent(
 
     async def _run() -> str:
         """Drain one SDK query, rejecting failed runs before returning text.
+
+        Returns:
+            The last result or assistant text only after the entire stream has
+            been checked for usage rejection and failed terminal results.
 
         Raises:
             IpoExtractionError: If the CLI is absent, its process fails, the
