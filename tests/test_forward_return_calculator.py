@@ -197,6 +197,12 @@ def test_compute_forward_return_rejects_malformed_raw_rows_before_preparation(mu
 
 
 def test_compute_forward_return_rejects_conflicting_daily_duplicates():
+    """Reject competing OHLC facts before preparation chooses a duplicate.
+
+    Beginner note:
+        If deduplication runs first, a conflicting entry price disappears and a fabricated return becomes
+        COMPUTED.
+    """
     frame = _candles(
         [
             ("2026-01-05", "90", "95", "88", "92"),
@@ -211,6 +217,12 @@ def test_compute_forward_return_rejects_conflicting_daily_duplicates():
 
 
 def test_compute_forward_return_accepts_ohlc_without_volume_and_holiday_gaps():
+    """Accept price-only evidence and count actual trading bars across holidays.
+
+    Beginner note:
+        Requiring volume or filling missing calendar dates would incorrectly reject valid OHLC or change the
+        requested holding period.
+    """
     frame = _candles(
         [
             ("2026-01-05", "90", "95", "88", "92"),
@@ -226,6 +238,12 @@ def test_compute_forward_return_accepts_ohlc_without_volume_and_holiday_gaps():
 
 @pytest.mark.parametrize("horizon", [True, False, 0, -1, 1.5, Decimal("2.0")])
 def test_compute_forward_return_rejects_non_positive_non_integral_horizons(horizon):
+    """Reject mistaken horizon values without silent integer coercion.
+
+    Beginner note:
+        Bool is an int subclass and int(1.5) truncates; either acceptance would measure a different period
+        than the caller requested.
+    """
     with pytest.raises(ValueError, match="positive integer"):
         compute_forward_return(
             _candles([("2026-01-05", "90", "95", "88", "92")]),
@@ -235,7 +253,13 @@ def test_compute_forward_return_rejects_non_positive_non_integral_horizons(horiz
 
 
 def test_identical_daily_rows_with_distinct_times_count_as_one_trading_bar():
-    """Two intraday timestamps for the same daily facts must not shorten a horizon."""
+    """Count equivalent intraday timestamps as one daily trading observation.
+
+    Beginner note:
+        Timestamp-level deduplication alone used to count January 6 twice and
+        move the two-bar exit from January 7 back to January 6. This assertion
+        protects the calendar-date canonicalization after raw validation.
+    """
     frame = pd.DataFrame([
         {"timestamp": "2026-01-05 00:00", "open": 100, "high": 110, "low": 90, "close": 104},
         {"timestamp": "2026-01-06 00:00", "open": 100, "high": 110, "low": 90, "close": 104},

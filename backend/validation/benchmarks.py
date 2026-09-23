@@ -195,6 +195,17 @@ def compute_benchmark_leg(
 ) -> BenchmarkLeg:
     """Compute the benchmark over stock dates after validating raw dated OHLC.
 
+    Args:
+        benchmark_candles: Raw dated index OHLC; optional volume is unused.
+        entry_date: Stored stock entry date whose index open is required.
+        exit_date: Stored stock exit date whose index close is required.
+        benchmark_key: Stable configured index identifier retained in the result.
+
+    Returns:
+        A BenchmarkLeg with Decimal prices and return, or the same key with null
+        measurement fields when dates/prices are missing or raw OHLC is invalid.
+        Calendar gaps are not filled and dates are never shifted to nearby bars.
+
     Beginner note:
         Invalid timestamps, conflicting daily rows, and impossible/nonfinite
         prices must be rejected before preparation can discard them. A missing

@@ -44,6 +44,13 @@ universe with intentionally no configured benchmark clears the flag and leaves
 the queue without manufacturing a return. Benchmark-only work skips universe
 mapping and stock history entirely.
 
+The shared Dhan normalizer retains malformed OHLC/date rows as NaN/NaT instead
+of dropping them. The range slicer retains undateable rows because their absence
+from the requested range cannot be proven. This evidence survives Parquet caching
+and reaches both scanner quality quarantine and historical validation. A response
+with an undateable row is inconclusive for vendor-earliest sidecars and cannot
+create, renew, replace or remove that authority. Valid
+out-of-range dates are still excluded and exact whole-row duplicates still collapse.
 Both calculators validate raw dated OHLC before preparation. Invalid timestamps,
 nonfinite values, impossible ranges and conflicting daily duplicates are rejected.
 Identical OHLC duplicates are accepted and canonicalized to one trading date;

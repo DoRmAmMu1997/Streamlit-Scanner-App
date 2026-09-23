@@ -642,6 +642,12 @@ class DailyDataLoader:
         start = _coerce_date(requested_from)
         if candles.empty:
             return
+        # Bounds intentionally ignore NaT for ordinary cache-coverage checks,
+        # but a vendor-earliest claim needs every returned date to be known.
+        # An unknown row could predate the first valid row; it cannot create,
+        # renew, replace or remove evidence about a precise earliest date.
+        if "timestamp" not in candles or pd.to_datetime(candles["timestamp"], errors="coerce").isna().any():
+            return
         first_date, _last_date = _date_bounds(candles)
         if first_date is None:
             return
@@ -693,7 +699,23 @@ class DailyDataLoader:
         start_date: date | datetime | str,
         end_date: date | datetime | str,
     ) -> pd.DataFrame:
-        """Return rows of `candles` whose timestamp falls within [start, end]."""
+        """Return in-range candles while retaining undateable corruption evidence.
+
+        Args:
+            candles: Provider or cache frame, before any row-level cleanup.
+            start_date: Inclusive beginning of the requested calendar range.
+            end_date: Inclusive end, including all times within that day.
+
+        Returns:
+            In-range rows plus rows whose timestamps cannot be parsed. Empty or
+            timestamp-free inputs remain unchanged for downstream validation.
+
+        Beginner note:
+            A malformed date cannot prove that its row falls outside this range.
+            Discarding it would hide corruption and shift historical bar counts.
+            Retaining it lets existing scanner and calculator quality checks fail
+            closed, while valid out-of-range dates are still safely excluded.
+        """
         if candles.empty or "timestamp" not in candles.columns:
             return candles
         start_ts = pd.Timestamp(_coerce_date(start_date))
@@ -701,7 +723,7 @@ class DailyDataLoader:
         # captures today's daily candle once it lands.
         end_ts = pd.Timestamp(_coerce_date(end_date)) + pd.Timedelta(hours=23, minutes=59, seconds=59)
         timestamps = pd.to_datetime(candles["timestamp"], errors="coerce")
-        mask = (timestamps >= start_ts) & (timestamps <= end_ts)
+        mask = timestamps.isna() | ((timestamps >= start_ts) & (timestamps <= end_ts))
         return candles.loc[mask].reset_index(drop=True)
 
     def get_daily_history(

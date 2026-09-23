@@ -593,6 +593,17 @@ def get_forward_return_work_items(
     Sorting by the oldest effective time rotates bounded batches fairly, with
     signal date and id as deterministic ties.
 
+    Args:
+        session: Caller-owned short read transaction; no commit is performed.
+        horizons: Requested horizon counts already validated by the worker.
+            Repeated counts are collapsed in caller order; empty means no work.
+        limit: Maximum distinct signals, or None for all eligible signals.
+
+    Returns:
+        Frozen detached work items ordered by oldest effective unresolved
+        attempt, signal date and ID. Each signal appears once with separate
+        stock and benchmark-only horizons, usable after its session closes.
+
     Beginner note:
     The limit counts signals, not horizon rows. One chosen signal carries all of
     its requested unresolved horizons, so a batch never processes the same
@@ -822,6 +833,21 @@ def update_forward_return_benchmark(
     attempted_at: dt.datetime | None = None,
 ) -> bool:
     """Update only benchmark retry fields on an existing terminal stock row.
+
+    Args:
+        session: Caller-owned write transaction; this helper never commits.
+        result_id: Stored signal identity.
+        horizon_days: Existing computed horizon being retried.
+        benchmark: Aligned result, or None for intentionally absent configuration.
+        retry_pending: True for unavailable configured work; False after success
+            or when no benchmark is configured.
+        attempted_at: UTC retry time; defaults to the current time.
+
+    Returns:
+        True if a computed row with an active retry and missing benchmark return
+        was updated; False for a no-op, including a concurrent successful winner.
+        Stock status, dates, prices, return, excursions and computed_at are never
+        modified, regardless of the proposed benchmark outcome.
 
     Beginner note:
     This statement intentionally omits every stock column. A benchmark provider

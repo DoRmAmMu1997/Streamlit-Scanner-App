@@ -49,9 +49,31 @@ def compute_forward_return(
 ) -> ForwardReturnPoint:
     """Measure one signal's forward return without database or network access.
 
-    The no-lookahead contract is the important bit: entry is the next bar's
-    open, exit is the ``horizon_days`` bar's close, and an exit after ``as_of``
-    stays pending instead of being guessed.
+    Args:
+        candles: Raw dated OHLC frame; volume is optional. Conflicting daily
+            duplicates, invalid timestamps, nonfinite prices and impossible
+            ranges are rejected before preparation can discard any evidence.
+        signal_date: Trading date whose next bar supplies the entry open.
+        horizon_days: Positive integral trading-bar count; bool is not accepted.
+        as_of: Last observable date; defaults to today and prevents future exits.
+        missing_data_grace_days: Calendar-day freshness allowance when the exit
+            bar is absent; recent missing data remains retryable.
+
+    Returns:
+        A COMPUTED point with exact Decimal return/path metrics when observable;
+        PENDING for a future exit or recently incomplete window; otherwise an
+        INSUFFICIENT_DATA point without manufactured measurement fields.
+
+    Raises:
+        ValueError: The horizon is boolean, non-integral, zero or negative.
+
+    Beginner note:
+        Entry is the next trading date's open and exit is the requested trading
+        bar's close. Removing an invalid entry bar first would silently move
+        entry to another day. Validate raw evidence before sorting/deduplicating;
+        identical daily facts count once, while ordinary holidays add no bars.
+        This pure function reports malformed input as unavailable. The service
+        separately treats a malformed provider response as retryable PENDING.
     """
     normalized_horizon = positive_integral(horizon_days, name="horizon_days")
     as_of_date = as_of or dt.date.today()

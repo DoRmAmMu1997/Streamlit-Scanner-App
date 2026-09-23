@@ -305,6 +305,12 @@ def test_service_keeps_signal_pending_and_retryable_when_universe_cannot_load(se
 
 
 def test_service_fetches_only_signal_date_through_as_of(session_factory):
+    """Bound provider requests to observable historical dates.
+
+    Beginner note:
+        The old horizon-times-three buffer requested future data; this test fails if that future range is
+        restored.
+    """
     _seed_signal(session_factory)
     loader = _FakeDailyLoader(
         {
@@ -336,6 +342,12 @@ def test_service_fetches_only_signal_date_through_as_of(session_factory):
 
 
 def test_service_keeps_future_signal_pending_without_any_fetch(session_factory):
+    """Leave future signals pending without asking for an inverted date range.
+
+    Beginner note:
+        A signal after as_of cannot have an observable entry, so even universe resolution and provider
+        fetching are unnecessary.
+    """
     _seed_signal(session_factory)
     loader = _FakeDailyLoader({})
 
@@ -385,6 +397,12 @@ def test_service_keeps_malformed_stock_data_retryable(session_factory):
 
 
 def test_service_repairs_benchmark_only_without_refetching_or_mutating_stock(session_factory):
+    """Recover an index leg while preserving every completed stock fact.
+
+    Beginner note:
+        Refetching stock could rewrite history after a provider revision. A benchmark-only retry must use
+        stored dates and leave computed_at and all stock fields identical.
+    """
     _seed_signal(session_factory)
     spec = BenchmarkSpec(key="nifty_test", symbol="NIFTY TEST", security_id="INDEX123")
     stock = _candles(
@@ -462,6 +480,12 @@ def test_service_repairs_benchmark_only_without_refetching_or_mutating_stock(ses
     [((True,), None), ((0,), None), ((-1,), None), ((1.5,), None), ((20,), True), ((20,), 0)],
 )
 def test_service_rejects_invalid_inputs_before_opening_a_session(horizons, limit):
+    """Reject invalid runtime inputs before database or provider work.
+
+    Beginner note:
+        Coercing fractional horizons or boolean limits would silently select different work; the forbidden
+        factory proves rejection precedes I/O.
+    """
     def forbidden_factory():
         pytest.fail("invalid input opened a database session")
 
@@ -475,6 +499,12 @@ def test_service_rejects_invalid_inputs_before_opening_a_session(horizons, limit
 
 
 def test_service_deduplicates_horizons_in_order_and_empty_is_noop(session_factory):
+    """Process each requested horizon once and let empty requests do no work.
+
+    Beginner note:
+        Repeated horizon values must not inflate counts or duplicate receipts, and an empty request should
+        not require provider credentials.
+    """
     _seed_signal(session_factory)
     loader = _FakeDailyLoader({})
 
@@ -674,3 +704,117 @@ def test_configured_benchmark_with_unusable_or_future_stock_dates_stays_retryabl
     with session_factory() as session:
         row = session.scalars(select(SignalForwardReturn)).one()
         assert row.benchmark_retry_pending
+
+
+@pytest.mark.parametrize("source", ["vendor", "cache"])
+@pytest.mark.parametrize("bad_field", ["open", "timestamp"])
+def test_real_loader_preserves_malformed_stock_for_service_and_calculator(
+    session_factory, tmp_path, source, bad_field,
+):
+    """The real normalizer and range slicer must not fabricate a later entry.
+
+    Beginner note:
+        Only the SDK network response is replaced. Previously Jan 6's null open
+        or invalid timestamp vanished before validation, making Jan 7 a false
+        one-day entry. The same evidence must survive a Parquet round trip so
+        the worker retries and both calculator and scanner reject the frame.
+    """
+    from types import SimpleNamespace
+
+    from backend.daily_data_loader import DailyDataLoader
+    from backend.dhan_client import DhanDataClient
+    from backend.validation.forward_return import compute_forward_return
+
+    _seed_signal(session_factory)
+    raw = _candles([
+        ("2026-01-05", "90", "95", "88", "92"),
+        ("2026-01-06", "100", "106", "98", "104"),
+        ("2026-01-07", "100", "110", "98", "107"),
+    ])
+    raw.loc[1, bad_field] = None if bad_field == "open" else "bad-date"
+    network_calls = []
+
+    def network(**kwargs):
+        network_calls.append(kwargs)
+        return {"status": "success", "data": raw.to_dict("records")}
+
+    loader = DailyDataLoader(
+        DhanDataClient(raw_client=SimpleNamespace(historical_daily_data=network)),
+        cache_dir=tmp_path, request_delay_seconds=0, fetch_workers=1,
+    )
+    if source == "cache":
+        raw.to_parquet(loader.cache_path("RELIANCE", "500325"), index=False)
+    universe = _universe([("RELIANCE", "500325")])
+    summary = compute_pending_forward_returns(
+        session_factory, loader, horizons=(1,), as_of=dt.date(2026, 1, 7),
+        universe_loader=lambda _: universe, benchmark_resolver=lambda _: None,
+    )
+    assert summary.pending == 1
+    assert summary.computed == 0
+    with session_factory() as session:
+        row = session.scalars(select(SignalForwardReturn)).one()
+        assert row.status is ForwardReturnStatus.PENDING
+        assert row.entry_date is None
+        assert row.forward_return_pct is None
+    cached, from_cache = loader.get_daily_history(universe.iloc[0], dt.date(2026, 1, 5), dt.date(2026, 1, 7))
+    assert from_cache
+    assert len(cached) == 3
+    point = compute_forward_return(cached, dt.date(2026, 1, 5), 1, as_of=dt.date(2026, 1, 7))
+    assert point.status is ForwardReturnStatus.INSUFFICIENT_DATA
+    scan = loader.load_universe_history(universe, dt.date(2026, 1, 5), dt.date(2026, 1, 7))
+    assert not scan.frames
+    assert scan.failures[0]["phase"] == "data_quality"
+    assert len(network_calls) == (1 if source == "vendor" else 0)
+
+
+@pytest.mark.parametrize("source", ["vendor", "cache"])
+def test_real_loader_keeps_malformed_benchmark_retryable(session_factory, tmp_path, source):
+    """A bad raw index row must remain visible even when both aligned dates exist.
+
+    Beginner note:
+        Dropping an invalid extra timestamp used to make the benchmark look
+        complete. Stock measurements may finish, but that fabricated index leg
+        must stay null and retryable through real normalization and cache slicing.
+    """
+    from types import SimpleNamespace
+
+    from backend.daily_data_loader import DailyDataLoader
+    from backend.dhan_client import DhanDataClient
+    from backend.validation.benchmarks import compute_benchmark_leg
+
+    _seed_signal(session_factory)
+    stock = _candles([
+        ("2026-01-05", "90", "95", "88", "92"),
+        ("2026-01-06", "100", "106", "98", "104"),
+        ("2026-01-07", "100", "110", "98", "107"),
+    ])
+    index = pd.concat([stock, stock.iloc[[1]].assign(timestamp="bad-date")], ignore_index=True)
+
+    def network(**kwargs):
+        frame = stock if kwargs["security_id"] == "500325" else index
+        return {"status": "success", "data": frame.to_dict("records")}
+
+    loader = DailyDataLoader(
+        DhanDataClient(raw_client=SimpleNamespace(historical_daily_data=network)),
+        cache_dir=tmp_path, request_delay_seconds=0, fetch_workers=1,
+    )
+    if source == "cache":
+        stock.to_parquet(loader.cache_path("RELIANCE", "500325"), index=False)
+        index.to_parquet(loader.cache_path("INDEX", "13"), index=False)
+    spec = BenchmarkSpec(key="index", symbol="INDEX", security_id="13")
+    summary = compute_pending_forward_returns(
+        session_factory, loader, horizons=(2,), as_of=dt.date(2026, 1, 7),
+        universe_loader=lambda _: _universe([("RELIANCE", "500325")]),
+        benchmark_resolver=lambda _: spec,
+    )
+    assert summary.computed == 1
+    assert summary.benchmark_missing == 1
+    with session_factory() as session:
+        row = session.scalars(select(SignalForwardReturn)).one()
+        assert row.benchmark_retry_pending
+        assert row.benchmark_return_pct is None
+    cached, from_cache = loader.get_daily_history(spec.instrument, dt.date(2026, 1, 5), dt.date(2026, 1, 7))
+    assert from_cache
+    leg = compute_benchmark_leg(cached, entry_date=dt.date(2026, 1, 6),
+                                exit_date=dt.date(2026, 1, 7), benchmark_key="index")
+    assert leg.return_pct is None
