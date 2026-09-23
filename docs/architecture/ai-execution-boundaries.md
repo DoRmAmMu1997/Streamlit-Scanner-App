@@ -57,15 +57,17 @@ selection and the named MCP allowlist are complementary parts of the contract.
 
 The IPO SDK runner drains the stream, remembers any rejected structured rate
 event, assistant `rate_limit`/`billing_error`, or failed `ResultMessage`, and
-returns model text only after terminal success is established. It maps failures
-to stable `IpoExtractionError.code` values:
+requires a successful terminal `ResultMessage` before returning model text. An
+empty successful terminal result may confirm preceding assistant text; EOF with
+no terminal result cannot. It maps failures to stable `IpoExtractionError.code`
+values:
 
 | Condition | Code |
 |---|---|
 | Rejected rate event, billing/rate assistant error, HTTP 429, or quota-shaped failed process/result | `usage_limit_reached` |
 | Bundled Claude CLI absent | `cli_not_found` |
 | Claude CLI exits unsuccessfully for another reason | `agent_process_failed` |
-| `ResultMessage.is_error` without a quota signal | `agent_run_failed` |
+| `ResultMessage.is_error` without a quota signal, or no terminal result | `agent_run_failed` |
 
 The public `propose_extraction()` boundary converts these errors to
 `IpoExtractionErrorReceipt`. Receipts carry only the exception type and stable
@@ -119,5 +121,7 @@ proposal candidate.
   initial or forced action.
 - Each agent test captures `ClaudeAgentOptions` and asserts `tools=[]` beside the
   unchanged MCP allowlist, `dontAsk`, and empty setting sources.
-- IPO tests feed valid proposal JSON through every failed SDK/CLI scenario and
-  assert a typed code plus an empty proposal table.
+- IPO tests feed valid proposal JSON through every failed SDK/CLI scenario,
+  including assistant-text EOF and an empty stream, and assert a typed code plus
+  an empty proposal table. A successful empty terminal result separately proves
+  that prior assistant text remains a supported fallback.

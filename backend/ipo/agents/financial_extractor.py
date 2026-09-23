@@ -1775,26 +1775,30 @@ def _default_run_agent(
         """Drain one SDK query, rejecting failed runs before returning text.
 
         Returns:
-            The last result or assistant text only after the entire stream has
-            been checked for usage rejection and failed terminal results.
+            The last result or assistant text only after a successful terminal
+            ``ResultMessage`` proves the stream completed.
 
         Raises:
             IpoExtractionError: If the CLI is absent, its process fails, the
-                provider rejects usage/billing, or the final result is failed.
+                provider rejects usage/billing, or a successful terminal result
+                is absent.
 
         Beginner note:
-            SDK streams may contain a polished JSON answer and still end with
-            ``is_error=True``. The terminal status wins. Returning that text
-            would let a failed provider run enter proposal parsing and storage.
+            SDK streams may contain polished JSON and then fail or end without
+            any terminal status. Neither case proves success. A successful
+            terminal event with an empty result may still confirm the preceding
+            assistant text, preserving the SDK's documented fallback shape.
         """
         final_text = ""
         usage_limit_reached = False
+        terminal_result: ResultMessage | None = None
         failed_result: ResultMessage | None = None
         try:
             async for message in query(prompt=prompt, options=options):
                 if _message_indicates_usage_limit(message):
                     usage_limit_reached = True
                 if isinstance(message, ResultMessage):
+                    terminal_result = message
                     if message.is_error and failed_result is None:
                         failed_result = message
                     if message.result:
@@ -1829,6 +1833,11 @@ def _default_run_agent(
             raise IpoExtractionError(
                 "agent_run_failed",
                 "The Claude Agent SDK reported a failed IPO extraction run.",
+            )
+        if terminal_result is None:
+            raise IpoExtractionError(
+                "agent_run_failed",
+                "The Claude Agent SDK ended without a successful terminal result.",
             )
         return final_text
 

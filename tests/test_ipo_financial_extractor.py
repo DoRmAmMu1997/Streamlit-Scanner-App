@@ -1226,7 +1226,15 @@ def _install_ipo_sdk_scenario(
             raise ProcessError("quota exceeded", stderr="billing token=secret")
         if scenario == "process_failed":
             raise ProcessError("exit 1 token=secret", stderr="private stderr")
-        if scenario == "billing_message":
+        if scenario == "empty_stream":
+            return
+        if scenario in {"assistant_eof", "success_empty_result"}:
+            yield AssistantMessage(
+                content=[types.SimpleNamespace(text=final_text)],
+            )
+            if scenario == "assistant_eof":
+                return
+        elif scenario == "billing_message":
             yield AssistantMessage(
                 error="billing_error",
                 content=[types.SimpleNamespace(text=final_text)],
@@ -1251,6 +1259,8 @@ def _install_ipo_sdk_scenario(
                 api_error_status=429,
                 errors=["rate limited"],
             )
+        elif scenario == "success_empty_result":
+            yield ResultMessage(result=None, is_error=False)
         else:
             yield ResultMessage(result=final_text, is_error=False)
 
@@ -1348,6 +1358,8 @@ def test_default_ipo_sdk_runner_disables_builtin_tools(monkeypatch) -> None:
         ("cli_missing", "cli_not_found"),
         ("process_usage", "usage_limit_reached"),
         ("process_failed", "agent_process_failed"),
+        ("assistant_eof", "agent_run_failed"),
+        ("empty_stream", "agent_run_failed"),
     ],
 )
 def test_failed_ipo_sdk_run_returns_typed_receipt_without_parsing_or_write(
@@ -1383,3 +1395,38 @@ def test_failed_ipo_sdk_run_returns_typed_receipt_without_parsing_or_write(
     assert list_extraction_proposals(
         issue_id=issue.id, session_factory=file_session_factory
     ) == []
+
+
+def test_successful_empty_terminal_result_uses_prior_assistant_text(
+    file_session_factory,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A successful terminal event preserves the documented assistant fallback.
+
+    Beginner note:
+        Some SDK versions put the final JSON in the last assistant message and
+        emit a successful ``ResultMessage`` whose own ``result`` is empty. The
+        terminal event still proves success, so the runner may use the retained
+        assistant text. This positive control prevents the fail-closed EOF fix
+        from rejecting a legitimate completed stream.
+    """
+    issue, document, _digest = _cached_pdf_document(file_session_factory, tmp_path)
+    _install_ipo_sdk_scenario(
+        monkeypatch,
+        scenario="success_empty_result",
+        final_text=_agent_json(),
+    )
+
+    result = propose_extraction(
+        issue.id,
+        document.id,
+        data_dir=tmp_path,
+        session_factory=file_session_factory,
+    )
+
+    assert isinstance(result, IpoExtractionProposalRecord)
+    proposals = list_extraction_proposals(
+        issue_id=issue.id, session_factory=file_session_factory
+    )
+    assert [proposal.id for proposal in proposals] == [result.id]
