@@ -1090,10 +1090,35 @@ def _install_ipo_sdk_scenario(
     captured: dict[str, Any] = {}
 
     class ClaudeAgentOptions:
+        """Capture runner options so tests can inspect the SDK boundary.
+
+        Beginner note:
+            The real SDK options configure permissions and tool access. Saving
+            their values here lets the test prove the production runner builds
+            its request with the intended limits without starting a CLI process.
+        """
+
         def __init__(self, **kwargs: Any) -> None:
+            """Store option values for assertions after the runner is called.
+
+            Args:
+                **kwargs: SDK option names and values supplied by production code.
+
+            Beginner note:
+                Recording rather than interpreting these values keeps this fake
+                small while preserving evidence about the actual configured call.
+            """
             captured.update(kwargs)
 
     class ResultMessage:
+        """Represent the SDK's final result, including provider failure state.
+
+        Beginner note:
+            The result text may contain valid proposal JSON even when the SDK
+            marks the run as failed. The runner must honor status and error
+            metadata before it can save any proposal.
+        """
+
         def __init__(
             self,
             *,
@@ -1102,6 +1127,18 @@ def _install_ipo_sdk_scenario(
             api_error_status: int | None = None,
             errors: list[str] | None = None,
         ) -> None:
+            """Build a final event with the fields consumed by the runner.
+
+            Args:
+                result: Final text, deliberately allowed to look like a proposal.
+                is_error: Whether the provider reports execution failure.
+                api_error_status: Optional HTTP status, including quota status 429.
+                errors: Optional provider details used to check secret-safe failure handling.
+
+            Beginner note:
+                Keeping proposal-looking text alongside an error catches code
+                that mistakenly persists output before checking the failure flag.
+            """
             self.result = result
             self.is_error = is_error
             self.api_error_status = api_error_status
@@ -1109,21 +1146,79 @@ def _install_ipo_sdk_scenario(
             self.subtype = "error_during_execution" if is_error else "success"
 
     class AssistantMessage:
+        """Represent an intermediate assistant event with an optional error.
+
+        Beginner note:
+            Billing failures can arrive before a final result event. This fake
+            lets the test check that such an event blocks later proposal parsing.
+        """
+
         def __init__(
             self, *, error: str | None = None, content: list[object] | None = None
         ) -> None:
+            """Store the intermediate error and any event content.
+
+            Args:
+                error: Optional SDK error category, such as ``billing_error``.
+                content: Optional content blocks, which may contain proposal text.
+
+            Beginner note:
+                Keeping content present during an error proves the runner checks
+                the event's failure state instead of trusting text alone.
+            """
             self.error = error
             self.content = content or []
 
     class CLINotFoundError(Exception):
-        pass
+        """Signal that the optional provider CLI is unavailable.
+
+        Beginner note:
+            This failure occurs before a provider result exists, so the caller
+            must return a safe error receipt and persist no extraction proposal.
+        """
 
     class ProcessError(Exception):
+        """Represent a failed SDK subprocess with optional private diagnostics.
+
+        Beginner note:
+            Quota messages and stderr can include sensitive details. Tests use
+            this fake to ensure failures remain failures without saving the
+            valid-looking text supplied for the other stream scenarios.
+        """
+
         def __init__(self, message: str, *, stderr: str | None = None) -> None:
+            """Retain the process message and its optional stderr field.
+
+            Args:
+                message: The exception message, possibly indicating quota exhaustion.
+                stderr: Optional subprocess diagnostics that must not become proposal data.
+
+            Beginner note:
+                The production error handler consumes both values, so this fake
+                makes quota and ordinary process failures reproducible in tests.
+            """
             super().__init__(message)
             self.stderr = stderr
 
     async def query(*, prompt: str, options: object):
+        """Yield one configured fake SDK stream or raise its selected failure.
+
+        Args:
+            prompt: Runner prompt, ignored because stream behavior is scenario-driven.
+            options: Constructed SDK options, ignored after capture above.
+
+        Yields:
+            Controlled assistant, rate-limit, and terminal result events.
+
+        Raises:
+            CLINotFoundError: The selected case models a missing CLI.
+            ProcessError: The selected case models quota or process failure.
+
+        Beginner note:
+            Every failing scenario still has access to valid proposal JSON. That
+            makes these streams prove that errors and quota rejections prevent
+            proposal persistence even when parseable text is available.
+        """
         del prompt, options
         if scenario == "cli_missing":
             raise CLINotFoundError("C:/secret/claude.exe missing")
@@ -1160,9 +1255,37 @@ def _install_ipo_sdk_scenario(
             yield ResultMessage(result=final_text, is_error=False)
 
     def tool(_name: str, _description: str, _schema: dict[str, type]):
+        """Provide the SDK decorator shape without registering a real tool.
+
+        Args:
+            _name: Tool name accepted by the SDK interface.
+            _description: Human-readable tool description accepted by the interface.
+            _schema: Input field types accepted by the interface.
+
+        Returns:
+            A decorator that leaves the supplied function unchanged.
+
+        Beginner note:
+            The runner can initialize its tool definitions while every test
+            call remains local and unable to perform an external action.
+        """
         return lambda function: function
 
     def create_sdk_mcp_server(*, name: str, version: str, tools: list[object]):
+        """Describe the fake tool server in the shape expected by the runner.
+
+        Args:
+            name: Server name selected by the production integration.
+            version: Server version selected by the production integration.
+            tools: Locally decorated fake tools to expose to the SDK client.
+
+        Returns:
+            A plain mapping that preserves the configured server metadata.
+
+        Beginner note:
+            A small local value is enough to exercise SDK setup; the test can
+            then focus on whether failed streams are rejected before persistence.
+        """
         return {"name": name, "version": version, "tools": tools}
 
     fake_sdk = types.ModuleType("claude_agent_sdk")

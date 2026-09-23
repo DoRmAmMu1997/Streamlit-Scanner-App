@@ -1638,15 +1638,27 @@ def _default_run_agent(
 ) -> str:
     """Run one extraction loop on the Claude Agent SDK and return final text.
 
-    Mirrors the fundamentals agent's locked-down runner: lazy SDK import,
-    in-process tools only, ``permission_mode="dontAsk"`` so nothing outside
-    ``allowed_tools`` can ever run, and no user/project settings loaded.
+    Args:
+        prompt: Application-built extraction instructions for this issue.
+        sections: Classified prospectus sections exposed by the bounded readers.
+        pages: Already extracted pages; tools cannot open arbitrary source files.
+        model: Configured Claude model identifier for this extraction attempt.
+
+    Returns:
+        Final or fallback assistant text from a run without a detected failure.
+        The caller still validates its JSON, citations, and financial values.
+
+    Raises:
+        IpoExtractionError: The SDK or CLI is unavailable, execution fails, or
+            usage/billing limits or a failed result make its output unusable.
 
     Beginner note:
-        The model cannot browse the filesystem or network. It can request only
-        the bounded sections and tables already produced by the contained PDF
-        parser. Every tool response is scanned again for prompt injection
-        before the model sees it.
+        Tool availability and approval are separate controls: ``tools=[]``
+        removes built-ins, the MCP allowlist approves only our bounded readers,
+        and ``dontAsk`` denies requests outside that approval policy. No user or
+        project settings are loaded. The model receives only the extracted
+        evidence; every text/table response is checked for prompt injection.
+        A parseable answer is insufficient if the SDK reports that the run failed.
     """
     try:
         from claude_agent_sdk import (  # type: ignore[import-not-found, unused-ignore]
