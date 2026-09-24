@@ -311,3 +311,117 @@ def test_interrupted_serialization_keeps_original_bytes(tmp_path: Path, monkeypa
 
     assert path.read_bytes() == before
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def _with_undateable_row(frame: pd.DataFrame) -> pd.DataFrame:
+    """Append one raw vendor row whose timestamp cannot be parsed."""
+    bad = pd.DataFrame({"timestamp": [pd.NaT], "open": [1.0], "high": [1.0], "low": [1.0],
+                        "close": [1.0], "volume": [1.0]})
+    return pd.concat([frame, bad], ignore_index=True)
+
+
+def test_full_window_refresh_replaces_undateable_cached_rows(tmp_path: Path):
+    """A refetch that covers every dated cached row is authoritative for all of it.
+
+    Beginner note:
+    An undateable row cannot be placed inside or outside a narrow window, so a
+    narrow refresh keeps it as evidence. When the requested window spans the
+    cache's whole dated range, though, the fresh vendor answer describes that
+    entire history; a stale NaT row would otherwise survive every refresh and
+    keep the symbol dirty until the separate repair job ran.
+    """
+    response = _frame(["2026-06-01", "2026-06-05", "2026-06-09"], close=106.0)
+    loader = _loader(tmp_path, _Client(response))
+    path = loader.cache_path("TEST", "123")
+    _with_undateable_row(_frame(["2026-06-02", "2026-06-08"])).to_parquet(path, index=False)
+
+    loader.get_daily_history(ROW, "2026-06-01", "2026-06-09", force_refresh=True)
+
+    stored = pd.read_parquet(path)
+    assert stored["timestamp"].notna().all()
+    assert stored.timestamp.dt.strftime("%Y-%m-%d").tolist() == ["2026-06-01", "2026-06-05", "2026-06-09"]
+
+
+def test_narrow_refresh_keeps_undateable_rows_as_evidence(tmp_path: Path):
+    loader = _loader(tmp_path, _Client(_frame(["2026-06-05"], close=106.0)))
+    path = loader.cache_path("TEST", "123")
+    _with_undateable_row(_frame(["2026-06-01", "2026-06-05", "2026-06-09"])).to_parquet(path, index=False)
+
+    loader.get_daily_history(ROW, "2026-06-05", "2026-06-05", force_refresh=True)
+
+    assert int(pd.read_parquet(path)["timestamp"].isna().sum()) == 1
+
+
+def test_publish_retries_a_transient_sharing_violation(tmp_path: Path, monkeypatch):
+    """Windows refuses to replace a parquet an unlocked reader has open.
+
+    Beginner note:
+    Readers take no lock (atomic replace is what protects them), so a scan that
+    is mid-read when the prefetch publishes makes ``os.replace`` raise
+    ``PermissionError`` on Windows. The read finishes quickly; a short bounded
+    retry publishes instead of failing that symbol's refresh.
+    """
+    import os
+    from types import SimpleNamespace
+
+    from backend import candle_cache
+
+    real_replace = os.replace
+    attempts: list[int] = []
+    sleeps: list[float] = []
+
+    def flaky(src, dst):
+        attempts.append(1)
+        if len(attempts) < 3:
+            raise PermissionError(13, "file in use")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky)
+    monkeypatch.setattr(candle_cache, "time", SimpleNamespace(sleep=sleeps.append), raising=False)
+    monkeypatch.setattr(candle_cache, "_REPLACE_ATTEMPTS", 5, raising=False)
+    destination = tmp_path / "TEST_123.parquet"
+
+    candle_cache.atomic_write_parquet(_frame(["2026-06-01"]), destination)
+
+    assert len(attempts) == 3 and len(sleeps) == 2
+    assert pd.read_parquet(destination).shape[0] == 1
+    assert [p.name for p in tmp_path.iterdir()] == ["TEST_123.parquet"]
+
+
+def test_publish_gives_up_after_bounded_retries_and_cleans_temp(tmp_path: Path, monkeypatch):
+    import os
+    from types import SimpleNamespace
+
+    from backend import candle_cache
+
+    def always_locked(src, dst):
+        raise PermissionError(13, "file in use")
+
+    monkeypatch.setattr(os, "replace", always_locked)
+    monkeypatch.setattr(candle_cache, "time", SimpleNamespace(sleep=lambda _s: None), raising=False)
+    monkeypatch.setattr(candle_cache, "_REPLACE_ATTEMPTS", 3, raising=False)
+
+    with pytest.raises(PermissionError):
+        candle_cache.atomic_write_parquet(_frame(["2026-06-01"]), tmp_path / "TEST_123.parquet")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_stale_cleanup_removes_old_temp_files_but_never_locks(tmp_path: Path):
+    """A writer killed mid-publish leaves an inert temp file behind forever."""
+    import os
+    import time
+
+    loader = _loader(tmp_path, _Client(pd.DataFrame()))
+    old_tmp = tmp_path / ".TEST_123.abcd1234.tmp"
+    new_tmp = tmp_path / ".TEST_123.efgh5678.tmp"
+    lock = tmp_path / "TEST_123.lock"
+    for item in (old_tmp, new_tmp, lock):
+        item.write_bytes(b"\0")
+    long_ago = time.time() - 10 * 86400
+    os.utime(old_tmp, (long_ago, long_ago))
+    os.utime(lock, (long_ago, long_ago))
+
+    loader.cleanup_stale_cache_files(max_age_days=3)
+
+    assert not old_tmp.exists()
+    assert new_tmp.exists() and lock.exists()

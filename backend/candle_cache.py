@@ -13,6 +13,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -22,6 +23,14 @@ import pandas as pd
 
 _THREAD_LOCKS: WeakValueDictionary[str, threading.Lock] = WeakValueDictionary()
 _REGISTRY_LOCK = threading.Lock()
+# Windows refuses to replace a file another handle has open without
+# FILE_SHARE_DELETE, which is how pyarrow opens parquet for reading. Readers
+# take no lock, so a publish that races a read gets a short bounded retry there.
+# On POSIX a PermissionError is a real, persistent permission problem: no retry.
+_REPLACE_ATTEMPTS = 5 if sys.platform == "win32" else 1
+_REPLACE_BACKOFF_SECONDS = 0.05
+# Temp files are named ``.<stem>.<random>.tmp``; stale cleanup matches this.
+TEMP_FILE_GLOB = ".*.tmp"
 
 
 @contextmanager
@@ -112,12 +121,26 @@ def atomic_write_parquet(frame: pd.DataFrame, path: Path) -> None:
     is atomic. Closing it before pandas opens it also works on Windows. Unique
     names prevent collisions; the ``finally`` block removes incomplete output
     if serialization or replacement raises. A process killed outright may leave
-    an inert ``.tmp`` sibling, never a partially serialized live parquet.
+    an inert ``.tmp`` sibling, never a partially serialized live parquet;
+    ``cleanup_stale_cache_files`` removes old ones. On Windows a replace that
+    races an unlocked reader is retried briefly (doubling backoff from 50 ms).
     """
     with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp", delete=False) as temp:
         temp_path = Path(temp.name)
     try:
         frame.to_parquet(temp_path, index=False)
-        os.replace(temp_path, path)
+        _replace_with_retry(temp_path, path)
     finally:
         temp_path.unlink(missing_ok=True)
+
+
+def _replace_with_retry(source: Path, destination: Path) -> None:
+    """Rename ``source`` over ``destination``, retrying transient sharing violations."""
+    for attempt in range(1, _REPLACE_ATTEMPTS + 1):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError:
+            if attempt >= _REPLACE_ATTEMPTS:
+                raise
+            time.sleep(_REPLACE_BACKOFF_SECONDS * 2 ** (attempt - 1))

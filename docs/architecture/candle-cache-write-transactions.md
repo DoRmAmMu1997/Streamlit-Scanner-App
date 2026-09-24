@@ -27,10 +27,18 @@ Parquet publisher. All three writers use these primitives without new dependenci
    its established unsolicited-correction behavior: a vendor row before the
    requested tail remains alongside the old row so the quality gate sees any
    conflict. Full-window prefetch branches use the same locked merge.
+   Undateable cached rows survive a narrow refresh, which cannot place them.
+   When the requested window spans every dated cached row, the fresh answer
+   describes the whole history, so stale undateable rows are replaced too;
+   otherwise they would survive every refresh until the repair job ran.
 4. Serialize to a uniquely named temporary file in the destination directory,
    close it, and publish with `os.replace`. Always remove the temporary file on
    ordinary failure. The old Parquet remains intact if serialization or rename
-   fails. An abrupt process kill can leave an inert `.tmp` file.
+   fails. On Windows, `os.replace` raises `PermissionError` while an unlocked
+   reader has the Parquet open (pyarrow opens without `FILE_SHARE_DELETE`), so
+   the publish retries up to five times with doubling backoff from 50 ms; POSIX
+   does not retry. An abrupt process kill can leave an inert `.<stem>.*.tmp`
+   file; `cleanup_stale_cache_files` removes those older than its cutoff.
 5. An empty answer does not alter the Parquet or `.firstbar` evidence. Existing
    empty-tail `.checked` behavior in prefetch remains unchanged. Read failures
    propagate for downloads and become failed repair outcomes, preserving the

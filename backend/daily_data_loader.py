@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from backend.candle_cache import atomic_write_parquet, cache_write_lock
+from backend.candle_cache import TEMP_FILE_GLOB, atomic_write_parquet, cache_write_lock
 from backend.config import (
     DAILY_CACHE_DIR,
     dhan_fetch_workers,
@@ -724,6 +724,9 @@ class DailyDataLoader:
         Unreadable parquet raises before replacement, preserving evidence for
         repair. Readable empty/missing-axis/all-NaT caches retain the existing
         full-download recovery behavior because they contain no dated history.
+        Undateable rows survive a narrow refresh, which cannot place them. When
+        the window spans every dated cached row, the fresh answer describes the
+        whole history, so stale undateable rows are replaced along with it.
         """
         if candles.empty:
             return candles
@@ -735,12 +738,16 @@ class DailyDataLoader:
         path = self.cache_path(symbol, security_id)
         with cache_write_lock(path):
             cached = pd.read_parquet(path) if path.exists() else pd.DataFrame()
-            if not cached.empty and "timestamp" in cached and _date_bounds(cached)[0] is not None:
+            cached_first, cached_last = _date_bounds(cached) if "timestamp" in cached else (None, None)
+            if not cached.empty and cached_first is not None and cached_last is not None:
+                window_start, window_end = _coerce_date(start_date), _coerce_date(end_date)
                 dates = pd.to_datetime(cached["timestamp"], errors="coerce").dt.date
-                inside = dates.between(_coerce_date(start_date), _coerce_date(end_date)).fillna(False)
-                # Keep unparseable rows too: a refresh is not permission to
-                # remove dirty evidence outside the interval we can identify.
-                kept = cached.loc[~inside]
+                inside = dates.between(window_start, window_end).fillna(False)
+                full_window = window_start <= cached_first and cached_last <= window_end
+                # Keep unparseable rows for a narrow refresh: it is not permission
+                # to remove dirty evidence outside the interval we can identify.
+                # A full-window answer is that permission (see Beginner note).
+                kept = cached.loc[~inside & dates.notna()] if full_window else cached.loc[~inside]
                 merged = pd.concat([kept, candles], ignore_index=True)
             else:
                 merged = candles.copy()
@@ -1692,6 +1699,14 @@ class DailyDataLoader:
                 # A marker without a parquet owner can never be used again.
                 if not sidecar.with_suffix(".parquet").exists():
                     targets.add(sidecar)
+
+        # A writer killed mid-publish leaves an inert ``.<stem>.<random>.tmp``.
+        # Only old ones are removed, so a publish in flight is never disturbed.
+        # ``.lock`` files are deliberately never deleted: they are the stable
+        # identity every writer locks (see backend/candle_cache.py).
+        for temp_file in self.cache_dir.glob(TEMP_FILE_GLOB):
+            if datetime.fromtimestamp(temp_file.stat().st_mtime) < cutoff:
+                targets.add(temp_file)
 
         deleted = 0
         for path in sorted(targets):
