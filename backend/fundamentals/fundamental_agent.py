@@ -50,6 +50,7 @@ from pydantic import Field, ValidationError, ValidationInfo, field_validator
 # The aliased import keeps this module's call sites unchanged: the shared
 # extractor pulls the AgentVerdict JSON out of the model's final message
 # (AI-006 — one tolerant implementation for all three agents).
+from backend.agent_usage_limits import USAGE_LIMIT_MARKERS, mentions_usage_limit
 from backend.ai_runtime import extract_json_object as _extract_json_object
 from backend.ai_runtime import run_agent_coroutine
 from backend.ai_validation import StrictAIModel, parse_with_retry
@@ -152,23 +153,27 @@ class _FundamentalEvidenceError(Exception):
         self.error_type = error_type
 
 
-# Substrings that mark a usage/limit failure in *unstructured* CLI error text.
-# The structured signals (RateLimitEvent / AssistantMessage.error) are checked
-# first; this list is only the fallback for raw process-error messages.
-_USAGE_LIMIT_MARKERS = (
-    "rate limit",
-    "usage limit",
-    "limit reached",
-    "out of credit",
-    "credit balance",
-    "quota",
-)
+# The unstructured-text fallback lives in one shared leaf so all four SDK
+# runners (including IPO extraction) classify refusals identically. The
+# private names are kept because the technical and 67 agents import them here.
+_USAGE_LIMIT_MARKERS = USAGE_LIMIT_MARKERS
+_mentions_usage_limit = mentions_usage_limit
 
 
-def _mentions_usage_limit(*texts: str | None) -> bool:
-    """True if any of `texts` reads like a usage/credit-limit message."""
-    haystack = " ".join(text for text in texts if text).lower()
-    return any(marker in haystack for marker in _USAGE_LIMIT_MARKERS)
+def _require_terminal_result(result_message: Any, agent_label: str) -> None:
+    """Refuse text from an SDK stream that ended without a terminal result.
+
+    Beginner note:
+        A stream can carry polished JSON in an assistant message and then end
+        (CLI crash, dropped connection) without the ``ResultMessage`` that
+        confirms the run finished. That text is unconfirmed, so it must not
+        become a verdict. Raising the ordinary agent error keeps the existing
+        retry policy: a transient crash gets another attempt.
+    """
+    if result_message is None:
+        raise FundamentalsAgentError(
+            f"The {agent_label} run ended without a terminal result; its output is unconfirmed."
+        )
 
 
 def _format_usage_limit_message(resets_at: int | None) -> str:
@@ -1035,6 +1040,7 @@ class FundamentalAgent:
         # Translate recognised conditions into typed errors the UI can react to.
         if usage_limit is not None:
             raise usage_limit
+        _require_terminal_result(result_message, "Check Fundamentals agent")
         if result_message is not None and result_message.is_error:
             if getattr(result_message, "api_error_status", None) == 429:
                 raise FundamentalsUsageLimitError()

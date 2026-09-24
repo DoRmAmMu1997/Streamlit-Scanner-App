@@ -69,6 +69,16 @@ values:
 | Claude CLI exits unsuccessfully for another reason | `agent_process_failed` |
 | `ResultMessage.is_error` without a quota signal, or no terminal result | `agent_run_failed` |
 
+The terminal-result rule is not IPO-specific. The Fundamentals, Technical and
+67-ka-Funda runners call the shared `_require_terminal_result` helper
+(`backend/fundamentals/fundamental_agent.py`) after draining their stream, so
+a stream that ends with assistant text but no `ResultMessage` raises
+`FundamentalsAgentError` (retried under each agent's existing policy) instead of
+becoming a verdict. All four runners also share one unstructured usage-limit
+classifier, `backend/agent_usage_limits.py` (`USAGE_LIMIT_MARKERS`,
+`mentions_usage_limit`), so a billing refusal is recognized everywhere rather
+than only by IPO extraction.
+
 The public `propose_extraction()` boundary converts these errors to
 `IpoExtractionErrorReceipt`. Receipts carry only the exception type and stable
 code; provider text, stderr, paths, and model output are excluded. Because the

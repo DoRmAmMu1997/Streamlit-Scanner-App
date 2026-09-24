@@ -38,6 +38,7 @@ from typing import Any, Final
 
 from pydantic import ValidationError, field_validator, model_validator
 
+from backend.agent_usage_limits import USAGE_LIMIT_MARKERS, mentions_usage_limit
 from backend.ai_runtime import extract_json_object, run_agent_coroutine
 from backend.ai_validation import StrictAIModel, parse_with_retry
 from backend.config import get_ai_max_attempts, get_settings
@@ -90,18 +91,12 @@ _SECTION_CHUNK_CHARS: Final = 12_000
 _MEDIUM_CONFIDENCE_MIN_VERIFIED: Final = 0.9
 _CITED_FACT_SCHEMA_VERSION: Final = "cited-financial-fact/v3"
 
-# Structured SDK events are authoritative where available. These fragments are
-# used only for older CLI ProcessError text and failed ResultMessage fallbacks.
-# They classify the failure without copying provider output into receipts.
-_USAGE_LIMIT_MARKERS: Final = (
-    "rate limit",
-    "usage limit",
-    "limit reached",
-    "out of credit",
-    "credit balance",
-    "quota",
-    "billing",
-)
+# Structured SDK events are authoritative where available. The shared marker
+# fallback (backend.agent_usage_limits) is used only for older CLI ProcessError
+# text and failed ResultMessage fallbacks, and is identical for every agent.
+# It classifies the failure without copying provider output into receipts.
+_USAGE_LIMIT_MARKERS: Final = USAGE_LIMIT_MARKERS
+_mentions_usage_limit = mentions_usage_limit
 
 # Request-local collector for raw text that tripped the injection scanner.
 # The model only ever sees the blocked-evidence marker; the run is failed
@@ -127,26 +122,6 @@ class IpoExtractionError(RuntimeError):
         """Store the stable code alongside the human-readable summary."""
         super().__init__(message)
         self.code = code
-
-
-def _mentions_usage_limit(*texts: str | None) -> bool:
-    """Return whether unstructured CLI text indicates quota or billing refusal.
-
-    Args:
-        *texts: Optional exception/diagnostic strings used only for classification.
-
-    Returns:
-        True if a known usage-limit marker occurs, otherwise False. This is a
-        compatibility heuristic, not permission to display the diagnostic text.
-
-    Beginner note:
-        Older SDK/CLI combinations can report limits only in exception text.
-        This helper is used for classification, never presentation: the text may
-        contain credentials or command paths, so callers raise a fixed typed
-        error instead of returning the matched provider message.
-    """
-    haystack = " ".join(text for text in texts if text).lower()
-    return any(marker in haystack for marker in _USAGE_LIMIT_MARKERS)
 
 
 def _message_indicates_usage_limit(message: Any) -> bool:

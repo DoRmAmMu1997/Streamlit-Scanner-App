@@ -55,6 +55,7 @@ from backend.fundamentals.fundamental_agent import (
     FundamentalsUsageLimitError,
     _describe_result_error,
     _mentions_usage_limit,
+    _require_terminal_result,
     _usage_limit_from_message,
 )
 from backend.fundamentals.fundamentals_cache import FundamentalsCache
@@ -746,6 +747,7 @@ class SixtySevenAgent:
 
         if usage_limit is not None:
             raise usage_limit
+        _require_terminal_result(result_message, "67 ka Funda agent")
         if result_message is not None and result_message.is_error:
             if getattr(result_message, "api_error_status", None) == 429:
                 raise FundamentalsUsageLimitError()
