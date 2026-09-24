@@ -1174,9 +1174,12 @@ Supported universe keys are `nifty_100`, `nifty_500`, `fno`,
 `hemant_super_45`, `hemant_good_45`, `hemant_good_200`, and the composites
 `hemant_super_good_union` (Hemant Super 45 ∪ Good 45) and
 `hemant_super_good_200_union` (Hemant Super 45 ∪ Good 45 ∪ Good 200), both deduped.
-The Hemant lists live in `data/universes/` alongside the other universe CSVs
-and are mapped to Dhan cash-equity IDs when universe files are refreshed; the
-union is assembled from those same source lists at refresh time.
+The pinned Hemant symbol lists live in `data/universes/sources/` and are mapped
+to Dhan cash-equity IDs when universe files are refreshed; the union is assembled
+from those same source lists at refresh time. The generated universe CSVs are
+written to `data/universes/` (which follows `DATA_DIR`), while the pinned sources
+are resolved relative to the repository so a container that redirects `DATA_DIR`
+to a volume can still rebuild them (DEPLOY-005).
 
 ---
 

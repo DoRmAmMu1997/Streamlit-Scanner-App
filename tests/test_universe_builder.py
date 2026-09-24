@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import textwrap
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from backend import universe_builder
+from backend.config import PROJECT_ROOT, UNIVERSE_SOURCE_DIR
 from backend.universe_builder import (
     HEMANT_SOURCE_FILES,
     build_equity_lookup,
@@ -18,6 +26,7 @@ from backend.universe_builder import (
     load_symbol_list_csv,
     normalize_instrument_master_columns,
     refresh_universe_files,
+    repo_relative_source_label,
 )
 
 
@@ -222,8 +231,11 @@ def test_load_symbol_list_csv_prefers_source_symbol_from_generated_csv(tmp_path)
 
 
 def test_hemant_source_csvs_are_pinned_from_google_doc_snapshot():
-    assert HEMANT_SOURCE_FILES["hemant_super_45"].parent.name == "universes"
-    assert HEMANT_SOURCE_FILES["hemant_super_45"].parent.parent.name == "data"
+    # DEPLOY-005 moved the pinned lists into their own `sources/` folder so a
+    # generated universe is never also its own input.
+    assert HEMANT_SOURCE_FILES["hemant_super_45"].parent.name == "sources"
+    assert HEMANT_SOURCE_FILES["hemant_super_45"].parent.parent.name == "universes"
+    assert HEMANT_SOURCE_FILES["hemant_super_45"].parent.parent.parent.name == "data"
     for universe_key, source_path in HEMANT_SOURCE_FILES.items():
         config = universe_builder.UNIVERSE_CONFIG[universe_key]
         assert config["source_file"] == str(source_path)
@@ -539,3 +551,96 @@ def test_union_of_mapped_universes_dedupes_by_security_id(tmp_path):
     assert "BADMAP" not in symbols
     # And RELIANCE should appear exactly once even though it was in two CSVs.
     assert int((union["symbol"] == "RELIANCE").sum()) == 1
+
+
+def test_pinned_source_dir_is_anchored_to_the_repo_not_the_data_volume():
+    """The pinned lists must not live under the DATA_DIR-driven output folder.
+
+    Beginner note (DEPLOY-005):
+    `UNIVERSE_DIR` follows the `DATA_DIR` environment variable so a deployment
+    can point generated files at a persistent volume. `UNIVERSE_SOURCE_DIR` must
+    NOT, because the pinned lists ship inside the image. If the two ever share a
+    root again, a container that sets DATA_DIR would look for its inputs on an
+    empty volume.
+    """
+    assert UNIVERSE_SOURCE_DIR.is_relative_to(PROJECT_ROOT)
+    for source_path in HEMANT_SOURCE_FILES.values():
+        assert source_path.is_relative_to(UNIVERSE_SOURCE_DIR)
+        assert source_path.is_file(), f"pinned source list is missing: {source_path}"
+
+
+def test_refresh_reads_pinned_sources_when_data_dir_points_elsewhere():
+    """Rebuild a Hemant universe in a subprocess with a relocated DATA_DIR.
+
+    Beginner note:
+    This regression has to run in a subprocess. `DATA_DIR` is read once, at
+    import time, to build the module-level path constants, so monkeypatching the
+    environment inside this already-imported process would prove nothing. A
+    fresh interpreter is exactly what Render's cron and `docker compose` give
+    us, so that is what we reproduce.
+
+    Before DEPLOY-005 this raised
+    ``FileNotFoundError: Universe source CSV not found: <DATA_DIR>/universes/
+    hemant_super_45.csv`` - which, in the Render blueprint's
+    ``refresh && run_daily_scan`` command, meant the daily scan never ran.
+    """
+    script = textwrap.dedent(
+        """
+        import json, sys, tempfile
+        from pathlib import Path
+
+        import pandas as pd
+
+        from backend.universe_builder import (
+            CANONICAL_INSTRUMENT_COLUMNS,
+            refresh_universe_files,
+        )
+
+        # A structurally valid one-row Dhan master keeps this offline.
+        master = pd.DataFrame(
+            [["NSE", "E", "11536", "EQUITY", "TCS", "TCS", "Tata Consultancy", "EQ"]],
+            columns=CANONICAL_INSTRUMENT_COLUMNS,
+        )
+        with tempfile.TemporaryDirectory() as out_dir:
+            written = refresh_universe_files(
+                universe_keys=["hemant_super_45"],
+                universe_dir=Path(out_dir),
+                instrument_master=master,
+            )
+            frame = pd.read_csv(written["hemant_super_45"], dtype=str).fillna("")
+            print(json.dumps({"rows": len(frame), "source": frame["source"].iloc[0]}))
+        """
+    )
+
+    repo_root = Path(universe_builder.__file__).resolve().parents[1]
+    env = dict(os.environ)
+    # The exact shape of the production bug: generated data is redirected to a
+    # volume that does not contain the pinned source lists.
+    with tempfile.TemporaryDirectory() as relocated:
+        env["DATA_DIR"] = str(Path(relocated) / "volume")
+        env["PYTHONPATH"] = str(repo_root)
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=relocated,
+            check=False,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+    payload = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert payload["rows"] == 43
+    # And the committed `source` label stays machine-independent.
+    assert payload["source"] == "data/universes/sources/hemant_super_45.csv"
+
+
+def test_repo_relative_source_label_never_leaks_an_absolute_path(tmp_path):
+    """Rows written into a committed CSV must not carry a developer's home dir."""
+    inside = HEMANT_SOURCE_FILES["hemant_good_45"]
+    assert repo_relative_source_label(inside) == "data/universes/sources/hemant_good_45.csv"
+
+    # A path outside the repository degrades to the bare file name rather than
+    # embedding somewhere unrelated on the machine.
+    outside = tmp_path / "somebody_elses_list.csv"
+    assert repo_relative_source_label(outside) == "somebody_elses_list.csv"
