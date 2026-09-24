@@ -87,7 +87,8 @@ The mode is chosen by the UI from the row's universe; `_normalize_verdict` **enf
 | **ContextVars for per-check symbol/refresh** | Cross `asyncio.to_thread` safely; a cached agent can't leak one session's choice into another. | Instance mutable state — cross-session leak. |
 | **Windows ProactorEventLoop bridge** | The SDK spawns the Claude CLI subprocess; Streamlit/Tornado's SelectorEventLoop can't (`NotImplementedError`). | `asyncio.run()` — fails on Windows. |
 | **Structured usage-limit detection** | `RateLimitEvent`/`AssistantMessage.error`/HTTP 429 → typed `FundamentalsUsageLimitError` (not string matching); UI shows reset time, cached verdicts keep working. | String matching only — brittle. |
-| **`allowed_tools` + `dontAsk` + `setting_sources=[]`** | Agent reaches ONLY the two tools; never built-in fs/bash; ignores user CLAUDE.md. | Default tools/settings — unsafe headless. |
+| **`tools=[]` + exact `allowed_tools` + `dontAsk` + `setting_sources=[]`** | The SDK loads no built-in tools, while the two named in-process MCP readers remain callable; the agent ignores user CLAUDE.md. | Rely on SDK defaults — built-in surface can drift. |
+| **Current `RUN_SCAN` role checked at display and action boundaries** | A Viewer can read a valid session-cached verdict after demotion or role-lookup fallback, but sees no initial/refresh controls; a queued widget event is denied immediately before agent construction. | Treat retained `scan_cache` or widget state as authority — stale privilege. |
 | **Bounded validation-retry on malformed output (AI-004)** | `check()` re-runs the agentic loop up to `SCANNER_AI_MAX_ATTEMPTS` (default 2) via the shared `parse_with_retry` when the verdict is unparseable/invalid, then raises `AIValidationError` (a `RuntimeError` the UI already catches). Only parse/validation retries — never SDK/CLI/usage-limit. | Reject on first malformed reply — wastes a recoverable click; retry SDK errors — wastes Agent SDK credit. |
 
 ## 6. Failure modes / degradation
@@ -105,7 +106,8 @@ The mode is chosen by the UI from the row's universe; `_normalize_verdict` **enf
 
 ## 8. Testing
 
-- [`tests/test_fundamental_agent.py`](../../../tests/test_fundamental_agent.py) — agent loop via injected `runner`, modes, verdict validation/normalization, usage-limit + legacy-outlook migration, and **prompt-injection quarantine** (both tools block hostile screener/transcript text, `check` fails closed without leaking the payload, benign near-neighbors pass).
+- [`tests/test_fundamental_agent.py`](../../../tests/test_fundamental_agent.py) — agent loop via injected `runner`, modes, verdict validation/normalization, captured SDK tool options, usage-limit + legacy-outlook migration, and **prompt-injection quarantine** (both tools block hostile screener/transcript text, `check` fails closed without leaking the payload, benign near-neighbors pass).
+- [`tests/test_app_fundamentals_panel.py`](../../../tests/test_app_fundamentals_panel.py) and [`tests/test_app_orchestration.py`](../../../tests/test_app_orchestration.py) — current-role propagation, retained Viewer display, hidden execution controls, and action-time authorization before agent construction.
 - [`tests/test_prompt_injection.py`](../../../tests/test_prompt_injection.py) — the shared detection engine + corpus, reused by this agent and the 67 Ka Funda agent ([`tests/fixtures/ai_prompt_injection_cases.json`](../../../tests/fixtures/ai_prompt_injection_cases.json)).
 - [`tests/test_screener_in_client.py`](../../../tests/test_screener_in_client.py) — scraper parsing (HTMX peers, announcements, concalls, median P/E).
 - [`tests/test_pdf_reader.py`](../../../tests/test_pdf_reader.py) — download caps, `pdfplumber`/`pypdf` fallback, content sniff.

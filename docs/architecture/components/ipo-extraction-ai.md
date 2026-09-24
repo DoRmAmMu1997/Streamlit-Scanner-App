@@ -41,7 +41,8 @@ verified cache (IPO-003) -> spawned bounded PDF worker -> parse receipt
 | Decision | Why |
 |---|---|
 | Reuse `ai_runtime` + `ai_validation` (`run_agent_coroutine`, `extract_json_object`, `StrictAIModel`, `parse_with_retry`) | One reviewed implementation of the sync bridge, JSON extraction, strict schemas, and the bounded retry across all four agents. |
-| Locked-down `ClaudeAgentOptions` (`permission_mode="dontAsk"`, `setting_sources=[]`, in-process tools only) | The model can never touch the filesystem, network, or shell; behaviour comes entirely from our prompt. |
+| Locked-down `ClaudeAgentOptions` (`tools=[]`, exact MCP `allowed_tools`, `permission_mode="dontAsk"`, `setting_sources=[]`) | The SDK loads no built-ins; only the three in-process prospectus readers exist, and behaviour comes entirely from our prompt. |
+| Successful terminal SDK status is required before output text | Rejected rate/billing events, `ResultMessage.is_error`, missing terminal result, missing CLI, and failed CLI processes become typed errors before JSON parsing. A successful empty terminal result may confirm prior assistant text; EOF cannot enqueue a proposal even when its text validates. |
 | Values travel as decimal strings | The exact printed digits survive schema validation, host verification, storage, and reconstruction without binary float drift. |
 | Host parses complete tokens in the original table cell/text span | Formatting-equivalent Indian grouping/currency/whitespace/trailing zeros is accepted, but rounding, substring, and cross-cell matches fail. |
 | Field label, unit, value, period header, page, cell/span, source token, and document SHA form one typed fact | A duplicate number in another financial row, fiscal column, peer metric, or unit context cannot be substituted as high-confidence evidence. |
@@ -59,9 +60,11 @@ all commit or all roll back.
 Error-receipt style (matching the technical/67 agents): parse failures get
 one bounded retry; quarantined evidence, honest `value_not_found` reports,
 unverifiable drafts, unparseable PDFs, duplicate pending proposals, and SDK
-unavailability all become `IpoExtractionErrorReceipt` values carrying only
-stable codes and exception type names. The screener job counts them and
-keeps going.
+unavailability, CLI absence/process failure, quota/billing refusal, and failed
+SDK result messages all become `IpoExtractionErrorReceipt` values carrying only
+stable codes and exception type names. Provider text and stderr are used only
+for classification and never copied into the receipt. The screener job counts
+these failures and keeps going.
 
 The parent also terminates and joins a timed-out/crashed child and rejects
 malformed or oversized worker output. Resource exhaustion, empty/scanned PDFs,

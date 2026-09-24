@@ -40,6 +40,7 @@ from backend.ipo.models import (
 from backend.ipo.repository import (
     create_document,
     create_issue,
+    list_extraction_proposals,
     reject_extraction_proposal,
 )
 from backend.security import BLOCKED_EVIDENCE_RESPONSE
@@ -1069,3 +1070,363 @@ def test_section_chunks_repeat_the_page_marker_without_crossing_pages() -> None:
     assert chunks[1].startswith("[page 1]\n")
     assert chunks[2].startswith("[page 2]\n")
     assert all(chunk.count("[page ") == 1 for chunk in chunks)
+
+
+def _install_ipo_sdk_scenario(
+    monkeypatch, *, scenario: str, final_text: str
+) -> dict[str, Any]:
+    """Install a complete fake SDK stream for one boundary scenario.
+
+    Beginner note:
+        The production runner imports the optional SDK lazily. Replacing that
+        module lets these tests exercise option construction and stream/error
+        handling without a Claude login, subprocess, provider request, or bill.
+        ``final_text`` is intentionally valid proposal JSON even on failures;
+        parsing it would expose the exact fail-open bug these cases prevent.
+    """
+    import sys
+    import types
+
+    captured: dict[str, Any] = {}
+
+    class ClaudeAgentOptions:
+        """Capture runner options so tests can inspect the SDK boundary.
+
+        Beginner note:
+            The real SDK options configure permissions and tool access. Saving
+            their values here lets the test prove the production runner builds
+            its request with the intended limits without starting a CLI process.
+        """
+
+        def __init__(self, **kwargs: Any) -> None:
+            """Store option values for assertions after the runner is called.
+
+            Args:
+                **kwargs: SDK option names and values supplied by production code.
+
+            Beginner note:
+                Recording rather than interpreting these values keeps this fake
+                small while preserving evidence about the actual configured call.
+            """
+            captured.update(kwargs)
+
+    class ResultMessage:
+        """Represent the SDK's final result, including provider failure state.
+
+        Beginner note:
+            The result text may contain valid proposal JSON even when the SDK
+            marks the run as failed. The runner must honor status and error
+            metadata before it can save any proposal.
+        """
+
+        def __init__(
+            self,
+            *,
+            result: str | None,
+            is_error: bool,
+            api_error_status: int | None = None,
+            errors: list[str] | None = None,
+        ) -> None:
+            """Build a final event with the fields consumed by the runner.
+
+            Args:
+                result: Final text, deliberately allowed to look like a proposal.
+                is_error: Whether the provider reports execution failure.
+                api_error_status: Optional HTTP status, including quota status 429.
+                errors: Optional provider details used to check secret-safe failure handling.
+
+            Beginner note:
+                Keeping proposal-looking text alongside an error catches code
+                that mistakenly persists output before checking the failure flag.
+            """
+            self.result = result
+            self.is_error = is_error
+            self.api_error_status = api_error_status
+            self.errors = errors
+            self.subtype = "error_during_execution" if is_error else "success"
+
+    class AssistantMessage:
+        """Represent an intermediate assistant event with an optional error.
+
+        Beginner note:
+            Billing failures can arrive before a final result event. This fake
+            lets the test check that such an event blocks later proposal parsing.
+        """
+
+        def __init__(
+            self, *, error: str | None = None, content: list[object] | None = None
+        ) -> None:
+            """Store the intermediate error and any event content.
+
+            Args:
+                error: Optional SDK error category, such as ``billing_error``.
+                content: Optional content blocks, which may contain proposal text.
+
+            Beginner note:
+                Keeping content present during an error proves the runner checks
+                the event's failure state instead of trusting text alone.
+            """
+            self.error = error
+            self.content = content or []
+
+    class CLINotFoundError(Exception):
+        """Signal that the optional provider CLI is unavailable.
+
+        Beginner note:
+            This failure occurs before a provider result exists, so the caller
+            must return a safe error receipt and persist no extraction proposal.
+        """
+
+    class ProcessError(Exception):
+        """Represent a failed SDK subprocess with optional private diagnostics.
+
+        Beginner note:
+            Quota messages and stderr can include sensitive details. Tests use
+            this fake to ensure failures remain failures without saving the
+            valid-looking text supplied for the other stream scenarios.
+        """
+
+        def __init__(self, message: str, *, stderr: str | None = None) -> None:
+            """Retain the process message and its optional stderr field.
+
+            Args:
+                message: The exception message, possibly indicating quota exhaustion.
+                stderr: Optional subprocess diagnostics that must not become proposal data.
+
+            Beginner note:
+                The production error handler consumes both values, so this fake
+                makes quota and ordinary process failures reproducible in tests.
+            """
+            super().__init__(message)
+            self.stderr = stderr
+
+    async def query(*, prompt: str, options: object):
+        """Yield one configured fake SDK stream or raise its selected failure.
+
+        Args:
+            prompt: Runner prompt, ignored because stream behavior is scenario-driven.
+            options: Constructed SDK options, ignored after capture above.
+
+        Yields:
+            Controlled assistant, rate-limit, and terminal result events.
+
+        Raises:
+            CLINotFoundError: The selected case models a missing CLI.
+            ProcessError: The selected case models quota or process failure.
+
+        Beginner note:
+            Every failing scenario still has access to valid proposal JSON. That
+            makes these streams prove that errors and quota rejections prevent
+            proposal persistence even when parseable text is available.
+        """
+        del prompt, options
+        if scenario == "cli_missing":
+            raise CLINotFoundError("C:/secret/claude.exe missing")
+        if scenario == "process_usage":
+            raise ProcessError("quota exceeded", stderr="billing token=secret")
+        if scenario == "process_failed":
+            raise ProcessError("exit 1 token=secret", stderr="private stderr")
+        if scenario == "empty_stream":
+            return
+        if scenario in {"assistant_eof", "success_empty_result"}:
+            yield AssistantMessage(
+                content=[types.SimpleNamespace(text=final_text)],
+            )
+            if scenario == "assistant_eof":
+                return
+        elif scenario == "billing_message":
+            yield AssistantMessage(
+                error="billing_error",
+                content=[types.SimpleNamespace(text=final_text)],
+            )
+        elif scenario == "rate_event":
+            yield types.SimpleNamespace(
+                rate_limit_info=types.SimpleNamespace(
+                    status="rejected", resets_at=1_800_000_000
+                )
+            )
+        if scenario == "result_error":
+            yield ResultMessage(
+                result=final_text,
+                is_error=True,
+                api_error_status=500,
+                errors=["provider failed api_key=supersecret123456"],
+            )
+        elif scenario == "result_429":
+            yield ResultMessage(
+                result=final_text,
+                is_error=True,
+                api_error_status=429,
+                errors=["rate limited"],
+            )
+        elif scenario == "success_empty_result":
+            yield ResultMessage(result=None, is_error=False)
+        else:
+            yield ResultMessage(result=final_text, is_error=False)
+
+    def tool(_name: str, _description: str, _schema: dict[str, type]):
+        """Provide the SDK decorator shape without registering a real tool.
+
+        Args:
+            _name: Tool name accepted by the SDK interface.
+            _description: Human-readable tool description accepted by the interface.
+            _schema: Input field types accepted by the interface.
+
+        Returns:
+            A decorator that leaves the supplied function unchanged.
+
+        Beginner note:
+            The runner can initialize its tool definitions while every test
+            call remains local and unable to perform an external action.
+        """
+        return lambda function: function
+
+    def create_sdk_mcp_server(*, name: str, version: str, tools: list[object]):
+        """Describe the fake tool server in the shape expected by the runner.
+
+        Args:
+            name: Server name selected by the production integration.
+            version: Server version selected by the production integration.
+            tools: Locally decorated fake tools to expose to the SDK client.
+
+        Returns:
+            A plain mapping that preserves the configured server metadata.
+
+        Beginner note:
+            A small local value is enough to exercise SDK setup; the test can
+            then focus on whether failed streams are rejected before persistence.
+        """
+        return {"name": name, "version": version, "tools": tools}
+
+    fake_sdk = types.ModuleType("claude_agent_sdk")
+    # Populate the dynamic module namespace explicitly. ModuleType's type stub
+    # cannot enumerate optional SDK exports, but the import system reads this
+    # same mapping at runtime.
+    fake_sdk.__dict__.update(
+        {
+            "ClaudeAgentOptions": ClaudeAgentOptions,
+            "ResultMessage": ResultMessage,
+            "AssistantMessage": AssistantMessage,
+            "CLINotFoundError": CLINotFoundError,
+            "ProcessError": ProcessError,
+            "query": query,
+            "tool": tool,
+            "create_sdk_mcp_server": create_sdk_mcp_server,
+        }
+    )
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk)
+    return captured
+
+
+def test_default_ipo_sdk_runner_disables_builtin_tools(monkeypatch) -> None:
+    """Only the three bounded prospectus readers are exposed to extraction."""
+    captured = _install_ipo_sdk_scenario(
+        monkeypatch, scenario="success", final_text="{}"
+    )
+    pages = (ExtractedPage(page_number=1, text="Revenue 100", tables=()),)
+    sections = (
+        ClassifiedSection(
+            section=IpoSectionType.FINANCIAL_STATEMENTS,
+            page_numbers=(1,),
+            keyword_hits=("financial statements",),
+        ),
+    )
+
+    assert (
+        financial_extractor._default_run_agent(
+            "prompt", sections=sections, pages=pages, model="test-model"
+        )
+        == "{}"
+    )
+    assert captured["tools"] == []
+    assert captured["allowed_tools"] == [
+        "mcp__ipo_extractor__list_sections",
+        "mcp__ipo_extractor__read_section",
+        "mcp__ipo_extractor__read_tables",
+    ]
+    assert captured["permission_mode"] == "dontAsk"
+    assert captured["setting_sources"] == []
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected_code"),
+    [
+        ("result_error", "agent_run_failed"),
+        ("result_429", "usage_limit_reached"),
+        ("billing_message", "usage_limit_reached"),
+        ("rate_event", "usage_limit_reached"),
+        ("cli_missing", "cli_not_found"),
+        ("process_usage", "usage_limit_reached"),
+        ("process_failed", "agent_process_failed"),
+        ("assistant_eof", "agent_run_failed"),
+        ("empty_stream", "agent_run_failed"),
+    ],
+)
+def test_failed_ipo_sdk_run_returns_typed_receipt_without_parsing_or_write(
+    file_session_factory,
+    tmp_path: Path,
+    monkeypatch,
+    scenario: str,
+    expected_code: str,
+) -> None:
+    """Provider/CLI failures cannot turn failed output into a pending proposal.
+
+    Beginner note:
+        Some SDK failures carry a JSON-looking final message. The stream status
+        remains authoritative: accepting that text would enqueue financial data
+        from a failed run. Each operational failure must instead become a stable,
+        payload-free receipt and leave the proposal table untouched.
+    """
+    issue, document, _digest = _cached_pdf_document(file_session_factory, tmp_path)
+    _install_ipo_sdk_scenario(
+        monkeypatch, scenario=scenario, final_text=_agent_json()
+    )
+
+    result = propose_extraction(
+        issue.id,
+        document.id,
+        data_dir=tmp_path,
+        session_factory=file_session_factory,
+    )
+
+    assert isinstance(result, IpoExtractionErrorReceipt)
+    assert result.error_type == "IpoExtractionError"
+    assert result.code == expected_code
+    assert list_extraction_proposals(
+        issue_id=issue.id, session_factory=file_session_factory
+    ) == []
+
+
+def test_successful_empty_terminal_result_uses_prior_assistant_text(
+    file_session_factory,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A successful terminal event preserves the documented assistant fallback.
+
+    Beginner note:
+        Some SDK versions put the final JSON in the last assistant message and
+        emit a successful ``ResultMessage`` whose own ``result`` is empty. The
+        terminal event still proves success, so the runner may use the retained
+        assistant text. This positive control prevents the fail-closed EOF fix
+        from rejecting a legitimate completed stream.
+    """
+    issue, document, _digest = _cached_pdf_document(file_session_factory, tmp_path)
+    _install_ipo_sdk_scenario(
+        monkeypatch,
+        scenario="success_empty_result",
+        final_text=_agent_json(),
+    )
+
+    result = propose_extraction(
+        issue.id,
+        document.id,
+        data_dir=tmp_path,
+        session_factory=file_session_factory,
+    )
+
+    assert isinstance(result, IpoExtractionProposalRecord)
+    proposals = list_extraction_proposals(
+        issue_id=issue.id, session_factory=file_session_factory
+    )
+    assert [proposal.id for proposal in proposals] == [result.id]

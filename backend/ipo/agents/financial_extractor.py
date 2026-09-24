@@ -38,6 +38,7 @@ from typing import Any, Final
 
 from pydantic import ValidationError, field_validator, model_validator
 
+from backend.agent_usage_limits import USAGE_LIMIT_MARKERS, mentions_usage_limit
 from backend.ai_runtime import extract_json_object, run_agent_coroutine
 from backend.ai_validation import StrictAIModel, parse_with_retry
 from backend.config import get_ai_max_attempts, get_settings
@@ -90,6 +91,13 @@ _SECTION_CHUNK_CHARS: Final = 12_000
 _MEDIUM_CONFIDENCE_MIN_VERIFIED: Final = 0.9
 _CITED_FACT_SCHEMA_VERSION: Final = "cited-financial-fact/v3"
 
+# Structured SDK events are authoritative where available. The shared marker
+# fallback (backend.agent_usage_limits) is used only for older CLI ProcessError
+# text and failed ResultMessage fallbacks, and is identical for every agent.
+# It classifies the failure without copying provider output into receipts.
+_USAGE_LIMIT_MARKERS: Final = USAGE_LIMIT_MARKERS
+_mentions_usage_limit = mentions_usage_limit
+
 # Request-local collector for raw text that tripped the injection scanner.
 # The model only ever sees the blocked-evidence marker; the run is failed
 # closed afterwards. Stays None outside propose_extraction so direct tool
@@ -114,6 +122,38 @@ class IpoExtractionError(RuntimeError):
         """Store the stable code alongside the human-readable summary."""
         super().__init__(message)
         self.code = code
+
+
+def _message_indicates_usage_limit(message: Any) -> bool:
+    """Recognize structured and failed-message quota signals from the Agent SDK.
+
+    Args:
+        message: SDK stream event inspected through its optional status fields.
+
+    Returns:
+        Whether structured rejection or an explicitly failed result identifies
+        a usage/billing limit. Ordinary successful answer text is not classified.
+
+    Beginner note:
+        A rejected ``RateLimitEvent`` or an assistant ``billing_error`` can
+        arrive before the final result. The runner remembers that signal while
+        draining the stream, then fails before any JSON-looking text is parsed.
+        Free-form text is considered only on an explicitly failed result.
+    """
+    rate_info = getattr(message, "rate_limit_info", None)
+    if rate_info is not None and getattr(rate_info, "status", None) == "rejected":
+        return True
+    if getattr(message, "error", None) in {"rate_limit", "billing_error"}:
+        return True
+    if not getattr(message, "is_error", False):
+        return False
+    if getattr(message, "api_error_status", None) == 429:
+        return True
+    errors = getattr(message, "errors", None) or []
+    return _mentions_usage_limit(
+        *(str(error) for error in errors),
+        str(getattr(message, "result", "") or ""),
+    )
 
 
 class _ExtractionOutputError(Exception):
@@ -1587,20 +1627,34 @@ def _default_run_agent(
 ) -> str:
     """Run one extraction loop on the Claude Agent SDK and return final text.
 
-    Mirrors the fundamentals agent's locked-down runner: lazy SDK import,
-    in-process tools only, ``permission_mode="dontAsk"`` so nothing outside
-    ``allowed_tools`` can ever run, and no user/project settings loaded.
+    Args:
+        prompt: Application-built extraction instructions for this issue.
+        sections: Classified prospectus sections exposed by the bounded readers.
+        pages: Already extracted pages; tools cannot open arbitrary source files.
+        model: Configured Claude model identifier for this extraction attempt.
+
+    Returns:
+        Final or fallback assistant text from a run without a detected failure.
+        The caller still validates its JSON, citations, and financial values.
+
+    Raises:
+        IpoExtractionError: The SDK or CLI is unavailable, execution fails, or
+            usage/billing limits or a failed result make its output unusable.
 
     Beginner note:
-        The model cannot browse the filesystem or network. It can request only
-        the bounded sections and tables already produced by the contained PDF
-        parser. Every tool response is scanned again for prompt injection
-        before the model sees it.
+        Tool availability and approval are separate controls: ``tools=[]``
+        removes built-ins, the MCP allowlist approves only our bounded readers,
+        and ``dontAsk`` denies requests outside that approval policy. No user or
+        project settings are loaded. The model receives only the extracted
+        evidence; every text/table response is checked for prompt injection.
+        A parseable answer is insufficient if the SDK reports that the run failed.
     """
     try:
         from claude_agent_sdk import (  # type: ignore[import-not-found, unused-ignore]
             AssistantMessage,
             ClaudeAgentOptions,
+            CLINotFoundError,
+            ProcessError,
             ResultMessage,
             create_sdk_mcp_server,
             query,
@@ -1673,6 +1727,9 @@ def _default_run_agent(
         tools=[_list_sections, _read_section, _read_tables],
     )
     options = ClaudeAgentOptions(
+        # ``tools`` controls SDK built-ins separately from allowed_tools. An
+        # explicit empty list ensures the model has only the MCP readers below.
+        tools=[],
         model=model,
         system_prompt=_SYSTEM_PROMPT,
         max_turns=_MAX_TURNS,
@@ -1690,17 +1747,73 @@ def _default_run_agent(
     )
 
     async def _run() -> str:
-        """Drain one SDK query and keep the final assistant/result text."""
+        """Drain one SDK query, rejecting failed runs before returning text.
+
+        Returns:
+            The last result or assistant text only after a successful terminal
+            ``ResultMessage`` proves the stream completed.
+
+        Raises:
+            IpoExtractionError: If the CLI is absent, its process fails, the
+                provider rejects usage/billing, or a successful terminal result
+                is absent.
+
+        Beginner note:
+            SDK streams may contain polished JSON and then fail or end without
+            any terminal status. Neither case proves success. A successful
+            terminal event with an empty result may still confirm the preceding
+            assistant text, preserving the SDK's documented fallback shape.
+        """
         final_text = ""
-        async for message in query(prompt=prompt, options=options):
-            if isinstance(message, ResultMessage):
-                if message.result:
-                    final_text = message.result
-            elif isinstance(message, AssistantMessage):
-                for block in getattr(message, "content", None) or []:
-                    block_text = getattr(block, "text", None)
-                    if block_text:
-                        final_text = block_text
+        usage_limit_reached = False
+        terminal_result: ResultMessage | None = None
+        failed_result: ResultMessage | None = None
+        try:
+            async for message in query(prompt=prompt, options=options):
+                if _message_indicates_usage_limit(message):
+                    usage_limit_reached = True
+                if isinstance(message, ResultMessage):
+                    terminal_result = message
+                    if message.is_error and failed_result is None:
+                        failed_result = message
+                    if message.result:
+                        final_text = message.result
+                elif isinstance(message, AssistantMessage):
+                    for block in getattr(message, "content", None) or []:
+                        block_text = getattr(block, "text", None)
+                        if block_text:
+                            final_text = block_text
+        except CLINotFoundError as exc:
+            raise IpoExtractionError(
+                "cli_not_found",
+                "The bundled Claude CLI could not be found; reinstall claude-agent-sdk.",
+            ) from exc
+        except ProcessError as exc:
+            if _mentions_usage_limit(str(exc), getattr(exc, "stderr", None)):
+                raise IpoExtractionError(
+                    "usage_limit_reached",
+                    "The Claude plan usage or billing limit rejected this extraction.",
+                ) from exc
+            raise IpoExtractionError(
+                "agent_process_failed",
+                "The Claude CLI process failed during IPO extraction.",
+            ) from exc
+
+        if usage_limit_reached:
+            raise IpoExtractionError(
+                "usage_limit_reached",
+                "The Claude plan usage or billing limit rejected this extraction.",
+            )
+        if failed_result is not None:
+            raise IpoExtractionError(
+                "agent_run_failed",
+                "The Claude Agent SDK reported a failed IPO extraction run.",
+            )
+        if terminal_result is None:
+            raise IpoExtractionError(
+                "agent_run_failed",
+                "The Claude Agent SDK ended without a successful terminal result.",
+            )
         return final_text
 
     return run_agent_coroutine(_run())
