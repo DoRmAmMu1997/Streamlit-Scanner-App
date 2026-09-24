@@ -16,6 +16,9 @@ pandas==3.0.5
 numpy==2.4.6
 pyarrow==23.0.1
 requests==2.34.2
+# pdf_transport.py uses urllib3's inspected 2.7.0 pool API directly; this
+# declares the already-tested transitive version without upgrading it.
+urllib3==2.7.0
 python-dotenv==1.2.2
 dhanhq==2.2.0
 PyYAML==6.0.3

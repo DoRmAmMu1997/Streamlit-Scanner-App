@@ -227,6 +227,7 @@ def worker_entry(
     pdf_path: str,
     budget: Mapping[str, int | float],
     send_connection: Any,
+    start_event: Any = None,
 ) -> None:
     """Contain parser state and emit one bounded byte message to the parent.
 
@@ -234,6 +235,7 @@ def worker_entry(
         pdf_path: Verified cache path selected by the parent.
         budget: Primitive resource limits supplied by the parent.
         send_connection: One-way pipe endpoint owned by this child.
+        start_event: Parent grant after OS containment; absent only in pure tests.
 
     Beginner note:
         This is a multiprocessing entrypoint, so it must stay at module scope
@@ -241,6 +243,10 @@ def worker_entry(
         the parent can reliably detect EOF after success, failure, or timeout.
     """
     try:
+        # A timed-out or failed parent cannot accidentally release a parser
+        # before its Windows Job Object has been attached.
+        if start_event is not None and not start_event.wait(timeout=60):
+            return
         _apply_linux_memory_limit(budget)
         encoded = _encode_payload(extract_payload(pdf_path, budget))
         if len(encoded) > _limit(budget, "max_serialized_result_bytes"):

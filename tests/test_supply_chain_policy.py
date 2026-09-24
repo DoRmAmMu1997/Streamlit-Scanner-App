@@ -180,6 +180,7 @@ def test_constraints_pin_direct_runtime_and_developer_dependencies():
         "psycopg",
         "psycopg-binary",
         "requests",
+        "urllib3",
         "python-dotenv",
         "dhanhq",
         "pyyaml",

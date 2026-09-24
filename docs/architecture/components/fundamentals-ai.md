@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Component** | Per-stock fundamental-analysis agent + screener.in scraper + PDF reader + cache |
-| **Source** | [`fundamental_agent.py`](../../../backend/fundamentals/fundamental_agent.py), [`screener_in_client.py`](../../../backend/fundamentals/screener_in_client.py), [`pdf_reader.py`](../../../backend/fundamentals/pdf_reader.py), [`fundamentals_cache.py`](../../../backend/fundamentals/fundamentals_cache.py) |
+| **Source** | [`fundamental_agent.py`](../../../backend/fundamentals/fundamental_agent.py), [`screener_in_client.py`](../../../backend/fundamentals/screener_in_client.py), [`pdf_reader.py`](../../../backend/fundamentals/pdf_reader.py), [`pdf_transport.py`](../../../backend/fundamentals/pdf_transport.py), [`fundamentals_cache.py`](../../../backend/fundamentals/fundamentals_cache.py) |
 | **Layer** | AI subsystem (`backend/`) — the shared SDK plumbing reused by the other two AI agents |
 | **Status** | Stable (migrated to Claude Agent SDK; structured forward outlook) |
 | **Related** | [HLD](../high-level-design.md) · [technical-analysis-ai.md](technical-analysis-ai.md) · [sixty-seven-ka-funda-ai.md](sixty-seven-ka-funda-ai.md) · [ui-pages.md](ui-pages.md) · [security.md](security.md) · [configuration.md](configuration.md) |
@@ -17,10 +17,11 @@ outlook). This package is also the **reference implementation** the Technical
 Analysis and 67 Ka Funda agents reuse (SDK runner, error types, usage-limit
 detection, Windows-safe async bridge, on-disk cache).
 
-**Four files:**
+**Five files:**
 - **`fundamental_agent.py`** — the agent, its two in-process tools, the `AgentVerdict` Pydantic schema, criteria/universal modes, usage-limit handling, and the shared `AgentRunResult` / error classes.
 - **`screener_in_client.py`** — `requests`+BeautifulSoup scraper (ratios, history, **HTMX peer table**, shareholding, announcements, concall metadata, median P/E).
-- **`pdf_reader.py`** — concall-transcript download + text extraction (`pdfplumber` → `pypdf` fallback), size/page-capped.
+- **`pdf_reader.py`** — concall-transcript download + text extraction (`pdfplumber` → optional `pypdf` fallback), in a killable child with 30-page/40,000-character, 60-second and 512 MiB limits. See the [PDF containment ADR](../pdf-parser-resource-containment.md).
+- **`pdf_transport.py`** — validates each transcript URL and redirect, resolves every DNS answer once, and opens the request through an IP-pinned urllib3 pool with the original Host/SNI/certificate identity.
 - **`fundamentals_cache.py`** — the on-disk JSON cache (data + verdicts) shared by all three AI agents.
 
 ## 2. Position in the system
@@ -41,7 +42,7 @@ sequenceDiagram
         Agent->>SDK: query(mode-aware prompt, 2 tools, dontAsk)
         SDK->>T1: fetch_company_data(symbol)  --> screener.in (cached)
         SDK->>T2: read_recent_concall_transcript(symbol)  [optional]
-        T2->>T2: pdf_reader (pdfplumber→pypdf, capped)
+        T2->>T2: pdf_reader → pdf_transport (public target + pinned request) → pdfplumber→pypdf (capped)
         Note over T1,T2: TEST-003 — record raw evidence (audit) then prompt-injection scan. A hit returns a generic blocked response, never the hostile text
         SDK-->>Agent: final AgentVerdict JSON
         Agent->>Agent: parse+validate, normalize (stamp mode/total_criteria)
@@ -61,7 +62,7 @@ sequenceDiagram
 | `CriterionResult` / `Observation` | Per-criterion verdict / agent-chosen observation (incl. mandatory Valuation P/E-vs-median). |
 | `AgentRunResult`, `FundamentalsAgentError` (`code`), `FundamentalsUsageLimitError` (`resets_at`, `rate_limit_type`) | **Shared** across all three AI agents. |
 | `screener_in_client.fetch_company_data(symbol)` / `ScreenerInFetchError` | Scrape one company page → structured dict (capped response text, HTMX peer fragment, announcements/concalls). |
-| `pdf_reader.read_recent_concall_text(concalls)` / `download_pdf` / `extract_text` | Most-recent transcript text; `pdfplumber`→`pypdf`; char/page caps; `_looks_like_pdf` content sniff. |
+| `pdf_reader.read_recent_concall_text(concalls)` / `download_pdf` / `extract_text` | Most-recent transcript text; `pdf_transport` validates and pins each public HTTP(S) hop; `pdfplumber`→`pypdf`; char/page caps; `_looks_like_pdf` content sniff. |
 | `FundamentalsCache` | `get/set_data` (30-day TTL, `SCANNER_FUNDAMENTALS_TTL_DAYS`), `get/set_verdict` (keyed `<SYMBOL>_verdict_<modelhash>_<data_date>`), `invalidate`. |
 
 ## 4. Two evaluation modes
@@ -77,6 +78,7 @@ The mode is chosen by the UI from the row's universe; `_normalize_verdict` **enf
 |---|---|---|
 | **Claude Agent SDK on the Claude subscription** | Usage draws on the plan's monthly Agent SDK credit, not per-token API. **`ANTHROPIC_API_KEY` must stay UNSET** or the SDK silently bills the API account. | Per-token API key / OpenRouter — billing surprise / dead key. |
 | **Two tools, `read_recent_concall_transcript` only when needed** | The transcript is ~8–15K tokens; the agent skips it when structured data is decisive (cost control). | Always read transcript — expensive. |
+| **Public-address-pinned transcript transport** | `pdf_transport` validates every URL and redirect before opening it, rejects mixed public/private DNS, and connects to the validated numeric address while retaining the original hostname for Host/SNI/certificate checks. Each hop uses a fresh `trust_env=False` session with no caller proxy, cookie, auth, or adapter state. | Preflight DNS followed by a normal hostname request — DNS time-of-check/time-of-use gap; caller-session reuse — ambient credentials/proxies and mutable adapters cross the boundary. |
 | **Tool outputs are untrusted evidence; symbol-bound** | System prompt + tool reject a mismatched symbol; scraped text is never followed as instructions (AI-003). | Trust scraped text — prompt-injection. |
 | **External evidence quarantined before model exposure (TEST-003)** | Both tools record the raw screener JSON / concall transcript in a request-local audit collector, then scan it via the shared [`backend.security.prompt_injection`](../../../backend/security/prompt_injection.py) engine (Unicode/homoglyph normalization + instruction patterns). A hit returns a generic blocked response to the model — never the hostile text — and `check` then fails closed with `PromptInjectionEvidence` (no verdict, no cache write, no retry). Context is copied across the worker thread so the collector actually populates. | Let hostile transcript/scrape text enter the model context or rely on the system prompt alone — injection risk. |
 | **`@field_validator` for `rating`/counts, not `Field(ge/le)`** | Keeps `minimum`/`maximum` out of the JSON schema (Claude rejects them on ints). | `Field(ge,le)` — Claude rejects schema. |
@@ -99,7 +101,7 @@ The mode is chosen by the UI from the row's universe; `_normalize_verdict` **enf
 
 ## 7. Configuration & dependencies
 
-`CLAUDE_AGENT_MODEL` (default `claude-sonnet-4-6`), `SCANNER_AGENT_FAST_MODE`, `SCANNER_AI_MAX_ATTEMPTS` (default 2 — validation-retry budget), `SCANNER_FUNDAMENTALS_TTL_DAYS`; **`ANTHROPIC_API_KEY` unset**. External: `claude-agent-sdk` (lazy), `requests`+`beautifulsoup4`, `pdfplumber`/`pypdf` (optional), `pydantic`. Caches under `DATA_DIR/cache/fundamentals/`.
+`CLAUDE_AGENT_MODEL` (default `claude-sonnet-4-6`), `SCANNER_AGENT_FAST_MODE`, `SCANNER_AI_MAX_ATTEMPTS` (default 2 — validation-retry budget), `SCANNER_FUNDAMENTALS_TTL_DAYS`; **`ANTHROPIC_API_KEY` unset**. External: `claude-agent-sdk` (lazy), `requests`+`urllib3`+`beautifulsoup4`, `pdfplumber`/`pypdf` (optional), `pydantic`. Caches under `DATA_DIR/cache/fundamentals/`.
 
 ## 8. Testing
 
@@ -107,6 +109,7 @@ The mode is chosen by the UI from the row's universe; `_normalize_verdict` **enf
 - [`tests/test_prompt_injection.py`](../../../tests/test_prompt_injection.py) — the shared detection engine + corpus, reused by this agent and the 67 Ka Funda agent ([`tests/fixtures/ai_prompt_injection_cases.json`](../../../tests/fixtures/ai_prompt_injection_cases.json)).
 - [`tests/test_screener_in_client.py`](../../../tests/test_screener_in_client.py) — scraper parsing (HTMX peers, announcements, concalls, median P/E).
 - [`tests/test_pdf_reader.py`](../../../tests/test_pdf_reader.py) — download caps, `pdfplumber`/`pypdf` fallback, content sniff.
+- [`tests/test_pdf_egress.py`](../../../tests/test_pdf_egress.py) — public-address validation, redirect/hop policy, resource closure, and IP-pinned Host/SNI/certificate transport inspection.
 - [`tests/test_fundamentals_cache.py`](../../../tests/test_fundamentals_cache.py) — TTL, keys, invalidate.
 
 ## 9. Extension points

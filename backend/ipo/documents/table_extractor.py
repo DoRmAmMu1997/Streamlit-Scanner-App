@@ -17,6 +17,7 @@ from __future__ import annotations
 import enum
 import json
 import multiprocessing
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -24,6 +25,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from backend.ipo_pdf_worker import extract_payload, worker_entry
+from backend.pdf_process_limits import WindowsPdfJob
 
 MAX_PAGES_DEFAULT: Final = 800
 _MAX_CELL_CHARS: Final = 200
@@ -305,6 +307,8 @@ def _run_worker(pdf_path: Path, budget: PdfExtractionBudget) -> bytes:
         Raw JSON bytes emitted by the worker.
 
     Raises:
+        OSError: Windows job creation or assignment cannot establish the memory
+            policy. The waiting child is cleaned up without starting its parser.
         TimeoutError: If the worker exceeds its wall-time budget.
         ChildProcessError: If the worker exits abnormally or cannot finish
             cleanup.
@@ -314,21 +318,32 @@ def _run_worker(pdf_path: Path, budget: PdfExtractionBudget) -> bytes:
         ``spawn`` starts a fresh interpreter on every platform. That is slower
         than ``fork`` but avoids inheriting parser state and matches Windows,
         which makes timeout and cleanup behavior consistent in production.
+        The parent grants the start event only after Windows assignment succeeds;
+        failed setup never releases an uncontained parser as a fallback.
     """
     context = multiprocessing.get_context("spawn")
+    job: WindowsPdfJob | None = None
     receive_connection, send_connection = context.Pipe(duplex=False)
+    start_event = context.Event()
     process = context.Process(
         target=worker_entry,
-        args=(str(pdf_path), vars(budget), send_connection),
+        args=(str(pdf_path), vars(budget), send_connection, start_event),
         name="ipo-pdf-parser",
     )
-    process.start()
-    # Only the child should own the sending endpoint after start. Closing the
-    # parent's duplicate lets EOF/crash detection work instead of waiting for a
-    # writer that the parent accidentally kept alive.
-    send_connection.close()
     deadline = time.monotonic() + budget.wall_time_seconds
     try:
+        if sys.platform == "win32":
+            job = WindowsPdfJob(budget.linux_address_space_bytes)
+        process.start()
+        # No parser runs while Windows assignment is pending. Both workers use
+        # the same Job Object policy and preserve their existing memory budgets.
+        if job is not None:
+            if process.pid is None:
+                raise ChildProcessError
+            job.assign(process.pid)
+        start_event.set()
+        # Close the parent's duplicate so child EOF remains observable.
+        send_connection.close()
         while not receive_connection.poll(0.05):
             if not process.is_alive():
                 process.join()
@@ -356,10 +371,16 @@ def _run_worker(pdf_path: Path, budget: PdfExtractionBudget) -> bytes:
             raise ChildProcessError
         return data
     finally:
+        send_connection.close()
         receive_connection.close()
         if process.is_alive():
             process.terminate()
             process.join(timeout=2)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=2)
+        if job is not None:
+            job.close()
 
 
 def parse_document_pages(
