@@ -319,3 +319,77 @@ def test_adapter_rejects_changed_url_verification_or_proxy():
         request.url = "https://other.example/file.pdf"
         with pytest.raises(requests.RequestException):
             adapter.get_connection_with_tls_context(request, True, {})
+
+
+def test_unreachable_first_address_falls_back_to_next_validated_address(tmp_path: Path, monkeypatch):
+    """Pinning must not turn one unreachable DNS answer into a lost transcript.
+
+    Beginner note: the old requests path tried every getaddrinfo answer. Each
+    fallback here is still a validated public address, and TLS still checks the
+    original hostname, so failover adds availability without widening egress.
+    """
+    attempted: list[str] = []
+
+    def send(adapter, request, **kwargs):
+        attempted.append(adapter.target.address)
+        if adapter.target.address == "2606:4700:4700::1111":
+            raise requests.exceptions.ConnectionError("network unreachable")
+        return response()
+
+    monkeypatch.setattr(pdf_transport._PinnedAdapter, "send", send)
+    result = pdf_reader.download_pdf("https://example.com/file.pdf", cache_dir=tmp_path,
+                                     resolver=lambda *_: ["2606:4700:4700::1111", "8.8.8.8"])
+    assert result is not None
+    assert attempted == ["2606:4700:4700::1111", "8.8.8.8"]
+
+
+def test_address_fallback_is_bounded_and_fails_closed(tmp_path: Path, monkeypatch):
+    attempted: list[str] = []
+
+    def send(adapter, request, **kwargs):
+        attempted.append(adapter.target.address)
+        raise requests.exceptions.ConnectTimeout("timed out")
+
+    monkeypatch.setattr(pdf_transport._PinnedAdapter, "send", send)
+    answers = ["8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1", "9.9.9.9"]
+    assert pdf_reader.download_pdf("https://example.com/file.pdf", cache_dir=tmp_path,
+                                   resolver=lambda *_: answers) is None
+    assert attempted == answers[:3]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_slow_drip_download_stops_at_overall_deadline(tmp_path: Path, monkeypatch):
+    """Per-read timeouts alone let a hostile host drip bytes for hours."""
+    from types import SimpleNamespace
+
+    ticks = iter(range(0, 100_000, 50))
+    monkeypatch.setattr(pdf_reader, "time", SimpleNamespace(monotonic=lambda: next(ticks)), raising=False)
+    first = response()
+    monkeypatch.setattr(first, "iter_content", lambda **_: iter([b"%PDF-"] + [b"x"] * 100))
+    assert pdf_reader.download_pdf("https://example.com/file.pdf", cache_dir=tmp_path,
+                                   resolver=lambda *_: ["8.8.8.8"], transport=RecordingSession([first])) is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_failed_cache_publish_leaves_no_partial_pdf(tmp_path: Path, monkeypatch):
+    """A truncated cache file would otherwise be served as a hit forever."""
+    import os
+
+    def fail_replace(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+    assert pdf_reader.download_pdf("https://example.com/file.pdf", cache_dir=tmp_path,
+                                   resolver=lambda *_: ["8.8.8.8"], transport=RecordingSession([response()])) is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_read_recent_concall_text_forwards_trusted_transport_seams(tmp_path: Path, monkeypatch):
+    transport = RecordingSession([response()])
+    monkeypatch.setattr(pdf_reader, "extract_text", lambda *_a, **_k: "transcript body")
+    text = pdf_reader.read_recent_concall_text(
+        [{"transcript_url": "https://example.com/t.pdf"}], cache_dir=tmp_path,
+        resolver=lambda *_: ["8.8.8.8"], transport=transport,
+    )
+    assert text == "transcript body"
+    assert len(transport.calls) == 1
