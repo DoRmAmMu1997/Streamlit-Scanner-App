@@ -1,6 +1,6 @@
 # Approved modernization implementation status
 
-This is a delivery ledger for the [approved plan](../superpowers/plans/2026-09-06-astra-modernization.md), last updated on 2026-09-23. Published PRs remain open: publication and successful checks do not mean a change has landed on `main`. Merge and production deployment remain with the repository owner.
+This is a delivery ledger for the [approved plan](../superpowers/plans/2026-09-06-astra-modernization.md), last updated on 2026-09-24. Published PRs remain open: publication and successful checks do not mean a change has landed on `main`. Merge and production deployment remain with the repository owner.
 
 ## Published and verified packages
 
@@ -15,15 +15,17 @@ This is a delivery ledger for the [approved plan](../superpowers/plans/2026-09-0
 | [#126](https://github.com/DoRmAmMu1997/Streamlit-Scanner-App/pull/126) | `a985970` | Historical market-date ranking and shared finite-number validation published; all six hosted checks pass. |
 | [#127](https://github.com/DoRmAmMu1997/Streamlit-Scanner-App/pull/127) | `616c549` | PDF parser process containment, stacked on #125; independent review and all three posted hosted checks pass, including native Linux and Docker. |
 | [#128](https://github.com/DoRmAmMu1997/Streamlit-Scanner-App/pull/128) | `5e5e57a` | Atomic locked candle-cache preservation and stale-repair protection; independent review and all six hosted checks pass. |
+| [#129](https://github.com/DoRmAmMu1997/Streamlit-Scanner-App/pull/129) | `532224f` | Forward-return integrity, raw-candle preservation and fair retries, stacked on #124; independent review and all three posted hosted checks pass. |
+| [#130](https://github.com/DoRmAmMu1997/Streamlit-Scanner-App/pull/130) | `a874684` | Current-role analysis authorization and terminal SDK-result enforcement; independent review, isolated browser checks and all six hosted checks pass. |
 
-A separate integration worktree first combined #116, #117, #122, #123, #124, #125 and #126 at `e42cdec`. On both pinned Python 3.11 and 3.12, that exact tree's full suite passes **2,156 tests, with one skip and 89.84% coverage including `app.py`**. Pre-commit configuration, compilation, Ruff, full mypy, Bandit, the pinned dependency audit, and diff checks also pass on both interpreters. The next integration head, `9b3dbe7`, additionally includes #127 and #128; its complete gate run remains pending. Neither tree is the final integrated revision.
+A separate integration worktree first combined #116, #117, #122, #123, #124, #125 and #126 at `e42cdec`. On both pinned Python 3.11 and 3.12, that exact tree's full suite passes **2,156 tests, with one skip and 89.84% coverage including `app.py`**. Pre-commit configuration, compilation, Ruff, full mypy, Bandit, the pinned dependency audit, and diff checks also pass on both interpreters. Integration head `c475862` additionally includes #127, #128 and #129; its complete gate run remains pending. Neither tree is the final integrated revision.
+
+The final local #129 candidate ran all 2,128 collected tests: 2,127 passed, one skipped, with 89.85% aggregate coverage including `app.py`. The final #130 candidate ran all 2,053 collected tests: 2,052 passed, one skipped, with 90.25% aggregate coverage including `app.py`. Local runs used recoverable module groups after host interruptions, with separate databases/coverage files and exact clean-commit/interpreter/test identity. Hosted CI subsequently passed the complete single-process suite on both supported Python versions for each PR.
 
 ## Work still required
 
 | Package | Current state | Completion requirement |
 |---|---|---|
-| Analysis permissions and SDK contracts | Implementation and documentation committed through local `91dfee3`; affected suite passes 327 tests, static/audit gates pass. Review found the missing-terminal-result case in IPO extraction. | Require a terminal SDK result before parsing, prove no proposal writes on premature stream end, re-review, verify full gates and publish. |
-| Forward-return processing | Core migration and reviewed fixes committed through `532224f`. Malformed rows survive normalization/range slicing, and incomplete dates cannot establish earliest-bar authority. Both review findings are resolved. | Complete the final full gate and composed-cache checks, publish after #124, and verify hosted checks. |
 | IPO current score and freshness | ADR and shared revision-lock interface recorded; implementation started on the forward-return schema branch. | Complete state selection, bounded retries, time-derived freshness and `20260921ipo013` migration. |
 | IPO proposal approval and editing | Approved requirements recorded. | Implement document chronology/manual-baseline protection and source-bound forms after scoring state. |
 | Shared evidence validation | Isolated implementation package started. | Unify URL/hash/label contracts and cache rejection, retain compatibility and verify all consumers. |
