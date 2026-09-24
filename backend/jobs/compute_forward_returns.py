@@ -31,12 +31,14 @@ from backend.observability import (
     log_event,
 )
 from backend.security import redact_exception
-from backend.storage.database import ensure_database_schema, session_scope
+from backend.storage.database import SessionFactory, ensure_database_schema, session_scope
 from backend.validation import (
     FORWARD_RETURN_HORIZONS,
     ForwardReturnRunSummary,
     compute_pending_forward_returns,
 )
+from backend.validation.forward_return import positive_integral
+from backend.validation.service import ForwardReturnBatchError
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +48,6 @@ logger = logging.getLogger(__name__)
 # client, and compute service. This is plain dependency injection: the function
 # never reaches for a global, so every external dependency can be swapped.
 EnsureSchema = Callable[[], object]
-SessionFactory = Callable[[], Any]
 DataClientFactory = Callable[[], Any]
 DataLoaderFactory = Callable[[Any], Any]
 ComputeService = Callable[..., ForwardReturnRunSummary]
@@ -98,8 +99,8 @@ def run_compute_forward_returns(
     Beginner note — the flow is deliberately linear:
       1. emit a structured ``..._started`` event (limit / as_of / horizons);
       2. bootstrap the database schema (same best-effort step the web app uses);
-      3. build the Dhan client + ``DailyDataLoader`` and open one session;
-      4. hand them to ``compute_pending_forward_returns`` (the idempotent service
+      3. build the Dhan client + ``DailyDataLoader``;
+      4. hand them and a typed context factory to ``compute_pending_forward_returns`` (the service
          that actually fetches candles and upserts rows);
       5. print + log a summary and return exit code 0.
     Any exception from steps 2–4 is caught at this command boundary, redacted with
@@ -107,7 +108,13 @@ def run_compute_forward_returns(
     the logs), reported, and turned into a fatal, exit-code-1 outcome.
     """
     out = output or sys.stdout
-    normalized_horizons = tuple(int(horizon) for horizon in horizons)
+    normalized_horizons = tuple(dict.fromkeys(positive_integral(h, name="horizon") for h in horizons))
+    if limit is not None:
+        limit = positive_integral(limit, name="limit")
+    if not normalized_horizons:
+        outcome = ForwardReturnJobOutcome(summary=ForwardReturnRunSummary(), message="completed")
+        _print_outcome(out, outcome)
+        return outcome
     log_event(
         logger,
         EVENT_FORWARD_RETURNS_JOB_STARTED,
@@ -127,18 +134,17 @@ def run_compute_forward_returns(
             if data_loader_factory is not None
             else DailyDataLoader(client)
         )
-        with session_factory() as session:
-            summary = compute_service(
-                session,
-                loader,
-                as_of=as_of,
-                horizons=normalized_horizons,
-                limit=limit,
-            )
+        summary = compute_service(
+            session_factory,
+            loader,
+            as_of=as_of,
+            horizons=normalized_horizons,
+            limit=limit,
+        )
     except Exception as exc:  # noqa: BLE001 - command boundary becomes exit code
         safe_message = redact_exception(exc)
         outcome = ForwardReturnJobOutcome(
-            summary=ForwardReturnRunSummary(),
+            summary=exc.summary if isinstance(exc, ForwardReturnBatchError) else ForwardReturnRunSummary(),
             fatal=True,
             message=safe_message,
         )
@@ -174,7 +180,14 @@ def _print_outcome(out: TextIO, outcome: ForwardReturnJobOutcome) -> None:
     message; the success branch prints the per-status counts the scheduler logs.
     """
     if outcome.fatal:
-        print(f"[forward-returns] FAILED {outcome.message}", file=out, flush=True)
+        print(
+            f"[forward-returns] FAILED {outcome.message} "
+            f"total_signals={outcome.summary.total_signals} computed={outcome.summary.computed} "
+            f"pending={outcome.summary.pending} insufficient={outcome.summary.insufficient} "
+            f"benchmark_computed={outcome.summary.benchmark_computed} "
+            f"benchmark_missing={outcome.summary.benchmark_missing}",
+            file=out, flush=True,
+        )
         return
     summary = outcome.summary
     print(

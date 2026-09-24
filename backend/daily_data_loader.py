@@ -334,6 +334,29 @@ def _date_bounds(candles: pd.DataFrame) -> tuple[date | None, date | None]:
     return timestamps.min().date(), timestamps.max().date()
 
 
+_PRICE_COLUMNS = ("open", "high", "low", "close")
+
+
+def _strip_malformed_rows(candles: pd.DataFrame) -> pd.DataFrame:
+    """Drop rows with an unparseable timestamp or a missing/non-numeric OHLC price.
+
+    Beginner note:
+        Since VALID-005 the Dhan normalizer and the cache keep such raw rows,
+        because forward-return validation must see them rather than silently
+        moving an entry to a later bar. Every other consumer (scans, charts,
+        ranking) gets this pre-VALID-005 view instead, so a single bad vendor
+        row no longer quarantines the whole symbol. Volume is not required,
+        matching the original normalizer.
+    """
+    if candles.empty or "timestamp" not in candles.columns:
+        return candles
+    valid = pd.to_datetime(candles["timestamp"], errors="coerce").notna()
+    for column in _PRICE_COLUMNS:
+        if column in candles.columns:
+            valid &= pd.to_numeric(candles[column], errors="coerce").notna()
+    return candles.loc[valid].reset_index(drop=True)
+
+
 class _RequestPacer:
     """Enforce a minimum spacing between Dhan requests across worker threads.
 
@@ -642,6 +665,12 @@ class DailyDataLoader:
         start = _coerce_date(requested_from)
         if candles.empty:
             return
+        # Bounds intentionally ignore NaT for ordinary cache-coverage checks,
+        # but a vendor-earliest claim needs every returned date to be known.
+        # An unknown row could predate the first valid row; it cannot create,
+        # renew, replace or remove evidence about a precise earliest date.
+        if "timestamp" not in candles or pd.to_datetime(candles["timestamp"], errors="coerce").isna().any():
+            return
         first_date, _last_date = _date_bounds(candles)
         if first_date is None:
             return
@@ -671,29 +700,60 @@ class DailyDataLoader:
             recorded_on=self.today_func(),
         )
 
-    def read_cached_history(self, symbol: str, security_id: str | int) -> pd.DataFrame:
+    def read_cached_history(
+        self,
+        symbol: str,
+        security_id: str | int,
+        *,
+        preserve_malformed_rows: bool = False,
+    ) -> pd.DataFrame:
         """Return the cached daily candles for one stock; empty DataFrame if missing.
 
-        Used by the chart UI: we want to render whatever is already on disk
+        Used by the chart UI and ranking: we want whatever is already on disk
         without ever falling back to a live Dhan fetch (that work belongs to
-        the CLI prefetch).
+        the CLI prefetch). Malformed raw rows are stripped unless the caller
+        opts in (see ``_strip_malformed_rows``).
         """
         path = self.cache_path(symbol, security_id)
         if not path.exists():
             return pd.DataFrame()
         try:
-            return pd.read_parquet(path)
+            cached = pd.read_parquet(path)
         except Exception:
             logger.exception("Failed to read cached parquet for %s", symbol)
             return pd.DataFrame()
+        return cached if preserve_malformed_rows else _strip_malformed_rows(cached)
 
     def _slice_to_range(
         self,
         candles: pd.DataFrame,
         start_date: date | datetime | str,
         end_date: date | datetime | str,
+        *,
+        preserve_malformed_rows: bool = False,
     ) -> pd.DataFrame:
-        """Return rows of `candles` whose timestamp falls within [start, end]."""
+        """Return in-range candles, keeping malformed raw rows only on request.
+
+        Args:
+            candles: Provider or cache frame, before any row-level cleanup.
+            start_date: Inclusive beginning of the requested calendar range.
+            end_date: Inclusive end, including all times within that day.
+            preserve_malformed_rows: Validation-only authority to also receive
+                rows with an unparseable timestamp or a missing OHLC price.
+
+        Returns:
+            In-range rows. With ``preserve_malformed_rows`` also every row whose
+            timestamp cannot be parsed, and malformed prices are kept. Empty or
+            timestamp-free inputs remain unchanged for downstream validation.
+
+        Beginner note:
+            A malformed date cannot prove that its row falls outside this range.
+            Forward-return validation opts in to see such rows so it can refuse
+            to shift an entry to a later bar. Scans, charts and ranking keep the
+            default: the rows are stripped exactly as the Dhan normalizer did
+            before VALID-005, so one bad vendor row cannot quarantine a symbol
+            from every screener.
+        """
         if candles.empty or "timestamp" not in candles.columns:
             return candles
         start_ts = pd.Timestamp(_coerce_date(start_date))
@@ -701,8 +761,10 @@ class DailyDataLoader:
         # captures today's daily candle once it lands.
         end_ts = pd.Timestamp(_coerce_date(end_date)) + pd.Timedelta(hours=23, minutes=59, seconds=59)
         timestamps = pd.to_datetime(candles["timestamp"], errors="coerce")
-        mask = (timestamps >= start_ts) & (timestamps <= end_ts)
-        return candles.loc[mask].reset_index(drop=True)
+        in_range = (timestamps >= start_ts) & (timestamps <= end_ts)
+        if preserve_malformed_rows:
+            return candles.loc[timestamps.isna() | in_range].reset_index(drop=True)
+        return _strip_malformed_rows(candles.loc[in_range])
 
     def get_daily_history(
         self,
@@ -712,6 +774,7 @@ class DailyDataLoader:
         force_refresh: bool = False,
         *,
         allow_unpublished_tail: bool = False,
+        preserve_malformed_rows: bool = False,
     ) -> tuple[pd.DataFrame, bool]:
         """Return daily candles for one instrument, sliced to the requested range.
 
@@ -723,6 +786,9 @@ class DailyDataLoader:
             force_refresh: Bypass a usable cache and fetch the requested range.
             allow_unpublished_tail: Scanner-only authority to accept a bounded
                 current-session/weekend/marker cache tail.
+            preserve_malformed_rows: Validation-only authority to receive raw
+                rows with unparseable timestamps or missing OHLC prices; every
+                other caller gets them stripped (see ``_slice_to_range``).
 
         Returns:
             The requested candle frame and whether it was served from cache.
@@ -797,7 +863,9 @@ class DailyDataLoader:
                     checked_through=checked_through,
                     allow_unpublished_tail=allow_unpublished_tail,
                 ):
-                    return self._slice_to_range(cached, start_date, end_date), True
+                    return self._slice_to_range(
+                        cached, start_date, end_date, preserve_malformed_rows=preserve_malformed_rows
+                    ), True
 
         # Cache miss (or force_refresh): fetch the requested window from Dhan
         # and save under the stable filename for future calls.
@@ -814,7 +882,9 @@ class DailyDataLoader:
         self._record_vendor_earliest(
             symbol, security_id, requested_from=start_date, candles=candles
         )
-        return self._slice_to_range(candles, start_date, end_date), False
+        return self._slice_to_range(
+            candles, start_date, end_date, preserve_malformed_rows=preserve_malformed_rows
+        ), False
 
     def fetch_window(
         self,

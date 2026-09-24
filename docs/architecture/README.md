@@ -104,3 +104,5 @@ and dashboard freshness/provenance.
 Keep these docs in sync with the code: when a subsystem's interface, schema, or a
 key decision changes, update its LLD (and the HLD if the change is system-wide) in
 the same PR.
+
+- [VALID-005 forward-return integrity and retry scheduling](valid-005-forward-return-integrity.md) — immutable receipts, short transactions, fair stock and benchmark retries.
