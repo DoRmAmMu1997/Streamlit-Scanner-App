@@ -26,6 +26,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from backend.numeric import finite_decimal
 from backend.storage.models import (
     AIEvaluation,
     AppConfig,
@@ -491,23 +492,6 @@ def get_scan_runs(session: Session, run_ids: Sequence[int]) -> list[ScanRun]:
     return list(session.scalars(stmt))
 
 
-def _finite_decimal(value: Any) -> Decimal | None:
-    """Parse only finite numeric values for score ordering.
-
-    Stored raw JSON is intentionally flexible, so ``confidence`` may be a
-    number, a numeric string, ``None``, or junk. The repository should make bad
-    values sort as unscored instead of letting ``Decimal('NaN')`` or a string
-    parsing error make the notification job fail.
-    """
-    if value is None:
-        return None
-    try:
-        parsed = Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return None
-    return parsed if parsed.is_finite() else None
-
-
 def _rank_score_and_source(result: ScanResult) -> tuple[Decimal | None, str | None]:
     """Return the score used for ALERT-001 ranking and its source.
 
@@ -515,12 +499,12 @@ def _rank_score_and_source(result: ScanResult) -> tuple[Decimal | None, str | No
     outranks the generic confidence fallback. The fallback only makes today's
     alerts more useful while RANK-002 is not yet merged.
     """
-    final_score = _finite_decimal(result.final_score)
+    final_score = finite_decimal(result.final_score)
     if final_score is not None:
         return final_score, "final_score"
     raw_result = result.raw_result_json
     if isinstance(raw_result, Mapping):
-        confidence = _finite_decimal(raw_result.get("confidence"))
+        confidence = finite_decimal(raw_result.get("confidence"))
         if confidence is not None:
             return confidence, "confidence"
     return None, None

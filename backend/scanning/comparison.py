@@ -27,12 +27,12 @@ from __future__ import annotations
 import datetime as dt
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
-from typing import Any
+from decimal import Decimal
 
 import pandas as pd
 from sqlalchemy.orm import Session
 
+from backend.numeric import finite_decimal
 from backend.storage.models import ScanResult, ScanRun
 from backend.storage.repository import (
     get_latest_finalized_scan_runs,
@@ -349,28 +349,10 @@ def _result_score(result: ScanResult) -> tuple[Decimal | None, str | None]:
         return result.final_score, "final_score"
     raw = result.raw_result_json
     if isinstance(raw, Mapping) and "confidence" in raw:
-        score = _decimal_or_none(raw.get("confidence"))
+        score = finite_decimal(raw.get("confidence"))
         if score is not None:
             return score, "confidence"
     return None, None
-
-
-def _decimal_or_none(value: Any) -> Decimal | None:
-    """Best-effort parse of an arbitrary JSON value into a finite ``Decimal``.
-
-    ``raw_result_json`` is free-form, so ``confidence`` could be a number, a
-    numeric string, ``None``, or junk. We convert via ``str(value)`` (so 4 and
-    "4" behave the same) and reject anything unparseable or non-finite
-    (``NaN``/``inf``) by returning ``None``, which keeps such symbols out of the
-    improved/degraded buckets.
-    """
-    if value is None:
-        return None
-    try:
-        score = Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return None
-    return score if score.is_finite() else None
 
 
 def _comparison_row(

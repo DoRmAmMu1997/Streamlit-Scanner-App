@@ -16,6 +16,7 @@ def test_load_scoring_config_uses_defaults_when_file_is_missing(tmp_path):
     config = load_scoring_config(tmp_path / "missing.yaml")
 
     assert config == ScoringConfig()
+    assert config.model_version == "rank-1.1"
 
 
 def test_load_scoring_config_malformed_file_is_graceful(tmp_path):
