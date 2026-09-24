@@ -12,7 +12,7 @@ import ipaddress
 import socket
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 from urllib.parse import urlsplit
 
@@ -20,9 +20,13 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.connectionpool import HTTPConnectionPool
 
-from backend.url_safety import is_safe_http_url
+from backend.url_safety import is_public_ip, is_safe_http_url
 
 Resolver = Callable[[str, int], Iterable[str]]
+
+# One primary plus two fallbacks. Each attempt may wait a full connect timeout,
+# so a long DNS answer list must not multiply the worst-case download time.
+_MAX_ADDRESS_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -31,6 +35,8 @@ class PublicTarget:
 
     Beginner note: keep hostname identity separate from the connection address.
     Substituting an IP into the TLS hostname would authenticate the wrong peer.
+    ``fallback_addresses`` are other members of the same validated DNS answer;
+    they exist only so one unreachable answer does not lose the whole fetch.
     """
 
     url: str
@@ -38,13 +44,14 @@ class PublicTarget:
     port: int
     address: str
     host_header: str
+    fallback_addresses: tuple[str, ...] = ()
 
 
 class Transport(Protocol):
     """Explicit trusted transport seam; URL content cannot supply this object."""
 
     def __call__(
-        self, target: PublicTarget, *, headers: dict[str, str], timeout: int,
+        self, target: PublicTarget, *, headers: dict[str, str], timeout: float,
     ) -> AbstractContextManager[requests.Response]:
         """Open one response, closing it when the caller leaves the context."""
         ...
@@ -57,15 +64,6 @@ def _resolve_addresses(hostname: str, port: int) -> Iterable[str]:
     records from becoming a lottery in which an internal address sometimes wins.
     """
     return [str(info[4][0]) for info in socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)]
-
-
-def _public_address(address: str) -> bool:
-    """Reject non-public and scoped addresses on both supported Python versions."""
-    if "%" in address:
-        return False
-    parsed = ipaddress.ip_address(address)
-    # Multicast can report is_global=True: it is never a unicast web endpoint.
-    return parsed.is_global and not (parsed.is_multicast or parsed.is_reserved)
 
 
 def resolve_public_target(url: str, *, resolver: Resolver | None = None) -> PublicTarget:
@@ -106,12 +104,18 @@ def resolve_public_target(url: str, *, resolver: Resolver | None = None) -> Publ
         addresses = list((resolver or _resolve_addresses)(hostname, port))
     else:
         addresses = [str(literal)]
-    if not addresses or not all(_public_address(address) for address in addresses):
+    if not addresses or not all(is_public_ip(address) for address in addresses):
         raise ValueError("Transcript DNS contains a non-public address")
     host_header = f"[{hostname}]" if ":" in hostname else hostname
     if parsed.port is not None:
         host_header += f":{port}"
-    return PublicTarget(canonical, hostname, port, str(ipaddress.ip_address(addresses[0])), host_header)
+    # Keep resolver order (the OS already prefers reachable families) and drop
+    # repeats, so each connection attempt is a genuinely different endpoint.
+    ordered = list(dict.fromkeys(str(ipaddress.ip_address(address)) for address in addresses))
+    return PublicTarget(
+        canonical, hostname, port, ordered[0], host_header,
+        fallback_addresses=tuple(ordered[1:_MAX_ADDRESS_ATTEMPTS]),
+    )
 
 
 class _PinnedAdapter(HTTPAdapter):
@@ -148,7 +152,7 @@ class _PinnedAdapter(HTTPAdapter):
 
 @contextmanager
 def open_pinned_response(
-    target: PublicTarget, *, headers: dict[str, str], timeout: int,
+    target: PublicTarget, *, headers: dict[str, str], timeout: float,
 ) -> Iterator[requests.Response]:
     """Open exactly one direct, verified request and close all owned resources.
 
@@ -156,22 +160,43 @@ def open_pinned_response(
     proxy settings. trust_env=False also prevents netrc credentials and ambient
     CA/proxy configuration from silently altering this security boundary.
     Redirects remain the downloader's responsibility, before the next request.
+    A connection-level failure moves on to the next validated address; every
+    attempt is still pinned and still verifies TLS for the original hostname.
     """
     with requests.Session() as session:
         session.trust_env = False
-        adapter = _PinnedAdapter(target)
+        response = _send_to_first_reachable(session, target, headers=headers, timeout=timeout)
+        with response:
+            yield response
+
+
+def _send_to_first_reachable(
+    session: requests.Session, target: PublicTarget, *, headers: dict[str, str], timeout: float,
+) -> requests.Response:
+    """Return the first response from the validated addresses, in resolver order.
+
+    Beginner note: only ``requests.ConnectionError`` (refused, unreachable,
+    connect timeout, TLS handshake failure) triggers a fallback. Any response,
+    even an HTTP error, is the answer. The loop finishes before the caller's
+    ``with`` block starts, so an exception raised while the caller reads the
+    body can never be mistaken for a failed connection and retried here.
+    """
+    candidates = (target.address, *target.fallback_addresses)
+    for attempt, address in enumerate(candidates, start=1):
+        adapter = _PinnedAdapter(replace(target, address=address))
+        # Mounting replaces the previous prefix entry, so the session's own
+        # close() only reaches the successful adapter; failures close here.
         session.mount(f"{urlsplit(target.url).scheme}://", adapter)
         request = session.prepare_request(requests.Request(
             "GET", target.url, headers={**headers, "Host": target.host_header},
         ))
-        # Session.send builds a hypothetical next request even when passed
-        # allow_redirects=False, eagerly consuming the entire redirect body.
-        # HTTPAdapter.send uses urllib3 redirect=False and never does that work.
-        with adapter.send(
-            request,
-            timeout=timeout,
-            stream=True,
-            verify=True,
-            proxies={},
-        ) as response:
-            yield response
+        try:
+            # Session.send builds a hypothetical next request even when passed
+            # allow_redirects=False, eagerly consuming the entire redirect body.
+            # HTTPAdapter.send uses urllib3 redirect=False and never does that work.
+            return adapter.send(request, timeout=timeout, stream=True, verify=True, proxies={})
+        except requests.ConnectionError:
+            adapter.close()
+            if attempt == len(candidates):
+                raise
+    raise AssertionError("unreachable: candidates always holds the primary address")  # pragma: no cover

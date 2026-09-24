@@ -23,6 +23,16 @@ TLS `server_hostname` and certificate `assert_hostname`. CA verification remains
 enabled. The connection never resolves the original hostname again, and no
 process-global resolver patch or caller-session mutation is used.
 
+Every answer in the validated DNS set must be public before any request. The
+first answer is tried first; a connection-level failure (`requests.ConnectionError`:
+refused, unreachable, connect timeout or TLS handshake failure) moves to the next
+validated answer, at most three addresses per hop. This restores the failover the
+unpinned requests/urllib3 path already had (for example, an AAAA answer on an
+IPv4-only host). Every attempt is still pinned and verifies the original hostname.
+The public-address rule is the shared `backend.url_safety.is_public_ip`, which
+also rejects multicast, reserved (including NAT64) and scoped addresses for every
+other server-side fetcher.
+
 Each production hop owns a fresh Session with `trust_env=False` and empty proxy
 settings. Prepared requests carry only the downloader's explicit headers. The
 adapter receives `verify=True`, `proxies={}`, streaming and the existing 30-second
@@ -42,6 +52,8 @@ returning control without consuming the body or following the redirect.
 Existing PDF acceptance rules remain: at most 25 MiB of streamed decoded bytes,
 PDF magic, and an allowed/missing media type. Redirect bodies are closed without
 being read. This package does not change PDF parsing or the existing cache key.
+An accepted PDF is written to a same-directory temporary file and published with
+`os.replace`, so an interrupted write can never leave a truncated cache hit.
 
 ## Alternatives and compatibility
 
@@ -52,9 +64,10 @@ unrelated credentials. All three alternatives were rejected.
 
 `download_pdf(..., session=...)` keeps its legacy signature, but session-only
 injection returns `None`, logs an explicit unsupported-injection reason and
-makes no network request. The same behavior propagates through the legacy
-`read_recent_concall_text(..., session=...)` option. Default application callers
-do not supply a Session and retain ordinary public transcript downloads.
+makes no network request. `read_recent_concall_text` no longer accepts a
+Session at all (it could only ever yield an empty transcript); it forwards the
+explicit `resolver`/`transport` seams instead. Default application callers do
+not supply either and retain ordinary public transcript downloads.
 
 Offline callers migrate to explicit trusted `resolver` and `transport` keyword
 arguments on `download_pdf`. Resolver results are still checked and transport
@@ -72,12 +85,14 @@ with original Host/SNI/certificate identity. It inspects the actual urllib3 pool
 and socket-creation arguments without probing a live endpoint. Existing download
 tests retain cache, size, content-type and PDF magic coverage.
 
-The existing timeout is per connection/read, not an overall workflow deadline.
-The resolver uses the operating system's DNS timeout. Arbitrary public HTTP URLs
+Each request keeps the 30-second per connection/read timeout, and one 120-second
+wall-clock deadline covers every hop and every body chunk, so a host dripping
+bytes just under the read timeout is still cut off. Each request's timeout is
+`min(30, remaining)`. The resolver uses the operating system's DNS timeout. Arbitrary public HTTP URLs
 remain allowed and therefore do not authenticate document content; HTTPS verifies
 server identity. Network-level egress policy remains useful defense in depth.
-This ADR scopes enforcement to transcript downloads; other URL fetchers are not
-implicitly hardened by this helper.
+This ADR scopes pinning to transcript downloads; other URL fetchers share only
+the strengthened public-address policy, not the pinned transport.
 
 Related: [fundamentals LLD](components/fundamentals-ai.md),
 [security LLD](components/security.md).

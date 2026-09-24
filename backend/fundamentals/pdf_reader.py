@@ -29,7 +29,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
+import tempfile
+import time
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -45,6 +48,10 @@ logger = logging.getLogger(__name__)
 
 
 _REQUEST_TIMEOUT_SECONDS = 30
+# Wall-clock budget for the whole download: every redirect hop and every body
+# chunk. The per-request timeout above only bounds a single socket wait, so a
+# host dripping one byte per 29 s would otherwise never be cut off.
+_DOWNLOAD_DEADLINE_SECONDS = 120
 _PDF_USER_AGENT = (
     "hemant-scanner/1.0 (+personal use; "
     "https://github.com/DoRmAmMu1997/Streamlit-Scanner-App)"
@@ -94,6 +101,26 @@ def _looks_like_pdf(content_type: str | None, body: bytes) -> bool:
     return body.lstrip().startswith(b"%PDF-")
 
 
+def _publish_atomically(data: bytes, destination: Path) -> None:
+    """Write ``data`` to a same-directory temp file, then rename it into place.
+
+    Beginner note: the cache treats any non-empty ``.pdf`` as a hit. Writing
+    the destination directly means a crash or full disk mid-write leaves a
+    truncated file that is served forever. ``os.replace`` within one directory
+    is atomic, so readers see either no file or the complete one; the
+    ``finally`` removes the temp file whenever the rename did not happen.
+    """
+    with tempfile.NamedTemporaryFile(
+        dir=destination.parent, prefix=f".{destination.stem}.", suffix=".tmp", delete=False,
+    ) as handle:
+        temp_path = Path(handle.name)
+        handle.write(data)
+    try:
+        os.replace(temp_path, destination)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 def download_pdf(
     url: str,
     *,
@@ -118,6 +145,8 @@ def download_pdf(
     before opening a response, and pin the socket to that validated IP. Passing
     a Session no longer waives DNS checks; legacy session-only injection fails
     safely instead of inheriting its proxies, credentials or unsafe adapters.
+    One wall-clock deadline covers every hop and body chunk, and the file is
+    published atomically so an interrupted write never becomes a cache hit.
     """
     if session is not None and transport is None:
         logger.warning("PDF Session injection is unsupported; use explicit resolver/transport injection")
@@ -134,16 +163,21 @@ def download_pdf(
             return pdf_path
 
         visited: set[str] = set()
+        deadline = time.monotonic() + _DOWNLOAD_DEADLINE_SECONDS
         # Three redirects permit at most four requests. A fourth redirect is
         # refused without even resolving or contacting its destination.
         for hop in range(4):
             if target.url in visited:
                 return None
             visited.add(target.url)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logger.warning("PDF fetch exceeded its %d-second deadline", _DOWNLOAD_DEADLINE_SECONDS)
+                return None
             with fetch(
                 target,
                 headers={"User-Agent": _PDF_USER_AGENT, "Accept": "application/pdf,*/*"},
-                timeout=_REQUEST_TIMEOUT_SECONDS,
+                timeout=min(_REQUEST_TIMEOUT_SECONDS, remaining),
             ) as response:
                 if response.status_code in {301, 302, 303, 307, 308}:
                     location = response.headers.get("Location")
@@ -157,6 +191,9 @@ def download_pdf(
                 elif response.status_code == 200:
                     buffer = bytearray()
                     for chunk in response.iter_content(chunk_size=65536):
+                        if time.monotonic() > deadline:
+                            logger.warning("PDF fetch exceeded its %d-second deadline", _DOWNLOAD_DEADLINE_SECONDS)
+                            return None
                         if not chunk:
                             continue
                         if len(buffer) + len(chunk) > _MAX_PDF_BYTES:
@@ -165,7 +202,7 @@ def download_pdf(
                         buffer.extend(chunk)
                     if not buffer or not _looks_like_pdf(response.headers.get("Content-Type"), bytes(buffer[:1024])):
                         return None
-                    pdf_path.write_bytes(buffer)
+                    _publish_atomically(bytes(buffer), pdf_path)
                     return pdf_path
                 else:
                     logger.warning("PDF fetch returned HTTP %s", response.status_code)
@@ -244,7 +281,8 @@ def read_recent_concall_text(
     concalls: Iterable[dict[str, Any]] | None,
     *,
     cache_dir: Path | str | None = None,
-    session: requests.Session | None = None,
+    resolver: Resolver | None = None,
+    transport: Transport | None = None,
     max_chars: int = 40000,
 ) -> str:
     """Download + extract the most recent concall transcript and return its text.
@@ -258,6 +296,11 @@ def read_recent_concall_text(
     Returns ``""`` if no transcript is available or the download / parse fails.
     The result is truncated to ``max_chars`` so a 50-page transcript still
     fits inside the model's context comfortably.
+
+    Beginner note: ``resolver``/``transport`` are the same trusted offline-test
+    seams ``download_pdf`` accepts. A bare Session is no longer accepted here,
+    because ``download_pdf`` refuses session-only injection and would turn
+    every such call into a silent empty transcript.
     """
     if not concalls:
         return ""
@@ -265,7 +308,7 @@ def read_recent_concall_text(
         url = (row or {}).get("transcript_url")
         if not url:
             continue
-        pdf_path = download_pdf(url, cache_dir=cache_dir, session=session)
+        pdf_path = download_pdf(url, cache_dir=cache_dir, resolver=resolver, transport=transport)
         if pdf_path is None:
             continue
         # Limit during extraction, not after, so a parser-bomb style PDF cannot
