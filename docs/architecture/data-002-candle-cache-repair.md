@@ -90,10 +90,12 @@ The split is deliberate: **`repair.py` decides, `cache_repair.py` does.** The
 planner is pure — no disk, no network, never mutates its input — which is what
 makes every rule testable with a three-row DataFrame instead of a broker session.
 
-`fetch_window` is a new `DailyDataLoader` method. Every pre-existing fetch path
-writes what it downloads straight to the symbol's parquet, which would truncate a
-ten-year file to the repaired window; `fetch_window` does the network half only
-and lets the caller own the result.
+`DailyDataLoader.fetch_window` does the network half only and lets repair validate
+its candidate before publication. Normal downloads now preserve outside-window
+history through a shared disk transaction. Repair reads and fingerprints its
+input under that same lock, releases it during vendor I/O, then verifies the
+revision before publishing. A changed input produces a skipped outcome without
+a retry marker. See the [cache-write ADR](candle-cache-write-transactions.md).
 
 ## 5. Finding → action mapping
 

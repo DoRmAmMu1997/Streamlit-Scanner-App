@@ -40,6 +40,7 @@ testing · extension points.
 
 ### Data & persistence
 - [data-acquisition.md](components/data-acquisition.md) — DhanHQ client + Parquet candle cache.
+- [candle-cache-write-transactions.md](candle-cache-write-transactions.md) — shared download/prefetch/repair locking, interval preservation, and atomic publication.
 - [data-quality.md](components/data-quality.md) — candle OHLCV validation + loader-boundary quarantine + per-run quality receipt (DATA-001) + prefetch-time cache repair (DATA-002).
 - [data-002-candle-cache-repair.md](data-002-candle-cache-repair.md) — why/how the cache repair fixes dirty candles instead of only reporting them.
 - [universe-management.md](components/universe-management.md) — universe build/load.

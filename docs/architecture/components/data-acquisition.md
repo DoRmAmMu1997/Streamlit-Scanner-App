@@ -105,6 +105,7 @@ vendor fixture.
 |---|---|---|
 | **Normalize exact rows at the boundary** | Screeners get one stable `timestamp, open, high, low, close, volume` frame; exact duplicates across all six canonical columns are removed before every cache write. Same-date rows that differ in any column remain for DATA-001/DATA-002 rather than silently picking a price. | Per-screener parsing or date-only de-duplication — duplicated, fragile, or able to hide a vendor conflict. |
 | **One file per `(symbol, security_id)`, no date in name** | Different scan windows reuse one growing cache; incremental top-up only fetches missing tail. | Date-range filenames (legacy) — duplicate files, re-fetches. `cleanup_legacy_cache_files` removes those. |
+| **Shared locked interval merge and atomic publication** | Direct downloads and prefetch re-read the current full file under a thread/process lock, preserve dates outside the requested interval, and publish via a unique same-directory temporary file. Repair uses the same lock and rejects changed input revisions. See [cache-write ADR](../candle-cache-write-transactions.md). | Replacing the whole file on a narrow fetch truncates history; locking only rename still loses concurrent updates. |
 | **Conservative direct cache coverage** | Historical and direct `get_daily_history` callers require every requested weekday candle; they ignore `.checked` evidence. Weekend-only gaps remain valid because no daily bar exists on those dates. | Infer that every request is a live scanner session — can silently feed incomplete history to forward-return calculations. |
 | **Explicit scanner unpublished-tail opt-in** | Only the sequential and parallel universe-loading paths pass `allow_unpublished_tail=True`, allowing the current session's requested end and a `.checked`-verified weekday-holiday gap. The marker may rescue at most seven calendar days (`_MAX_TOLERABLE_GAP_DAYS = 7`), preventing a stale cache from being certified indefinitely. | Depend on a trading calendar or apply the relaxation to all callers — extra dependency or unsafe historical behavior. |
 | **Deterministic DH-904 backoff `[2,5,10]s`** | Predictable, testable retry without random jitter; raises after the list is exhausted. | Infinite/exponential random retry — unbounded, flaky tests. |
@@ -121,7 +122,7 @@ vendor fixture.
 - Per-symbol fetch exception → redacted message captured in `BatchLoadResult.failures` + `external_api_failed` log event ([observability.md](observability.md)); the scan continues (→ `partial`).
 - Malformed cached parquet → the DATA-002 repair pass at the end of the prefetch attempts a fix (de-duplicate, re-download, or drop an impossible bar) and re-validates; see [data-quality.md](data-quality.md).
 - Fatal candle quality defect → frame withheld as a `phase="data_quality"` failure + `candle_data_quality_failed` event (codes only); warning-only frames pass through with a `candle_data_quality_warning` event (DATA-001).
-- Corrupt/empty/all-NaT parquet → treated as no cache, full re-download.
+- Unreadable parquet → left intact; download fails and repair reports the read failure. Readable empty/missing-axis/all-NaT parquet retains full-window prefetch recovery.
 - Rate limit beyond retry budget → `DhanRateLimitError` propagates.
 - Missing creds at fetch time (`required=True`) → `RuntimeError` with setup hint.
 
