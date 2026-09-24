@@ -20,7 +20,7 @@ detection, Windows-safe async bridge, on-disk cache).
 **Five files:**
 - **`fundamental_agent.py`** — the agent, its two in-process tools, the `AgentVerdict` Pydantic schema, criteria/universal modes, usage-limit handling, and the shared `AgentRunResult` / error classes.
 - **`screener_in_client.py`** — `requests`+BeautifulSoup scraper (ratios, history, **HTMX peer table**, shareholding, announcements, concall metadata, median P/E).
-- **`pdf_reader.py`** — concall-transcript download + text extraction (`pdfplumber` → `pypdf` fallback), size/page-capped.
+- **`pdf_reader.py`** — concall-transcript download + text extraction (`pdfplumber` → optional `pypdf` fallback), in a killable child with 30-page/40,000-character, 60-second and 512 MiB limits. See the [PDF containment ADR](../pdf-parser-resource-containment.md).
 - **`pdf_transport.py`** — validates each transcript URL and redirect, resolves every DNS answer once, and opens the request through an IP-pinned urllib3 pool with the original Host/SNI/certificate identity.
 - **`fundamentals_cache.py`** — the on-disk JSON cache (data + verdicts) shared by all three AI agents.
 

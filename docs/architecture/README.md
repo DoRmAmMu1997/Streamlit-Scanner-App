@@ -70,6 +70,7 @@ and dashboard freshness/provenance.
 
 ## Ticket-scoped design docs (historical, still authoritative)
 
+- **[pdf-parser-resource-containment.md](pdf-parser-resource-containment.md)** — killable transcript parsing with OS memory limits, bounded receipts, and Windows IPO worker containment.
 - **[ipo-001-domain-score-contract.md](ipo-001-domain-score-contract.md)** — IPO domain tables, offline score contract, fail-closed verdict policy, and typed CRUD boundary.
 - **[ipo-002-sebi-filing-ingestion.md](ipo-002-sebi-filing-ingestion.md)** — hardened official-SEBI listing inventory, deterministic filing identity, category-atomic persistence, and recovery semantics.
 - **[ipo-003-document-downloader-cache.md](ipo-003-document-downloader-cache.md)** — bounded SEBI PDF retrieval, content-addressed storage, cache provenance, and recovery semantics.
