@@ -58,6 +58,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -497,6 +498,25 @@ class SignalForwardReturn(Base):
     # created_at so a re-run that flips pending → computed is visible in the audit trail.
     computed_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, comment="UTC time the row was last computed"
+    )
+
+    # Every retry records when it was considered so bounded batches can rotate
+    # fairly instead of repeatedly selecting the lowest result id. This is
+    # intentionally separate from computed_at: a transient provider failure is
+    # still an attempt even though no terminal stock fact was produced.
+    last_attempted_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="UTC time this unresolved work was last attempted"
+    )
+
+    # A stock return can be terminal while only its benchmark leg is missing.
+    # Keeping that retry state explicit lets the worker repair the benchmark
+    # later without fetching the stock again or touching its completed fields.
+    benchmark_retry_pending: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+        comment="True when a terminal stock row still needs its benchmark leg",
     )
 
     # When this row was first written. tz-aware UTC, ORM-side default, same as ScanResult.
@@ -1792,6 +1812,105 @@ class CandleRepairRun(Base):
         return (
             f"CandleRepairRun(id={self.id!r}, trigger={self.trigger!r}, "
             f"symbols_repaired={self.symbols_repaired!r})"
+        )
+
+
+class UniverseHealthSnapshot(Base):
+    """OBS-004 - one row per universe per health check (the mapping baseline).
+
+    A symbol that Dhan's instrument master no longer contains is written into the
+    universe CSV as ``mapping_status='missing_security_id'`` and then filtered out
+    of every scan by ``mapped_only()``. Nothing outside the interactive Streamlit
+    sidebar ever reported that, so a universe could quietly shrink for weeks -
+    ~3% of the Hemant Good 200 list was already unscanned when OBS-004 was
+    written, and two more names dropped out mid-audit without a peep.
+
+    Beginner note:
+    This table exists purely so the daily job can answer *"is this worse than last
+    time?"*. Detecting an increase needs a previous number to compare against, and
+    the Render cron runs on an ephemeral filesystem with no disk - the shared
+    Postgres is the only thing that survives between runs. Hence a table rather
+    than a file next to the CSVs.
+
+    Rows are an append-only history: the check reads the newest row per universe
+    and then writes today's. Keeping the history (rather than upserting one row
+    per universe) means an operator can see *when* a symbol dropped out, which is
+    usually the question that follows the alert.
+
+    ``unmapped_symbols_json`` is a bounded object containing the sorted symbol
+    strings plus explicit truncation and membership-completeness flags. That
+    lets the alert name exact changes only when both compared sets are complete.
+    Symbols and booleans only - no prices, no credentials.
+    """
+
+    __tablename__ = "universe_health_snapshots"
+
+    # Same BigInt/SQLite-Integer variant as every other surrogate key here.
+    id: Mapped[int] = mapped_column(BigIntPrimaryKey, primary_key=True)
+
+    # Indexed together with universe_key: every read is "newest row for universe X".
+    captured_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: dt.datetime.now(dt.UTC),
+        index=True,
+        comment="UTC time this universe was inspected",
+    )
+
+    universe_key: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        index=True,
+        comment="Universe registry key, e.g. 'hemant_good_200'",
+    )
+
+    # Read failures remain useful history, but only ``valid`` rows may become a
+    # comparison baseline. ``legacy_unknown`` is assigned by the follow-up
+    # migration because rows created before this field existed cannot prove that
+    # both counts and names came from one successful CSV read.
+    observation_status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="valid",
+        server_default="valid",
+        comment="valid | missing | unreadable | legacy_unknown",
+    )
+
+    total_rows: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="Rows in the universe CSV"
+    )
+    mapped_rows: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="Rows the scanner can actually fetch"
+    )
+    # Stored rather than derived so a reader (and the comparison) never has to
+    # trust that total_rows and mapped_rows came from the same read.
+    unmapped_rows: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, comment="Rows with no usable Dhan security_id"
+    )
+
+    # Bounded, sorted list of the unmapped symbols. Nullable so a universe whose
+    # CSV could not be read still leaves its header row behind as evidence.
+    unmapped_symbols_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True, comment="Capped, sorted list of currently unmapped symbols"
+    )
+
+    __table_args__ = (
+        # The comparison query filters valid rows per universe and orders by
+        # captured_at/id. One composite index serves that full lookup shape on
+        # both SQLite and Postgres.
+        Index(
+            "ix_universe_health_snapshots_key_status_captured_id",
+            "universe_key",
+            "observation_status",
+            "captured_at",
+            "id",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"UniverseHealthSnapshot(universe_key={self.universe_key!r}, "
+            f"unmapped_rows={self.unmapped_rows!r})"
         )
 
 

@@ -61,6 +61,12 @@ def _body_lines(report: DailyScanReport) -> list[str]:
             f"  - {line.screener_key}{universe}: {line.status}, "
             f"{line.shortlisted} shortlisted{detail}"
         )
+    # OBS-004: a universe that quietly stopped being scannable is a warning about
+    # the integrity of THIS scan, so it sits above the results and is included at
+    # the summary-only content level too.
+    if report.universe_warnings:
+        lines += ["", "Universe warnings:"]
+        lines += [f"  - {warning}" for warning in report.universe_warnings]
     # ALERT-002: summary-only alerts stop here (status + counts); full alerts add
     # the per-stock results list below.
     if report.include_results:

@@ -27,6 +27,7 @@ import pandas as pd
 import yaml
 
 from backend.config.settings import PROJECT_ROOT
+from backend.data_quality import validate_candles
 from backend.validation._pricing import as_money, pct, prepared_frame
 
 logger = logging.getLogger(__name__)
@@ -191,8 +192,35 @@ def compute_benchmark_leg(
     entry_date: dt.date,
     exit_date: dt.date,
     benchmark_key: str,
+    raw_validated: bool = False,
 ) -> BenchmarkLeg:
-    """Compute the benchmark return by entry/exit date, not by bar offset."""
+    """Compute the benchmark over stock dates after validating raw dated OHLC.
+
+    Args:
+        benchmark_candles: Raw dated index OHLC; optional volume is unused.
+        entry_date: Stored stock entry date whose index open is required.
+        exit_date: Stored stock exit date whose index close is required.
+        benchmark_key: Stable configured index identifier retained in the result.
+        raw_validated: The caller already validated this exact raw frame once;
+            the per-horizon repeat is skipped. Pure callers keep the default.
+
+    Returns:
+        A BenchmarkLeg with Decimal prices and return, or the same key with null
+        measurement fields when dates/prices are missing or raw OHLC is invalid.
+        Calendar gaps are not filled and dates are never shifted to nearby bars.
+
+    Beginner note:
+        Invalid timestamps, conflicting daily rows, and impossible/nonfinite
+        prices must be rejected before preparation can discard them. A missing
+        benchmark result remains unavailable; the service decides retry policy.
+        Volume is optional because this calculation consumes prices only.
+    """
+    if not raw_validated and validate_candles(
+        benchmark_candles, symbol=benchmark_key,
+        required_columns=("open", "high", "low", "close"),
+        allow_identical_daily_duplicates=True,
+    ).has_fatal_findings:
+        return BenchmarkLeg(benchmark_key, None, None, None)
     frame = prepared_frame(benchmark_candles)
     if frame.empty:
         return BenchmarkLeg(benchmark_key, None, None, None)

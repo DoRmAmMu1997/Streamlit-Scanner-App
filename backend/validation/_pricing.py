@@ -47,7 +47,9 @@ def prepared_frame(candles: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     prepared = frame.loc[valid].copy()
     prepared["_date"] = timestamps.loc[valid].dt.date
-    return prepared.reset_index(drop=True)
+    # Raw validation has already established that repeated daily OHLC facts
+    # agree. Count each trading date once even if vendor timestamps differ.
+    return prepared.drop_duplicates("_date").reset_index(drop=True)
 
 
 def as_money(value: object) -> Decimal | None:

@@ -45,12 +45,24 @@ def infer_epoch_unit(values: pd.Series) -> Literal["s", "ms", "us"]:
 
 
 def normalize_daily_payload(data: Any) -> pd.DataFrame:
-    """
-    Convert Dhan daily candle payloads into timestamp/open/high/low/close/volume.
+    """Convert broker wire fields without hiding malformed candle evidence.
 
-    The Dhan SDK may return either a dictionary of arrays or a list of candle
-    dictionaries. Keeping that normalization in one place means screeners can
-    work with plain pandas data and ignore SDK wire-shape details.
+    Args:
+        data: Dhan dictionary of field arrays or list of candle dictionaries.
+
+    Returns:
+        Standard timestamp/open/high/low/close/volume columns, with timestamps
+        converted to India-market naive datetimes and prices coerced numerically.
+        Unparseable timestamps and prices remain NaT/NaN rows for downstream
+        quality validation. Unsupported or structurally incomplete payloads
+        return an empty frame. Only identical whole-row duplicates are removed.
+
+    Beginner note:
+        Normalization translates wire format; it does not certify usable data.
+        Dropping a null entry open or invalid date here would shift a return's
+        entry to a later trading bar before validators could notice. Preserve
+        that row through caching so both scanners and historical calculators
+        can reject it, and the worker can retry repaired provider evidence.
     """
     if data is None:
         return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
@@ -118,7 +130,9 @@ def normalize_daily_payload(data: Any) -> pd.DataFrame:
     # Store timestamps as India-market naive datetimes. That matches the style
     # commonly used in local CSV files and avoids timezone surprises in tables.
     out["timestamp"] = timestamps.dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
-    out = out.drop(columns=["timestamp_raw"]).dropna(subset=["timestamp", "open", "high", "low", "close"])
+    # Preserve malformed rows: dropping them would manufacture a shorter series
+    # before scanner/validation quality checks can reject the raw evidence.
+    out = out.drop(columns=["timestamp_raw"])
     out = out[["timestamp", "open", "high", "low", "close", "volume"]]
     # DATA-003: drop bars the vendor repeated verbatim. DhanHQ occasionally returns
     # the same candle twice (observed live for AEGISLOG on 2024-06-05, two

@@ -76,7 +76,7 @@ review → `/code-review` + `/security-review`; everything → `/using-superpowe
 | `fundamentals/`, `technical/`, `sixty_seven/` | The three AI-assisted subsystems. |
 | `ipo/` | IPO domain: SEBI filing ingestion, verified content-addressed document cache, manual extraction records, deterministic ratio engine, immutable score/recommendation history, factor derivation + hard caution flags (`scoring/`), read-only dashboard builder, quarantined SerpAPI enrichment (`sources/enrichment.py`), and the fail-closed AI extraction agent (`agents/`, `documents/table_extractor.py`, `documents/section_classifier.py`) (IPO-001…010). |
 | `jobs/` | Headless CLIs (daily scan, forward-return computation, candle cache repair, IPO filing ingestion, and the idempotent IPO scan/download/enrich/extract/score pipeline). |
-| `admin/`, `auth/`, `notifications/`, `data_quality/` | Config overrides, OIDC gate, alerts, candle-quality receipts. |
+| `admin/`, `auth/`, `notifications/`, `data_quality/` | Config overrides, OIDC gate, alerts, candle-quality receipts, and the OBS-004 universe mapping-health baseline. |
 | `screener_registry.py`, `scanner_base.py`, `indicators.py`, `daily_data_loader.py`, `universe_*` | Screener framework, indicators, candle cache, universe management. |
 
 ---
@@ -253,6 +253,7 @@ allowlist gate. Full details and the **accepted residual risks**:
 - **Observability / audit / config:** [observability](docs/architecture/components/observability.md) ·
   [audit-log](docs/architecture/components/audit-log.md) ·
   [obs-003 design](docs/architecture/obs-003-audit-log.md) ·
+  [obs-004 universe health](docs/architecture/obs-004-universe-health-alerts.md) ·
   [configuration](docs/architecture/components/configuration.md)
 - **Screener framework:** [screener-framework](docs/architecture/components/screener-framework.md) ·
   [screener-catalog](docs/architecture/components/screener-catalog.md) ·

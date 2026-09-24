@@ -112,6 +112,13 @@ EVENT_CANDLE_CACHE_REPAIR_STARTED = "candle_cache_repair_started"
 EVENT_CANDLE_CACHE_REPAIR_COMPLETED = "candle_cache_repair_completed"
 EVENT_CANDLE_CACHE_SYMBOL_REPAIRED = "candle_cache_symbol_repaired"
 EVENT_CANDLE_CACHE_REPAIR_FAILED = "candle_cache_repair_failed"
+# OBS-004 universe mapping-health events. `_checked` is the routine per-universe
+# receipt (rows / mapped / unmapped) emitted on every check so the counts are
+# searchable even when nothing changed; `_regressed` fires only when a universe
+# has MORE unmapped symbols than the last recorded check - i.e. a stock silently
+# left the scannable set. Symbols and counts only, never prices.
+EVENT_UNIVERSE_HEALTH_CHECKED = "universe_health_checked"
+EVENT_UNIVERSE_MAPPING_REGRESSED = "universe_mapping_regressed"
 EVENT_AUTH_DENIED = "auth_denied"
 EVENT_DATA_REFRESH_STARTED = "data_refresh_started"
 EVENT_DATA_REFRESH_COMPLETED = "data_refresh_completed"
@@ -197,6 +204,8 @@ __all__ = [
     "EVENT_SCAN_SCORING_FAILED",
     "EVENT_SCAN_STARTED",
     "EVENT_SYMBOL_SCAN_FAILED",
+    "EVENT_UNIVERSE_HEALTH_CHECKED",
+    "EVENT_UNIVERSE_MAPPING_REGRESSED",
     "ExceptionInfo",
     "JsonEventFormatter",
     "TextEventFormatter",

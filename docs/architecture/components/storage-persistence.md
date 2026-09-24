@@ -126,7 +126,8 @@ Full design: [ipo-005-ratio-engine.md](../ipo-005-ratio-engine.md).
 | `get_ai_evaluations(session, run_id)` | AI receipts for a run, ordered `(symbol, id)`. |
 | `count_scan_results_for_runs(session, run_ids)` | One grouped COUNT; every id present (0 default). |
 | `list_distinct_{screener,universe}_keys`, `list_distinct_triggered_by_values` | History-page filter options (read from history, not the live registry). |
-| `get_signals_needing_forward_returns(session, *, horizons, limit=None)` | VALID-002 selection query: non-null `signal_date` rows whose requested horizons are missing or still `pending`; eager-loads the parent run for universe resolution. |
+| `get_forward_return_work_items(session, *, horizons, limit=None)` | VALID-005 selection query: non-null `signal_date` signals with a missing, `pending` or benchmark-retry horizon, ordered oldest-attempt-first with the limit applied in SQL; returns detached work items (no ORM rows). |
+| `mark_forward_return_attempted(session, *, result_id, horizons, attempted_at=None)` | Records a failed signal's attempt without facts: empty PENDING rows for never-attempted horizons, new `last_attempted_at` on unresolved rows, terminal rows untouched. |
 | `upsert_forward_return(session, *, result_id, point, benchmark=None)` | Idempotent `(result_id, horizon_days)` insert/update into `signal_forward_returns`; terminal rows get `computed_at`, pending rows stay retryable. |
 | `get_forward_return_metric_records(session, *, screener_key, universe_key, horizon_days, signal_date_from, signal_date_to)` | VALID-003A read-only join across `scan_runs`, `scan_results`, and `signal_forward_returns` (`SUCCESS`/`PARTIAL` runs only); date filters are inclusive over `scan_results.signal_date`. |
 | `create_audit_log_entry(session, *, event, user_email, metadata)` | Insert one `audit_logs` row; metadata routed through `normalize_secret_safe_json` (OBS-003). |

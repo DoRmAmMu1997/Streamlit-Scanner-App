@@ -21,8 +21,10 @@ from dataclasses import asdict, dataclass, is_dataclass
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import exists, func, or_, select
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import and_, case, exists, func, insert, or_, select, update
+from sqlalchemy.engine import CursorResult
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from backend.storage.models import (
     AIEvaluation,
@@ -34,6 +36,7 @@ from backend.storage.models import (
     ScanRun,
     ScanStatus,
     SignalForwardReturn,
+    UniverseHealthSnapshot,
     UserRole,
 )
 
@@ -42,6 +45,9 @@ if TYPE_CHECKING:
     from backend.validation.forward_return import ForwardReturnPoint
 
 _AI_EVALUATION_OUTCOMES = frozenset({"approved", "rejected", "error"})
+_UNIVERSE_OBSERVATION_STATUSES = frozenset(
+    {"valid", "missing", "unreadable", "legacy_unknown"}
+)
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
@@ -62,6 +68,41 @@ class ForwardReturnMetricRecord:
     excess_return_pct: Decimal | None
     max_adverse_excursion_pct: Decimal | None
     max_favorable_excursion_pct: Decimal | None
+
+
+@dataclass(frozen=True)
+class BenchmarkForwardReturnWork:
+    """Stored stock facts needed to retry only one benchmark horizon.
+
+    ``computed_at`` is when the stock leg became terminal; the worker stops
+    retrying an unavailable benchmark once that is older than its grace period.
+    """
+
+    horizon_days: int
+    entry_date: dt.date | None
+    exit_date: dt.date | None
+    forward_return_pct: Decimal | None
+    computed_at: dt.datetime | None = None
+
+
+@dataclass(frozen=True)
+class ForwardReturnWorkItem:
+    """Detached work for one signal selected by the validation worker.
+
+    Beginner note:
+    ORM objects remain connected to their database session. This value object
+    copies only stable scalar facts so the service can close its read
+    transaction before loading universe files or calling a market-data provider.
+    ``stock_horizons`` need the symbol history; ``benchmark_horizons`` already
+    have terminal stock facts and therefore must never refetch or rewrite them.
+    """
+
+    result_id: int
+    symbol: str
+    signal_date: dt.date
+    universe_key: str
+    stock_horizons: tuple[int, ...]
+    benchmark_horizons: tuple[BenchmarkForwardReturnWork, ...]
 
 
 def get_scan_run(session: Session, run_id: int) -> ScanRun | None:
@@ -544,44 +585,192 @@ def get_ai_evaluations(session: Session, run_id: int) -> list[AIEvaluation]:
 # ---------------------------------------------------------------------------
 
 
-def get_signals_needing_forward_returns(
+def get_forward_return_work_items(
     session: Session,
     *,
     horizons: Sequence[int],
     limit: int | None = None,
-) -> list[ScanResult]:
-    """Return signals with a missing or still-pending row for any horizon.
+) -> list[ForwardReturnWorkItem]:
+    """Return fairly ordered detached work for unresolved stock or benchmark legs.
 
-    Terminal rows (``computed`` / ``insufficient_data``) are skipped so the
-    validation service can be re-run without rewriting completed measurements.
-    The parent run is eager-loaded because its universe key drives instrument
-    and benchmark resolution.
+    Missing horizons use ``ScanResult.created_at`` as their effective attempt
+    time; persisted unresolved rows use ``last_attempted_at`` when available.
+    Sorting by the oldest effective time rotates bounded batches fairly, with
+    signal date and id as deterministic ties.
+
+    Args:
+        session: Caller-owned short read transaction; no commit is performed.
+        horizons: Requested horizon counts already validated by the worker.
+            Repeated counts are collapsed in caller order; empty means no work.
+        limit: Maximum distinct signals, or None for all eligible signals.
+
+    Returns:
+        Frozen detached work items ordered by oldest effective unresolved
+        attempt, signal date and ID. Each signal appears once with separate
+        stock and benchmark-only horizons, usable after its session closes.
+
+    Beginner note:
+    The limit counts signals, not horizon rows. One chosen signal carries all of
+    its requested unresolved horizons, so a batch never processes the same
+    signal twice or partially hides work behind a row-level SQL limit.
+
+    Selection, fairness ordering and the limit all run in SQL, and only the
+    chosen signals' scalar columns are read afterwards. Scan history grows
+    every day while a batch stays a few hundred signals, so loading every
+    stored result (with its raw JSON) to discard it in Python does not scale.
     """
-    normalized_horizons = tuple(int(horizon) for horizon in horizons)
+    normalized_horizons = tuple(dict.fromkeys(int(horizon) for horizon in horizons))
     if not normalized_horizons:
         return []
 
-    needs_any_horizon = []
-    for horizon in normalized_horizons:
-        terminal_row_exists = exists().where(
-            SignalForwardReturn.result_id == ScanResult.id,
-            SignalForwardReturn.horizon_days == horizon,
-            SignalForwardReturn.status != ForwardReturnStatus.PENDING,
+    sfr = SignalForwardReturn
+    # A stored row still needs work while its stock leg is pending, or while a
+    # terminal stock leg waits for its benchmark (benchmark-only retry).
+    unresolved = or_(sfr.status == ForwardReturnStatus.PENDING, sfr.benchmark_retry_pending.is_(True))
+    attempt_time = func.coalesce(sfr.last_attempted_at, ScanResult.created_at)
+    per_signal = (
+        select(
+            sfr.result_id.label("result_id"),
+            func.count(sfr.id).label("row_count"),
+            func.count(case((unresolved, 1))).label("unresolved_count"),
+            func.min(case((unresolved, attempt_time))).label("oldest_attempt"),
         )
-        needs_any_horizon.append(~terminal_row_exists)
-
-    stmt = (
-        select(ScanResult)
-        .options(joinedload(ScanResult.run))
-        .where(
-            ScanResult.signal_date.is_not(None),
-            or_(*needs_any_horizon),
-        )
-        .order_by(ScanResult.signal_date.asc(), ScanResult.id.asc())
+        .join(ScanResult, ScanResult.id == sfr.result_id)
+        .where(sfr.horizon_days.in_(normalized_horizons))
+        .group_by(sfr.result_id)
+        .subquery()
+    )
+    # (result_id, horizon_days) is unique, so fewer rows than requested
+    # horizons means at least one horizon was never attempted at all.
+    has_missing = func.coalesce(per_signal.c.row_count, 0) < len(normalized_horizons)
+    oldest = per_signal.c.oldest_attempt
+    # A never-attempted horizon counts from the signal's creation time; the
+    # effective time is the earlier of that and the oldest unresolved attempt.
+    effective_attempt = case(
+        (and_(has_missing, or_(oldest.is_(None), ScanResult.created_at <= oldest)), ScanResult.created_at),
+        else_=oldest,
+    )
+    selection = (
+        select(ScanResult.id, ScanResult.symbol, ScanResult.signal_date, ScanRun.universe_key)
+        .join(ScanRun, ScanRun.id == ScanResult.run_id)
+        .outerjoin(per_signal, per_signal.c.result_id == ScanResult.id)
+        .where(ScanResult.signal_date.is_not(None), or_(has_missing, per_signal.c.unresolved_count > 0))
+        .order_by(effective_attempt, ScanResult.signal_date, ScanResult.id)
     )
     if limit is not None:
-        stmt = stmt.limit(limit)
-    return list(session.scalars(stmt))
+        selection = selection.limit(limit)
+    chosen = session.execute(selection).all()
+    if not chosen:
+        return []
+
+    stored = session.execute(
+        select(
+            sfr.result_id, sfr.horizon_days, sfr.status, sfr.benchmark_retry_pending,
+            sfr.entry_date, sfr.exit_date, sfr.forward_return_pct, sfr.computed_at,
+        ).where(sfr.result_id.in_([signal.id for signal in chosen]), sfr.horizon_days.in_(normalized_horizons))
+    ).all()
+    rows_by_signal: dict[int, dict[int, Any]] = {}
+    for stored_row in stored:
+        rows_by_signal.setdefault(stored_row.result_id, {})[stored_row.horizon_days] = stored_row
+
+    work_items: list[ForwardReturnWorkItem] = []
+    for signal in chosen:
+        rows = rows_by_signal.get(signal.id, {})
+        stock_horizons: list[int] = []
+        benchmark_horizons: list[BenchmarkForwardReturnWork] = []
+        for horizon in normalized_horizons:
+            row = rows.get(horizon)
+            if row is None or row.status is ForwardReturnStatus.PENDING:
+                stock_horizons.append(horizon)
+            elif row.benchmark_retry_pending:
+                benchmark_horizons.append(
+                    BenchmarkForwardReturnWork(
+                        horizon_days=horizon,
+                        entry_date=row.entry_date,
+                        exit_date=row.exit_date,
+                        forward_return_pct=row.forward_return_pct,
+                        computed_at=row.computed_at,
+                    )
+                )
+        # A concurrent worker may finish a signal between the two reads.
+        if not stock_horizons and not benchmark_horizons:
+            continue
+        work_items.append(
+            ForwardReturnWorkItem(
+                result_id=signal.id,
+                symbol=signal.symbol,
+                signal_date=cast(dt.date, signal.signal_date),
+                universe_key=signal.universe_key,
+                stock_horizons=tuple(stock_horizons),
+                benchmark_horizons=tuple(benchmark_horizons),
+            )
+        )
+    return work_items
+
+
+def mark_forward_return_attempted(
+    session: Session,
+    *,
+    result_id: int,
+    horizons: Sequence[int],
+    attempted_at: dt.datetime | None = None,
+) -> None:
+    """Record that a signal's unresolved horizons were attempted, without any facts.
+
+    Args:
+        session: Caller-owned short write transaction; this helper never commits.
+        result_id: Stored signal whose processing failed.
+        horizons: The horizons that were being worked on.
+        attempted_at: UTC attempt time, defaulting to now.
+
+    Beginner note:
+    When a signal's processing fails, its measurement transaction rolls back,
+    so without this receipt its attempt time never changes and oldest-first
+    selection hands the same failing signal to every future batch, starving
+    the queue. Missing horizons get an empty PENDING row; existing pending or
+    benchmark-retry rows only get a new ``last_attempted_at``. Terminal stock
+    facts and benchmark values are never read or written here.
+    """
+    attempted = attempted_at or dt.datetime.now(dt.UTC)
+    wanted = tuple(dict.fromkeys(int(horizon) for horizon in horizons))
+    existing = set(
+        session.scalars(
+            select(SignalForwardReturn.horizon_days).where(
+                SignalForwardReturn.result_id == result_id,
+                SignalForwardReturn.horizon_days.in_(wanted),
+            )
+        )
+    )
+    for horizon in wanted:
+        if horizon in existing:
+            continue
+        try:
+            with session.begin_nested():
+                session.execute(
+                    insert(SignalForwardReturn).values(
+                        result_id=result_id,
+                        horizon_days=horizon,
+                        status=ForwardReturnStatus.PENDING,
+                        last_attempted_at=attempted,
+                        created_at=attempted,
+                    )
+                )
+        except IntegrityError:
+            # A concurrent writer created the row; the update below still
+            # bumps it if it remains unresolved.
+            pass
+    session.execute(
+        update(SignalForwardReturn)
+        .where(
+            SignalForwardReturn.result_id == result_id,
+            SignalForwardReturn.horizon_days.in_(wanted),
+            or_(
+                SignalForwardReturn.status == ForwardReturnStatus.PENDING,
+                SignalForwardReturn.benchmark_retry_pending.is_(True),
+            ),
+        )
+        .values(last_attempted_at=attempted)
+    )
 
 
 def upsert_forward_return(
@@ -590,58 +779,192 @@ def upsert_forward_return(
     result_id: int,
     point: ForwardReturnPoint,
     benchmark: BenchmarkLeg | None = None,
+    benchmark_retry_pending: bool = False,
+    attempted_at: dt.datetime | None = None,
 ) -> SignalForwardReturn:
-    """Insert or update one ``signal_forward_returns`` horizon row.
+    """Insert missing work or conditionally update a still-pending stock receipt.
 
-    The schema's unique ``(result_id, horizon_days)`` constraint is the durable
-    idempotency contract; this helper mirrors that in ORM code so callers never
-    append duplicate measurements on reruns.
+    Args:
+        session: Caller-owned transaction; this helper never commits it.
+        result_id: Stored signal identity.
+        point: Proposed stock measurement or unresolved status.
+        benchmark: Optional aligned index measurement.
+        benchmark_retry_pending: Whether configured index data still needs work.
+        attempted_at: UTC attempt time, defaulting to now.
+
+    Returns:
+        The durable row, including a concurrent terminal winner if one exists.
+
+    Beginner note:
+        A selection-time Python check is insufficient: another worker can finish
+        while this worker fetches candles. The UPDATE itself requires PENDING.
+        Unique insert conflicts roll back only a savepoint, then conditionally
+        retry that same UPDATE. Completed dates, prices, returns, excursions,
+        benchmark facts and computed_at can therefore never be erased by retries.
     """
-    stmt = select(SignalForwardReturn).where(
+    attempted = attempted_at or dt.datetime.now(dt.UTC)
+    key_predicates = (
         SignalForwardReturn.result_id == result_id,
         SignalForwardReturn.horizon_days == point.horizon_days,
     )
-    row = session.scalar(stmt)
-    if row is None:
-        row = SignalForwardReturn(
-            result_id=result_id,
-            horizon_days=point.horizon_days,
-        )
-        session.add(row)
-
-    row.status = point.status
-    row.entry_date = point.entry_date
-    row.exit_date = point.exit_date
-    row.entry_price = point.entry_price
-    row.exit_price = point.exit_price
-    row.forward_return_pct = point.forward_return_pct
-    row.max_adverse_excursion_pct = point.max_adverse_excursion_pct
-    row.max_favorable_excursion_pct = point.max_favorable_excursion_pct
-    row.computed_at = (
-        dt.datetime.now(dt.UTC)
-        if point.status is not ForwardReturnStatus.PENDING
-        else None
-    )
+    values: dict[str, object] = {
+        "status": point.status,
+        "entry_date": point.entry_date,
+        "exit_date": point.exit_date,
+        "entry_price": point.entry_price,
+        "exit_price": point.exit_price,
+        "forward_return_pct": point.forward_return_pct,
+        "max_adverse_excursion_pct": point.max_adverse_excursion_pct,
+        "max_favorable_excursion_pct": point.max_favorable_excursion_pct,
+        "computed_at": (
+            attempted
+            if point.status is not ForwardReturnStatus.PENDING
+            else None
+        ),
+        "last_attempted_at": attempted,
+        "benchmark_retry_pending": benchmark_retry_pending,
+    }
 
     if benchmark is None:
-        row.benchmark_key = None
-        row.benchmark_entry_price = None
-        row.benchmark_exit_price = None
-        row.benchmark_return_pct = None
-        row.excess_return_pct = None
+        values.update(
+            benchmark_key=None,
+            benchmark_entry_price=None,
+            benchmark_exit_price=None,
+            benchmark_return_pct=None,
+            excess_return_pct=None,
+        )
     else:
-        row.benchmark_key = benchmark.benchmark_key
-        row.benchmark_entry_price = benchmark.entry_price
-        row.benchmark_exit_price = benchmark.exit_price
-        row.benchmark_return_pct = benchmark.return_pct
-        row.excess_return_pct = (
-            point.forward_return_pct - benchmark.return_pct
-            if point.forward_return_pct is not None and benchmark.return_pct is not None
-            else None
+        values.update(
+            benchmark_key=benchmark.benchmark_key,
+            benchmark_entry_price=benchmark.entry_price,
+            benchmark_exit_price=benchmark.exit_price,
+            benchmark_return_pct=benchmark.return_pct,
+            excess_return_pct=(
+                point.forward_return_pct - benchmark.return_pct
+                if point.forward_return_pct is not None and benchmark.return_pct is not None
+                else None
+            ),
         )
 
+    # The status predicate is the concurrency guard. Even if another worker
+    # terminalizes the row after selection, this UPDATE cannot touch any stock
+    # receipt field once status is no longer pending.
+    updated = session.execute(
+        update(SignalForwardReturn)
+        .where(*key_predicates, SignalForwardReturn.status == ForwardReturnStatus.PENDING)
+        .values(**values)
+    )
+    if cast(CursorResult[Any], updated).rowcount == 0:
+        existing = session.scalar(select(SignalForwardReturn).where(*key_predicates))
+        if existing is None:
+            try:
+                with session.begin_nested():
+                    session.execute(
+                        insert(SignalForwardReturn).values(
+                            result_id=result_id,
+                            horizon_days=point.horizon_days,
+                            created_at=attempted,
+                            **values,
+                        )
+                    )
+            except IntegrityError:
+                # A concurrent insert won the unique key. Update only if its row
+                # is still pending; a terminal winner remains immutable.
+                session.execute(
+                    update(SignalForwardReturn)
+                    .where(
+                        *key_predicates,
+                        SignalForwardReturn.status == ForwardReturnStatus.PENDING,
+                    )
+                    .values(**values)
+                )
+
     session.flush()
+    row = session.scalar(select(SignalForwardReturn).where(*key_predicates))
+    if row is None:  # pragma: no cover - defensive invariant after insert/update
+        raise RuntimeError("forward-return persistence produced no row")
     return row
+
+
+def update_forward_return_benchmark(
+    session: Session,
+    *,
+    result_id: int,
+    horizon_days: int,
+    benchmark: BenchmarkLeg | None,
+    retry_pending: bool,
+    attempted_at: dt.datetime | None = None,
+) -> bool:
+    """Update only benchmark retry fields on an existing terminal stock row.
+
+    Args:
+        session: Caller-owned write transaction; this helper never commits.
+        result_id: Stored signal identity.
+        horizon_days: Existing computed horizon being retried.
+        benchmark: Aligned result, or None for intentionally absent configuration.
+        retry_pending: True for unavailable configured work; False after success
+            or when no benchmark is configured.
+        attempted_at: UTC retry time; defaults to the current time.
+
+    Returns:
+        True if a computed row with an active retry and missing benchmark return
+        was updated; False for a no-op, including a concurrent successful winner.
+        Stock status, dates, prices, return, excursions and computed_at are never
+        modified, regardless of the proposed benchmark outcome.
+
+    Beginner note:
+    This statement intentionally omits every stock column. A benchmark provider
+    can fail today and recover tomorrow without changing the historical entry,
+    exit, return, excursions, status, or ``computed_at`` already proven for the
+    stock. The terminal predicate also prevents attaching a benchmark to a stock
+    leg that has not finished. The missing-return and retry predicates protect
+    a benchmark already completed by another worker after work selection.
+    """
+    values: dict[str, object] = {
+        "last_attempted_at": attempted_at or dt.datetime.now(dt.UTC),
+        "benchmark_retry_pending": retry_pending,
+    }
+    if benchmark is None:
+        values.update(
+            benchmark_key=None,
+            benchmark_entry_price=None,
+            benchmark_exit_price=None,
+            benchmark_return_pct=None,
+            excess_return_pct=None,
+        )
+    else:
+        row_return = session.scalar(
+            select(SignalForwardReturn.forward_return_pct).where(
+                SignalForwardReturn.result_id == result_id,
+                SignalForwardReturn.horizon_days == horizon_days,
+                SignalForwardReturn.status == ForwardReturnStatus.COMPUTED,
+                SignalForwardReturn.benchmark_retry_pending.is_(True),
+                SignalForwardReturn.benchmark_return_pct.is_(None),
+            )
+        )
+        values.update(
+            benchmark_key=benchmark.benchmark_key,
+            benchmark_entry_price=benchmark.entry_price,
+            benchmark_exit_price=benchmark.exit_price,
+            benchmark_return_pct=benchmark.return_pct,
+            excess_return_pct=(
+                row_return - benchmark.return_pct
+                if row_return is not None and benchmark.return_pct is not None
+                else None
+            ),
+        )
+    result = session.execute(
+        update(SignalForwardReturn)
+        .where(
+            SignalForwardReturn.result_id == result_id,
+            SignalForwardReturn.horizon_days == horizon_days,
+            SignalForwardReturn.status == ForwardReturnStatus.COMPUTED,
+            SignalForwardReturn.benchmark_retry_pending.is_(True),
+            SignalForwardReturn.benchmark_return_pct.is_(None),
+        )
+        .values(**values)
+    )
+    return bool(cast(CursorResult[Any], result).rowcount)
 
 
 # ---------------------------------------------------------------------------
@@ -830,6 +1153,105 @@ def get_latest_candle_repair_run(session: Session) -> CandleRepairRun | None:
         .limit(1)
     )
     return session.scalars(stmt).first()
+
+
+def record_universe_health_snapshots(
+    session: Session,
+    snapshots: Sequence[Mapping[str, Any]],
+) -> list[UniverseHealthSnapshot]:
+    """Append one OBS-004 mapping-health row per universe and return them.
+
+    Beginner note:
+    Rows are appended, never updated. The comparison only ever reads the newest
+    row per universe, and keeping the history means an operator can answer "when
+    did this symbol drop out?" - which is the question that always follows the
+    alert. ``flush`` assigns the ids without ending the caller's transaction
+    (the caller owns it, per REFACTOR-002).
+
+    Each mapping needs ``universe_key``, ``total_rows``, ``mapped_rows`` and
+    ``unmapped_rows``; ``unmapped_symbols`` is optional and stored as JSON.
+    Failed reads are persisted with an explicit status for diagnosis, while the
+    read helper below deliberately excludes them from baseline authority.
+    """
+    invalid_statuses = {
+        str(snapshot.get("observation_status", "valid"))
+        for snapshot in snapshots
+    } - _UNIVERSE_OBSERVATION_STATUSES
+    if invalid_statuses:
+        raise ValueError(f"Unsupported universe observation status: {sorted(invalid_statuses)!r}")
+
+    rows = [
+        UniverseHealthSnapshot(
+            universe_key=str(snapshot["universe_key"]),
+            observation_status=str(snapshot.get("observation_status", "valid")),
+            total_rows=int(snapshot.get("total_rows", 0)),
+            mapped_rows=int(snapshot.get("mapped_rows", 0)),
+            unmapped_rows=int(snapshot.get("unmapped_rows", 0)),
+            unmapped_symbols_json=(
+                {
+                    "symbols": list(snapshot["unmapped_symbols"]),
+                    "truncated": bool(snapshot.get("unmapped_symbols_truncated", False)),
+                    "membership_complete": bool(snapshot.get("membership_complete", False)),
+                }
+                if snapshot.get("unmapped_symbols") is not None
+                else None
+            ),
+        )
+        for snapshot in snapshots
+    ]
+    session.add_all(rows)
+    session.flush()
+    return rows
+
+
+def get_latest_universe_health_snapshots(
+    session: Session,
+) -> dict[str, UniverseHealthSnapshot]:
+    """Return the newest valid mapping-health row per universe.
+
+    Beginner note:
+    This is the baseline the daily job compares today's counts against. A window
+    function ranks valid rows inside each universe in the database, so Python
+    receives one row per key even when years of append-only history exist. The
+    primary-key tie-breaker keeps the winner deterministic when two checks share
+    a timestamp.
+
+    Beginner note:
+    Missing, unreadable, and migrated ``legacy_unknown`` rows remain in history
+    as operational evidence, but do not replace a previously valid baseline.
+    Otherwise a temporary read failure recorded as zero could make the next good
+    read look like a false mapping regression.
+
+    An empty result means the check has never run - the caller must treat that as
+    "no baseline", not as "zero unmapped", or the very first run would alert on
+    every pre-existing unmapped symbol.
+    """
+    ranked = (
+        select(
+            UniverseHealthSnapshot.id.label("snapshot_id"),
+            func.row_number()
+            .over(
+                partition_by=UniverseHealthSnapshot.universe_key,
+                order_by=(
+                    UniverseHealthSnapshot.captured_at.desc(),
+                    UniverseHealthSnapshot.id.desc(),
+                ),
+            )
+            .label("baseline_rank"),
+        )
+        .where(UniverseHealthSnapshot.observation_status == "valid")
+        .subquery()
+    )
+    stmt = (
+        select(UniverseHealthSnapshot)
+        .join(ranked, UniverseHealthSnapshot.id == ranked.c.snapshot_id)
+        .where(ranked.c.baseline_rank == 1)
+        .order_by(
+            UniverseHealthSnapshot.captured_at.desc(),
+            UniverseHealthSnapshot.id.desc(),
+        )
+    )
+    return {row.universe_key: row for row in session.scalars(stmt)}
 
 
 def get_recent_audit_logs(
