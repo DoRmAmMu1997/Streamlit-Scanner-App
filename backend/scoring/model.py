@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import logging
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -35,6 +36,8 @@ from backend.scoring.components import (
 )
 from backend.scoring.config import ScoringConfig
 from backend.scoring.ordering import sort_by_final_score
+
+logger = logging.getLogger(__name__)
 
 _COMPONENT_ORDER = ("technical", "liquidity", "risk", "freshness")
 _MARKET_TIMEZONE = ZoneInfo("Asia/Kolkata")
@@ -102,6 +105,13 @@ def score_candidates(
     # Mapping[str, ...] consumer below (QUAL-006).
     records = cast(list[dict[str, Any]], ranked.to_dict("records"))
     symbol_to_security_id = _security_id_lookup(context.universe_df)
+    if context.data_snapshot_date is None:
+        # Candle components need a cutoff to avoid lookahead, so they are
+        # omitted below. Say so once per run instead of silently re-weighting.
+        logger.warning(
+            "Scoring without data_snapshot_date: liquidity and risk are omitted for %d row(s)",
+            len(records),
+        )
     cached_candles = [
         _read_cached_candles(
             row,
@@ -300,6 +310,11 @@ def _read_cached_candles(
     rewriting yesterday's ranking. With no snapshot or no parseable daily dates,
     returning an empty frame deliberately drops those components and lets the
     existing per-row weight renormalization handle the missing evidence.
+
+    A row whose date cannot be classified is excluded on its own: it can never
+    be proven to sit before the snapshot. The cache keeps raw vendor rows for
+    forward-return validation (VALID-005), but ranking, like scans, strips
+    malformed rows instead of discarding the symbol's whole history.
     """
     if snapshot_date is None:
         return pd.DataFrame()
@@ -330,18 +345,35 @@ def _read_cached_candles(
     if not isinstance(candles, pd.DataFrame) or candles.empty or "timestamp" not in candles.columns:
         return pd.DataFrame()
 
-    market_dates = candles["timestamp"].map(_trusted_market_date)
-    if market_dates.isna().any():
-        # We cannot safely decide whether an unclassifiable row belongs before
-        # or after the snapshot. Dropping only that row could silently omit an
-        # in-scope price, so both candle-derived components fail closed.
-        return pd.DataFrame()
+    market_dates = _market_dates(candles["timestamp"])
+    # ``None`` (unclassifiable) rows fail this test and are excluded; only rows
+    # provably on or before the snapshot date feed liquidity and risk.
     within_snapshot = market_dates.map(
         lambda market_date: market_date is not None and market_date <= snapshot_date
-    )
+    ).astype(bool)
     if not within_snapshot.any():
         return pd.DataFrame()
     return candles.loc[within_snapshot].copy().reset_index(drop=True)
+
+
+def _market_dates(timestamps: pd.Series) -> pd.Series:
+    """Return each timestamp's India market date, or ``None`` when unclassifiable.
+
+    Beginner note:
+    Dhan caches store a real ``datetime64`` column, so the common case is
+    converted in one vectorized step (aware values are moved to Asia/Kolkata
+    first, exactly like the scalar rule). Only object columns, which may hold
+    strings or mixed values, fall back to ``_trusted_market_date`` per value.
+    Both paths must agree; a parity test pins that.
+    """
+    if not pd.api.types.is_datetime64_any_dtype(timestamps.dtype):
+        return timestamps.map(_trusted_market_date)
+    local = timestamps
+    if isinstance(timestamps.dtype, pd.DatetimeTZDtype):
+        local = timestamps.dt.tz_convert(_MARKET_TIMEZONE)
+    dates = local.dt.date.astype(object)
+    dates[local.isna()] = None
+    return dates
 
 
 def _trusted_market_date(value: Any) -> dt.date | None:

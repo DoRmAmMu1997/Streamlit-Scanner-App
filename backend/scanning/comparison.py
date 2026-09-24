@@ -28,7 +28,6 @@ import datetime as dt
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
 
 import pandas as pd
 from sqlalchemy.orm import Session
@@ -350,21 +349,10 @@ def _result_score(result: ScanResult) -> tuple[Decimal | None, str | None]:
         return result.final_score, "final_score"
     raw = result.raw_result_json
     if isinstance(raw, Mapping) and "confidence" in raw:
-        score = _decimal_or_none(raw.get("confidence"))
+        score = finite_decimal(raw.get("confidence"))
         if score is not None:
             return score, "confidence"
     return None, None
-
-
-def _decimal_or_none(value: Any) -> Decimal | None:
-    """Compatibility wrapper around the shared finite-Decimal parser.
-
-    Beginner note:
-    This private name may still be imported by older tests or callers. Keeping
-    the wrapper preserves that path while the shared leaf ensures comparison,
-    persistence, notifications, and validation interpret bad numbers equally.
-    """
-    return finite_decimal(value)
 
 
 def _comparison_row(

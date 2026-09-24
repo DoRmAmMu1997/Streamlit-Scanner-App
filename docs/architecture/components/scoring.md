@@ -98,9 +98,15 @@ The receipt shape is:
 - Scoring raises inside `run_scan` -> `scan_scoring_failed` warning event,
   null `final_score` column, rows/status/persistence continue.
 - Missing cached candles -> liquidity/risk omitted for that row.
-- Missing snapshot date or any unparseable candle date -> liquidity/risk omitted;
-  later cache rows never enter a historical score. The whole candle sample fails
-  closed because silently dropping an unknown-date row could omit in-scope data.
+- Missing snapshot date -> liquidity/risk omitted (logged once per scoring run);
+  later cache rows never enter a historical score.
+- Unparseable candle date -> that row alone is excluded, because it can never be
+  proven to sit before the snapshot. The candle cache keeps raw vendor rows for
+  forward-return validation (VALID-005), but ranking, like scans, strips
+  malformed rows rather than discarding a symbol's whole dated history. A frame
+  with no dated rows at or before the snapshot still omits liquidity/risk.
+  `datetime64` columns take a vectorized date path; object columns use the
+  per-value `_trusted_market_date` rule (a parity test keeps them equal).
 - Malformed result numbers -> the affected component is treated as missing.
 - Empty result frame -> returned unchanged except for an empty `final_score`
   column when needed.

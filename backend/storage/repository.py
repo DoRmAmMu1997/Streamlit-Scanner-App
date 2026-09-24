@@ -451,16 +451,6 @@ def get_scan_runs(session: Session, run_ids: Sequence[int]) -> list[ScanRun]:
     return list(session.scalars(stmt))
 
 
-def _finite_decimal(value: Any) -> Decimal | None:
-    """Compatibility wrapper for finite numeric score ordering.
-
-    Beginner note:
-    Repository callers keep the established helper name while the shared leaf
-    prevents numeric boundary rules from drifting between backend packages.
-    """
-    return finite_decimal(value)
-
-
 def _rank_score_and_source(result: ScanResult) -> tuple[Decimal | None, str | None]:
     """Return the score used for ALERT-001 ranking and its source.
 
@@ -468,12 +458,12 @@ def _rank_score_and_source(result: ScanResult) -> tuple[Decimal | None, str | No
     outranks the generic confidence fallback. The fallback only makes today's
     alerts more useful while RANK-002 is not yet merged.
     """
-    final_score = _finite_decimal(result.final_score)
+    final_score = finite_decimal(result.final_score)
     if final_score is not None:
         return final_score, "final_score"
     raw_result = result.raw_result_json
     if isinstance(raw_result, Mapping):
-        confidence = _finite_decimal(raw_result.get("confidence"))
+        confidence = finite_decimal(raw_result.get("confidence"))
         if confidence is not None:
             return confidence, "confidence"
     return None, None

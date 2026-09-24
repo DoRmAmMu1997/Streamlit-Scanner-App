@@ -13,7 +13,6 @@ import logging
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.orm import Session
@@ -114,25 +113,19 @@ def _failed_symbols_or_findings(outcome: DailyScanOutcome) -> int:
     )
 
 
-def _finite_decimal(value: Any) -> Decimal | None:
-    """Compatibility wrapper for report score parsing.
+def _score_and_source(row: Any) -> tuple[float | None, str]:
+    """Return the report score and the label the renderer should show.
 
     Beginner note:
-    Keeping this helper name avoids breaking private-path consumers. The shared
-    leaf makes an invalid score consistently become ``unscored`` instead of
-    reaching a notification renderer as NaN or Infinity.
+    The shared ``finite_decimal`` leaf makes an invalid score consistently
+    become ``unscored`` instead of reaching the renderer as NaN or Infinity.
     """
-    return finite_decimal(value)
-
-
-def _score_and_source(row: Any) -> tuple[float | None, str]:
-    """Return the report score and the label the renderer should show."""
-    final_score = _finite_decimal(getattr(row, "final_score", None))
+    final_score = finite_decimal(getattr(row, "final_score", None))
     if final_score is not None:
         return float(final_score), "final_score"
     raw_result = getattr(row, "raw_result_json", None)
     if isinstance(raw_result, dict):
-        confidence = _finite_decimal(raw_result.get("confidence"))
+        confidence = finite_decimal(raw_result.get("confidence"))
         if confidence is not None:
             return float(confidence), "confidence"
     return None, "unscored"

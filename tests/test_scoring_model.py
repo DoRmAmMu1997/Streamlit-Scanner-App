@@ -395,13 +395,15 @@ def test_unparseable_candle_dates_omit_cache_derived_components():
 
 
 @pytest.mark.parametrize("bad_timestamp", [pd.NaT, "not-a-date"])
-def test_any_unclassifiable_candle_date_omits_cache_derived_components(bad_timestamp):
-    """One unknown date makes the whole cached sample unsafe for replay.
+def test_unclassifiable_candle_rows_are_ignored_not_the_whole_sample(bad_timestamp):
+    """One undateable vendor row must not strip liquidity and risk from a symbol.
 
     Beginner note:
-    Silently dropping an invalid row could hide an in-scope candle that changes
-    risk or liquidity. The scorer cannot prove which market day that row belongs
-    to, so it fails closed and omits both candle-dependent components.
+    The candle cache now keeps raw vendor rows (VALID-005) so validation can
+    see them, but scans and ranking strip malformed rows exactly as they did
+    before. An undateable row can never be proven to sit before the snapshot,
+    so it is excluded, while every dated in-snapshot row still counts. Its
+    extreme price and volume must therefore not move the score at all.
     """
     frame = pd.DataFrame(
         [
@@ -413,17 +415,49 @@ def test_any_unclassifiable_candle_date_omits_cache_derived_components(bad_times
             }
         ]
     )
-    candles = _candles([100, 101, 102, 1000], [100, 100, 100, 10_000_000])
-    candles["timestamp"] = [
+    clean = _candles([100, 101, 102], [100, 100, 100])
+    clean["timestamp"] = pd.to_datetime(["2026-05-31", "2026-06-01", "2026-06-02"])
+    dirty = _candles([100, 101, 102, 1000], [100, 100, 100, 10_000_000])
+    dirty["timestamp"] = [
         pd.Timestamp("2026-05-31"),
         pd.Timestamp("2026-06-01"),
         pd.Timestamp("2026-06-02"),
         bad_timestamp,
     ]
 
-    scored = score_candidates(frame, context=_context(_CachedLoader({"AAA": candles})))
+    expected = score_candidates(frame, context=_context(_CachedLoader({"AAA": clean})))
+    scored = score_candidates(frame, context=_context(_CachedLoader({"AAA": dirty})))
 
     breakdown = scored.loc[0, "provenance"]["score_breakdown"]
-    assert breakdown["coverage"] == ["technical", "freshness"]
-    assert breakdown["missing"] == ["liquidity", "risk"]
+    assert breakdown["coverage"] == ["technical", "liquidity", "risk", "freshness"]
+    assert scored.loc[0, "final_score"] == expected.loc[0, "final_score"]
     assert _trusted_market_date(bad_timestamp) is None
+
+
+def test_missing_snapshot_is_logged(caplog):
+    """Silently dropping two components on every row hides a caller bug."""
+    import logging
+
+    frame = pd.DataFrame(
+        [{"symbol": "AAA", "signal_date": "2026-06-02", "confidence": 5, "provenance": _provenance()}]
+    )
+    context = replace(_context(_CachedLoader({"AAA": _candles([100, 101, 102])})), data_snapshot_date=None)
+    with caplog.at_level(logging.WARNING, logger="backend.scoring.model"):
+        score_candidates(frame, context=context)
+    assert "data_snapshot_date" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "timestamps",
+    [
+        pd.Series(pd.to_datetime(["2026-06-01 09:15", "2026-06-02 00:00", None], format="ISO8601")),
+        pd.Series(pd.to_datetime(["2026-06-01T18:30:00Z", "2026-06-02T00:00:00Z", None], format="ISO8601")),
+        pd.Series(["2026-06-01", pd.Timestamp("2026-06-02T18:30:00Z"), dt.date(2026, 6, 3), 5, None, "junk"]),
+    ],
+)
+def test_vectorized_market_dates_match_the_per_value_rule(timestamps):
+    """The fast path for datetime64 columns must agree with the scalar parser."""
+    from backend.scoring.model import _market_dates
+
+    expected = [_trusted_market_date(value) for value in timestamps]
+    assert list(_market_dates(timestamps)) == expected
