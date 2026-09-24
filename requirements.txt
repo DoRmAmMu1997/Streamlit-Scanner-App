@@ -43,6 +43,3 @@ beautifulsoup4
 lxml
 pdfplumber
 claude-agent-sdk
-
-# Test runner.
-pytest
