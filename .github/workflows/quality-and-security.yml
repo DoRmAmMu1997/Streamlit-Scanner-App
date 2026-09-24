@@ -49,7 +49,7 @@ jobs:
           # The floor sits ~two points under the measured 89% (QUAL-005) so
           # routine PRs don't fight the gate, while a large untested addition
           # still fails.
-          python -m pytest -q --cov=backend --cov=screeners --cov=ui --cov-fail-under=89
+          python -m pytest -q --cov=app --cov=backend --cov=screeners --cov=ui --cov-fail-under=89
 
       - name: Compile importable Python files
         run: python -m compileall -q app.py backend screeners ui tests
