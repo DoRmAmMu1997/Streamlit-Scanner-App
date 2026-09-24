@@ -20,14 +20,32 @@ separate network boundary: a small PDF can expand into much larger parser object
 can request smaller limits but cannot increase these ceilings. New bounded text
 caches use `.transcript-v1.txt`; legacy `.txt` files cannot prove page coverage
 and are ignored. Cache reads and child result reads are bounded independently.
+Cache eligibility is decided by the *effective* limits: any request that clamps
+to the 40,000/30 ceilings (including the production `read_recent_concall_text`
+call) shares the cache, which is published atomically; a stricter request is
+partial and never reads or replaces it. The ceilings are defined once, in the
+import-light worker module, and imported by the launcher and `pdf_reader`.
 
 ## Process and OS boundaries
 
 - The transcript launcher starts the fixed lightweight worker script with the
-  current interpreter's isolated `-I` mode. It does not import the broad
-  fundamentals facade or application main module in the child.
+  current interpreter and `-E -P`: PYTHON* variables are ignored and the script
+  folder is never prepended to `sys.path`. `-I` is deliberately not used because
+  it implies `-s`, hiding user site-packages; on installs that keep the parsers
+  there (reproduced on a Windows/Anaconda host) the child silently parsed
+  nothing. The child does not import the broad fundamentals facade or
+  application main module.
+- The child receives an allowlisted environment (PATH, SYSTEMROOT, WINDIR,
+  TEMP/TMP/TMPDIR, HOME, USERPROFILE, APPDATA, LOCALAPPDATA, LANG, LC_ALL).
+  Broker tokens, API keys, database URLs and OIDC secrets never reach the
+  process that parses hostile documents.
 - On Linux the child installs `RLIMIT_AS` before importing either parser. It
-  also limits individual file size to the 256 KiB result ceiling.
+  also limits individual file size to the 256 KiB result ceiling and CPU time to
+  60 seconds, a backstop for when the parent dies and cannot enforce its deadline.
+- The worker exits 0 after writing a receipt, 3 when no parser library can be
+  imported, and 1 for any other failure. The parent raises with that exit code
+  and `extract_text` logs the exception class and code (never document text), so
+  a broken deployment is visible instead of silently returning empty evidence.
 - On Windows the parent creates a Job Object with a 512 MiB process commit
   limit and kill-on-close. The child waits for a three-byte start token; the
   parent sends it only after successful assignment. Setup or assignment failure

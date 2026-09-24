@@ -59,7 +59,7 @@ def test_stalled_child_is_killed_and_private_directory_removed(tmp_path: Path, m
     with pytest.raises(launcher.subprocess.TimeoutExpired):
         launcher.run_transcript_worker(tmp_path / "unused.pdf", max_chars=40, max_pages=1)
     assert processes[0].poll() is not None
-    assert not Path(processes[0].args[4]).parent.exists()
+    assert not Path(processes[0].args[-3]).parent.exists()
 
 
 def test_parent_rejects_large_result_file_and_cleans_up(tmp_path: Path, monkeypatch):
@@ -75,7 +75,7 @@ def test_parent_rejects_large_result_file_and_cleans_up(tmp_path: Path, monkeypa
     with pytest.raises(OverflowError):
         launcher.run_transcript_worker(tmp_path / "unused.pdf", max_chars=40, max_pages=1)
     assert processes[0].poll() == 0
-    assert not Path(processes[0].args[4]).parent.exists()
+    assert not Path(processes[0].args[-3]).parent.exists()
 
 
 def test_windows_assignment_failure_never_releases_child(tmp_path: Path, monkeypatch):
@@ -357,3 +357,126 @@ def test_large_requested_limits_cannot_override_transcript_ceiling(tmp_path: Pat
     monkeypatch.setattr(pdf_reader, "_run_transcript_worker", bounded)
     assert len(pdf_reader.extract_text(path, max_chars=90000, max_pages=90)) == 40000
     assert len(pdf_reader.extract_text(path)) == 40000
+
+
+def test_worker_reports_internal_failure_with_nonzero_exit(tmp_path: Path, monkeypatch):
+    """An exit code of 0 with no receipt made every containment failure silent.
+
+    Beginner note:
+        The parent can only log what it can observe. A non-zero code lets it
+        tell "the worker broke" apart from "the PDF had no text", without the
+        child ever printing hostile document text anywhere.
+    """
+    def fail_limit():
+        raise OSError("limit unavailable")
+
+    monkeypatch.setattr(worker, "_install_memory_limit", fail_limit)
+    monkeypatch.setattr(worker.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(b"GO\n")))
+    monkeypatch.setattr(worker.sys, "argv", ["worker", "unused.pdf", str(tmp_path / "r.json"), "40", "1"])
+    assert worker.main() == worker.EXIT_FAILED
+
+
+def test_worker_reports_missing_parsers_distinctly(tmp_path: Path, monkeypatch):
+    """No importable parser must not look like a PDF that simply had no text."""
+    import sys
+
+    pdf = tmp_path / "good.pdf"
+    _write_pdf(pdf, ["Page01"])
+    monkeypatch.setitem(sys.modules, "pdfplumber", None)
+    monkeypatch.setitem(sys.modules, "pypdf", None)
+    monkeypatch.setattr(worker, "_install_memory_limit", lambda: None)
+    monkeypatch.setattr(worker.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(b"GO\n")))
+    result = tmp_path / "r.json"
+    monkeypatch.setattr(worker.sys, "argv", ["worker", str(pdf), str(result), "40", "1"])
+    assert worker.main() == worker.EXIT_PARSER_UNAVAILABLE
+    assert not result.exists()
+
+
+def test_parent_surfaces_worker_exit_code(tmp_path: Path, monkeypatch):
+    _fake_worker(tmp_path, monkeypatch, "sys.stdin.buffer.read(3)\nsys.exit(3)\n")
+    with pytest.raises(ChildProcessError, match="code 3"):
+        launcher.run_transcript_worker(tmp_path / "unused.pdf", max_chars=40, max_pages=1)
+
+
+def test_extract_text_logs_worker_failure(tmp_path: Path, monkeypatch, caplog):
+    """Returning "" is right for the prompt, but operators need a log line."""
+    import logging
+
+    path = tmp_path / "document.pdf"
+    path.write_bytes(b"%PDF-fake")
+
+    def fail(*_args, **_kwargs):
+        raise ChildProcessError("PDF worker exited with code 3")
+
+    monkeypatch.setattr(pdf_reader, "_run_transcript_worker", fail)
+    with caplog.at_level(logging.WARNING, logger=pdf_reader.logger.name):
+        assert pdf_reader.extract_text(path) == ""
+    assert "ChildProcessError" in caplog.text and "code 3" in caplog.text
+
+
+def test_production_sized_request_reuses_bounded_cache(tmp_path: Path, monkeypatch):
+    """The only production caller passes the ceilings, so it must hit the cache.
+
+    Beginner note:
+        Clamping makes a 40,000/30 request identical to the default one, so it
+        may share the default cache. A smaller request is still partial and
+        must neither read nor replace that cache.
+    """
+    path = tmp_path / "document.pdf"
+    path.write_bytes(b"%PDF-fake")
+    calls: list[tuple[int, int]] = []
+
+    def bounded(_path, *, max_chars, max_pages):
+        calls.append((max_chars, max_pages))
+        return json.dumps({"text": "cached words"}).encode()
+
+    monkeypatch.setattr(pdf_reader, "_run_transcript_worker", bounded)
+    assert pdf_reader.extract_text(path, max_chars=40000, max_pages=30) == "cached words"
+    assert pdf_reader.extract_text(path, max_chars=40000, max_pages=30) == "cached words"
+    assert calls == [(40000, 30)]
+    pdf_reader.extract_text(path, max_chars=10, max_pages=30)
+    assert calls == [(40000, 30), (10, 30)]
+
+
+def test_worker_launch_drops_secrets_but_keeps_user_site(tmp_path: Path, monkeypatch):
+    """The hostile-PDF child needs a runtime, not the app's credentials.
+
+    Beginner note:
+        ``-I`` implies ``-s``, which hides user site-packages; on machines that
+        install the parsers there the child silently parsed nothing. ``-E -P``
+        still ignores PYTHON* variables and never prepends the script folder.
+    """
+    import os
+
+    captured: dict[str, object] = {}
+
+    def fake_popen(args, **kwargs):
+        captured["args"] = args
+        captured["env"] = kwargs.get("env")
+        raise OSError("stop before spawning")
+
+    monkeypatch.setattr(launcher.subprocess, "Popen", fake_popen)
+    monkeypatch.setenv("DHAN_ACCESS_TOKEN", "secret-token")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret")
+    with pytest.raises(OSError, match="stop before spawning"):
+        launcher.run_transcript_worker(tmp_path / "unused.pdf", max_chars=40, max_pages=1)
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert "DHAN_ACCESS_TOKEN" not in env and "ANTHROPIC_API_KEY" not in env
+    assert env.get("PATH") == os.environ.get("PATH")
+    args = captured["args"]
+    assert isinstance(args, list) and "-I" not in args and "-s" not in args
+    assert "-E" in args and "-P" in args
+
+
+def test_linux_limits_include_cpu_backstop(monkeypatch):
+    """The parent's deadline cannot help once the parent itself has died."""
+    import sys
+
+    calls: list[tuple[int, tuple[int, int]]] = []
+    fake_resource = SimpleNamespace(RLIMIT_AS=1, RLIMIT_FSIZE=2, RLIMIT_CPU=3,
+                                    setrlimit=lambda kind, limits: calls.append((kind, limits)))
+    monkeypatch.setitem(sys.modules, "resource", fake_resource)
+    monkeypatch.setattr(worker.sys, "platform", "linux")
+    worker._install_memory_limit()
+    assert (3, (60, 60)) in calls

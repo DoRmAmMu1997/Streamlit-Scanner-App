@@ -1,9 +1,11 @@
 """Lightweight transcript child; parser imports occur only after containment.
 
 Beginner note:
-    Execute this file with an isolated Python interpreter. It deliberately
+    Execute this file with a fresh Python interpreter. It deliberately
     imports neither the fundamentals facade nor the application's main module.
-    Both parsers share the same deadline and memory boundary.
+    Both parsers share the same deadline and memory boundary. Because this
+    module imports only the standard library at top level, the parent modules
+    import the ceilings below from here: one definition, no drift.
 """
 
 from __future__ import annotations
@@ -14,6 +16,26 @@ from pathlib import Path
 
 MAX_RESULT_BYTES = 256 * 1024
 MEMORY_BYTES = 512 * 1024 * 1024
+MAX_CHARS = 40_000
+MAX_PAGES = 30
+# Child-side backstop matching the parent's wall-time budget. It only matters
+# when the parent dies mid-parse and can no longer enforce its own deadline.
+CPU_SECONDS = 60
+
+# Exit codes observed by the parent. Non-zero never carries document text.
+EXIT_OK = 0
+EXIT_FAILED = 1
+EXIT_PARSER_UNAVAILABLE = 3
+
+
+class ParserUnavailableError(RuntimeError):
+    """Neither pdfplumber nor pypdf could be imported inside the child.
+
+    Beginner note:
+        This is an environment problem, not a property of the PDF. Reporting it
+        separately stops "no parser installed" from masquerading as "this
+        transcript contained no text".
+    """
 
 
 def _append_limited(
@@ -58,7 +80,7 @@ def _extract_with_pdfplumber(
     *,
     max_chars: int | None = None,
     max_pages: int | None = None,
-) -> str:
+) -> str | None:
     """Extract the bounded leading pages with pdfplumber inside the child.
 
     Args:
@@ -67,18 +89,20 @@ def _extract_with_pdfplumber(
         max_pages: Maximum leading pages to visit.
 
     Returns:
-        Joined text, or an empty string if the library is absent or parsing fails.
+        Joined text, an empty string if parsing fails, or ``None`` when the
+        library (or one of its dependencies) cannot be imported at all.
 
     Beginner note:
         Importing the parser here lets the worker install OS limits first.
         Page selection alone cannot bound compressed-object expansion, which is
         why this helper must remain behind the process launcher in production.
+        ``None`` versus ``""`` keeps a broken install distinguishable from a
+        PDF that simply has no extractable text.
     """
     try:
         import pdfplumber  # type: ignore[import-untyped, unused-ignore]
     except ImportError:
-        pass
-        return ""
+        return None
 
     chunks: list[str] = []
     try:
@@ -99,7 +123,7 @@ def _extract_with_pypdf(
     *,
     max_chars: int | None = None,
     max_pages: int | None = None,
-) -> str:
+) -> str | None:
     """Try the optional pypdf reader under the same child resource limits.
 
     Args:
@@ -108,7 +132,8 @@ def _extract_with_pypdf(
         max_pages: Maximum leading pages to visit.
 
     Returns:
-        Joined text, or an empty string if pypdf is absent or cannot parse it.
+        Joined text, an empty string if pypdf cannot parse it, or ``None``
+        when pypdf is not importable.
 
     Beginner note:
         A fallback is useful for differences between PDF libraries, but it must
@@ -118,7 +143,7 @@ def _extract_with_pypdf(
     try:
         from pypdf import PdfReader  # type: ignore[import-untyped, unused-ignore]
     except ImportError:
-        return ""
+        return None
 
     try:
         reader = PdfReader(str(pdf_path))
@@ -145,13 +170,21 @@ def extract_payload(pdf_path: Path, *, max_chars: int, max_pages: int) -> bytes:
         UTF-8 JSON containing only text, bounded to 256 KiB. An oversized result
         is replaced by an empty-text receipt so it cannot become evidence.
 
+    Raises:
+        ParserUnavailableError: Neither parser library could be imported.
+
     Beginner note:
         Pure unit tests may call this helper with fake parser modules. Production
         reaches it only through main after the operating-system limits succeed.
     """
-    text = _extract_with_pdfplumber(pdf_path, max_chars=max_chars, max_pages=max_pages)
+    primary = _extract_with_pdfplumber(pdf_path, max_chars=max_chars, max_pages=max_pages)
+    text = primary or ""
+    fallback: str | None = ""
     if not text:
-        text = _extract_with_pypdf(pdf_path, max_chars=max_chars, max_pages=max_pages)
+        fallback = _extract_with_pypdf(pdf_path, max_chars=max_chars, max_pages=max_pages)
+        text = fallback or ""
+    if primary is None and fallback is None:
+        raise ParserUnavailableError("No PDF parser library is importable")
     encoded = json.dumps({"text": text}, ensure_ascii=False).encode("utf-8")
     return encoded if len(encoded) <= MAX_RESULT_BYTES else b'{"text":""}'
 
@@ -167,18 +200,26 @@ def _install_memory_limit() -> None:
         Linux sets RLIMIT_AS before pdfplumber/pypdf imports. Windows relies on
         the parent's Job Object and cannot proceed until the parent grants its
         token. The file-size limit also bounds a faulty result writer on Linux.
+        RLIMIT_CPU is a backstop for the case the parent's deadline cannot
+        cover: the parent process itself dying while this child is parsing.
     """
     if sys.platform == "linux":
         import resource
 
         resource.setrlimit(resource.RLIMIT_AS, (MEMORY_BYTES, MEMORY_BYTES))
         resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_RESULT_BYTES, MAX_RESULT_BYTES))
+        resource.setrlimit(resource.RLIMIT_CPU, (CPU_SECONDS, CPU_SECONDS))
     elif sys.platform != "win32":
         raise OSError("PDF memory containment unavailable")
 
 
-def main() -> None:
+def main() -> int:
     """Wait for containment, parse, then write one bounded primitive receipt.
+
+    Returns:
+        ``EXIT_OK`` after writing a receipt, ``EXIT_PARSER_UNAVAILABLE`` when no
+        parser library imports, otherwise ``EXIT_FAILED``. The code is the only
+        diagnostic that leaves the child; it never carries document text.
 
     Beginner note:
         EOF or an absent start token means the parent failed or could not attach
@@ -186,18 +227,21 @@ def main() -> None:
         result file avoids blocking the parent on a partial pipe message.
     """
     if sys.stdin.buffer.read(3) != b"GO\n":
-        return
+        return EXIT_FAILED
     try:
         _install_memory_limit()
         pdf_path, result_path, chars, pages = sys.argv[1:]
         max_chars, max_pages = int(chars), int(pages)
-        if not (0 < max_chars <= 40000 and 0 < max_pages <= 30):
-            return
+        if not (0 < max_chars <= MAX_CHARS and 0 < max_pages <= MAX_PAGES):
+            return EXIT_FAILED
         result = extract_payload(Path(pdf_path), max_chars=max_chars, max_pages=max_pages)
         Path(result_path).write_bytes(result)
+    except ParserUnavailableError:
+        return EXIT_PARSER_UNAVAILABLE
     except Exception:  # noqa: BLE001 - no parser-controlled exception escapes
-        return
+        return EXIT_FAILED
+    return EXIT_OK
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -43,6 +43,7 @@ import requests
 from backend.config import FUNDAMENTALS_PDF_DIR
 from backend.fundamentals.pdf_transport import Resolver, Transport, open_pinned_response, resolve_public_target
 from backend.transcript_pdf_process import run_transcript_worker as _run_transcript_worker
+from backend.transcript_pdf_worker import MAX_CHARS, MAX_PAGES, MAX_RESULT_BYTES
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,7 @@ _PDF_USER_AGENT = (
 # an oversized or malicious URL must not be able to read an unbounded body into
 # memory (DoS). Mirrors the streamed byte cap in backend/universe_builder.py.
 _MAX_PDF_BYTES = 25 * 1024 * 1024  # 25 MiB
-_MAX_PDF_PAGES = 30
+_MAX_PDF_PAGES = MAX_PAGES
 
 
 def _safe_filename(url: str, *, fallback_prefix: str = "doc") -> str:
@@ -239,15 +240,19 @@ def extract_text(
         Both parsers run in the same killable child with a 60-second deadline
         and a 512 MiB OS memory limit. There is no in-process fallback. A new
         cache suffix separates bounded transcript receipts from legacy full-text
-        caches, whose page count cannot be verified. Limited calls never write
-        the shared cache, so one small prompt cannot truncate a later request.
+        caches, whose page count cannot be verified. The cache is keyed on the
+        *effective* limits: a request clamped to the ceilings (including the
+        production 40,000/30 call) is identical to the default one and shares
+        it, while a stricter request is partial and never reads or writes it.
+        Worker failures still return "" for the prompt but are logged by
+        exception class and exit code, never by document text.
     """
     pdf_path = Path(pdf_path)
-    chars = min(40000, max_chars) if max_chars is not None else 40000
-    pages = min(30, max_pages) if max_pages is not None else 30
+    chars = min(MAX_CHARS, max_chars) if max_chars is not None else MAX_CHARS
+    pages = min(MAX_PAGES, max_pages) if max_pages is not None else MAX_PAGES
     if chars <= 0 or pages <= 0 or not pdf_path.is_file():
         return ""
-    cache_allowed = max_chars is None and max_pages is None
+    cache_allowed = chars == MAX_CHARS and pages == MAX_PAGES
     text_cache = pdf_path.with_suffix(".transcript-v1.txt")
     try:
         if cache_allowed and text_cache.is_file() and text_cache.stat().st_mtime >= pdf_path.stat().st_mtime:
@@ -259,19 +264,25 @@ def extract_text(
         pass
     try:
         encoded = _run_transcript_worker(pdf_path, max_chars=chars, max_pages=pages)
-        if len(encoded) > 256 * 1024:
+        if len(encoded) > MAX_RESULT_BYTES:
+            logger.warning("Transcript PDF worker receipt exceeded its size budget")
             return ""
         payload = json.loads(encoded.decode("utf-8"))
         if not isinstance(payload, dict) or set(payload) != {"text"}:
+            logger.warning("Transcript PDF worker returned a malformed receipt")
             return ""
         text = payload["text"]
         if not isinstance(text, str) or len(text) > chars:
+            logger.warning("Transcript PDF worker returned text outside its limits")
             return ""
-    except Exception:  # noqa: BLE001 - parser/process errors expose no hostile text
+    except Exception as exc:  # noqa: BLE001 - parser/process errors expose no hostile text
+        # Our launcher's messages carry only fixed text and an exit code, and
+        # JSON/Unicode errors describe positions, never the document itself.
+        logger.warning("Transcript PDF worker failed: %s: %s", type(exc).__name__, exc)
         return ""
     if text and cache_allowed:
         try:
-            text_cache.write_text(text, encoding="utf-8")
+            _publish_atomically(text.encode("utf-8"), text_cache)
         except OSError:
             logger.warning("Could not write bounded transcript cache")
     return text
