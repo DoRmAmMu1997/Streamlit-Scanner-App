@@ -46,6 +46,7 @@ def compute_forward_return(
     *,
     as_of: dt.date | None = None,
     missing_data_grace_days: int = MISSING_FUTURE_DATA_GRACE_DAYS,
+    raw_validated: bool = False,
 ) -> ForwardReturnPoint:
     """Measure one signal's forward return without database or network access.
 
@@ -58,6 +59,9 @@ def compute_forward_return(
         as_of: Last observable date; defaults to today and prevents future exits.
         missing_data_grace_days: Calendar-day freshness allowance when the exit
             bar is absent; recent missing data remains retryable.
+        raw_validated: The caller already ran the same raw validation on this
+            exact frame (the service does it once per loaded frame), so the
+            per-horizon repeat is skipped. Pure callers keep the default.
 
     Returns:
         A COMPUTED point with exact Decimal return/path metrics when observable;
@@ -77,13 +81,12 @@ def compute_forward_return(
     """
     normalized_horizon = positive_integral(horizon_days, name="horizon_days")
     as_of_date = as_of or dt.date.today()
-    quality = validate_candles(
+    if not raw_validated and validate_candles(
         candles,
         symbol="FORWARD_RETURN",
         required_columns=("open", "high", "low", "close"),
         allow_identical_daily_duplicates=True,
-    )
-    if quality.has_fatal_findings:
+    ).has_fatal_findings:
         return _empty_point(normalized_horizon, ForwardReturnStatus.INSUFFICIENT_DATA)
     frame = prepared_frame(candles)
     if frame.empty:

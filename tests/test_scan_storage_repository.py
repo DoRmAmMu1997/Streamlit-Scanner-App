@@ -11,7 +11,7 @@ import datetime as dt
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, select
 
 from backend.scanning.result_contract import AIEvaluationRecord, AIProvenance
 from backend.storage.models import ScanStatus
@@ -756,12 +756,12 @@ def test_storage_package_exports_ai_evaluation_api():
     assert callable(storage.get_forward_return_metric_records)
 
 
-def test_get_signals_needing_forward_returns_returns_missing_and_pending_only(db_session):
+def test_forward_return_work_selection_returns_missing_and_pending_only(db_session):
     """VALID-002 should retry missing/pending horizons and skip terminal rows."""
     from backend.storage.models import ForwardReturnStatus, SignalForwardReturn
     from backend.storage.repository import (
         create_scan_run,
-        get_signals_needing_forward_returns,
+        get_forward_return_work_items,
         save_scan_results,
     )
 
@@ -793,10 +793,166 @@ def test_get_signals_needing_forward_returns_returns_missing_and_pending_only(db
     )
     db_session.commit()
 
-    rows = get_signals_needing_forward_returns(db_session, horizons=(20,))
+    work = get_forward_return_work_items(db_session, horizons=(20,))
 
-    assert [row.id for row in rows] == [missing.id, pending.id]
-    assert rows[0].run.universe_key == "nifty_500"
+    assert [item.result_id for item in work] == [missing.id, pending.id]
+    assert work[0].universe_key == "nifty_500"
+
+
+def test_forward_return_work_selection_filters_terminal_history_in_sql(db_session):
+    """Terminal history must never be loaded just to be thrown away.
+
+    Beginner note:
+    The nightly job handles at most a few hundred signals, but scan history
+    grows every day. Selecting in Python meant loading every stored result
+    (with its raw JSON) on every run; the database must do the filtering.
+    """
+    from backend.storage.models import ForwardReturnStatus, ScanResult, SignalForwardReturn
+    from backend.storage.repository import (
+        create_scan_run,
+        get_forward_return_work_items,
+        save_scan_results,
+    )
+
+    run = create_scan_run(db_session, screener_key="envelope", universe_key="nifty_500")
+    results = save_scan_results(
+        db_session,
+        run,
+        [{"symbol": f"DONE{i}", "signal_date": dt.date(2026, 1, 5)} for i in range(30)]
+        + [{"symbol": "OPEN", "signal_date": dt.date(2026, 1, 5)}],
+    )
+    db_session.add_all(
+        SignalForwardReturn(result_id=result.id, horizon_days=20, status=ForwardReturnStatus.COMPUTED)
+        for result in results[:30]
+    )
+    db_session.commit()
+    db_session.expunge_all()
+    loaded: list[object] = []
+
+    def on_load(target, _context):
+        loaded.append(target)
+
+    event.listen(ScanResult, "load", on_load)
+    event.listen(SignalForwardReturn, "load", on_load)
+    try:
+        [work] = get_forward_return_work_items(db_session, horizons=(20,))
+    finally:
+        event.remove(ScanResult, "load", on_load)
+        event.remove(SignalForwardReturn, "load", on_load)
+
+    assert work.symbol == "OPEN"
+    assert len(loaded) <= 1
+
+
+def _reference_work_order(session, horizons):
+    """The original in-Python selection rule, kept as the parity oracle."""
+    from backend.storage.models import ForwardReturnStatus, ScanResult
+
+    def aware(value):
+        return value.replace(tzinfo=dt.UTC) if value.tzinfo is None else value.astimezone(dt.UTC)
+
+    ordered = []
+    for result in session.scalars(select(ScanResult).where(ScanResult.signal_date.is_not(None))):
+        rows = {row.horizon_days: row for row in result.forward_returns if row.horizon_days in horizons}
+        stock, bench, times = [], [], []
+        for horizon in horizons:
+            row = rows.get(horizon)
+            if row is None:
+                stock.append(horizon)
+                times.append(result.created_at)
+            elif row.status is ForwardReturnStatus.PENDING:
+                stock.append(horizon)
+                times.append(row.last_attempted_at or result.created_at)
+            elif row.benchmark_retry_pending:
+                bench.append(horizon)
+                times.append(row.last_attempted_at or result.created_at)
+        if stock or bench:
+            ordered.append((min(aware(t) for t in times), result.signal_date, result.id, tuple(stock), tuple(bench)))
+    ordered.sort(key=lambda item: item[:3])
+    return [item[2:] for item in ordered]
+
+
+def test_forward_return_work_selection_matches_reference_ordering(db_session):
+    """The SQL query must keep the fairness order and horizon split exactly."""
+    from backend.storage.models import ForwardReturnStatus, SignalForwardReturn
+    from backend.storage.repository import (
+        create_scan_run,
+        get_forward_return_work_items,
+        save_scan_results,
+    )
+
+    base = dt.datetime(2026, 1, 10, 12, tzinfo=dt.UTC)
+    run = create_scan_run(db_session, screener_key="envelope", universe_key="nifty_500")
+    specs = [
+        ("MISSING_ALL", dt.date(2026, 1, 5), 0),
+        ("PENDING_RECENT", dt.date(2026, 1, 4), 1),
+        ("BENCH_ONLY", dt.date(2026, 1, 3), 2),
+        ("ALL_TERMINAL", dt.date(2026, 1, 2), 3),
+        ("NO_DATE", None, 4),
+        ("PENDING_LEGACY", dt.date(2026, 1, 6), 5),
+        ("TIE_A", dt.date(2026, 1, 1), 6),
+        ("TIE_B", dt.date(2026, 1, 1), 6),
+    ]
+    results = save_scan_results(
+        db_session, run, [{"symbol": symbol, "signal_date": day} for symbol, day, _ in specs],
+    )
+    for result, (_symbol, _day, hours) in zip(results, specs, strict=True):
+        result.created_at = base + dt.timedelta(hours=hours)
+    by_symbol = {result.symbol: result for result in results}
+    computed = ForwardReturnStatus.COMPUTED
+    db_session.add_all([
+        SignalForwardReturn(result_id=by_symbol["PENDING_RECENT"].id, horizon_days=20,
+                            last_attempted_at=base + dt.timedelta(days=3)),
+        SignalForwardReturn(result_id=by_symbol["BENCH_ONLY"].id, horizon_days=20, status=computed,
+                            benchmark_retry_pending=True, last_attempted_at=base - dt.timedelta(days=1)),
+        SignalForwardReturn(result_id=by_symbol["BENCH_ONLY"].id, horizon_days=60, status=computed),
+        SignalForwardReturn(result_id=by_symbol["ALL_TERMINAL"].id, horizon_days=20, status=computed),
+        SignalForwardReturn(result_id=by_symbol["ALL_TERMINAL"].id, horizon_days=60, status=computed),
+        SignalForwardReturn(result_id=by_symbol["PENDING_LEGACY"].id, horizon_days=20),
+        SignalForwardReturn(result_id=by_symbol["PENDING_LEGACY"].id, horizon_days=60, status=computed),
+        SignalForwardReturn(result_id=by_symbol["TIE_A"].id, horizon_days=60,
+                            last_attempted_at=base + dt.timedelta(hours=6)),
+    ])
+    db_session.commit()
+
+    expected = _reference_work_order(db_session, (20, 60))
+    work = get_forward_return_work_items(db_session, horizons=(20, 60))
+    actual = [(item.result_id, item.stock_horizons, tuple(b.horizon_days for b in item.benchmark_horizons))
+              for item in work]
+    assert actual == expected
+    limited = get_forward_return_work_items(db_session, horizons=(20, 60), limit=2)
+    assert [item.result_id for item in limited] == [row[0] for row in expected[:2]]
+
+
+def test_mark_forward_return_attempted_never_touches_terminal_facts(db_session):
+    """A failed signal records an attempt without inventing or erasing measurements."""
+    from decimal import Decimal
+
+    from backend.storage.models import ForwardReturnStatus, SignalForwardReturn
+    from backend.storage.repository import (
+        create_scan_run,
+        mark_forward_return_attempted,
+        save_scan_results,
+    )
+
+    run = create_scan_run(db_session, screener_key="envelope", universe_key="nifty_500")
+    [result] = save_scan_results(db_session, run, [{"symbol": "RELIANCE", "signal_date": dt.date(2026, 1, 5)}])
+    db_session.add_all([
+        SignalForwardReturn(result_id=result.id, horizon_days=1, status=ForwardReturnStatus.COMPUTED,
+                            forward_return_pct=Decimal("4.0000")),
+        SignalForwardReturn(result_id=result.id, horizon_days=5, status=ForwardReturnStatus.COMPUTED,
+                            forward_return_pct=Decimal("6.0000"), benchmark_retry_pending=True),
+    ])
+    db_session.commit()
+    attempted = dt.datetime(2026, 3, 1, tzinfo=dt.UTC)
+
+    mark_forward_return_attempted(db_session, result_id=result.id, horizons=(1, 5, 20), attempted_at=attempted)
+    db_session.commit()
+
+    rows = {row.horizon_days: row for row in db_session.scalars(select(SignalForwardReturn))}
+    assert rows[1].forward_return_pct == Decimal("4.0000") and rows[1].last_attempted_at is None
+    assert rows[5].forward_return_pct == Decimal("6.0000") and rows[5].last_attempted_at is not None
+    assert rows[20].status is ForwardReturnStatus.PENDING and rows[20].last_attempted_at is not None
 
 
 def test_upsert_forward_return_updates_pending_row_in_place(db_session):

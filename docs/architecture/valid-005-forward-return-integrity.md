@@ -25,9 +25,13 @@ The repository selects each requested signal once, ordered by its oldest
 effective unresolved attempt time. A missing horizon uses `ScanResult.created_at`;
 an existing unresolved row uses `last_attempted_at`, falling back to that signal
 creation time. Signal date then ID break ties. The CLI defaults to 500 distinct
-signals. Retried signals move behind older untouched work. Selection currently
-materializes candidates in Python for portable ordering of missing horizons;
-very large histories may justify a SQL aggregation implementation later.
+signals. Retried signals move behind older untouched work. Selection, ordering
+and the limit run in SQL: one aggregate over the requested horizons per signal
+(row count, unresolved count, oldest `COALESCE(last_attempted_at, created_at)`)
+decides eligibility and order, and only the chosen signals' scalar columns are
+read afterwards. Scan history grows daily while a batch stays a few hundred
+signals, so terminal history is never loaded just to be discarded. A parity test
+keeps the SQL ordering identical to the original Python rule.
 
 Stock writes require `status = pending` in the UPDATE statement itself. A
 missing row is inserted under the existing unique signal/horizon constraint;
@@ -42,12 +46,24 @@ retry cannot overwrite another worker's successful benchmark. Failed or malforme
 configured index data keeps `benchmark_retry_pending`; success clears it. A
 universe with intentionally no configured benchmark clears the flag and leaves
 the queue without manufacturing a return. Benchmark-only work skips universe
-mapping and stock history entirely.
+mapping and stock history entirely. A configured benchmark that still cannot
+produce a leg more than `MISSING_FUTURE_DATA_GRACE_DAYS` (7) days after the stock
+leg became terminal (`computed_at`, or the signal date for legacy rows) is
+finalized as missing, mirroring the stock leg's own grace period, so no retry
+stays queued forever. The window is measured against `as_of`, so a replay dated
+before `computed_at` never expires anything.
 
 The shared Dhan normalizer retains malformed OHLC/date rows as NaN/NaT instead
-of dropping them. The range slicer retains undateable rows because their absence
-from the requested range cannot be proven. This evidence survives Parquet caching
-and reaches both scanner quality quarantine and historical validation. A response
+of dropping them, and this evidence survives Parquet caching. **Only
+forward-return validation sees it:** `get_daily_history`, `_slice_to_range` and
+`read_cached_history` take a keyword `preserve_malformed_rows` (default False,
+the same opt-in pattern as `allow_unpublished_tail`). By default rows with an
+unparseable timestamp or a missing OHLC price are stripped exactly as the
+normalizer did before VALID-005, so scans, charts and ranking are unchanged and a
+single bad vendor row cannot quarantine a symbol from every screener. The
+validation service's `_load_history` (stock and benchmark) is the one caller that
+opts in, and then the range slicer also retains undateable rows because their
+absence from the requested range cannot be proven. A response
 with an undateable row is inconclusive for vendor-earliest sidecars and cannot
 create, renew, replace or remove that authority. Valid
 out-of-range dates are still excluded and exact whole-row duplicates still collapse.
@@ -63,8 +79,9 @@ by `signal_date..as_of`; future signals stay pending without fetching.
 Horizon and limit arguments must be positive `numbers.Integral` values. Booleans,
 zero, negatives and fractional values fail before database/provider access.
 Horizons are deduplicated in caller order; an empty sequence is a no-op and the
-Python API permits `limit=None`. The exported legacy stock-selection helper
-retains its contract; workers use the new detached-work API.
+Python API permits `limit=None`. The legacy `get_signals_needing_forward_returns`
+helper was removed: it ignored benchmark-only work, so any new caller would have
+silently skipped it. Workers use the detached-work API only.
 
 ## Schema and failure behavior
 
@@ -76,11 +93,17 @@ facts are untouched; downgrade removes only the scheduling metadata.
 
 `ForwardReturnRunSummary.total_signals` counts successfully committed signals,
 including benchmark-only attempts. Other counters count processed unresolved
-measurements. If a later signal fails fatally, its entire transaction rolls back
-and `ForwardReturnBatchError.summary` carries earlier committed progress. The
-CLI returns failure with that progress instead of reporting zero or claiming that
-the rolled-back signal completed. Transient provider failures remain normal
-pending work, not fatal batch failures.
+measurements. If a signal fails, its entire measurement transaction rolls back,
+`mark_forward_return_attempted` commits an attempt receipt in its own short
+transaction (empty PENDING rows for never-attempted horizons, a new
+`last_attempted_at` on pending/benchmark-retry rows, terminal facts untouched),
+and the batch continues with the next signal. Without that receipt the failed
+signal would stay the oldest work item and every limited batch would pick it
+first and fail again, stalling the queue. After the batch,
+`ForwardReturnBatchError.summary` carries the committed progress and the first
+failure is its cause, so the CLI still exits non-zero. If the attempt receipt
+itself cannot be written the database is unusable and the batch stops there.
+Transient provider failures remain normal pending work, not batch failures.
 
 ## Validation
 

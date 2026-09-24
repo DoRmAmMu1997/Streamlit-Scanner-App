@@ -27,8 +27,10 @@ class _FakeDailyLoader:
         start_date: dt.date,
         end_date: dt.date,
         force_refresh: bool = False,
+        *,
+        preserve_malformed_rows: bool = False,
     ) -> tuple[pd.DataFrame, bool]:
-        del force_refresh
+        del force_refresh, preserve_malformed_rows
         row = dict(instrument)
         symbol = str(row["symbol"]).upper()
         self.calls.append({"symbol": symbol, "start_date": start_date, "end_date": end_date})
@@ -580,7 +582,7 @@ def test_provider_calls_allow_independent_writer_and_concurrent_terminalization(
     writes = []
 
     class WritingLoader(_FakeDailyLoader):
-        def get_daily_history(self, instrument, start_date, end_date, force_refresh=False):
+        def get_daily_history(self, instrument, start_date, end_date, force_refresh=False, **_kwargs):
             with file_session_factory() as writer:
                 target = result_id if instrument["symbol"] == "RELIANCE" else other_id
                 upsert_forward_return(writer, result_id=target, point=ForwardReturnPoint(
@@ -632,7 +634,12 @@ def test_later_signal_failure_rolls_back_all_its_horizons_preserving_previous_co
     assert caught.value.summary.total_signals == 1
     assert caught.value.summary.pending == 2
     with file_session_factory() as session:
-        assert session.scalars(select(SignalForwardReturn.result_id)).all() == [first, first]
+        rows = session.scalars(select(SignalForwardReturn).order_by(SignalForwardReturn.id)).all()
+        assert [row.result_id for row in rows] == [first, first, second, second]
+        # The failed signal keeps only attempt receipts: no measurement facts.
+        failed_rows = [row for row in rows if row.result_id == second]
+        assert all(row.status is ForwardReturnStatus.PENDING for row in failed_rows)
+        assert all(row.last_attempted_at is not None and row.entry_date is None for row in failed_rows)
 
 
 def test_limit_one_rotates_pending_signals_across_invocations(session_factory):
@@ -756,14 +763,21 @@ def test_real_loader_preserves_malformed_stock_for_service_and_calculator(
         assert row.status is ForwardReturnStatus.PENDING
         assert row.entry_date is None
         assert row.forward_return_pct is None
-    cached, from_cache = loader.get_daily_history(universe.iloc[0], dt.date(2026, 1, 5), dt.date(2026, 1, 7))
+    raw_view, from_cache = loader.get_daily_history(
+        universe.iloc[0], dt.date(2026, 1, 5), dt.date(2026, 1, 7), preserve_malformed_rows=True,
+    )
     assert from_cache
-    assert len(cached) == 3
-    point = compute_forward_return(cached, dt.date(2026, 1, 5), 1, as_of=dt.date(2026, 1, 7))
+    assert len(raw_view) == 3
+    point = compute_forward_return(raw_view, dt.date(2026, 1, 5), 1, as_of=dt.date(2026, 1, 7))
     assert point.status is ForwardReturnStatus.INSUFFICIENT_DATA
+    # Owner decision: only validation opts in to raw rows. Scans strip the
+    # malformed row exactly as before VALID-005 instead of quarantining the
+    # whole symbol from every screener.
+    clean_view, _ = loader.get_daily_history(universe.iloc[0], dt.date(2026, 1, 5), dt.date(2026, 1, 7))
+    assert len(clean_view) == 2
     scan = loader.load_universe_history(universe, dt.date(2026, 1, 5), dt.date(2026, 1, 7))
-    assert not scan.frames
-    assert scan.failures[0]["phase"] == "data_quality"
+    assert "RELIANCE" in scan.frames
+    assert not scan.failures
     assert len(network_calls) == (1 if source == "vendor" else 0)
 
 
@@ -813,8 +827,159 @@ def test_real_loader_keeps_malformed_benchmark_retryable(session_factory, tmp_pa
         row = session.scalars(select(SignalForwardReturn)).one()
         assert row.benchmark_retry_pending
         assert row.benchmark_return_pct is None
-    cached, from_cache = loader.get_daily_history(spec.instrument, dt.date(2026, 1, 5), dt.date(2026, 1, 7))
+    cached, from_cache = loader.get_daily_history(
+        spec.instrument, dt.date(2026, 1, 5), dt.date(2026, 1, 7), preserve_malformed_rows=True,
+    )
     assert from_cache
     leg = compute_benchmark_leg(cached, entry_date=dt.date(2026, 1, 6),
                                 exit_date=dt.date(2026, 1, 7), benchmark_key="index")
     assert leg.return_pct is None
+
+
+def _poisoned_upsert(monkeypatch, poison_id: int) -> None:
+    """Make every stock write for one signal fail deterministically."""
+    from backend.validation import service
+
+    original = service.upsert_forward_return
+
+    def fail_poison(session, **kwargs):
+        if kwargs["result_id"] == poison_id:
+            raise RuntimeError("deterministic write failure")
+        return original(session, **kwargs)
+
+    monkeypatch.setattr(service, "upsert_forward_return", fail_poison)
+
+
+def test_one_failing_signal_does_not_stop_the_rest_of_the_batch(session_factory, monkeypatch):
+    """A single poison signal used to abort every later signal in the batch."""
+    from backend.validation import service
+
+    poison = _seed_signal(session_factory)
+    healthy = _seed_signal(session_factory)
+    _poisoned_upsert(monkeypatch, poison)
+
+    with pytest.raises(service.ForwardReturnBatchError) as caught:
+        compute_pending_forward_returns(
+            session_factory, _FakeDailyLoader({}), horizons=(1,),
+            universe_loader=lambda _: _universe([("RELIANCE", "500325")]),
+            benchmark_resolver=lambda _: None,
+        )
+    assert caught.value.summary.total_signals == 1
+    with session_factory() as session:
+        assert healthy in set(session.scalars(select(SignalForwardReturn.result_id)))
+
+
+def test_failing_signal_is_recorded_as_attempted_so_the_queue_moves_on(session_factory, monkeypatch):
+    """Oldest-attempt-first selection must not pick the same poison forever.
+
+    Beginner note:
+        The failed signal's transaction rolls back, so without a separately
+        committed attempt time it stayed the oldest work item and a limited
+        batch re-selected it (and failed) on every run, starving the queue.
+    """
+    from backend.validation import service
+
+    poison = _seed_signal(session_factory)
+    healthy = _seed_signal(session_factory)
+    _poisoned_upsert(monkeypatch, poison)
+    options = dict(horizons=(1,), limit=1, benchmark_resolver=lambda _: None,
+                   universe_loader=lambda _: _universe([("RELIANCE", "500325")]))
+
+    with pytest.raises(service.ForwardReturnBatchError):
+        compute_pending_forward_returns(session_factory, _FakeDailyLoader({}), **options)
+    summary = compute_pending_forward_returns(session_factory, _FakeDailyLoader({}), **options)
+
+    assert summary.total_signals == 1
+    with session_factory() as session:
+        stored = {row.result_id: row for row in session.scalars(select(SignalForwardReturn))}
+        assert healthy in stored
+        assert stored[poison].status is ForwardReturnStatus.PENDING
+        assert stored[poison].last_attempted_at is not None
+
+
+def test_benchmark_retry_finalizes_after_grace_period(session_factory):
+    """A configured index that never yields a leg cannot stay queued forever."""
+    from backend.storage.repository import upsert_forward_return
+    from backend.validation.forward_return import ForwardReturnPoint
+
+    result_id = _seed_signal(session_factory)
+    with session_factory() as session:
+        upsert_forward_return(session, result_id=result_id, point=ForwardReturnPoint(
+            horizon_days=1, status=ForwardReturnStatus.COMPUTED,
+            entry_date=dt.date(2026, 1, 6), exit_date=dt.date(2026, 1, 6),
+            forward_return_pct=Decimal("4"),
+        ), benchmark_retry_pending=True, attempted_at=dt.datetime(2026, 1, 7, tzinfo=dt.UTC))
+    summary = compute_pending_forward_returns(
+        session_factory, _FakeDailyLoader({}), horizons=(1,), as_of=dt.date(2026, 2, 1),
+        universe_loader=lambda _: pytest.fail("stock fetched"),
+        benchmark_resolver=lambda _: BenchmarkSpec(key="index", symbol="INDEX", security_id="13"),
+    )
+    assert summary.benchmark_missing == 1
+    with session_factory() as session:
+        row = session.scalars(select(SignalForwardReturn)).one()
+        assert row.benchmark_retry_pending is False
+        assert row.benchmark_return_pct is None
+        assert row.forward_return_pct == Decimal("4")
+
+
+def test_service_validates_each_loaded_frame_once(session_factory, monkeypatch):
+    """The loader boundary validates; the calculator must not repeat it per horizon."""
+    from backend.validation import forward_return, service
+
+    _seed_signal(session_factory)
+    calls: list[str] = []
+    for module in (service, forward_return):
+        original = module.validate_candles
+
+        def counting(*args, _original=original, _name=module.__name__, **kwargs):
+            calls.append(_name)
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(module, "validate_candles", counting)
+    frame = _candles([("2026-01-05", "90", "95", "88", "92"), ("2026-01-06", "100", "106", "98", "104"),
+                      ("2026-01-07", "100", "110", "98", "107"), ("2026-01-08", "100", "110", "98", "108")])
+    compute_pending_forward_returns(
+        session_factory, _FakeDailyLoader({"RELIANCE": frame}), horizons=(1, 2, 3),
+        as_of=dt.date(2026, 1, 8), benchmark_resolver=lambda _: None,
+        universe_loader=lambda _: _universe([("RELIANCE", "500325")]),
+    )
+    assert len(calls) == 1
+
+def test_loader_strips_malformed_rows_unless_validation_opts_in(tmp_path):
+    """Owner decision: only forward-return validation sees raw malformed rows.
+
+    Beginner note:
+        The cache keeps raw vendor rows so validation can refuse to shift an
+        entry day. Scans, charts and ranking read the same cache, and a single
+        bad row there used to quarantine the symbol from every screener, so
+        their default view strips malformed rows exactly as before VALID-005.
+    """
+    from types import SimpleNamespace
+
+    from backend.daily_data_loader import DailyDataLoader
+    from backend.dhan_client import DhanDataClient
+
+    loader = DailyDataLoader(
+        DhanDataClient(raw_client=SimpleNamespace(historical_daily_data=lambda **_: pytest.fail("no network"))),
+        cache_dir=tmp_path, request_delay_seconds=0, fetch_workers=1,
+    )
+    raw = _candles([
+        ("2026-01-05", "90", "95", "88", "92"),
+        ("2026-01-06", "100", "106", "98", "104"),
+        ("2026-01-06", "100", "106", "98", "104"),
+        ("2026-01-07", "100", "110", "98", "107"),
+    ])
+    raw.loc[1, "open"] = None
+    raw.loc[2, "timestamp"] = "bad-date"
+    raw.to_parquet(loader.cache_path("RELIANCE", "500325"), index=False)
+    instrument = {"symbol": "RELIANCE", "security_id": "500325"}
+
+    clean, hit = loader.get_daily_history(instrument, dt.date(2026, 1, 5), dt.date(2026, 1, 7))
+    raw_view, _ = loader.get_daily_history(
+        instrument, dt.date(2026, 1, 5), dt.date(2026, 1, 7), preserve_malformed_rows=True,
+    )
+
+    assert hit and len(clean) == 2
+    assert len(raw_view) == 4
+    assert len(loader.read_cached_history("RELIANCE", "500325")) == 2
+    assert len(loader.read_cached_history("RELIANCE", "500325", preserve_malformed_rows=True)) == 4
