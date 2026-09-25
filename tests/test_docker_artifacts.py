@@ -48,7 +48,7 @@ def test_dockerfile_has_secure_streamlit_runtime_contract() -> None:
     entrypoint, and no local-path leakage."""
     dockerfile = _read("Dockerfile")
 
-    assert "FROM python:3.11-slim-bookworm" in dockerfile
+    assert "FROM python:3.14-slim-bookworm" in dockerfile
     assert "WORKDIR /app" in dockerfile
     assert "requirements.txt" in dockerfile
     assert "constraints.txt" in dockerfile

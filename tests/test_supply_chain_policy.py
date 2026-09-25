@@ -173,7 +173,7 @@ def test_ci_workflow_runs_quality_and_dependency_security_checks():
 
     assert "permissions:\n  contents: read" in text
     assert "pip install -r requirements.txt -r requirements-dev.txt -c constraints.txt" in text
-    assert 'python-version: ["3.11", "3.12", "3.13"]' in text
+    assert 'python-version: ["3.12", "3.13", "3.14"]' in text
     assert "python -m pre_commit validate-config .pre-commit-config.yaml" in text
     assert (
         "python -m pytest -q --cov=app --cov=backend --cov=screeners --cov=ui "
@@ -192,6 +192,35 @@ def test_ci_workflow_runs_quality_and_dependency_security_checks():
     assert "docker compose up --build --wait --wait-timeout 180" in text
     assert "docker compose down --volumes --remove-orphans" in text
     assert "python -m pip_audit -r requirements.txt -r requirements-dev.txt" not in text
+
+
+def test_deployed_python_is_tested_and_static_checks_target_the_oldest_leg():
+    """Deploy only an interpreter CI tests, and lint/type-check for the oldest one.
+
+    Beginner note:
+    The Dockerfile decides which Python production runs, the CI matrix decides
+    which Pythons the gates prove, and Ruff/mypy decide which syntax is allowed.
+    A Dependabot base-image bump once moved production to 3.14 while CI stopped
+    at 3.13. Tying the three together makes that an explicit, reviewed change:
+    the deployed version must be in the matrix, and Ruff's ``target-version``
+    and mypy's ``python_version`` must match the matrix's oldest version so code
+    never uses syntax an older supported interpreter cannot run.
+    """
+    workflow = (ROOT / ".github" / "workflows" / "quality-and-security.yml").read_text(encoding="utf-8")
+    matrix_match = re.search(r"python-version: \[([^\]]*)\]", workflow)
+    assert matrix_match is not None
+    matrix = [version.strip().strip('"') for version in matrix_match.group(1).split(",")]
+
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    base_match = re.search(r"^FROM python:(\d+\.\d+)-", dockerfile, flags=re.MULTILINE)
+    assert base_match is not None
+    assert base_match.group(1) in matrix
+
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        config = tomllib.load(handle)
+    oldest = min(matrix, key=lambda version: tuple(int(part) for part in version.split(".")))
+    assert config["tool"]["mypy"]["python_version"] == oldest
+    assert config["tool"]["ruff"]["target-version"] == "py" + oldest.replace(".", "")
 
 
 RUFF_PRE_COMMIT_HOOK = "https://github.com/astral-sh/ruff-pre-commit"

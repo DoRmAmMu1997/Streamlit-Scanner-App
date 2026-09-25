@@ -1067,8 +1067,11 @@ that avoids surprise failures:
    dependency, update that policy test (and `constraints.txt`) in the same
    commit - that is the test doing its job of making such changes explicit.
 
-The workflow runs every gate on Python 3.11 (the deployment target), 3.12 and
-3.13, so an interpreter upgrade never arrives as a surprise.
+The workflow runs every gate on Python 3.12, 3.13 and 3.14. 3.14 is the
+deployment target (the Dockerfile base image), and 3.12 is the oldest supported
+interpreter, which Ruff and mypy target. `tests/test_supply_chain_policy.py`
+fails if the deployed version leaves the matrix or the static-check targets stop
+matching its oldest leg.
 
 ### Dependency updates (Dependabot)
 
@@ -1088,8 +1091,10 @@ Merge notes:
 - **`ruff` PRs fail CI on purpose.** `ruff==` in `constraints.txt` and the
   ruff-pre-commit hook `rev` must match (QUAL-008), and Dependabot bumps them
   in different ecosystems. Push the matching `rev` bump to the ruff PR, then merge.
-- **A newer Python base image changes the deployment target.** Move the CI
-  matrix and mypy's `python_version` with it, deliberately.
+- **A newer Python base image changes the deployment target.** Its PR fails the
+  policy test until the new version is added to the CI matrix. Decide
+  deliberately whether to drop the oldest leg, and if you do, move Ruff's
+  `target-version` and mypy's `python_version` up with it.
 - **A Postgres major bump needs a data migration.** `pg_dump`, recreate the
   `postgres-data` volume, then restore (see "Backing up scan history") before
   merging.
