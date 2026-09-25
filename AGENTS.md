@@ -118,7 +118,8 @@ review → `/code-review` + `/security-review`; everything → `/using-superpowe
 
 ## 6. The CI gate suite (run locally before every PR)
 
-CI (`.github/workflows/quality-and-security.yml`) runs the matrix Python **3.11 + 3.12**.
+CI (`.github/workflows/quality-and-security.yml`) runs the matrix Python **3.11 + 3.12 + 3.13**
+(3.11 is the deployment target; mypy keeps `python_version = "3.11"` on every leg).
 Reproduce it locally — these are the exact commands; **all must pass**:
 
 ```bash
@@ -162,6 +163,13 @@ is hand-written migrations that the Alembic drift guard covers instead.
 - **Adding a dependency ⇒ pin it in `constraints.txt`** (and keep `requirements*.txt` in
   sync). On any branch, `git diff origin/main HEAD -- constraints.txt pyproject.toml` must
   be empty unless the change is a deliberate, reviewed bump.
+- **Dependabot (`.github/dependabot.yml`) opens those reviewed bumps weekly**: grouped
+  minor/patch PRs per ecosystem (pip, GitHub Actions, pre-commit) plus separate major PRs,
+  and image PRs for the Dockerfile and Compose file. **A Dependabot `ruff` PR is expected to fail
+  `test_pre_commit_ruff_rev_matches_the_constraints_pin`**: bump the ruff-pre-commit `rev` in
+  `.pre-commit-config.yaml` in that same PR (the pre-commit ecosystem deliberately skips the
+  ruff hook). A Python base-image bump changes the deployment target, and a Postgres major
+  needs a dump/restore, so neither is a routine merge.
 - **Changing a deterministic screener's output ⇒ regenerate goldens** with
   `UPDATE_GOLDEN=1 python -m pytest tests/test_screener_golden_outputs.py` and **review the
   JSON diff** before committing.

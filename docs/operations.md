@@ -1066,3 +1066,32 @@ that avoids surprise failures:
    `constraints.txt`. If you deliberately change a CI command or add a dev
    dependency, update that policy test (and `constraints.txt`) in the same
    commit - that is the test doing its job of making such changes explicit.
+
+The workflow runs every gate on Python 3.11 (the deployment target), 3.12 and
+3.13, so an interpreter upgrade never arrives as a surprise.
+
+### Dependency updates (Dependabot)
+
+`.github/dependabot.yml` checks every Monday morning (IST) and opens pull
+requests; it never merges anything. Each PR runs the full workflow above.
+
+| Source | Ecosystem | PRs |
+|---|---|---|
+| `constraints.txt` pins | `pip` | one grouped minor/patch PR, separate PRs for majors and for `ruff` (3-day cooldown on new releases) |
+| workflow actions | `github-actions` | one grouped minor/patch PR, separate majors |
+| `.pre-commit-config.yaml` hooks | `pre-commit` | one grouped minor/patch PR, separate majors; the ruff hook is skipped |
+| `Dockerfile` base image | `docker` | one PR per newer image |
+| `docker-compose.yml` images | `docker-compose` | one PR per newer image |
+
+Merge notes:
+
+- **`ruff` PRs fail CI on purpose.** `ruff==` in `constraints.txt` and the
+  ruff-pre-commit hook `rev` must match (QUAL-008), and Dependabot bumps them
+  in different ecosystems. Push the matching `rev` bump to the ruff PR, then merge.
+- **A newer Python base image changes the deployment target.** Move the CI
+  matrix and mypy's `python_version` with it, deliberately.
+- **A Postgres major bump needs a data migration.** `pg_dump`, recreate the
+  `postgres-data` volume, then restore (see "Backing up scan history") before
+  merging.
+- Security updates for known-vulnerable versions are a separate repository
+  setting (enabled) and still arrive as individual PRs.

@@ -173,7 +173,7 @@ def test_ci_workflow_runs_quality_and_dependency_security_checks():
 
     assert "permissions:\n  contents: read" in text
     assert "pip install -r requirements.txt -r requirements-dev.txt -c constraints.txt" in text
-    assert 'python-version: ["3.11", "3.12"]' in text
+    assert 'python-version: ["3.11", "3.12", "3.13"]' in text
     assert "python -m pre_commit validate-config .pre-commit-config.yaml" in text
     assert (
         "python -m pytest -q --cov=app --cov=backend --cov=screeners --cov=ui "
@@ -192,6 +192,63 @@ def test_ci_workflow_runs_quality_and_dependency_security_checks():
     assert "docker compose up --build --wait --wait-timeout 180" in text
     assert "docker compose down --volumes --remove-orphans" in text
     assert "python -m pip_audit -r requirements.txt -r requirements-dev.txt" not in text
+
+
+RUFF_PRE_COMMIT_HOOK = "https://github.com/astral-sh/ruff-pre-commit"
+
+
+def _dependabot_updates() -> dict[str, dict]:
+    """Return the Dependabot ``updates`` entries keyed by package ecosystem."""
+    config = yaml.safe_load((ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8"))
+    assert config["version"] == 2
+    updates = {entry["package-ecosystem"]: entry for entry in config["updates"]}
+    assert len(updates) == len(config["updates"]), "expected one entry per ecosystem"
+    return updates
+
+
+def test_dependabot_watches_every_pinned_dependency_source():
+    """Every file that pins a dependency must be kept current automatically.
+
+    Beginner note:
+    ``constraints.txt`` holds the Python pins CI installs, the workflow pins
+    GitHub Actions, ``.pre-commit-config.yaml`` pins hook revisions, and the
+    Dockerfile/Compose file pin container images. Dependabot only bumps the
+    ecosystems it is told about, so dropping one would let that source go stale
+    silently.
+    """
+    updates = _dependabot_updates()
+
+    assert set(updates) == {"pip", "github-actions", "pre-commit", "docker", "docker-compose"}
+    for ecosystem, entry in updates.items():
+        assert entry["directory"] == "/", ecosystem
+        assert entry["schedule"]["interval"] == "weekly", ecosystem
+
+
+def test_dependabot_groups_routine_bumps_but_isolates_majors_and_ruff():
+    """Weekly batches must not hide breaking bumps or break the ruff pin pair.
+
+    Beginner note:
+    Grouping minor/patch bumps keeps review load low, but a major upgrade in the
+    batch could fail CI and block every other bump, so majors get their own PR.
+    Ruff is pinned twice (``constraints.txt`` and the pre-commit hook rev) and
+    ``test_pre_commit_ruff_rev_matches_the_constraints_pin`` requires the two
+    to agree. Dependabot bumps each ecosystem separately, so ruff gets its own
+    pip PR (the sync test then names the hook rev to bump in that same PR) and
+    the pre-commit ecosystem skips the ruff hook instead of opening a second,
+    always-failing PR.
+    """
+    updates = _dependabot_updates()
+
+    for ecosystem in ("pip", "github-actions", "pre-commit"):
+        groups = updates[ecosystem].get("groups", {})
+        assert groups, f"{ecosystem} should batch routine bumps"
+        for group in groups.values():
+            assert set(group["update-types"]) <= {"minor", "patch"}, ecosystem
+
+    assert all("ruff" in group.get("exclude-patterns", []) for group in updates["pip"]["groups"].values())
+    assert not any(rule.get("dependency-name") == "ruff" for rule in updates["pip"].get("ignore", []))
+    ignored_hooks = {rule["dependency-name"] for rule in updates["pre-commit"].get("ignore", [])}
+    assert RUFF_PRE_COMMIT_HOOK in ignored_hooks
 
 
 def test_pre_commit_configuration_is_non_rewriting():
