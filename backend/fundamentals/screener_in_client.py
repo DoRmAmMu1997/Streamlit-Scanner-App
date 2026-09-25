@@ -438,7 +438,9 @@ def _extract_peers_url(soup: BeautifulSoup) -> str | None:
             candidates.append(element)
     # Also include any element with class "peers-cell" or similar; if the page
     # changes the wrapper structure we still want to find the attribute.
-    candidates.extend(soup.find_all(attrs={"hx-get": True}))
+    # name=None is the default, but beautifulsoup4 4.15's typed overloads only
+    # accept an `attrs` dict when a name argument is passed explicitly.
+    candidates.extend(soup.find_all(name=None, attrs={"hx-get": True}))
 
     for element in candidates:
         for attr_name in ("hx-get", "data-href", "data-url", "data-peers-url"):

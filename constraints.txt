@@ -10,30 +10,30 @@
 # streamlit 1.58 is the floor for pandas 3.x: 1.55 caps pandas<3, so the two
 # pins move together. 1.58 also makes starlette/uvicorn required rather than
 # optional extras, and drops tornado.
-streamlit==1.58.0
-authlib==1.7.2
-pandas==3.0.5
+streamlit==1.64.0
+authlib==1.8.0
+pandas==3.0.6
 numpy==2.4.6
 pyarrow==25.0.1
 requests==2.34.2
 # pdf_transport.py uses urllib3's inspected 2.7.0 pool API directly; this
 # declares the already-tested transitive version without upgrading it.
-urllib3==2.7.0
-python-dotenv==1.2.2
+urllib3==2.8.0
+python-dotenv==1.2.3
 dhanhq==2.2.0
 PyYAML==6.0.3
-beautifulsoup4==4.14.3
-lxml==6.1.0
-pdfplumber==0.11.9
-claude-agent-sdk==0.2.137
-SQLAlchemy==2.0.50
+beautifulsoup4==4.15.0
+lxml==6.1.3
+pdfplumber==0.11.10
+claude-agent-sdk==0.2.157
+SQLAlchemy==2.0.54
 # Keep Alembic pinned with SQLAlchemy so local migrations and CI use the same
 # migration behavior every time.
-alembic==1.18.4
+alembic==1.20.0
 # `psycopg[binary]` installs both distributions; pin each one so CI and
 # deployments use the same PostgreSQL driver implementation.
-psycopg==3.3.4
-psycopg-binary==3.3.4
+psycopg==3.3.6
+psycopg-binary==3.3.6
 
 # Developer and CI verification tools.
 pytest==9.1.1
@@ -46,6 +46,6 @@ types-PyYAML==6.0.12.20260518
 # pandas-stubs tracks the pinned pandas 3.0.5 series (QUAL-006); types-pytz is
 # its declared dependency.
 pandas-stubs==3.0.5.260914
-types-pytz==2026.2.0.20260518
+types-pytz==2026.3.1.20260727
 pytest-cov==7.1.0
 pre-commit==4.6.2
