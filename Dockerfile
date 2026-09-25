@@ -6,7 +6,7 @@
 
 # Slim Debian + Python 3.11 — 3.11 is the CI/deploy target; "slim" drops build
 # tooling we don't need at runtime, keeping the image small.
-FROM python:3.11-slim-bookworm
+FROM python:3.14-slim-bookworm
 
 # Image-wide environment. The first three are Python/pip hygiene (no .pyc files,
 # unbuffered stdout so logs stream immediately, no pip download cache). The rest
