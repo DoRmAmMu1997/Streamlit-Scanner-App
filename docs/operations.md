@@ -606,8 +606,8 @@ Cloud SQL) from step 3 onward — the app-side steps are identical.
    docker run -d --name scanner-postgres \
      --env-file postgres.env \
      -p 5432:5432 \
-     -v scanner-pgdata:/var/lib/postgresql/data \
-     postgres:16
+     -v scanner-pgdata:/var/lib/postgresql \
+     postgres:18
    ```
 
    Never commit `postgres.env`; use the host's secret manager when one is
@@ -788,7 +788,7 @@ The two long-lived services are:
 - `scanner-ui` - builds the local `Dockerfile`, listens on
   `${SCANNER_UI_PORT:-8501}:8501`, runs with `APP_ENV=production`,
   `AUTH_REQUIRED=true`, and stores app-generated files under `/data`.
-- `postgres` - runs `postgres:16-bookworm` on the private Compose network with
+- `postgres` - runs `postgres:18-bookworm` on the private Compose network with
   no host port. The UI reaches it through
   `postgresql+psycopg://...@postgres:5432/...`.
 
@@ -796,8 +796,10 @@ The volumes are intentionally separate:
 
 - `scanner-data` backs `/data` for candle caches, fundamentals caches, and any
   local fallback artifacts.
-- `postgres-data` backs `/var/lib/postgresql/data` so scan history survives
-  container replacement.
+- `postgres-data` backs `/var/lib/postgresql` so scan history survives
+  container replacement. (Postgres 18+ images keep the cluster in
+  `/var/lib/postgresql/18/docker`; the pre-18 `.../data` mount point would be
+  ignored.)
 
 Stop the stack without deleting those volumes:
 
@@ -927,6 +929,36 @@ docker compose exec postgres pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" > scanne
 For a local restore into a fresh Compose database, start from
 `docker compose down --volumes`, bring the stack back up, then load the dump with
 `docker compose exec -T postgres psql -U "$POSTGRES_USER" "$POSTGRES_DB" < scanner.sql`.
+
+#### Upgrading the Compose Postgres major version (16 → 18)
+
+A new Postgres major cannot open the previous major's data files. The
+Postgres 18 image also moved its data directory (`/var/lib/postgresql/18/docker`
+under a volume at `/var/lib/postgresql`). An existing stack would therefore start
+**empty** on 18, with the old data still sitting unused in the volume. Move the
+data with a dump and restore, **before** pulling the new `docker-compose.yml`
+(or with the old image still selected):
+
+```bash
+# 1. While still on 16: dump scan history.
+docker compose exec postgres pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" > scanner-pg16.sql
+
+# 2. Stop the stack and remove ONLY the Postgres volume. `down --volumes`
+#    would also delete scanner-data (the candle and fundamentals caches).
+docker compose down
+docker volume ls --filter name=postgres-data   # e.g. <project>_postgres-data
+docker volume rm <project>_postgres-data
+
+# 3. Switch to the 18 docker-compose.yml, start Postgres alone, and restore.
+docker compose up -d --wait postgres
+docker compose exec -T postgres psql -U "$POSTGRES_USER" "$POSTGRES_DB" < scanner-pg16.sql
+
+# 4. Start the full stack. The app's schema bootstrap sees the restored
+#    Alembic revision and does not re-create tables.
+docker compose up -d --wait
+```
+
+Keep `scanner-pg16.sql` until the app shows your previous scan history.
 
 The candle cache (`data/cache/daily/*.parquet`) is *re-downloadable* and does
 not need backup; the scan-history database is the part you cannot regenerate.
