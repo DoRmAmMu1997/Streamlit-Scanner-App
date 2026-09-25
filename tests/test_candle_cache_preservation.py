@@ -425,3 +425,21 @@ def test_stale_cleanup_removes_old_temp_files_but_never_locks(tmp_path: Path):
 
     assert not old_tmp.exists()
     assert new_tmp.exists() and lock.exists()
+
+def test_direct_fetch_caches_raw_malformed_rows_for_validation(tmp_path: Path):
+    """The window clip before a cache write must keep raw vendor evidence.
+
+    Beginner note:
+    The cache stores raw rows (VALID-005) and stripping happens on read, so scans
+    still get the clean view while forward-return validation can opt in to see
+    the malformed bar. Clipping with the default (stripping) view here wrote a
+    cleaned frame instead, so validation never saw the bad row again.
+    """
+    response = _frame(["2026-06-05", "2026-06-08", "2026-06-09"], close=106.0)
+    response.loc[1, "open"] = float("nan")
+    loader = _loader(tmp_path, _Client(response))
+
+    loader.get_daily_history(ROW, "2026-06-05", "2026-06-09", force_refresh=True)
+
+    assert len(loader.read_cached_history("TEST", "123", preserve_malformed_rows=True)) == 3
+    assert len(loader.read_cached_history("TEST", "123")) == 2
