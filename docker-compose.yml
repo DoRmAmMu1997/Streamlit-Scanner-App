@@ -79,8 +79,13 @@ services:
     # No `ports:` on purpose. Other Compose services can reach this database at
     # `postgres:5432`; host tools can use `docker compose exec postgres psql ...`
     # when needed without exposing the database to the whole host network.
+    # Postgres 18+ images keep PGDATA at /var/lib/postgresql/18/docker and
+    # declare their volume at /var/lib/postgresql, so the named volume mounts
+    # the parent directory (the pre-18 `.../data` mount would be ignored). A
+    # future major keeps its data under /var/lib/postgresql/<major>/docker, so
+    # upgrading still needs the dump/restore in docs/operations.md.
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql
 
     healthcheck:
       # The double-dollar syntax is intentional: Compose converts `$$` to `$`

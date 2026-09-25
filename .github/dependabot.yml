@@ -88,10 +88,10 @@ updates:
     commit-message:
       prefix: "chore(deps)"
 
-  # Compose images (docker-compose.yml: postgres:16-bookworm). A Postgres
+  # Compose images (docker-compose.yml: postgres:18-bookworm). A Postgres
   # MAJOR bump cannot reuse the existing `postgres-data` volume: pg_dump first,
-  # recreate the volume, then restore ("Backing up scan history" in
-  # docs/operations.md) before merging.
+  # recreate the volume, then restore ("Upgrading the Compose Postgres major
+  # version" in docs/operations.md) before merging.
   - package-ecosystem: "docker-compose"
     directory: "/"
     schedule:

@@ -412,7 +412,7 @@ Compose uses two named volumes:
 
 - `scanner-data` mounted at `/data` for candles, caches, SQLite fallback files,
   and other app-generated state.
-- `postgres-data` mounted at `/var/lib/postgresql/data` for the local Postgres
+- `postgres-data` mounted at `/var/lib/postgresql` for the local Postgres 18
   cluster.
 
 Stop the stack without deleting data:

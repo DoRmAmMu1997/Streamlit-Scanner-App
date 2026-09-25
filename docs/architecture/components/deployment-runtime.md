@@ -31,7 +31,7 @@ flowchart LR
     Streamlit --> App["app.main"]
     App --> Data[("scanner-data:/data")]
     App --> DB["scanner-ui -> postgres"]
-    PG --> PGData[("postgres-data:/var/lib/postgresql/data")]
+    PG --> PGData[("postgres-data:/var/lib/postgresql")]
     App --> Secrets["read-only /app/.streamlit/secrets.toml"]
 ```
 
@@ -49,7 +49,7 @@ port on the developer machine.
 | **HTTP** | Streamlit listens on `0.0.0.0:8501`; Compose publishes `${SCANNER_UI_PORT:-8501}:8501`; the image declares `EXPOSE 8501`. |
 | **Health** | Docker `HEALTHCHECK` probes `http://127.0.0.1:8501/_stcore/health`; Compose waits for `postgres` with `pg_isready` before starting `scanner-ui`. |
 | **Runtime data** | `scanner-data` mounts at `/data`; `DATA_DIR=/data`. |
-| **Database** | `postgres:16-bookworm` stores data in `postgres-data`; `DATABASE_URL=postgresql+psycopg://...@postgres:5432/...`. |
+| **Database** | `postgres:18-bookworm` stores data in `postgres-data` (mounted at `/var/lib/postgresql`; the 18+ image keeps the cluster in `18/docker` beneath it); `DATABASE_URL=postgresql+psycopg://...@postgres:5432/...`. |
 | **Secrets/config** | Root `.env` feeds non-secret and secret env values to Compose; `.streamlit/secrets.toml` is mounted read-only for Google OIDC. |
 | **Daily scan job** | `docker compose run --rm scanner-ui python -m backend.jobs.run_daily_scan --config config/daily_scans.yaml`. |
 | **IPO filing inventory** | `docker compose run --rm scanner-ui python -m backend.jobs.scan_ipo_filings`; the image contains the CLI, but Compose and Render do not schedule it. |

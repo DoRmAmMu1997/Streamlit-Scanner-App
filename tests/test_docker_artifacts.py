@@ -197,9 +197,13 @@ def test_docker_compose_defines_local_production_stack() -> None:
     assert "ADMIN_EMAILS=${ADMIN_EMAILS:-}" in environment
 
     postgres = services["postgres"]
-    assert postgres["image"] == "postgres:16-bookworm"
+    assert postgres["image"] == "postgres:18-bookworm"
     assert "ports" not in postgres
-    assert "postgres-data:/var/lib/postgresql/data" in postgres["volumes"]
+    # Postgres 18+ images keep PGDATA at /var/lib/postgresql/18/docker under a
+    # volume declared at /var/lib/postgresql. The pre-18 mount point (…/data)
+    # makes the container exit on a fresh volume, and on an existing one the
+    # named volume would simply be ignored - so the mount must be the parent.
+    assert postgres["volumes"] == ["postgres-data:/var/lib/postgresql"]
     healthcheck_command = " ".join(postgres["healthcheck"]["test"])
     assert "pg_isready" in healthcheck_command
     assert "$$POSTGRES_USER" in healthcheck_command
