@@ -14,7 +14,7 @@ streamlit==1.58.0
 authlib==1.7.2
 pandas==3.0.5
 numpy==2.4.6
-pyarrow==23.0.1
+pyarrow==25.0.1
 requests==2.34.2
 # pdf_transport.py uses urllib3's inspected 2.7.0 pool API directly; this
 # declares the already-tested transitive version without upgrading it.
