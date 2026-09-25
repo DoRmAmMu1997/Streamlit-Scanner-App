@@ -118,8 +118,9 @@ review → `/code-review` + `/security-review`; everything → `/using-superpowe
 
 ## 6. The CI gate suite (run locally before every PR)
 
-CI (`.github/workflows/quality-and-security.yml`) runs the matrix Python **3.11 + 3.12 + 3.13**
-(3.11 is the deployment target; mypy keeps `python_version = "3.11"` on every leg).
+CI (`.github/workflows/quality-and-security.yml`) runs the matrix Python **3.12 + 3.13 + 3.14**
+(3.14 is the deployment target in the Dockerfile; Ruff's `target-version` and mypy's
+`python_version` are pinned to the oldest leg, 3.12, and a policy test keeps all three in step).
 Reproduce it locally — these are the exact commands; **all must pass**:
 
 ```bash

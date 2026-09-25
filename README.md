@@ -162,7 +162,7 @@ network work happens up front in the terminal.
 
 ## Requirements
 
-- **Python 3.11+**
+- **Python 3.12+** (CI tests 3.12-3.14; the Docker image runs 3.14)
 - The core packages in [`requirements.txt`](requirements.txt), installed with
   the verified direct pins in [`constraints.txt`](constraints.txt):
   `pip install -r requirements.txt -c constraints.txt`
