@@ -769,7 +769,9 @@ class DailyDataLoader:
             return candles
         raw_response = candles
         if clip_to_window:
-            candles = self._slice_to_range(candles, start_date, end_date)
+            # Storage keeps raw vendor evidence (VALID-005); stripping malformed
+            # rows happens on read. Valid out-of-window dates are still clipped.
+            candles = self._slice_to_range(candles, start_date, end_date, preserve_malformed_rows=True)
             if candles.empty:
                 return candles
         path = self.cache_path(symbol, security_id)
