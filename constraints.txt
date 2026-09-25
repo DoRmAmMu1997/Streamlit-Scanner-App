@@ -37,7 +37,7 @@ psycopg-binary==3.3.4
 
 # Developer and CI verification tools.
 pytest==9.1.1
-ruff==0.16.3
+ruff==0.16.8
 bandit==1.9.4
 pip-audit==2.10.1
 mypy==2.3.1
