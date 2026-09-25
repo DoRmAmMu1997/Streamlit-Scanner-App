@@ -14,7 +14,7 @@ streamlit==1.58.0
 authlib==1.7.2
 pandas==3.0.5
 numpy==2.4.6
-pyarrow==23.0.1
+pyarrow==25.0.1
 requests==2.34.2
 # pdf_transport.py uses urllib3's inspected 2.7.0 pool API directly; this
 # declares the already-tested transitive version without upgrading it.
@@ -40,7 +40,7 @@ pytest==9.1.1
 ruff==0.16.3
 bandit==1.9.4
 pip-audit==2.10.1
-mypy==1.20.2
+mypy==2.3.1
 types-requests==2.33.0.20260712
 types-PyYAML==6.0.12.20260518
 # pandas-stubs tracks the pinned pandas 3.0.5 series (QUAL-006); types-pytz is
