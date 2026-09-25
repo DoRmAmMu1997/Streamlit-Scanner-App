@@ -4,9 +4,10 @@
 # is deliberate (rarely-changing steps first) to keep rebuilds fast. The
 # docs/architecture/components/deployment-runtime.md LLD explains the design.
 
-# Slim Debian + Python 3.11 — 3.11 is the CI/deploy target; "slim" drops build
-# tooling we don't need at runtime, keeping the image small.
-FROM python:3.11-slim-bookworm
+# Slim Debian + Python 3.14 — the deployment target, and the newest leg of the
+# CI matrix (a policy test requires this version to be one CI tests); "slim"
+# drops build tooling we don't need at runtime, keeping the image small.
+FROM python:3.14-slim-bookworm
 
 # Image-wide environment. The first three are Python/pip hygiene (no .pyc files,
 # unbuffered stdout so logs stream immediately, no pip download cache). The rest

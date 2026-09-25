@@ -45,7 +45,7 @@ types-requests==2.33.0.20260712
 types-PyYAML==6.0.12.20260518
 # pandas-stubs tracks the pinned pandas 3.0.5 series (QUAL-006); types-pytz is
 # its declared dependency.
-pandas-stubs==3.0.5.260730
+pandas-stubs==3.0.5.260914
 types-pytz==2026.3.1.20260727
 pytest-cov==7.1.0
 pre-commit==4.6.2

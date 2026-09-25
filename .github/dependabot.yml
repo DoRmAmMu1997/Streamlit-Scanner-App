@@ -75,9 +75,10 @@ updates:
         patterns: ["*"]
         update-types: ["minor", "patch"]
 
-  # Deployment base image (Dockerfile: python:3.11-slim-bookworm). A newer
-  # Python here changes the deployment target: review it together with the CI
-  # matrix and mypy's python_version in pyproject.toml, not as a routine bump.
+  # Deployment base image (Dockerfile: python:3.14-slim-bookworm). A newer
+  # Python here changes the deployment target, so its PR fails the policy test
+  # until that version joins the CI matrix; decide then whether to drop the
+  # oldest leg (and move Ruff/mypy's target with it). Not a routine bump.
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
@@ -88,10 +89,10 @@ updates:
     commit-message:
       prefix: "chore(deps)"
 
-  # Compose images (docker-compose.yml: postgres:16-bookworm). A Postgres
+  # Compose images (docker-compose.yml: postgres:18-bookworm). A Postgres
   # MAJOR bump cannot reuse the existing `postgres-data` volume: pg_dump first,
-  # recreate the volume, then restore ("Backing up scan history" in
-  # docs/operations.md) before merging.
+  # recreate the volume, then restore ("Upgrading the Compose Postgres major
+  # version" in docs/operations.md) before merging.
   - package-ecosystem: "docker-compose"
     directory: "/"
     schedule:

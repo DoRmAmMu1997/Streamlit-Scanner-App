@@ -53,7 +53,7 @@ Streamlit dashboard renders only stored state.
 - **Secret-safe & fail-closed**: redaction on every output sink; production refuses unsafe config.
 - **Portable storage**: SQLite locally, Postgres in deployment, same schema.
 
-**Constraints**: Python 3.11+; DhanHQ account for candle data; `requests` +
+**Constraints**: Python 3.12+ (3.14 deployed); DhanHQ account for candle data; `requests` +
 Beautiful Soup for official SEBI listing HTML; TA-Lib/pandas_ta optional
 (pure-pandas fallback); Claude Agent SDK + SerpAPI optional. IPO prospectus
 parsing runs in a bounded local child process, and AI/web outputs remain
@@ -292,7 +292,7 @@ status. Ratios are not stored and do not trigger IPO-001 evaluation.
 
 ## 8. Tech stack
 
-Python 3.11+ · Streamlit · pandas / pyarrow · SQLAlchemy 2 + Alembic · `dhanhq` · `requests` + BeautifulSoup · `pdfplumber`/`pypdf` (optional) · `claude-agent-sdk` (optional) · TradingView Lightweight Charts v5 (CDN+SRI) · Pydantic. Optional accelerators TA-Lib / pandas_ta. **Dependency policy**: `requirements.txt` (bare names) installed with `constraints.txt` (exact `==` pins); `requirements-optional.txt` / `requirements-dev.txt` separate.
+Python 3.12+ · Streamlit · pandas / pyarrow · SQLAlchemy 2 + Alembic · `dhanhq` · `requests` + BeautifulSoup · `pdfplumber`/`pypdf` (optional) · `claude-agent-sdk` (optional) · TradingView Lightweight Charts v5 (CDN+SRI) · Pydantic. Optional accelerators TA-Lib / pandas_ta. **Dependency policy**: `requirements.txt` (bare names) installed with `constraints.txt` (exact `==` pins); `requirements-optional.txt` / `requirements-dev.txt` separate.
 
 ## 9. Data & storage
 
@@ -326,11 +326,11 @@ cached PDFs. Designs: [OBS-003](obs-003-audit-log.md),
   `python -m backend.jobs.scan_ipo_filings`; it is operator-invoked or available
   to an external scheduler, but current Compose/Render definitions do not run it
   automatically.
-- **Docker image**: `python:3.11-slim-bookworm`, runtime dependencies installed with `requirements.txt` + `constraints.txt`, non-root `appuser`, `DATA_DIR=/data`, `EXPOSE 8501`, Streamlit bound to `0.0.0.0:8501`, and a `/_stcore/health` health check. The image runs `streamlit run app.py`, not the local `python app.py` prefetch wrapper.
+- **Docker image**: `python:3.14-slim-bookworm`, runtime dependencies installed with `requirements.txt` + `constraints.txt`, non-root `appuser`, `DATA_DIR=/data`, `EXPOSE 8501`, Streamlit bound to `0.0.0.0:8501`, and a `/_stcore/health` health check. The image runs `streamlit run app.py`, not the local `python app.py` prefetch wrapper.
 - **Docker Compose local production mode**: `docker-compose.yml` starts exactly two long-lived services, `scanner-ui` and `postgres`. `scanner-ui -> postgres` uses the private Compose network and `postgresql+psycopg://...@postgres:5432/...`; only Streamlit's `${SCANNER_UI_PORT:-8501}:8501` is published to the host. `scanner-data` keeps `/data` app state separate from `postgres-data` database storage.
 - **Render managed hosting (DEPLOY-003 / DEPLOY-003B)**: `render.yaml` Blueprint reusing the same image — a `scanner-web` web service (persistent disk at `DATA_DIR=/data` for the candle cache) + a managed `scanner-db` Postgres auto-wired into `DATABASE_URL` with public ingress closed + an ephemeral `scanner-daily-scan` cron. Render disks are single-attach, so the disk lives on the web service while the cron re-fetches candles and writes to the shared Postgres. Env secrets are dashboard-provided (`sync: false`); Google OIDC uses the Render Docker secret file at `/etc/secrets/streamlit-secrets.toml`. DEPLOY-003B keeps the cron deployable by committing `config/daily_scans.yaml` as the deterministic default schedule while AI-heavy jobs stay opt-in.
 - **Production** (`APP_ENV=production`): requires explicit `DATABASE_URL` + `DATA_DIR` (persistent volume) + Dhan creds + `AUTH_REQUIRED=true` + an allow/admin email; rejects `AUTH_REQUIRED=false`. Logs render JSON. Migrations apply automatically on startup. A bare `postgresql://` `DATABASE_URL` (as managed providers auto-wire) is normalized to the pinned `postgresql+psycopg://` driver at startup.
-- **CI quality gates** (`.github/workflows/quality-and-security.yml`, Python 3.11 + 3.12): `pytest` (coverage ≥84% on `backend`/`screeners`/`ui`), `compileall`, `ruff`, `mypy`, `bandit`, `pip-audit`, `pre-commit`, plus golden-snapshot + Alembic drift tests. The `docker-build` job also runs `docker build --tag streamlit-scanner-app:ci .`, `docker compose config`, and `docker compose up --build --wait --wait-timeout 180` before `docker compose down --volumes --remove-orphans`, so both image assembly and the local production stack are verified in CI.
+- **CI quality gates** (`.github/workflows/quality-and-security.yml`, Python 3.12 + 3.13 + 3.14): `pytest` (coverage ≥84% on `backend`/`screeners`/`ui`), `compileall`, `ruff`, `mypy`, `bandit`, `pip-audit`, `pre-commit`, plus golden-snapshot + Alembic drift tests. The `docker-build` job also runs `docker build --tag streamlit-scanner-app:ci .`, `docker compose config`, and `docker compose up --build --wait --wait-timeout 180` before `docker compose down --volumes --remove-orphans`, so both image assembly and the local production stack are verified in CI.
 
 ## 11. System-wide design decisions
 

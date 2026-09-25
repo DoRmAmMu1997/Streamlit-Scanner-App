@@ -162,7 +162,7 @@ network work happens up front in the terminal.
 
 ## Requirements
 
-- **Python 3.11+**
+- **Python 3.12+** (CI tests 3.12-3.14; the Docker image runs 3.14)
 - The core packages in [`requirements.txt`](requirements.txt), installed with
   the verified direct pins in [`constraints.txt`](constraints.txt):
   `pip install -r requirements.txt -c constraints.txt`
@@ -412,7 +412,7 @@ Compose uses two named volumes:
 
 - `scanner-data` mounted at `/data` for candles, caches, SQLite fallback files,
   and other app-generated state.
-- `postgres-data` mounted at `/var/lib/postgresql/data` for the local Postgres
+- `postgres-data` mounted at `/var/lib/postgresql` for the local Postgres 18
   cluster.
 
 Stop the stack without deleting data:

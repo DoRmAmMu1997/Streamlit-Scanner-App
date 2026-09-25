@@ -31,7 +31,7 @@ flowchart LR
     Streamlit --> App["app.main"]
     App --> Data[("scanner-data:/data")]
     App --> DB["scanner-ui -> postgres"]
-    PG --> PGData[("postgres-data:/var/lib/postgresql/data")]
+    PG --> PGData[("postgres-data:/var/lib/postgresql")]
     App --> Secrets["read-only /app/.streamlit/secrets.toml"]
 ```
 
@@ -49,7 +49,7 @@ port on the developer machine.
 | **HTTP** | Streamlit listens on `0.0.0.0:8501`; Compose publishes `${SCANNER_UI_PORT:-8501}:8501`; the image declares `EXPOSE 8501`. |
 | **Health** | Docker `HEALTHCHECK` probes `http://127.0.0.1:8501/_stcore/health`; Compose waits for `postgres` with `pg_isready` before starting `scanner-ui`. |
 | **Runtime data** | `scanner-data` mounts at `/data`; `DATA_DIR=/data`. |
-| **Database** | `postgres:16-bookworm` stores data in `postgres-data`; `DATABASE_URL=postgresql+psycopg://...@postgres:5432/...`. |
+| **Database** | `postgres:18-bookworm` stores data in `postgres-data` (mounted at `/var/lib/postgresql`; the 18+ image keeps the cluster in `18/docker` beneath it); `DATABASE_URL=postgresql+psycopg://...@postgres:5432/...`. |
 | **Secrets/config** | Root `.env` feeds non-secret and secret env values to Compose; `.streamlit/secrets.toml` is mounted read-only for Google OIDC. |
 | **Daily scan job** | `docker compose run --rm scanner-ui python -m backend.jobs.run_daily_scan --config config/daily_scans.yaml`. |
 | **IPO filing inventory** | `docker compose run --rm scanner-ui python -m backend.jobs.scan_ipo_filings`; the image contains the CLI, but Compose and Render do not schedule it. |
@@ -58,7 +58,7 @@ port on the developer machine.
 
 | Decision | Rationale | Alternative rejected |
 |---|---|---|
-| **`python:3.11-slim-bookworm` base** | 3.11 is the deployment target in CI; slim Debian keeps the runtime small and boring. | Full `python` image (bloat) / Alpine (musl wheel friction). |
+| **`python:3.14-slim-bookworm` base** | 3.14 is the deployment target and the newest CI leg (CI tests 3.12–3.14; a policy test keeps the base image inside the matrix); slim Debian keeps the runtime small and boring. | Full `python` image (bloat) / Alpine (musl wheel friction). |
 | **Install `requirements.txt` constrained by `constraints.txt`, before `COPY . .`** | Runtime-only deps (no dev/optional accelerators); copying deps first lets Docker cache the install layer across source edits. | Install everything / copy source first — slower rebuilds, larger image. |
 | **`streamlit run app.py`, not `python app.py`** | The plain-Python entrypoint does local prefetch-then-launch-browser; a container should become a web server immediately. | `python app.py` — would try to open a browser and run the prefetch wrapper at boot. |
 | **Production + auth-required defaults** | A deployed image and Compose stack fail closed until real prod env + OIDC secrets are present. | Permissive defaults — an exposed container would run unauthenticated. |
@@ -148,7 +148,7 @@ port on the developer machine.
   watermark window.
 - **Slim the image** further by adding `tests/`, `docs/`, `.github/` to
   `.dockerignore` (deferred — marginal while the image is small).
-- **Pin the base by digest** (`python:3.11-slim-bookworm@sha256:...`) for fully
+- **Pin the base by digest** (`python:3.14-slim-bookworm@sha256:...`) for fully
   reproducible builds.
 - **Add system libraries** only if a future runtime dep needs them (insert an
   `apt-get install ... && rm -rf /var/lib/apt/lists/*` layer before the pip
