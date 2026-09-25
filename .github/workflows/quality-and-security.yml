@@ -19,9 +19,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.11 is the deployment target; 3.12 catches forward-compatibility
-        # drift before an interpreter upgrade is forced on us.
-        python-version: ["3.11", "3.12"]
+        # 3.11 is the deployment target; 3.12 and 3.13 catch forward-compatibility
+        # drift before an interpreter upgrade is forced on us. mypy keeps its
+        # python_version = "3.11" target on every leg (pyproject.toml).
+        python-version: ["3.11", "3.12", "3.13"]
 
     steps:
       - name: Check out repository

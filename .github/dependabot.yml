@@ -1,0 +1,103 @@
+# Dependabot version updates: keep every pinned dependency source current.
+#
+# Beginner note: Dependabot opens pull requests that bump pins; it never merges
+# them. Each PR runs the full "Quality and security" workflow, so a bump only
+# lands after the same gates as any other change. Security updates (alerts for
+# known-vulnerable versions) are a separate repository setting and are enabled.
+#
+# Policy invariants for this file live in tests/test_supply_chain_policy.py.
+version: 2
+
+updates:
+  # Python pins. Dependabot's pip support treats every root *.txt whose lines
+  # are all requirements/comments as a requirements file, so it bumps the
+  # `==` pins in constraints.txt (the file CI installs with `-c`). The
+  # requirements*.txt files list names only, so there is nothing to bump there.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Asia/Kolkata"
+    # Wait a few days before proposing a brand-new release: most malicious or
+    # broken PyPI uploads are yanked within that window.
+    cooldown:
+      default-days: 3
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      # One weekly PR for routine bumps. Majors stay separate so one breaking
+      # upgrade cannot block every other bump in the batch.
+      python-minor-and-patch:
+        applies-to: "version-updates"
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+        # Ruff is pinned twice: `ruff==` here and the ruff-pre-commit hook rev.
+        # test_pre_commit_ruff_rev_matches_the_constraints_pin requires them to
+        # match, so ruff gets its own PR. That PR's CI fails and names the hook
+        # rev to bump; add that one line to the same PR before merging.
+        exclude-patterns: ["ruff"]
+
+  # GitHub Actions used by the workflow (actions/checkout, actions/setup-python).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Asia/Kolkata"
+    commit-message:
+      prefix: "ci(deps)"
+    groups:
+      actions-minor-and-patch:
+        applies-to: "version-updates"
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # pre-commit hook revisions (.pre-commit-config.yaml).
+  - package-ecosystem: "pre-commit"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Asia/Kolkata"
+    commit-message:
+      prefix: "chore(deps)"
+    # The ruff hook moves together with the `ruff==` pin in the pip ruff PR
+    # (see above); a separate hook-only bump would always fail the sync test.
+    ignore:
+      - dependency-name: "https://github.com/astral-sh/ruff-pre-commit"
+    groups:
+      pre-commit-minor-and-patch:
+        applies-to: "version-updates"
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # Deployment base image (Dockerfile: python:3.11-slim-bookworm). A newer
+  # Python here changes the deployment target: review it together with the CI
+  # matrix and mypy's python_version in pyproject.toml, not as a routine bump.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Asia/Kolkata"
+    commit-message:
+      prefix: "chore(deps)"
+
+  # Compose images (docker-compose.yml: postgres:16-bookworm). A Postgres
+  # MAJOR bump cannot reuse the existing `postgres-data` volume: pg_dump first,
+  # recreate the volume, then restore ("Backing up scan history" in
+  # docs/operations.md) before merging.
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "Asia/Kolkata"
+    commit-message:
+      prefix: "chore(deps)"
