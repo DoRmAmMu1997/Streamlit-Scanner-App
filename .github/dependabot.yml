@@ -26,6 +26,13 @@ updates:
       default-days: 3
     commit-message:
       prefix: "chore(deps)"
+    ignore:
+      # numpy 2.5 requires Python >= 3.12, but 3.11 is the deployment target
+      # (Dockerfile + CI's 3.11 leg): pip cannot install it there, and its stubs
+      # use the 3.12 `type` statement that mypy's python_version = "3.11"
+      # rejects. Drop this rule when the deployment target moves to 3.12+.
+      - dependency-name: "numpy"
+        versions: [">=2.5.0"]
     groups:
       # One weekly PR for routine bumps. Majors stay separate so one breaking
       # upgrade cannot block every other bump in the batch.
