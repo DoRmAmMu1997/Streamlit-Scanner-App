@@ -421,27 +421,3 @@ class BaseScanner(ABC):
             rows,
             compute_failure_callback=compute_failure_callback,
         )
-
-
-def export_module_compat(scanner: BaseScanner) -> dict[str, Any]:
-    """Bundle module-level back-compat aliases for an existing screener test suite.
-
-    Older tests import a screener as a module and call `module.run(...)`,
-    `module.SCREENER`, `module.RESULT_COLUMNS`. New screeners are classes,
-    so each module exposes those names via this helper:
-
-        _scanner = MyScanner()
-        SCREENER = _scanner.SCREENER
-        RESULT_COLUMNS = _scanner.result_columns
-        run = _scanner.run
-        build_chart = _scanner.build_chart
-
-    Returning a dict here just documents the convention; modules still
-    bind the names explicitly so the names are obvious to readers.
-    """
-    return {
-        "SCREENER": scanner.SCREENER,
-        "RESULT_COLUMNS": scanner.result_columns,
-        "run": scanner.run,
-        "build_chart": scanner.build_chart,
-    }

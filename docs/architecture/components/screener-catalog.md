@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Component** | The strategy layer — one file per screener |
-| **Source** | [`screeners/`](../../../screeners) (11 strategies) |
+| **Source** | [`screeners/`](../../../screeners) (11 stock strategies and one IPO pipeline screener) |
 | **Layer** | Strategy (`screeners/` — the deliberate boundary vs `backend/` plumbing) |
 | **Status** | Stable (+ golden-snapshot regression tests) |
 | **Related** | [HLD](../high-level-design.md) · [screener-framework.md](screener-framework.md) · [indicators.md](indicators.md) · [charts-visualization.md](charts-visualization.md) · [technical-analysis-ai.md](technical-analysis-ai.md) · [sixty-seven-ka-funda-ai.md](sixty-seven-ka-funda-ai.md) · [fundamentals-ai.md](fundamentals-ai.md) |
@@ -16,9 +16,11 @@ Each file is a self-contained trading strategy: a `BaseScanner` subclass (see
 The strategy decides **what to look for**; all plumbing (data, loop, errors,
 persistence, charts) is inherited or composed from `backend/`.
 
-**The boundary**: strategy logic lives here; no Dhan/SDK/DB code. Every screener
-ends with module-level back-compat aliases (`SCREENER`, `RESULT_COLUMNS`, `run`,
-`build_chart`) via `export_module_compat`.
+**The boundary**: strategy and scan-adapter logic lives here; provider, SDK and
+database operations are delegated to `backend/`. Modules bind their compatibility
+aliases explicitly. Stock screeners generally expose `SCREENER`, `RESULT_COLUMNS`,
+`run` and `build_chart`; the IPO screener exposes `SCREENER` and `run` and delegates
+its event-driven pipeline to the backend without requesting candle history.
 
 ## 2. Catalog
 
@@ -35,6 +37,7 @@ ends with module-level back-compat aliases (`SCREENER`, `RESULT_COLUMNS`, `run`,
 | **CPR Yearly Reversal** (`cpr_yearly`) | `nifty_500` | deterministic | Yearly CPR central pivots descending 3 straight years (this < last < 2y-ago) **and** a weekly close reclaiming the previous year's high. Chart = weekly candles + yearly CPR lines. |
 | **67 Ka Funda (AI)** (`sixty_seven_ka_funda`) | `hemant_super_good_200_union` | **hybrid (gate + AI)** | ≥67% fall from ATH (≥100% upside) gate, then a Claude verifier approves a BUY on evidence. → [sixty-seven-ka-funda-ai.md](sixty-seven-ka-funda-ai.md) |
 | **Technical Analysis (AI)** (`technical_analysis`) | `hemant_super_good_union` | **hybrid (gate + AI)** | Cheap pivot/pattern gate, then a Claude agent confirms a bullish setup with tools. → [technical-analysis-ai.md](technical-analysis-ai.md) |
+| **IPO Screener** (`ipo_screener`) | `ipo_filings` (history label; no universe CSV) | **event-driven pipeline** | Inventories filings, caches prospectuses, optionally enriches/extracts evidence and re-scores upcoming issues; returns one row per issue. → [IPO screener orchestration](../ipo-011-one-button-screener.md) |
 
 (Universe keys: see [universe-management.md](universe-management.md). The Check Fundamentals per-row agent — [fundamentals-ai.md](fundamentals-ai.md) — is invoked from the UI on a shortlisted row, not a screener itself.)
 
