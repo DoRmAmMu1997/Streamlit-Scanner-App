@@ -136,6 +136,19 @@ def _row_for(symbol: str) -> dict[str, object]:
     }
 
 
+def _healthy_universe_check(_session):
+    """Return a quiet report for stubbed, offline job orchestration tests.
+
+    Beginner note:
+    Supplying this checker with a temporary session factory keeps the new
+    pre-scan health step inside the same isolated boundary as the fake scanner.
+    It cannot inspect real universe files or the configured database.
+    """
+    from backend.data_quality.universe_health import UniverseHealthReport
+
+    return UniverseHealthReport()
+
+
 def test_default_screener_keys_are_the_deterministic_daily_set():
     """The scheduled default should avoid AI/network-only screeners."""
     from backend.jobs.run_daily_scan import DEFAULT_DAILY_SCAN_KEYS
@@ -289,7 +302,9 @@ def test_failed_screener_is_recorded_and_exits_nonzero(file_session_factory, cap
     assert "LEAKME" not in output
 
 
-def test_setup_failure_exits_nonzero_without_printing_raw_exception(capsys):
+def test_setup_failure_exits_nonzero_without_printing_raw_exception(
+    file_session_factory, capsys
+):
     """Universe/load setup errors happen before run_scan can persist a row.
 
     Because no scan header exists yet, the only durable signal is the process
@@ -310,6 +325,8 @@ def test_setup_failure_exits_nonzero_without_printing_raw_exception(capsys):
             FileNotFoundError("token=LEAKME universe path")
         ),
         data_loader_factory=_FakeLoader,
+        session_factory=file_session_factory,
+        universe_health_checker=_healthy_universe_check,
         today=date(2026, 6, 5),
     )
 
@@ -352,7 +369,7 @@ def test_unknown_screener_exits_nonzero_and_continues_known_scans(file_session_f
     assert summary.outcomes[1].run_id is not None
 
 
-def test_missing_run_id_is_fatal_for_the_scheduled_job(capsys):
+def test_missing_run_id_is_fatal_for_the_scheduled_job(file_session_factory, capsys):
     """The UI can be best-effort, but the daily job must know history failed.
 
     ``run_id=None`` is the signal that SCAN-003 could not create/persist the
@@ -380,6 +397,8 @@ def test_missing_run_id_is_fatal_for_the_scheduled_job(capsys):
         universe_loader=lambda _key: _fake_universe("NOPERSIST"),
         data_loader_factory=_FakeLoader,
         scan_runner=fake_scan_runner,
+        session_factory=file_session_factory,
+        universe_health_checker=_healthy_universe_check,
         today=date(2026, 6, 5),
     )
 
@@ -518,7 +537,9 @@ def test_config_run_skips_disabled_entries_and_runs_enabled(
     assert "disabled_one" in output
 
 
-def test_config_entry_overrides_universe_and_params_reach_the_service(capsys):
+def test_config_entry_overrides_universe_and_params_reach_the_service(
+    file_session_factory, capsys
+):
     """Config overrides reach both the scan service and operator-facing outcome.
 
     The resolved universe is more than an internal input: it is also printed in
@@ -564,6 +585,8 @@ def test_config_entry_overrides_universe_and_params_reach_the_service(capsys):
         universe_loader=load_universe,
         data_loader_factory=_FakeLoader,
         scan_runner=fake_scan_runner,
+        session_factory=file_session_factory,
+        universe_health_checker=_healthy_universe_check,
         today=date(2026, 6, 5),
     )
 
@@ -582,7 +605,7 @@ def test_config_entry_overrides_universe_and_params_reach_the_service(capsys):
     assert params["end_date"] == date(2026, 6, 5)
 
 
-def test_outcome_carries_structured_partial_failure_counts() -> None:
+def test_outcome_carries_structured_partial_failure_counts(file_session_factory) -> None:
     """ALERT-001 needs partial-symbol counts, not just fatal screener counts."""
     from backend.jobs.run_daily_scan import run_daily_scan
 
@@ -619,6 +642,8 @@ def test_outcome_carries_structured_partial_failure_counts() -> None:
             last_failures=[{"symbol": "LOAD_BAD", "message": "timeout"}]
         ),
         scan_runner=fake_scan_runner,
+        session_factory=file_session_factory,
+        universe_health_checker=_healthy_universe_check,
         today=date(2026, 6, 5),
     )
 
@@ -664,7 +689,7 @@ def test_config_unknown_screener_is_fatal_but_keeps_running_valid_entries(
     assert summary.outcomes[1].run_id is not None
 
 
-def test_config_unknown_universe_is_fatal(capsys):
+def test_config_unknown_universe_is_fatal(file_session_factory, capsys):
     """An unknown universe_key override surfaces clearly via load_universe."""
     from backend.jobs.daily_scan_config import DailyScanEntry
     from backend.jobs.run_daily_scan import run_daily_scan
@@ -690,6 +715,8 @@ def test_config_unknown_universe_is_fatal(capsys):
         },
         universe_loader=load_universe,
         data_loader_factory=_FakeLoader,
+        session_factory=file_session_factory,
+        universe_health_checker=_healthy_universe_check,
         today=date(2026, 6, 5),
     )
 

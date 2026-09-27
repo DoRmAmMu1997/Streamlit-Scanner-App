@@ -3,9 +3,9 @@
 | | |
 |---|---|
 | **Component** | Reusable OHLCV candle-quality validation + scan-time quarantine, receipt, health surfacing, and prefetch-time repair |
-| **Source** | [`backend/data_quality/candles.py`](../../../backend/data_quality/candles.py), [`repair.py`](../../../backend/data_quality/repair.py), [`cache_repair.py`](../../../backend/data_quality/cache_repair.py), [`backend/data_quality/__init__.py`](../../../backend/data_quality/__init__.py); integrated in [`daily_data_loader.py`](../../../backend/daily_data_loader.py), [`scanning/service.py`](../../../backend/scanning/service.py), [`jobs/repair_candle_cache.py`](../../../backend/jobs/repair_candle_cache.py), [`health.py`](../../../backend/health.py), [`ui/health_page.py`](../../../ui/health_page.py) |
+| **Source** | [`backend/data_quality/candles.py`](../../../backend/data_quality/candles.py), [`repair.py`](../../../backend/data_quality/repair.py), [`cache_repair.py`](../../../backend/data_quality/cache_repair.py), [`universe_health.py`](../../../backend/data_quality/universe_health.py), [`backend/data_quality/__init__.py`](../../../backend/data_quality/__init__.py); integrated in [`daily_data_loader.py`](../../../backend/daily_data_loader.py), [`scanning/service.py`](../../../backend/scanning/service.py), [`jobs/repair_candle_cache.py`](../../../backend/jobs/repair_candle_cache.py), [`health.py`](../../../backend/health.py), [`ui/health_page.py`](../../../ui/health_page.py) |
 | **Layer** | Foundation checker + repair planner (pure, no I/O) + boundary integration in the data/scan layers |
-| **Status** | Stable (DATA-001A checker · DATA-001B integration · DATA-002 repair) |
+| **Status** | Stable (DATA-001A checker · DATA-001B integration · DATA-002 repair · OBS-004 universe mapping health) |
 | **Related** | [HLD](../high-level-design.md) · [data-002 repair design](../data-002-candle-cache-repair.md) · [data-acquisition.md](data-acquisition.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [storage-persistence.md](storage-persistence.md) · [health-monitoring.md](health-monitoring.md) · [observability.md](observability.md) · [security.md](security.md) |
 
 ## 1. Purpose & responsibilities
@@ -20,7 +20,7 @@ repair pass then runs at the end of the `python app.py` prefetch, so the app
 starts against the cleanest cache we can produce rather than silently dropping
 corrupt symbols from every scan.
 
-**Three parts:**
+**Four parts:**
 - **DATA-001A — checker** (`candles.py`): `validate_candles(...)` → an immutable
   `CandleQualityReport` of `DataQualityFinding`s with stable codes/severities.
   Pure, dependency-light (stdlib + pandas), never mutates the caller's frame, no
@@ -33,6 +33,22 @@ corrupt symbols from every scan.
   only the vendor can answer, **re-validates its own work**, and writes the cache
   back atomically. Full rationale in
   [data-002-candle-cache-repair.md](../data-002-candle-cache-repair.md).
+- **OBS-004 — universe mapping health** (`universe_health.py`): a different
+  question from the three above. They ask *"is this symbol's candle data sound?"*;
+  this asks *"is this symbol still in the scannable set at all?"*. A symbol that
+  leaves Dhan's instrument master is filtered out by `mapped_only()` and was
+  previously invisible to every headless path. The check compares today's
+  per-universe unmapped count against a persisted baseline
+  (`universe_health_snapshots`) and alerts only on an *increase*. Full rationale,
+  including why the prefetch logs but never records, in
+  [obs-004-universe-health-alerts.md](../obs-004-universe-health-alerts.md).
+  Collection reads each CSV once so counts and names describe one file
+  generation. Observations record `valid`, `missing`, `unreadable`, or
+  `legacy_unknown`; only the latest valid row per universe is baseline
+  authority. Valid observations must be non-empty and satisfy the runtime
+  loader's required-column contract. Bounded name evidence carries explicit
+  completeness/truncation, so an incomplete set can raise a count alert without
+  claiming an exact new name.
 
 ### Repair, in one paragraph
 
@@ -107,6 +123,7 @@ The persisted receipt (`scan_runs.data_quality_json`, `schema_version=1`) carrie
 - Warning-only frame → passes through, recorded in the receipt, `candle_data_quality_warning` logged.
 - No reports (e.g. cached-only run with no fetches) → receipt is `None`; health shows "No scan has recorded … findings yet."
 - Old runs / pre-DATA-001 receipts → nullable column + defensive `_copy_data_quality_run` parsing → health simply omits them.
+- Missing, unparsable, empty, or loader-incompatible universe CSV → warning observation retained, previous valid mapping baseline preserved; recovery compares against that valid row.
 
 ## 6. Configuration & dependencies
 

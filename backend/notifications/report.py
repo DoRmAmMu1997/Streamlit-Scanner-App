@@ -13,12 +13,12 @@ import logging
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.orm import Session
 
 from backend.notifications.config import NotificationSettings
+from backend.numeric import finite_decimal
 from backend.storage import get_scan_runs, get_top_ranked_results, session_scope
 
 if TYPE_CHECKING:
@@ -79,6 +79,10 @@ class DailyScanReport:
     # renderer omits the per-stock results block. Defaults True (full) so existing
     # constructions keep the ALERT-001 behaviour.
     include_results: bool = True
+    # OBS-004: one line per universe that lost mapped symbols since the previous
+    # run. Rendered even at the summary-only content level - a shrinking universe
+    # is a data-integrity warning about the scan itself, not a per-stock result.
+    universe_warnings: tuple[str, ...] = ()
 
 
 def _status_label(outcome: DailyScanOutcome) -> str:
@@ -113,30 +117,19 @@ def _failed_symbols_or_findings(outcome: DailyScanOutcome) -> int:
     )
 
 
-def _finite_decimal(value: Any) -> Decimal | None:
-    """Parse a finite numeric score from typed columns or raw JSON.
-
-    Raw scanner JSON can contain strings, ints, floats, ``None``, or accidental
-    values such as ``"nan"``. The notification should simply treat bad values as
-    unscored, not fail the whole alert.
-    """
-    if value is None:
-        return None
-    try:
-        score = Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return None
-    return score if score.is_finite() else None
-
-
 def _score_and_source(row: Any) -> tuple[float | None, str]:
-    """Return the report score and the label the renderer should show."""
-    final_score = _finite_decimal(getattr(row, "final_score", None))
+    """Return the report score and the label the renderer should show.
+
+    Beginner note:
+    The shared ``finite_decimal`` leaf makes an invalid score consistently
+    become ``unscored`` instead of reaching the renderer as NaN or Infinity.
+    """
+    final_score = finite_decimal(getattr(row, "final_score", None))
     if final_score is not None:
         return float(final_score), "final_score"
     raw_result = getattr(row, "raw_result_json", None)
     if isinstance(raw_result, dict):
-        confidence = _finite_decimal(raw_result.get("confidence"))
+        confidence = finite_decimal(raw_result.get("confidence"))
         if confidence is not None:
             return float(confidence), "confidence"
     return None, "unscored"
@@ -216,4 +209,7 @@ def build_daily_scan_report(
         top_results=top_results,
         app_url=settings.app_url,
         include_results=include_results,
+        # OBS-004: getattr keeps this tolerant of a DailyScanSummary built by
+        # older code (or a test fake) that predates the field.
+        universe_warnings=tuple(getattr(summary, "universe_warnings", ()) or ()),
     )

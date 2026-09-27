@@ -93,9 +93,13 @@ services:
     # Adjust to taste; Render cron schedules are evaluated in UTC.
     schedule: "30 13 * * 1-5"
     # The cron runs on an ephemeral filesystem with no persistent disk, so it
-    # first regenerates the universe CSVs (the nifty/fno lists are downloaded,
-    # not baked into the image), then runs the daily scan, which fetches candles
-    # fresh from Dhan and writes results to the shared Postgres above.
+    # first regenerates the universe CSVs, then runs the daily scan, which
+    # fetches candles fresh from Dhan and writes results to the shared Postgres
+    # above. The NIFTY/F&O lists are downloaded; the Hemant lists are rebuilt
+    # from the pinned sources baked into the image at
+    # /app/data/universes/sources/. Those sources deliberately do NOT follow
+    # DATA_DIR (DEPLOY-005) — when they did, this ephemeral cron looked for them
+    # on a volume it does not have and the whole `&&` chain died before the scan.
     dockerCommand: >-
       sh -c "python -c 'from backend.universe_builder import refresh_universe_files; refresh_universe_files()' && python -m backend.jobs.run_daily_scan --config config/daily_scans.yaml"
     envVars:

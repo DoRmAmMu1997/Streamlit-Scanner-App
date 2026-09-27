@@ -821,3 +821,71 @@ def test_run_sync_propagates_caller_contextvars_into_worker_thread():
         probe.reset(token)
 
     assert result.text == "BOUND"
+
+
+def test_default_sdk_runner_disables_builtin_tools(monkeypatch, tmp_path):
+    """The research MCP call is the verifier's complete tool surface.
+
+    Beginner note:
+        The SDK has both an allowlist and a built-in-tool selection. An empty
+        built-in list makes the boundary explicit, while retaining the one
+        intended in-process research tool through ``allowed_tools``.
+    """
+    import sys
+    import types
+
+    captured: dict[str, Any] = {}
+
+    class ClaudeAgentOptions:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    class ResultMessage:
+        def __init__(self) -> None:
+            self.result = "{}"
+            self.total_cost_usd = None
+            self.is_error = False
+
+    class AssistantMessage:
+        pass
+
+    class CLINotFoundError(Exception):
+        pass
+
+    class ProcessError(Exception):
+        pass
+
+    async def query(*, prompt: str, options: object):
+        del prompt, options
+        yield ResultMessage()
+
+    def tool(_name: str, _description: str, _schema: dict[str, type]):
+        return lambda function: function
+
+    def create_sdk_mcp_server(*, name: str, version: str, tools: list[object]):
+        return {"name": name, "version": version, "tools": tools}
+
+    fake_sdk = types.ModuleType("claude_agent_sdk")
+    fake_sdk.ClaudeAgentOptions = ClaudeAgentOptions
+    fake_sdk.ResultMessage = ResultMessage
+    fake_sdk.AssistantMessage = AssistantMessage
+    fake_sdk.CLINotFoundError = CLINotFoundError
+    fake_sdk.ProcessError = ProcessError
+    fake_sdk.query = query
+    fake_sdk.tool = tool
+    fake_sdk.create_sdk_mcp_server = create_sdk_mcp_server
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk)
+
+    agent = SixtySevenAgent(
+        model="test-model", cache=FundamentalsCache(cache_dir=tmp_path)
+    )
+    agent._run_sync(
+        agent._default_run(
+            "prompt", system_prompt="system", model="test-model", max_turns=2
+        )
+    )
+
+    assert captured["tools"] == []
+    assert captured["allowed_tools"] == ["mcp__sixty_seven__research_company"]
+    assert captured["permission_mode"] == "dontAsk"
+    assert captured["setting_sources"] == []

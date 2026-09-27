@@ -29,6 +29,47 @@ from backend.storage import database
 from backend.storage.models import Base, IpoIssue, IpoManualExtraction, IpoScore
 
 
+def test_obs004a_backfills_legacy_rows_and_restores_original_shape(
+    monkeypatch, tmp_path: Path
+):
+    """Old snapshots lose baseline authority while retaining their history.
+
+    The failure this catches is a migration that labels pre-single-read rows as
+    valid, or edits the original OBS-004 migration instead of providing an
+    upgrade path for databases that already ran it.
+    """
+    db_path = tmp_path / "obs004a.db"
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
+    config = Config("alembic.ini")
+    command.upgrade(config, "20260904obs004")
+    engine = create_engine(f"sqlite:///{db_path.as_posix()}", future=True)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO universe_health_snapshots "
+                "(captured_at, universe_key, total_rows, mapped_rows, unmapped_rows, "
+                "unmapped_symbols_json) VALUES "
+                "('2026-09-05 00:00:00', 'nifty_100', 100, 99, 1, NULL)"
+            )
+        )
+
+    command.upgrade(config, "head")
+    with engine.connect() as connection:
+        status = connection.execute(
+            text("SELECT observation_status FROM universe_health_snapshots")
+        ).scalar_one()
+    assert status == "legacy_unknown"
+    assert {
+        index["name"] for index in inspect(engine).get_indexes("universe_health_snapshots")
+    } >= {"ix_universe_health_snapshots_key_status_captured_id"}
+
+    command.downgrade(config, "20260904obs004")
+    assert "observation_status" not in {
+        column["name"] for column in inspect(engine).get_columns("universe_health_snapshots")
+    }
+    engine.dispose()
+
+
 def test_alembic_cli_does_not_echo_percent_encoded_database_password():
     """Alembic errors must not print credentials from a URL-encoded password.
 
@@ -108,6 +149,7 @@ def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Pa
         "scan_runs",
         "scan_results",
         "signal_forward_returns",
+        "universe_health_snapshots",
         "user_roles",
     }
     assert {index["name"] for index in inspector.get_indexes("audit_logs")} >= {
@@ -777,6 +819,7 @@ def test_ensure_database_schema_creates_tables_and_short_circuits(monkeypatch, t
         "scan_runs",
         "scan_results",
         "signal_forward_returns",
+        "universe_health_snapshots",
         "user_roles",
     }
     engine.dispose()
@@ -901,3 +944,49 @@ def _reflect_schema(engine) -> dict[str, dict[str, object]]:
         schema[table] = {"columns": columns, "indexes": indexes, "foreign_keys": foreign_keys}
     engine.dispose()
     return schema
+
+
+def test_valid005_backfills_attempts_and_only_missing_computed_benchmarks(monkeypatch, tmp_path: Path):
+    """Upgrade retries legacy missing benchmarks without changing stock facts.
+
+    Beginner note:
+        Old pending rows have no computed timestamp, so creation time is their
+        fair scheduling fallback. Computed rows use their later measurement time.
+        Downgrade removes metadata only and preserves every receipt row.
+    """
+    url = f"sqlite:///{(tmp_path / 'valid005.db').as_posix()}"
+    monkeypatch.setenv("DATABASE_URL", url)
+    config = Config("alembic.ini")
+    command.upgrade(config, "20260906obs004a")
+    engine = create_engine(url)
+    with engine.begin() as connection:
+        connection.execute(text("INSERT INTO scan_runs (id, started_at, status, screener_key, universe_key) "
+                                "VALUES (1, '2026-01-01', 'success', 'test', 'nifty_500')"))
+        connection.execute(text("INSERT INTO scan_results (id, run_id, symbol, signal_date, created_at) "
+                                "VALUES (1, 1, 'TEST', '2026-01-05', '2026-01-05')"))
+        for horizon, status, computed, benchmark in [
+            (1, "computed", "2026-01-08", None), (2, "computed", "2026-01-08", 2),
+            (20, "pending", None, None), (60, "insufficient_data", "2026-01-08", None),
+        ]:
+            connection.execute(text(
+                "INSERT INTO signal_forward_returns "
+                "(result_id, horizon_days, status, computed_at, benchmark_return_pct, created_at) "
+                "VALUES (1, :horizon, :status, :computed, :benchmark, '2026-01-06')"
+            ), dict(horizon=horizon, status=status, computed=computed, benchmark=benchmark))
+    command.upgrade(config, "20260909valid005")
+    with engine.connect() as connection:
+        rows = connection.execute(text(
+            "SELECT horizon_days, last_attempted_at, benchmark_retry_pending "
+            "FROM signal_forward_returns ORDER BY horizon_days"
+        )).all()
+    assert rows == [(1, "2026-01-08", 1), (2, "2026-01-08", 0),
+                    (20, "2026-01-06", 0), (60, "2026-01-08", 0)]
+    command.downgrade(config, "20260906obs004a")
+    assert "last_attempted_at" not in {c["name"] for c in inspect(engine).get_columns("signal_forward_returns")}
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT COUNT(*) FROM signal_forward_returns")) == 4
+        benchmark = connection.scalar(
+            text("SELECT benchmark_return_pct FROM signal_forward_returns WHERE horizon_days=2")
+        )
+        assert benchmark == 2
+    engine.dispose()

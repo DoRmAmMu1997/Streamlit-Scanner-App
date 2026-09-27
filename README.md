@@ -162,7 +162,7 @@ network work happens up front in the terminal.
 
 ## Requirements
 
-- **Python 3.11+**
+- **Python 3.12+** (CI tests 3.12-3.14; the Docker image runs 3.14)
 - The core packages in [`requirements.txt`](requirements.txt), installed with
   the verified direct pins in [`constraints.txt`](constraints.txt):
   `pip install -r requirements.txt -c constraints.txt`
@@ -412,7 +412,7 @@ Compose uses two named volumes:
 
 - `scanner-data` mounted at `/data` for candles, caches, SQLite fallback files,
   and other app-generated state.
-- `postgres-data` mounted at `/var/lib/postgresql/data` for the local Postgres
+- `postgres-data` mounted at `/var/lib/postgresql` for the local Postgres 18
   cluster.
 
 Stop the stack without deleting data:
@@ -1174,9 +1174,12 @@ Supported universe keys are `nifty_100`, `nifty_500`, `fno`,
 `hemant_super_45`, `hemant_good_45`, `hemant_good_200`, and the composites
 `hemant_super_good_union` (Hemant Super 45 ∪ Good 45) and
 `hemant_super_good_200_union` (Hemant Super 45 ∪ Good 45 ∪ Good 200), both deduped.
-The Hemant lists live in `data/universes/` alongside the other universe CSVs
-and are mapped to Dhan cash-equity IDs when universe files are refreshed; the
-union is assembled from those same source lists at refresh time.
+The pinned Hemant symbol lists live in `data/universes/sources/` and are mapped
+to Dhan cash-equity IDs when universe files are refreshed; the union is assembled
+from those same source lists at refresh time. The generated universe CSVs are
+written to `data/universes/` (which follows `DATA_DIR`), while the pinned sources
+are resolved relative to the repository so a container that redirects `DATA_DIR`
+to a volume can still rebuild them (DEPLOY-005).
 
 ---
 
@@ -1197,7 +1200,7 @@ pip install -r requirements-dev.txt -c constraints.txt
 Run the full local verification set before publishing changes:
 
 ```bash
-python -m pytest -q --cov=backend --cov=screeners --cov=ui --cov-fail-under=89
+python -m pytest -q --cov=app --cov=backend --cov=screeners --cov=ui --cov-fail-under=89
 python -m compileall -q app.py backend screeners ui tests
 python -m ruff check app.py backend screeners ui Dependencies tests
 python -m bandit -r app.py backend screeners ui Dependencies -q

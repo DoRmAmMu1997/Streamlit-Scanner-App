@@ -287,6 +287,8 @@ def prefetch_data_assets() -> None:
         display_name = UNIVERSE_CONFIG.get(key, {}).get("display_name", key)
         print(f"[prefetch]   {display_name:<25} -> {path}", flush=True)
 
+    _log_universe_health()
+
     # Computing the union AFTER the refresh guarantees we see the freshest
     # mapped rows. If no universes loaded, we still let Streamlit boot.
     union = union_of_mapped_universes()
@@ -498,6 +500,28 @@ def _inject_css() -> None:
     (no user input), so there is no injection surface.
     """
     st.markdown(_CUSTOM_CSS, unsafe_allow_html=True)
+
+
+def _log_universe_health() -> None:
+    """Emit the OBS-004 per-universe mapping counts. Best-effort, log only.
+
+    Beginner note:
+    This deliberately does NOT record a snapshot, unlike the daily job. Whoever
+    writes the baseline defines what "last time" means, so if this morning
+    prefetch also persisted, a symbol that dropped out here would already be part
+    of the baseline by the time the evening job ran - and the alert would never
+    fire. The prefetch's job is only to make the counts visible in the log; the
+    daily job owns the comparison.
+    """
+    try:
+        from backend.data_quality.universe_health import (
+            collect_universe_health,
+            log_universe_health,
+        )
+
+        log_universe_health(collect_universe_health())
+    except Exception:  # noqa: BLE001 - never let a health log break the prefetch
+        logger.warning("universe health logging failed during prefetch", exc_info=True)
 
 
 def refresh_universes_and_invalidate() -> dict[str, Path]:
@@ -807,7 +831,13 @@ def main() -> None:
         return
 
     _render_scan_output(
-        selected, cache, can_export=role_has_capability(current_role, EXPORT_RESULTS)
+        selected,
+        cache,
+        can_export=role_has_capability(current_role, EXPORT_RESULTS),
+        # Results may predate a role change. Only the identity resolved at the
+        # start of this rerun can authorize actions underneath those results.
+        current_role=current_role,
+        current_email=current_email,
     )
 
 

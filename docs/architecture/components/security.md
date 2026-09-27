@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | **Component** | Cross-cutting security utilities |
-| **Source** | [`backend/security/redaction.py`](../../../backend/security/redaction.py), [`backend/security/prompt_injection.py`](../../../backend/security/prompt_injection.py), [`backend/security/__init__.py`](../../../backend/security/__init__.py), [`backend/url_safety.py`](../../../backend/url_safety.py), [`backend/ai_cache_integrity.py`](../../../backend/ai_cache_integrity.py) |
+| **Source** | [`backend/security/redaction.py`](../../../backend/security/redaction.py), [`backend/security/prompt_injection.py`](../../../backend/security/prompt_injection.py), [`backend/security/__init__.py`](../../../backend/security/__init__.py), [`backend/url_safety.py`](../../../backend/url_safety.py), [`backend/fundamentals/pdf_transport.py`](../../../backend/fundamentals/pdf_transport.py), [`backend/ai_cache_integrity.py`](../../../backend/ai_cache_integrity.py) |
 | **Layer** | Foundation (leaf utilities, best-effort, never raise on the safety path) |
 | **Status** | Stable (SEC-001 URL safety · SEC-002 redaction · PROV-003 AI cache integrity · TEST-003 prompt-injection quarantine) |
 | **Related** | [HLD](../high-level-design.md) · [configuration.md](configuration.md) · [observability.md](observability.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [storage-persistence.md](storage-persistence.md) · [ipo-screener.md](ipo-screener.md) · [fundamentals-ai.md](fundamentals-ai.md) · [technical-analysis-ai.md](technical-analysis-ai.md) · [sixty-seven-ka-funda-ai.md](sixty-seven-ka-funda-ai.md) |
@@ -49,6 +49,8 @@ flowchart LR
       PROV["IPO provenance URL"] --> SAFE --> STORE["store only; never fetched"]
       SEBIURL["fixed SEBI URL / redirect"] --> STRICT["_canonical_sebi_url: exact HTTPS host"]
       STRICT --> BOUNDED["manual redirects + bounded streamed request"]
+      PDFURL["transcript URL / redirect"] --> PIN["pdf_transport: resolve once, reject mixed DNS, pin numeric IP"]
+      PIN --> TLS["original Host/SNI/certificate identity"]
     end
     subgraph AICache[PROV-003 ai_cache_integrity]
       KEY["signing key (env or per-process)"] --> SIGN["sign_cache_envelope (HMAC-SHA256)"]
@@ -104,6 +106,18 @@ are cleaned on every failure and become visible only through same-directory
 atomic rename after hashing and fsync. Persistence compare-and-sets the detached
 source URL/type, so a concurrent provenance correction cannot inherit stale
 bytes.
+
+**Transcript PDF egress enforcement.** `backend/fundamentals/pdf_transport.py` is
+the network boundary for URLs scraped from third-party transcript pages. It
+canonicalizes and validates the initial URL and every relative redirect, rejects
+credentials, malformed authorities, controls, backslashes, non-public addresses,
+and mixed public/private DNS answers, then passes the selected public numeric
+address to urllib3 while retaining the original hostname for the HTTP Host header,
+TLS SNI, and certificate assertion. Every hop uses a fresh `trust_env=False`
+session with empty proxy settings and explicit headers; caller sessions, cookies,
+auth, proxies, and adapters do not cross the boundary. Redirects are bounded and
+response resources close on every success or refusal. See the
+[transcript egress ADR](../sec-transcript-egress.md).
 
 ### AI cache integrity — `backend/ai_cache_integrity.py`
 | Symbol | Contract |

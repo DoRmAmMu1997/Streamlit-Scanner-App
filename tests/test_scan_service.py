@@ -173,7 +173,7 @@ def test_run_scan_success_persists_run_and_results(db_engine, session_factory):
         assert provenance["notes"] is None
         assert provenance["ai"] is None
         breakdown = provenance["score_breakdown"]
-        assert breakdown["model_version"] == "rank-1.0"
+        assert breakdown["model_version"] == "rank-1.1"
         assert breakdown["components"] == {"freshness": 87.06}
         assert breakdown["coverage"] == ["freshness"]
         assert breakdown["missing"] == ["technical", "liquidity", "risk"]

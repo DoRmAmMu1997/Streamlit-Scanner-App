@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from backend.auth.roles import Role
 from backend.screener_registry import ScreenerDefinition
 from ui import scan_view
 
@@ -152,7 +153,13 @@ def test_empty_results_warn_and_skip_chart_export_and_fundamentals(fake_st, monk
     panel_calls: list[object] = []
     monkeypatch.setattr(scan_view, "_render_fundamentals_panel", panel_calls.append)
 
-    scan_view._render_scan_output(_definition(), _cache(_results([])), can_export=True)
+    scan_view._render_scan_output(
+        _definition(),
+        _cache(_results([])),
+        can_export=True,
+        current_role=Role.ANALYST,
+        current_email="analyst@example.com",
+    )
 
     assert fake_st.warnings == ["The screener returned no rows."]
     assert fake_st.download_buttons == []
@@ -163,14 +170,29 @@ def test_empty_results_warn_and_skip_chart_export_and_fundamentals(fake_st, monk
 
 def test_happy_path_charts_symbol_and_shows_fundamentals(fake_st, monkeypatch):
     panel_calls: list[object] = []
-    monkeypatch.setattr(scan_view, "_render_fundamentals_panel", panel_calls.append)
+    monkeypatch.setattr(
+        scan_view,
+        "_render_fundamentals_panel",
+        lambda symbol, **kwargs: panel_calls.append((symbol, kwargs)),
+    )
     monkeypatch.setattr(
         scan_view, "_render_results_with_chart", lambda selected, results, cache: "INFY"
     )
 
-    scan_view._render_scan_output(_definition(), _cache(_results(["INFY", "TCS"])), can_export=False)
+    scan_view._render_scan_output(
+        _definition(),
+        _cache(_results(["INFY", "TCS"])),
+        can_export=False,
+        current_role=Role.VIEWER,
+        current_email="viewer@example.com",
+    )
 
-    assert panel_calls == ["INFY"]
+    assert panel_calls == [
+        (
+            "INFY",
+            {"current_role": Role.VIEWER, "current_email": "viewer@example.com"},
+        )
+    ]
     assert any("2 stock(s) shortlisted" in m for m in fake_st.markdowns)
     # Diagnostics metrics rendered inside the expander.
     assert ("Cache hits", 3) in fake_st.metrics
@@ -178,22 +200,34 @@ def test_happy_path_charts_symbol_and_shows_fundamentals(fake_st, monkeypatch):
 
 def test_export_button_is_capability_gated(fake_st, monkeypatch):
     """AUTH-003: viewers never reach the download button or the bytes build."""
-    monkeypatch.setattr(scan_view, "_render_fundamentals_panel", lambda symbol: None)
+    monkeypatch.setattr(scan_view, "_render_fundamentals_panel", lambda symbol, **kwargs: None)
     monkeypatch.setattr(
         scan_view, "_render_results_with_chart", lambda selected, results, cache: None
     )
 
-    scan_view._render_scan_output(_definition(), _cache(_results(["INFY"])), can_export=False)
+    scan_view._render_scan_output(
+        _definition(),
+        _cache(_results(["INFY"])),
+        can_export=False,
+        current_role=Role.VIEWER,
+        current_email="viewer@example.com",
+    )
     assert fake_st.download_buttons == []
 
-    scan_view._render_scan_output(_definition(), _cache(_results(["INFY"])), can_export=True)
+    scan_view._render_scan_output(
+        _definition(),
+        _cache(_results(["INFY"])),
+        can_export=True,
+        current_role=Role.ANALYST,
+        current_email="analyst@example.com",
+    )
     assert len(fake_st.download_buttons) == 1
     assert fake_st.download_buttons[0]["file_name"] == "demo_results.csv"
 
 
 def test_export_click_records_audit_event(fake_st, monkeypatch):
     """st.download_button doubles as the OBS-003 export trigger."""
-    monkeypatch.setattr(scan_view, "_render_fundamentals_panel", lambda symbol: None)
+    monkeypatch.setattr(scan_view, "_render_fundamentals_panel", lambda symbol, **kwargs: None)
     monkeypatch.setattr(
         scan_view, "_render_results_with_chart", lambda selected, results, cache: None
     )
@@ -204,7 +238,13 @@ def test_export_click_records_audit_event(fake_st, monkeypatch):
     fake_st.download_clicked = True
     fake_st.session_state["_audit_user_email"] = "analyst@example.com"
 
-    scan_view._render_scan_output(_definition(), _cache(_results(["INFY", "TCS"])), can_export=True)
+    scan_view._render_scan_output(
+        _definition(),
+        _cache(_results(["INFY", "TCS"])),
+        can_export=True,
+        current_role=Role.ANALYST,
+        current_email="analyst@example.com",
+    )
 
     assert len(audit_events) == 1
     assert audit_events[0]["user_email"] == "analyst@example.com"
@@ -213,7 +253,7 @@ def test_export_click_records_audit_event(fake_st, monkeypatch):
 
 
 def test_failure_expanders_render_with_redacted_messages(fake_st, monkeypatch):
-    monkeypatch.setattr(scan_view, "_render_fundamentals_panel", lambda symbol: None)
+    monkeypatch.setattr(scan_view, "_render_fundamentals_panel", lambda symbol, **kwargs: None)
     monkeypatch.setattr(
         scan_view, "_render_results_with_chart", lambda selected, results, cache: None
     )
@@ -228,7 +268,13 @@ def test_failure_expanders_render_with_redacted_messages(fake_st, monkeypatch):
     cache["failures"] = [{"symbol": "TCS", "message": "token=super-secret"}]
     cache["compute_failures"] = [{"symbol": "WIPRO", "message": "boom"}]
 
-    scan_view._render_scan_output(_definition(), cache, can_export=False)
+    scan_view._render_scan_output(
+        _definition(),
+        cache,
+        can_export=False,
+        current_role=Role.VIEWER,
+        current_email="viewer@example.com",
+    )
 
     assert "Fetch failures" in fake_st.expanders
     assert "Compute failures" in fake_st.expanders

@@ -2,6 +2,8 @@
 
 > Approved by the user on 2026-09-06. Execute with isolated worktrees, regression-first development, independent reviews, and verified PR publication. Merging and production deployment remain with the user.
 
+> Execution update, 2026-09-27: the user's replacement `AGENTS.md` and merged CI changes supersede the original Python matrix below. Remaining implementation and final verification use Python **3.12, 3.13 and 3.14**, deployment Python **3.14**, and Ruff/mypy target **3.12**. Preserve the merged dependency upgrades and weekly Dependabot configuration. Earlier Python 3.11 evidence remains historical; it does not satisfy the current matrix. See the [delivery ledger](../../architecture/astra-modernization-status.md) for current merged versus pending work.
+
 ## Mandatory conventions
 
 Preserve the research-tool architecture, Claude integration, strategies, and dark/teal theme. Give new and materially changed functions/classes/complex helpers detailed Google-style docstrings with accurate Args, Returns and Raises as applicable. Include **Beginner note:** paragraphs explaining purpose, assumptions, safety reasoning and trade-offs. Comment non-obvious security checks, transaction boundaries, concurrency controls, numerical edge cases, cache behavior and state transitions. Explain each regression's original failure and protected invariant. Review documentation quality alongside correctness and security in every PR.

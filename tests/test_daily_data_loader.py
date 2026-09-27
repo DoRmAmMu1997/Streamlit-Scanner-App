@@ -6,7 +6,6 @@ import concurrent.futures
 import logging
 import os
 import threading
-import time
 from datetime import date, datetime
 
 import pandas as pd
@@ -457,7 +456,17 @@ def test_circuit_breaker_skips_remaining_symbols_after_failure_limit(tmp_path):
 
 
 def test_fetch_timeout_records_failure_without_waiting_for_slow_client(tmp_path):
-    """A stuck Dhan call should fail the symbol promptly instead of blocking."""
+    """A stuck Dhan call returns a failure while the worker is still blocked.
+
+    Beginner note:
+    Events control the fake vendor's lifetime. The caller must finish before we
+    release the vendor, which proves timeout behavior without relying on a
+    subsecond wall-clock benchmark that fails on busy CI runners. Always release
+    the worker in ``finally`` so even a regression cannot strand a test thread.
+    """
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
 
     class SlowClient:
         def __init__(self):
@@ -465,8 +474,13 @@ def test_fetch_timeout_records_failure_without_waiting_for_slow_client(tmp_path)
 
         def fetch_daily_candles(self, *args, **kwargs):
             self.calls += 1
-            time.sleep(0.25)
-            return candle_frame()
+            entered.set()
+            try:
+                if not release.wait(timeout=30):
+                    raise AssertionError("test did not release the fake vendor")
+                return candle_frame()
+            finally:
+                finished.set()
 
     loader = DailyDataLoader(
         SlowClient(),
@@ -474,15 +488,18 @@ def test_fetch_timeout_records_failure_without_waiting_for_slow_client(tmp_path)
         request_delay_seconds=0.0,
         fetch_timeout_seconds=0.01,
     )
-    started = time.monotonic()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        caller = pool.submit(
+            loader.load_universe_history, mapped_universe(), date(2026, 5, 1), date(2026, 5, 11)
+        )
+        try:
+            assert entered.wait(timeout=10)
+            result = caller.result(timeout=10)
+            assert not finished.is_set()
+        finally:
+            release.set()
+            assert finished.wait(timeout=10)
 
-    result = loader.load_universe_history(
-        mapped_universe(),
-        date(2026, 5, 1),
-        date(2026, 5, 11),
-    )
-
-    assert time.monotonic() - started < 0.20
     assert result.frames == {}
     assert "timed out" in str(result.failures[0]["message"]).lower()
 

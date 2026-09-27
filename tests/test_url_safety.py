@@ -17,8 +17,32 @@ import pytest
 from backend.url_safety import (
     hostname_looks_public,
     hostname_resolves_public,
+    is_public_ip,
     is_safe_http_url,
 )
+
+
+@pytest.mark.parametrize(
+    "address",
+    ["224.0.0.1", "239.255.255.250", "ff02::1", "64:ff9b::a00:1", "fe80::1%eth0", "not-an-ip", ""],
+)
+def test_is_public_ip_rejects_multicast_reserved_scoped_and_garbage(address):
+    """``is_global`` alone reports some multicast/NAT64 ranges as global.
+
+    Beginner note: every server-side fetcher shares this one policy, so the
+    transcript transport and the screener.in/Telegram/IPO fetchers can never
+    disagree about which answers are safe to connect to.
+    """
+    assert is_public_ip(address) is False
+
+
+def test_is_public_ip_accepts_global_unicast():
+    assert is_public_ip("8.8.8.8") is True
+    assert is_public_ip("2606:4700:4700::1111") is True
+
+
+def test_hostname_looks_public_rejects_multicast_literal():
+    assert hostname_looks_public("224.0.0.1") is False
 
 # ---------------------------------------------------------------------------
 # is_safe_http_url: scheme, credentials, host shape

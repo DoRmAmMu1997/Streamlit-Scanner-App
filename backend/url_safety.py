@@ -16,18 +16,28 @@ from urllib.parse import urlparse
 _LOCALHOST_NAMES = {"localhost", "localhost.localdomain"}
 
 
-def _is_public_ip(address: str) -> bool:
-    """Return True only for globally routable IP addresses.
+def is_public_ip(address: str) -> bool:
+    """Return True only for globally routable unicast IP addresses.
 
-    `ipaddress` marks loopback, private, link-local, multicast, and reserved
-    ranges as non-global. Those are exactly the ranges a server-side fetcher
-    should refuse when the URL came from untrusted HTML.
+    `ipaddress` marks loopback, private and link-local ranges as non-global.
+    Those are exactly the ranges a server-side fetcher should refuse when the
+    URL came from untrusted HTML.
+
+    Beginner note:
+        ``is_global`` alone is not enough: some multicast ranges (224.0.0.0/4)
+        and the NAT64 prefix (64:ff9b::/96, which can embed a private IPv4)
+        still report ``is_global=True``. A web fetch only ever needs a unicast
+        endpoint, so multicast and reserved answers are refused too. Scoped
+        IPv6 text (``fe80::1%eth0``) names an interface-local destination and is
+        refused before parsing. Every server-side fetcher shares this policy.
     """
+    if not address or "%" in address:
+        return False
     try:
         parsed = ipaddress.ip_address(address)
     except ValueError:
         return False
-    return parsed.is_global
+    return parsed.is_global and not (parsed.is_multicast or parsed.is_reserved)
 
 
 def hostname_looks_public(hostname: str) -> bool:
@@ -42,11 +52,12 @@ def hostname_looks_public(hostname: str) -> bool:
     if not normalized or normalized in _LOCALHOST_NAMES or normalized.endswith(".localhost"):
         return False
     try:
-        return ipaddress.ip_address(normalized).is_global
+        ipaddress.ip_address(normalized)
     except ValueError:
         # Not an IP literal. It may still resolve to a private address; callers
         # with real network access can use `hostname_resolves_public(...)`.
         return True
+    return is_public_ip(normalized)
 
 
 def hostname_resolves_public(hostname: str) -> bool:
@@ -67,7 +78,7 @@ def hostname_resolves_public(hostname: str) -> bool:
     # getaddrinfo's sockaddr tuples type the first element as `str | int`
     # (AF_UNIX paths can be ints in the stubs); IP literals are always str.
     addresses = {str(info[4][0]) for info in infos if info and info[4]}
-    return bool(addresses) and all(_is_public_ip(address) for address in addresses)
+    return bool(addresses) and all(is_public_ip(address) for address in addresses)
 
 
 def is_safe_http_url(

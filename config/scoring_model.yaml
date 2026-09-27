@@ -4,7 +4,7 @@
 # renormalizes over whichever components are present for a row, so missing
 # cached candles or missing technical fields drop only that component.
 scoring:
-  model_version: "rank-1.0"
+  model_version: "rank-1.1"
   weights:
     technical: 0.45
     risk: 0.25

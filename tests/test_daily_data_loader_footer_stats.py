@@ -15,7 +15,9 @@ Two behaviors changed and two must NOT have changed:
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import date, timedelta
+from pathlib import Path
 from typing import cast
 
 import pandas as pd
@@ -61,15 +63,6 @@ def _write_cache(loader: DailyDataLoader, frame: pd.DataFrame, *, statistics: bo
         frame.to_parquet(path, index=False)
     else:
         pq.write_table(pa.Table.from_pandas(frame), path, write_statistics=False)
-
-
-def _forbid_full_reads(monkeypatch) -> None:
-    """Make any pandas parquet read fail loudly inside the loader module."""
-
-    def _explode(*_args, **_kwargs):
-        raise AssertionError("this path must answer from footer statistics alone")
-
-    monkeypatch.setattr(daily_data_loader.pd, "read_parquet", _explode)
 
 
 def test_prefetch_validates_frame_before_fresh_verdict(monkeypatch, tmp_path):
@@ -162,12 +155,19 @@ def test_stale_cache_still_reaches_the_slow_path(tmp_path):
 
 
 def test_get_daily_history_miss_decision_reads_no_frame(monkeypatch, tmp_path):
-    """An insufficient cache goes straight to the fetch, frame unread.
+    """Decide a miss from the footer, then read once under the merge lock.
 
-    Before PERF-002 the loader decompressed the whole cached frame, computed
-    its bounds, discarded it, and fetched from Dhan. Now the footer answers
-    the coverage question, so the only pandas work is the fetched result.
+    Beginner note:
+    PERF-002 avoids decompressing a file merely to decide that it cannot answer
+    the requested interval. After the vendor returns, a full read is necessary
+    to preserve history outside that interval. Record the phases explicitly:
+    no frame read before the fetch, exactly one inside the real write lock,
+    and an outside-window row still on disk after publication. This protects
+    the performance contract without forbidding the required safe merge.
     """
+    phases: list[str] = []
+    read_paths: list[Path] = []
+    locked = False
     fetched = pd.DataFrame(
         {
             "timestamp": pd.date_range(date(2026, 6, 1), date(2026, 7, 10), freq="B"),
@@ -186,6 +186,10 @@ def test_get_daily_history_miss_decision_reads_no_frame(monkeypatch, tmp_path):
             self.calls = 0
 
         def fetch_daily_candles(self, **_kwargs) -> pd.DataFrame:
+            assert phases == ["footer"]
+            assert read_paths == []
+            assert not locked
+            phases.append("fetch")
             self.calls += 1
             return fetched.copy(deep=True)
 
@@ -196,9 +200,41 @@ def test_get_daily_history_miss_decision_reads_no_frame(monkeypatch, tmp_path):
         request_delay_seconds=0.0,
     )
     short = fetched.loc[fetched["timestamp"] >= pd.Timestamp(date(2026, 7, 1))]
-    _write_cache(loader, short, statistics=True)
-    # Forbid reads AFTER writing the cache; to_parquet is unaffected.
-    _forbid_full_reads(monkeypatch)
+    outside = fetched.iloc[[-1]].copy()
+    outside["timestamp"] = pd.Timestamp(date(2026, 7, 13))
+    _write_cache(loader, pd.concat([short, outside], ignore_index=True), statistics=True)
+    real_read_parquet = pd.read_parquet
+    real_timestamp_bounds = daily_data_loader.timestamp_bounds
+    real_write_lock = daily_data_loader.cache_write_lock
+
+    def _record_footer(path):
+        assert phases == []
+        phases.append("footer")
+        return real_timestamp_bounds(path)
+
+    @contextmanager
+    def _record_lock(path):
+        nonlocal locked
+        with real_write_lock(path):
+            locked = True
+            phases.append("lock_enter")
+            try:
+                yield
+            finally:
+                phases.append("lock_exit")
+                locked = False
+
+    def _record_read(path, *args, **kwargs):
+        assert locked
+        assert client.calls == 1
+        assert phases == ["footer", "fetch", "lock_enter"]
+        phases.append("read")
+        read_paths.append(path)
+        return real_read_parquet(path, *args, **kwargs)
+
+    monkeypatch.setattr(daily_data_loader, "timestamp_bounds", _record_footer)
+    monkeypatch.setattr(daily_data_loader, "cache_write_lock", _record_lock)
+    monkeypatch.setattr(daily_data_loader.pd, "read_parquet", _record_read)
 
     frame, from_cache = loader.get_daily_history(
         _instrument(), date(2026, 6, 1), date(2026, 7, 10)
@@ -206,7 +242,13 @@ def test_get_daily_history_miss_decision_reads_no_frame(monkeypatch, tmp_path):
 
     assert from_cache is False
     assert client.calls == 1
-    assert not frame.empty
+    assert phases == ["footer", "fetch", "lock_enter", "read", "lock_exit"]
+    assert read_paths == [loader.cache_path("DEMO", "1")]
+    pd.testing.assert_frame_equal(frame, fetched)
+    # Bypass the instrumented reader for verification: this read belongs to the
+    # test, not the loader transaction whose work count we assert above.
+    stored = real_read_parquet(loader.cache_path("DEMO", "1"))
+    pd.testing.assert_frame_equal(stored, pd.concat([fetched, outside], ignore_index=True))
 
 
 def test_get_daily_history_covered_range_without_statistics_is_still_a_hit(tmp_path):

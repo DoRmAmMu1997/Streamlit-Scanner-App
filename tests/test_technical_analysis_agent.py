@@ -841,6 +841,7 @@ def test_default_run_registers_only_the_technical_tools(monkeypatch, tmp_path):
     options = captured["options"]
     assert SERVER_NAME in options["mcp_servers"]
     assert options["allowed_tools"] == TOOL_NAMES
+    assert options["tools"] == []
     assert options["permission_mode"] == "dontAsk"
     assert options["setting_sources"] == []
 
