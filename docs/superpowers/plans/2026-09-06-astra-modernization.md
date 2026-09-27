@@ -74,6 +74,6 @@ Group sidebar navigation into Research,IPO,Administration with stable identities
 
 ## Verification and delivery
 
-Use regression-first work and independent spec/quality/security/doc reviews. Run pre-commit validation, pytest with app/backend/screeners/ui coverage>=89%, compileall,Ruff,mypy,Bandit,pinned audits,Python3.11/3.12,Docker/Compose,Postgres and Windows worker checks as applicable. Browser-test with isolated fixtures; no real provider calls or production mutations. Reconcile dependency/base changes and rerun affected gates.
+Use regression-first work and independent spec/quality/security/doc reviews. Run pre-commit validation, pytest with app/backend/screeners/ui coverage>=89%, compileall,Ruff,mypy,Bandit,pinned audits,Python3.12/3.13/3.14,Docker/Compose,Postgres and Windows worker checks as applicable. Browser-test with isolated fixtures; no real provider calls or production mutations. Reconcile dependency/base changes and rerun affected gates. This matrix incorporates the September 27 execution update above; Python 3.11 is no longer a supported verification target.
 
 Serialize schema-changing worktrees into a documented migration chain and test all heads in a separate integration worktree. Publish followups/new PRs with co-authorship, findings, tests and dependency links. Complete remaining security-source review on the integrated revision; repeat tech-debt/general review and report remaining issues honestly. Do not silently rewrite historical records. Do not merge or deploy. User universe edits stay untouched.
