@@ -17,6 +17,7 @@ import logging
 import os
 import subprocess
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,62 @@ from sqlalchemy.orm import Session
 
 from backend.storage import database
 from backend.storage.models import Base, IpoIssue, IpoManualExtraction, IpoScore
+
+
+def test_ipo013_backfills_complete_history_without_certifying_it(monkeypatch, tmp_path: Path) -> None:
+    """Beginner note: newest orphan/legacy receipts must never become verified state."""
+    from sqlalchemy.exc import IntegrityError
+
+    from backend.storage.models import IpoRecommendation
+
+    database_url = f"sqlite:///{(tmp_path / 'ipo013.db').as_posix()}"
+    monkeypatch.setenv("DATABASE_URL", database_url)
+    config = Config("alembic.ini")
+    command.upgrade(config, "20260909valid005")
+    engine = database._make_engine(database_url)
+    with Session(engine) as session:
+        issue = IpoIssue(company_name="Legacy Ltd", issue_type="mainboard", status="rhp_filed",
+                         source_confidence="high")
+        empty = IpoIssue(company_name="Empty Ltd", issue_type="mainboard", status="rhp_filed",
+                         source_confidence="high")
+        session.add_all([issue, empty])
+        session.flush()
+        issue_id, empty_id = issue.id, empty.id
+        tied = dt.datetime(2026, 9, 1, tzinfo=dt.UTC)
+        scores = []
+        for ordinal in range(3):
+            score = IpoScore(issue_id=issue.id, total_score=Decimal("50"), contributions_json={},
+                             missing_data_json=[], reasons_json=["preserve original"], model_version="legacy",
+                             scored_at=tied if ordinal < 2 else tied + dt.timedelta(days=1))
+            session.add(score)
+            session.flush()
+            scores.append(score.id)
+            if ordinal < 2:
+                session.add(IpoRecommendation(score_id=score.id, recommendation="Not Recommended",
+                    recommendation_type="Skip", confidence="low", reasons_json=["preserve recommendation"],
+                    missing_data_json=[], source_documents_json=["https://www.sebi.gov.in/legacy"]))
+        session.commit()
+    with engine.connect() as connection:
+        original = list(connection.execute(text("SELECT * FROM ipo_scores ORDER BY id")))
+        receipts = list(connection.execute(text("SELECT * FROM ipo_recommendations ORDER BY id")))
+    command.upgrade(config, "head")
+    with engine.connect() as connection:
+        states = list(connection.execute(text("SELECT * FROM ipo_scoring_state ORDER BY issue_id")))
+        assert states == [(issue_id, 0, scores[1], None, None), (empty_id, 0, None, None, None)]
+        assert list(connection.execute(text("SELECT * FROM ipo_scores ORDER BY id"))) == original
+        assert list(connection.execute(text("SELECT * FROM ipo_recommendations ORDER BY id"))) == receipts
+    for assignment in ("input_revision=-1", "evaluated_revision=-1", "evaluated_revision=1"):
+        with pytest.raises(IntegrityError), engine.begin() as connection:
+            connection.execute(text(f"UPDATE ipo_scoring_state SET {assignment}"))
+    with engine.begin() as connection:
+        connection.execute(text("DELETE FROM ipo_scores WHERE id=:id"), {"id": scores[1]})
+        assert connection.execute(text("SELECT current_score_id FROM ipo_scoring_state WHERE issue_id=:id"),
+                                  {"id": issue_id}).scalar_one() is None
+        connection.execute(text("DELETE FROM ipo_issues WHERE id=:id"), {"id": issue_id})
+        assert connection.execute(text("SELECT COUNT(*) FROM ipo_scoring_state")).scalar_one() == 1
+    command.downgrade(config, "20260909valid005")
+    assert "ipo_scoring_state" not in inspect(engine).get_table_names()
+    engine.dispose()
 
 
 def test_obs004a_backfills_legacy_rows_and_restores_original_shape(
@@ -145,6 +202,7 @@ def test_alembic_upgrade_and_downgrade_use_temp_sqlite(monkeypatch, tmp_path: Pa
         "ipo_manual_peer_valuations",
         "ipo_recommendations",
         "ipo_scores",
+        "ipo_scoring_state",
         "ipo_subscriptions",
         "scan_runs",
         "scan_results",
@@ -815,6 +873,7 @@ def test_ensure_database_schema_creates_tables_and_short_circuits(monkeypatch, t
         "ipo_manual_peer_valuations",
         "ipo_recommendations",
         "ipo_scores",
+        "ipo_scoring_state",
         "ipo_subscriptions",
         "scan_runs",
         "scan_results",

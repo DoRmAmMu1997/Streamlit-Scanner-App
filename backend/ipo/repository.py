@@ -82,6 +82,12 @@ from backend.ipo.models import (
 )
 from backend.ipo.scoring.recommendation import build_recommendation
 from backend.ipo.scoring.score_model import score_ipo
+from backend.ipo.scoring.state import (
+    IpoScoringConflictError,
+    IpoScoringSnapshot,
+    IpoScoringStateRecord,
+    normalize_scoring_time,
+)
 from backend.observability import (
     EVENT_IPO_DOCUMENT_DOWNLOAD_COMPLETED,
     EVENT_IPO_DOCUMENT_DOWNLOAD_FAILED,
@@ -91,7 +97,7 @@ from backend.observability import (
 )
 from backend.scanning.result_contract import normalize_secret_safe_json
 from backend.security import redact_text
-from backend.storage import session_scope
+from backend.storage import SessionFactory, session_scope
 from backend.storage.ipo_repository import (
     delete_ipo_document_row,
     delete_ipo_evaluation_row,
@@ -108,6 +114,7 @@ from backend.storage.ipo_repository import (
     get_ipo_issue,
     get_ipo_issue_by_sebi_key,
     get_ipo_manual_extraction,
+    get_ipo_scoring_state_values,
     get_ipo_subscription,
     get_latest_ipo_evaluation_rows,
     get_latest_ipo_filing_date,
@@ -129,7 +136,9 @@ from backend.storage.ipo_repository import (
     list_ipo_manual_extraction_rows,
     list_ipo_subscription_rows,
     list_unclaimed_ipo_issues_by_company_name,
+    lock_ipo_scoring_state,
     mark_ipo_extraction_proposal_reviewed,
+    select_ipo_current_evaluation,
     try_insert_ipo_extraction_proposal,
     update_ipo_document_cache_if_source_matches,
     update_ipo_document_values,
@@ -139,7 +148,6 @@ from backend.storage.ipo_repository import (
     upsert_ipo_enrichment_signal,
 )
 
-SessionFactory = Any
 DocumentDownloader = Callable[..., IpoDocumentDownloadResult]
 AuditRecorder = Callable[..., bool]
 
@@ -914,29 +922,46 @@ def get_latest_ipo_ratios(
     )
 
 
-def load_ipo_factor_inputs_snapshot(
+def load_ipo_scoring_snapshot(
     issue_id: int,
     *,
     as_of: dt.datetime,
     session_factory: SessionFactory = session_scope,
-) -> IpoFactorInputs:
-    """Load every scoring input in one caller-owned read transaction.
+) -> IpoScoringSnapshot:
+    """Detach one revision-consistent evidence and current-selection bundle.
+
+    Args:
+        issue_id: Issue whose evidence and selected history are required.
+        as_of: Aware business clock, normalized to UTC before time-derived rules.
+        session_factory: Fresh caller-owned read transaction for this attempt.
+
+    Returns:
+        Detached inputs, scalar state and a complete issue-owned historical pair.
+
+    Raises:
+        IpoNotFoundError: If the issue does not exist.
+        IpoScoringConflictError: If committed writes changed the bundle.
+        ValueError: If the injected clock is naive.
 
     Beginner note:
-        A scheduled job must not combine a profile from one instant with a
-        subscription or enrichment row committed a moment later. Detaching the
-        complete bundle inside one transaction makes the fingerprint and score
-        consume the same immutable snapshot.
+        One READ COMMITTED transaction alone is not a consistent snapshot.
+        Compare scalar state SQL reads around all input and eager-child reads;
+        ORM identity-map values cannot provide the second read. This function
+        does exactly one attempt so the service owns one three-attempt budget.
     """
     from backend.ipo.scoring.factor_derivation import (
         IpoFactorInputs,
         derive_debt_reduction_purpose_evidence,
     )
 
+    as_of = normalize_scoring_time(as_of)
     with session_factory() as session:
+        before = get_ipo_scoring_state_values(session, issue_id)
         issue_row = get_ipo_issue(session, issue_id)
         if issue_row is None:
             raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
+        if before is None:
+            raise IpoScoringConflictError("IPO scoring state is missing.")
         profile_row = get_latest_ipo_manual_extraction(session, issue_id)
         subscription_row = get_latest_ipo_subscription(session, issue_id)
         enrichment_rows = list_ipo_enrichment_signal_rows(session, issue_id)
@@ -958,6 +983,14 @@ def load_ipo_factor_inputs_snapshot(
                 if row.document_type in {"drhp", "rhp"}
             )
         )
+        selected = (
+            get_ipo_evaluation_rows(session, issue_id, before[1])
+            if before[1] is not None else get_latest_ipo_evaluation_rows(session, issue_id)
+        )
+        evaluation = _evaluation_record(*selected) if selected is not None else None
+        after = get_ipo_scoring_state_values(session, issue_id)
+        if before != after:
+            raise IpoScoringConflictError("IPO inputs changed during snapshot assembly.")
     ratios = (
         calculate_ipo_ratios(
             profile,
@@ -967,7 +1000,7 @@ def load_ipo_factor_inputs_snapshot(
         if profile is not None
         else None
     )
-    return IpoFactorInputs(
+    inputs = IpoFactorInputs(
         issue=issue,
         profile=profile,
         ratios=ratios,
@@ -977,6 +1010,20 @@ def load_ipo_factor_inputs_snapshot(
         debt_reduction_purpose=derive_debt_reduction_purpose_evidence(profile),
         source_documents=source_documents,
     )
+
+    return IpoScoringSnapshot(inputs, IpoScoringStateRecord(*before), evaluation)
+
+
+def load_ipo_factor_inputs_snapshot(
+    issue_id: int, *, as_of: dt.datetime, session_factory: SessionFactory = session_scope
+) -> IpoFactorInputs:
+    """Keep the historical input-only API with revision-validated assembly.
+
+    Beginner note:
+        Conflicts propagate to the caller; this compatibility wrapper introduces
+        no nested retry budget and never writes verification state.
+    """
+    return load_ipo_scoring_snapshot(issue_id, as_of=as_of, session_factory=session_factory).inputs
 
 
 _STATUS_ORDER = {
@@ -2437,21 +2484,46 @@ def _evaluate_issue_once(
     inputs_fingerprint: str | None = None,
     model_version: str = "ipo-001-v1",
     session_factory: SessionFactory = session_scope,
+    expected_revision: int | None = None,
+    publication_check: Callable[[], None] | None = None,
 ) -> tuple[IpoEvaluationRecord, bool]:
-    """Persist one semantic evaluation once and report whether this call won.
+    """Persist one immutable evaluation and optionally publish verified selection.
+
+    Args:
+        issue_id: Owner of all supplied source documents and resulting receipts.
+        score_input: Derived scorecard; public legacy callers remain history-only.
+        caution_flags: Optional caution receipt used by recommendation derivation.
+        inputs_fingerprint: Semantic identity of the complete detached inputs.
+        model_version: Version persisted without modifying older history.
+        session_factory: Caller-owned write scope for this single attempt.
+        expected_revision: Service-only captured revision enabling guarded publication.
+        publication_check: Optional service callback rejecting clock eligibility drift.
+
+    Returns:
+        The complete immutable pair and whether a new pair was inserted.
+
+    Raises:
+        IpoNotFoundError: If the issue no longer exists.
+        IpoScoringConflictError: If revision or live time eligibility changed.
+        IpoValidationError: If company or registered-source ownership fails.
 
     Beginner note:
-        The three IPO-006 keyword arguments are optional so IPO-001 callers
-        keep their exact behavior. The scoring service passes a caution-flag
-        report (enforced inside ``build_recommendation``), the SHA-256
-        fingerprint of the evidence it consumed (the screener's idempotency
-        anchor), and its own model version; all three are persisted with the
-        immutable pair.
+        Conditional state UPDATE precedes subordinate reads and nested insertion,
+        holding the lock through commit. It establishes SQLite's outer transaction
+        so a late callback/selection failure also rolls back the saved pair. The
+        public evaluate_issue API never passes revision authority and cannot certify
+        caller-invented scorecards. Retry ownership stays with the scoring service.
     """
     score_result = score_ipo(score_input)
     recommendation = build_recommendation(score_result, caution_flags=caution_flags)
 
     with session_factory() as session:
+        if expected_revision is not None and not lock_ipo_scoring_state(
+            session, issue_id, expected_revision=expected_revision
+        ):
+            if get_ipo_issue(session, issue_id) is None:
+                raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
+            raise IpoScoringConflictError("IPO inputs changed before publication.")
         issue = get_ipo_issue(session, issue_id)
         if issue is None:
             raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
@@ -2522,6 +2594,15 @@ def _evaluate_issue_once(
         score_row, recommendation_row, inserted = insert_ipo_evaluation(
             session, issue_id, score_values, recommendation_values
         )
+        if expected_revision is not None:
+            # Check the clock after insertion too: crossing eligibility must
+            # roll back the complete outer transaction, including its savepoint.
+            if publication_check is not None:
+                publication_check()
+            select_ipo_current_evaluation(
+                session, issue_id, score_row.id, input_revision=expected_revision,
+                verified_at=dt.datetime.now(dt.UTC),
+            )
         return _evaluation_record(score_row, recommendation_row), inserted
 
 
@@ -2586,9 +2667,9 @@ def get_latest_evaluation(
 ) -> IpoEvaluationRecord | None:
     """Return the newest complete evaluation record for one issue, if any.
 
-    The IPO-006 scoring service compares its freshly computed inputs
-    fingerprint against this record to decide whether a re-score would be a
-    byte-identical no-op, which is what makes ``run_ipo_screener`` idempotent.
+    This is explicitly historical ordering, not the currently verified receipt.
+    Actionable consumers must use ``get_current_evaluation`` from the scoring
+    service, because returning to older semantic inputs may reselect older history.
 
     Beginner note:
         “Latest” is a display convenience, not an in-place update: every
@@ -2631,11 +2712,13 @@ def get_latest_subscription(
 def get_latest_recommendation(
     issue_id: int, *, session_factory: SessionFactory = session_scope
 ) -> IpoRecommendationResult | None:
-    """Return the newest recommendation for an issue, or ``None`` if unscored.
+    """Return the newest historical recommendation, or ``None`` if unscored.
 
     Reads only the most recent evaluation pair (``LIMIT 1``) rather than loading
     the full append-only history. A missing issue still raises ``IpoNotFoundError``
     so callers can distinguish "no such issue" from "issue exists but unscored".
+    It does not certify current freshness; use ``get_current_evaluation`` for
+    actionable decisions.
     """
     with session_factory() as session:
         if get_ipo_issue(session, issue_id) is None:

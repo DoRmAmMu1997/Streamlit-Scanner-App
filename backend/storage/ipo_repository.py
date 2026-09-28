@@ -31,14 +31,144 @@ from backend.storage.models import (
     IpoManualPeerValuation,
     IpoRecommendation,
     IpoScore,
+    IpoScoringState,
     IpoSubscription,
 )
 
 
+def lock_ipo_scoring_state(
+    session: Session, issue_id: int, *, expected_revision: int | None = None
+) -> bool:
+    """Acquire the shared issue serialization boundary in the caller transaction.
+
+    Args:
+        session: Caller-owned write transaction; do not commit inside this helper.
+        issue_id: Issue whose state must be locked before subordinate input rows.
+        expected_revision: Optional publication CAS token captured with evidence.
+
+    Returns:
+        Whether the state exists and the optional revision still matches.
+
+    Beginner note:
+        A no-op UPDATE takes a database write lock until commit. All scoring
+        writers and downstream manual-baseline checks acquire this row first,
+        avoiding inverted lock order. It also starts SQLite's real transaction
+        before any nested savepoint. No manual-baseline authority is inferred
+        from this broad scoring-input revision.
+    """
+    stmt = update(IpoScoringState).where(IpoScoringState.issue_id == issue_id)
+    if expected_revision is not None:
+        stmt = stmt.where(IpoScoringState.input_revision == expected_revision)
+    result = cast(CursorResult[Any], session.execute(
+        stmt.values(input_revision=IpoScoringState.input_revision)
+        .execution_options(synchronize_session=False)
+    ))
+    return result.rowcount == 1
+
+
+def advance_ipo_scoring_input_revision(session: Session, issue_id: int) -> None:
+    """Atomically invalidate verification before changing any scoring input.
+
+    Args:
+        session: Caller-owned transaction retaining the lock through commit.
+        issue_id: Parent issue initialized with a state row on creation.
+
+    Raises:
+        ValueError: If the issue lacks its required state row.
+
+    Beginner note:
+        SQL addition avoids lost updates. Input and revision changes roll back
+        together. Multiple increments are safe: this is a monotonic mutation
+        token, not an edit count, and deliberately stays outside fingerprints.
+    """
+    result = cast(CursorResult[Any], session.execute(
+        update(IpoScoringState).where(IpoScoringState.issue_id == issue_id)
+        .values(input_revision=IpoScoringState.input_revision + 1)
+        .execution_options(synchronize_session=False)
+    ))
+    if result.rowcount != 1 and get_ipo_issue(session, issue_id) is not None:
+        raise ValueError("IPO issue is missing its scoring state.")
+
+
+def get_ipo_scoring_state_values(
+    session: Session, issue_id: int
+) -> tuple[int, int | None, int | None, dt.datetime | None] | None:
+    """Read fresh scalar state without consulting cached ORM identity objects.
+
+    Args:
+        session: Caller-owned read scope.
+        issue_id: Issue to inspect.
+
+    Returns:
+        Revision, selected score, evaluated revision and UTC verification time,
+        or None when no state exists.
+
+    Beginner note:
+        Repeating this SQL SELECT detects committed mutations between component
+        reads under READ COMMITTED; session.get could reuse an obsolete object.
+    """
+    row = session.execute(select(
+        IpoScoringState.input_revision, IpoScoringState.current_score_id,
+        IpoScoringState.evaluated_revision, IpoScoringState.last_verified_at,
+    ).where(IpoScoringState.issue_id == issue_id)).one_or_none()
+    if row is None:
+        return None
+    verified = row[3]
+    if verified is not None and verified.tzinfo is None:
+        verified = verified.replace(tzinfo=dt.UTC)
+    return row[0], row[1], row[2], verified
+
+
+def select_ipo_current_evaluation(
+    session: Session, issue_id: int, score_id: int, *, input_revision: int, verified_at: dt.datetime
+) -> None:
+    """Publish a complete owned pair under the already-held state lock.
+
+    Args:
+        session: Caller transaction holding lock_ipo_scoring_state.
+        issue_id: Owner of both the state and immutable score pair.
+        score_id: Historical score to select, including a reused older receipt.
+        input_revision: Evidence token verified by the caller's guarded calculation.
+        verified_at: Actual aware UTC wall time of successful verification.
+
+    Raises:
+        ValueError: If the selected pair is incomplete, foreign, or revision changed.
+
+    Beginner note:
+        The single-column FK cannot enforce ownership. Check both issue and score
+        here and on reads; no historical payload or calculation time is updated.
+    """
+    if get_ipo_evaluation_rows(session, issue_id, score_id) is None:
+        raise ValueError("Current IPO evaluation must be complete and issue-owned.")
+    result = cast(CursorResult[Any], session.execute(
+        update(IpoScoringState).where(
+            IpoScoringState.issue_id == issue_id,
+            IpoScoringState.input_revision == input_revision,
+        ).values(current_score_id=score_id, evaluated_revision=input_revision, last_verified_at=verified_at)
+        .execution_options(synchronize_session=False)
+    ))
+    if result.rowcount != 1:
+        raise ValueError("IPO scoring revision changed before selection.")
+
+
 def insert_ipo_issue(session: Session, values: dict[str, Any]) -> IpoIssue:
-    """Stage one validated issue row and flush so its generated id is usable."""
+    """Stage one issue and initialize its scoring state atomically.
+
+    Args:
+        session: Caller-owned transaction, committed by the domain facade.
+        values: Validated issue columns.
+
+    Returns:
+        The flushed issue with a generated identifier and revision-zero state.
+
+    Beginner note:
+        State must exist from the same commit as the issue so every later input
+        writer has a shared serialization row. An issue without evidence has no
+        current score or verification timestamp."""
     row = IpoIssue(**values)
     session.add(row)
+    session.flush()
+    session.add(IpoScoringState(issue_id=row.id, input_revision=0))
     session.flush()
     return row
 
@@ -78,7 +208,21 @@ def list_ipo_issue_rows(session: Session) -> list[IpoIssue]:
 def update_ipo_issue_row(
     session: Session, issue_id: int, values: dict[str, Any]
 ) -> IpoIssue | None:
-    """Apply supplied issue columns, refresh update time, and flush if present."""
+    """Update an issue after atomically invalidating its scoring revision.
+
+    Args:
+        session: Caller transaction retaining the state lock until commit.
+        issue_id: Parent issue to update.
+        values: Validated replacement columns.
+
+    Returns:
+        The flushed issue, or None for a missing issue.
+
+    Beginner note:
+        Ingestion calls this storage helper directly, so a facade-only hook would
+        miss scoring changes. Conservative invalidation is safe even when supplied
+        values are unchanged; rollback restores both evidence and revision."""
+    advance_ipo_scoring_input_revision(session, issue_id)
     row = session.get(IpoIssue, issue_id)
     if row is None:
         return None
@@ -102,7 +246,20 @@ def delete_ipo_issue_row(session: Session, issue_id: int) -> bool:
 def insert_ipo_document(
     session: Session, issue_id: int, values: dict[str, Any]
 ) -> IpoDocument:
-    """Stage one issue-owned source document and expose its generated id."""
+    """Register a source under the issue's scoring serialization boundary.
+
+    Args:
+        session: Caller-owned transaction.
+        issue_id: Owning issue.
+        values: Validated document columns.
+
+    Returns:
+        Flushed document with its generated id.
+
+    Beginner note:
+        Registered DRHP/RHP URLs enter the immutable scoring receipt, so source
+        registration invalidates verification even before a PDF is downloaded."""
+    advance_ipo_scoring_input_revision(session, issue_id)
     row = IpoDocument(issue_id=issue_id, **values)
     session.add(row)
     session.flush()
@@ -138,7 +295,22 @@ def get_ipo_document_by_url(session: Session, document_url: str) -> IpoDocument 
 def update_ipo_document_values(
     session: Session, document: IpoDocument, values: dict[str, Any]
 ) -> IpoDocument:
-    """Mutate an already-owned document row and flush in the caller transaction."""
+    """Update an owned document, invalidating source changes only.
+
+    Args:
+        session: Caller-owned transaction.
+        document: Already-owned row to update.
+        values: Validated replacement columns.
+
+    Returns:
+        The flushed document.
+
+    Beginner note:
+        URL/type changes alter scoring provenance and acquire the state lock
+        before mutation. Cache-only metadata is display activity; the scorer does
+        not consume it, so downloading unchanged bytes cannot stale a score."""
+    if {"document_url", "document_type"}.intersection(values):
+        advance_ipo_scoring_input_revision(session, document.issue_id)
     for name, value in values.items():
         setattr(document, name, value)
     session.flush()
@@ -166,7 +338,22 @@ def update_ipo_document_row(
     document_id: int,
     values: dict[str, Any],
 ) -> IpoDocument | None:
-    """Update a parent-scoped document or return ``None`` when ownership fails."""
+    """Update a parent-scoped document under the source revision boundary.
+
+    Args:
+        session: Caller-owned transaction.
+        issue_id: Required issue owner.
+        document_id: Document to update.
+        values: Validated columns; URL/type changes invalidate scoring.
+
+    Returns:
+        Flushed document, or None if the ownership lookup fails.
+
+    Beginner note:
+        Lock the state before changing provenance. Cache-only metadata does not
+        change the score's semantic inputs and therefore needs no revision bump."""
+    if {"document_url", "document_type"}.intersection(values):
+        advance_ipo_scoring_input_revision(session, issue_id)
     row = get_ipo_document(session, issue_id, document_id)
     if row is None:
         return None
@@ -211,7 +398,21 @@ def update_ipo_document_cache_if_source_matches(
 
 
 def delete_ipo_document_row(session: Session, issue_id: int, document_id: int) -> bool:
-    """Stage a parent-scoped metadata deletion without touching shared files."""
+    """Delete registered provenance and invalidate verification atomically.
+
+    Args:
+        session: Caller-owned transaction.
+        issue_id: Required issue owner.
+        document_id: Document to remove.
+
+    Returns:
+        Whether a parent-scoped row was deleted.
+
+    Beginner note:
+        Take the state write boundary before subordinate deletion. A failed
+        retention/foreign-key check rolls back the revision too; immutable score
+        receipts retain the URLs they originally used."""
+    advance_ipo_scoring_input_revision(session, issue_id)
     row = get_ipo_document(session, issue_id, document_id)
     if row is None:
         return False
@@ -290,11 +491,27 @@ def insert_ipo_manual_extraction(
 ) -> IpoManualExtraction:
     """Stage one complete immutable revision and all of its owned rows.
 
+    Args:
+        session: Caller-owned transaction.
+        issue_id: Parent issue.
+        header_values: Validated immutable extraction header.
+        period_values: Complete annual financial child rows.
+        peer_values: Approved peer valuation child rows.
+
+    Returns:
+        Complete flushed extraction and eager children.
+
     Beginner note:
     Header, periods, and peers are attached to one SQLAlchemy unit of work and
     flushed together. The caller's session context therefore either commits the
     complete revision or rolls every row back; a half-written form cannot exist.
+
+    Scoring-state note:
+        The atomic revision increment acquires the shared state lock before input
+        writes or nested savepoints. It commits/rolls back with this evidence;
+        unchanged re-observation may reuse history after explicit verification.
     """
+    advance_ipo_scoring_input_revision(session, issue_id)
     row = IpoManualExtraction(issue_id=issue_id, **header_values)
     row.periods = [
         IpoManualFinancialPeriod(**values) for values in period_values
@@ -376,7 +593,21 @@ def get_latest_ipo_manual_extraction(
 def insert_ipo_subscription(
     session: Session, issue_id: int, values: dict[str, Any]
 ) -> IpoSubscription:
-    """Stage one timestamped demand snapshot under its parent issue."""
+    """Append demand evidence after locking and advancing scoring state.
+
+    Args:
+        session: Caller-owned transaction.
+        issue_id: Owning issue.
+        values: Validated subscription columns.
+
+    Returns:
+        The flushed demand snapshot.
+
+    Beginner note:
+        A latest-demand change may alter factors or near-close caution flags.
+        Advancing before insertion makes publication either see the complete new
+        evidence or fail its captured-revision check."""
+    advance_ipo_scoring_input_revision(session, issue_id)
     row = IpoSubscription(issue_id=issue_id, **values)
     session.add(row)
     session.flush()
@@ -412,7 +643,21 @@ def update_ipo_subscription_row(
     subscription_id: int,
     values: dict[str, Any],
 ) -> IpoSubscription | None:
-    """Replace selected fields on a parent-scoped demand snapshot and flush."""
+    """Update demand evidence and its scoring revision in one transaction.
+
+    Args:
+        session: Caller-owned transaction.
+        issue_id: Required issue owner.
+        subscription_id: Snapshot to update.
+        values: Validated replacement columns.
+
+    Returns:
+        Flushed snapshot or None for an ownership mismatch.
+
+    Beginner note:
+        Even editing an older observation conservatively invalidates verification.
+        State locks precede row writes, and rollback restores both changes."""
+    advance_ipo_scoring_input_revision(session, issue_id)
     row = get_ipo_subscription(session, issue_id, subscription_id)
     if row is None:
         return None
@@ -425,7 +670,20 @@ def update_ipo_subscription_row(
 def delete_ipo_subscription_row(
     session: Session, issue_id: int, subscription_id: int
 ) -> bool:
-    """Stage deletion of one issue-owned snapshot and remain idempotent."""
+    """Delete demand evidence after acquiring the shared state boundary.
+
+    Args:
+        session: Caller-owned transaction.
+        issue_id: Required issue owner.
+        subscription_id: Snapshot to remove.
+
+    Returns:
+        Whether a parent-scoped snapshot existed and was deleted.
+
+    Beginner note:
+        Removing the latest row makes an older capture authoritative. The revision
+        must advance even though this operation inserts no replacement evidence."""
+    advance_ipo_scoring_input_revision(session, issue_id)
     row = get_ipo_subscription(session, issue_id, subscription_id)
     if row is None:
         return False
@@ -645,6 +903,14 @@ def insert_ipo_enrichment_signals(
 ) -> list[IpoEnrichmentSignal]:
     """Stage one enrichment batch for an issue as a single unit of work.
 
+    Args:
+        session: Caller-owned transaction.
+        issue_id: Parent issue.
+        values_list: Validated observation columns for a compatibility batch.
+
+    Returns:
+        All flushed observations, without committing the caller transaction.
+
     A SerpAPI collection run produces several signal types at one capture
     instant; inserting them together keeps a partially-persisted batch from
     masquerading as a complete observation set.
@@ -653,7 +919,13 @@ def insert_ipo_enrichment_signals(
         This older batch helper remains for compatibility. New collection code
         uses semantic upsert so repeated observations refresh rather than
         accumulate.
+
+    Scoring-state note:
+        The atomic revision increment acquires the shared state lock before input
+        writes or nested savepoints. It commits/rolls back with this evidence;
+        unchanged re-observation may reuse history after explicit verification.
     """
+    advance_ipo_scoring_input_revision(session, issue_id)
     rows = [IpoEnrichmentSignal(issue_id=issue_id, **values) for values in values_list]
     session.add_all(rows)
     session.flush()
@@ -686,11 +958,25 @@ def upsert_ipo_enrichment_signal(
 ) -> IpoEnrichmentSignal:
     """Preserve first-seen identity and refresh last-seen on identical evidence.
 
+    Args:
+        session: Caller-owned transaction.
+        issue_id: Parent issue.
+        values: Validated observation with semantic identity and aware timestamps.
+
+    Returns:
+        The inserted or refreshed semantic observation.
+
     Beginner note:
         The preflight read is an optimization, not a concurrency guarantee.
         When two collectors race, the unique semantic index selects one row and
         the losing savepoint reloads it before refreshing freshness timestamps.
+
+    Scoring-state note:
+        The atomic revision increment acquires the shared state lock before input
+        writes or nested savepoints. It commits/rolls back with this evidence;
+        unchanged re-observation may reuse history after explicit verification.
     """
+    advance_ipo_scoring_input_revision(session, issue_id)
     semantic_hash = str(values["semantic_hash"])
     signal_type = str(values["signal_type"])
     existing = _get_ipo_enrichment_signal_by_semantic_hash(

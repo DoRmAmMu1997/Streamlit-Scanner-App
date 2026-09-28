@@ -52,6 +52,16 @@ def _row(**overrides: Any) -> IpoDashboardRow:
     return IpoDashboardRow(**values)
 
 
+def test_stale_history_is_not_an_actionable_rating() -> None:
+    """Beginner note: the adapter previously exported stale history as a live rating."""
+    row = _row(evaluation_stale=True)
+    result = ipo_screener._result_row(row, scanner=ipo_screener.IpoScreener(), failed=False)
+    assert result["rating"] is None
+    assert result["recommendation_type"] is None
+    assert result["signal_date"] is None
+    assert result["historical_recommendation"] == row.recommendation
+
+
 def _install(monkeypatch, rows: list[IpoDashboardRow], **overrides: Any) -> dict[str, Any]:
     """Fake the pipeline, auto-approval, and snapshot; capture the call args.
 
