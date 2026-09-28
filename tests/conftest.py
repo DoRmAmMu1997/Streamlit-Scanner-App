@@ -105,3 +105,45 @@ def file_db_engine(tmp_path) -> Iterator[Engine]:
 def file_session_factory(file_db_engine: Engine) -> SessionFactory:
     """A transactional session factory bound to the file-backed engine."""
     return _session_scope_factory(file_db_engine)
+
+
+@pytest.fixture
+def postgres_admin_url() -> str:
+    """Require opt-in to a PostgreSQL test server, never an application database.
+
+    Returns:
+        Explicit provisioning URL for a role with CREATEDB permission.
+
+    Beginner note:
+        Absence is an honest local skip. Once configured, every connection error
+        fails the tests. CI sets this variable and the separate required flag so
+        an accidentally removed URL cannot turn its PostgreSQL lane green.
+    """
+    import os
+
+    value = os.environ.get("SCANNER_TEST_POSTGRES_ADMIN_URL", "").strip()
+    if not value:
+        if os.environ.get("SCANNER_REQUIRE_POSTGRES_TESTS") == "1":
+            pytest.fail("SCANNER_TEST_POSTGRES_ADMIN_URL is required for this test lane")
+        pytest.skip("No disposable PostgreSQL test server configured")
+    return value
+
+
+@pytest.fixture
+def postgres_database_pair(postgres_admin_url: str) -> Iterator[tuple[str, str]]:
+    """Own two private databases for migrated-versus-ORM schema comparison.
+
+    Yields:
+        URLs for the migration database and the ORM reference database.
+
+    Beginner note:
+        Nested cleanup drops the first database even if provisioning the second
+        fails. Neither fixture rebuilds a shared schema or uses DATABASE_URL.
+    """
+    from backend.storage.verification_database import disposable_postgres_database
+
+    with (
+        disposable_postgres_database(postgres_admin_url) as migrated,
+        disposable_postgres_database(postgres_admin_url) as metadata,
+    ):
+        yield migrated, metadata

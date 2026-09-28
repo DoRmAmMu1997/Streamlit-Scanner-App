@@ -246,3 +246,53 @@ per-signal schema. The PROV-003 ledger accepts richer hashed evidence through
 new durable identity or query key requires a real schema review. Any schema
 change requires an Alembic migration, matching `models.py` metadata, repository
 helpers, and updates to the owning scan-history or IPO design document.
+
+## Migration verification and disposable database contract
+
+The read-only comparator in `backend/storage/schema_verification.py` compares
+migration-built and ORM-built databases on the **same dialect**. It retains
+column types, nullability, server defaults, generated/identity definitions,
+ordered primary-key columns, checks, unique constraints, index definitions
+(including ordered columns and predicates), and foreign-key targets/options.
+`alembic_version` is bookkeeping and excluded; the existing hardcoded table
+inventory and exactly-one-Alembic-head guard remain separate checks.
+
+Beginner note: an index name can survive while its columns or WHERE condition
+change. The drift tests deliberately hold names/types constant and change one
+real enforcement rule. String-literal whitespace and case stay significant.
+Unsupported reflection (for example SQLite expression indexes) fails rather
+than silently omitting that index from the evidence.
+The only default normalization is SQLite BOOLEAN `'0'`/`'1'` versus `0`/`1`,
+whose numeric-affinity equivalence is proved by inserting and reading values.
+Foreign-key and primary-key names are not enforcement semantics: SQLite batch
+migrations name some FKs that ORM metadata leaves unnamed. Ordered columns,
+referred schema/table/columns and every reflected option are still compared.
+SQLite PRAGMA also captures actual FK update/delete actions because reflection
+of inline REFERENCES syntax can omit those options.
+
+`tests/conftest.py` owns opt-in PostgreSQL fixtures. Set
+`SCANNER_TEST_POSTGRES_ADMIN_URL` to a **test server's** maintenance database URL
+(using a role with CREATEDB), stored in a protected environment file rather
+than shell arguments. The fixture creates two `scanner_verify_<UUID>` databases
+through the existing pinned psycopg driver. It never clears a shared public
+schema or uses the application's DATABASE_URL as a fallback. Both databases
+are dropped in finally blocks; a failed second creation also cleans up the
+first. Connection/provisioning failures are failures once the URL is supplied.
+No URL means a local skip, unless `SCANNER_REQUIRE_POSTGRES_TESTS=1` requires the
+lane; CI sets both variables so it cannot silently skip.
+
+Run the focused contract with:
+
+```text
+python -m pytest tests/test_schema_verification.py tests/test_database_verification_smoke.py tests/test_scan_storage_migrations.py -q
+```
+
+The shared smoke scenario upgrades the initial scan-history revision, inserts
+historical rows using only its original columns, upgrades to the current head,
+and checks that IDs, lifecycle status, Decimal price and JSON evidence survive.
+It then uses current repository helpers for write/read/delete, checks a real
+database uniqueness violation and rollback, and issues a parent DELETE that
+bypasses ORM cascade so missing database cascade cannot be masked. Unrelated
+historical rows must remain. A second database built from ORM metadata provides
+the comparison reference. Existing nonempty verification targets are refused
+before DDL. This is a verification tool, not a runtime schema repair routine.

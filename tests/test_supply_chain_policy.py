@@ -378,3 +378,29 @@ def test_screener_guide_matches_registry_chart_golden_and_ci_contracts():
     assert "series.isna().any()" not in text
     for command in CI_COMMANDS:
         assert command in text
+
+
+def test_ci_requires_real_postgres_and_application_image_smoke():
+    """Protect the executable PostgreSQL and final-image verification lanes.
+
+    Beginner note:
+        A health endpoint and pip installation cannot prove migrations or
+        repository writes work in the deployment image. Required opt-in prevents
+        missing CI environment from silently skipping PostgreSQL integration.
+    """
+    workflow = yaml.safe_load((ROOT / ".github/workflows/quality-and-security.yml").read_text(encoding="utf-8"))
+    verify = workflow["jobs"]["verify"]
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    assert verify["services"]["postgres"]["image"] == compose["services"]["postgres"]["image"]
+    assert verify["env"]["SCANNER_REQUIRE_POSTGRES_TESTS"] == "1"
+    assert "127.0.0.1:5432/postgres" in verify["env"]["SCANNER_TEST_POSTGRES_ADMIN_URL"]
+    smoke_steps = workflow["jobs"]["docker-build"]["steps"]
+    application_smoke = next(
+        step for step in smoke_steps if step["name"] == "Verify application storage in final image"
+    )
+    assert "docker compose run --rm -T --no-deps" in application_smoke["run"]
+    assert "-e SCANNER_TEST_POSTGRES_ADMIN_URL" in application_smoke["run"]
+    assert "scanner-ui python -m backend.storage.verification_smoke" in application_smoke["run"]
+    assert "@postgres:5432/postgres" in application_smoke["env"]["SCANNER_TEST_POSTGRES_ADMIN_URL"]
+    teardown = next(step for step in smoke_steps if step["name"] == "Tear down Compose stack")
+    assert teardown["if"] == "always()"

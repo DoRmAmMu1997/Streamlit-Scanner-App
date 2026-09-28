@@ -23,6 +23,25 @@ jobs:
         # drift before an interpreter upgrade is forced on us.
         python-version: ["3.11", "3.12"]
 
+    # Each matrix worker owns an isolated server; fixtures create/drop only
+    # UUID databases, never the configured maintenance/application database.
+    services:
+      postgres:
+        image: postgres:16-bookworm
+        env:
+          POSTGRES_USER: scanner_test
+          POSTGRES_PASSWORD: scanner_ci_only
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U scanner_test -d postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: sqlite://
+      SCANNER_TEST_POSTGRES_ADMIN_URL: postgresql+psycopg://scanner_test:scanner_ci_only@127.0.0.1:5432/postgres
+      SCANNER_REQUIRE_POSTGRES_TESTS: "1"
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -111,6 +130,16 @@ jobs:
 
       - name: Smoke-test Compose stack
         run: docker compose up --build --wait --wait-timeout 180
+
+      - name: Verify application storage in final image
+        env:
+          # Template-only CI credentials; the helper creates its own databases.
+          SCANNER_TEST_POSTGRES_ADMIN_URL: postgresql+psycopg://scanner:scanner_dev_password_change_me@postgres:5432/postgres
+        run: >-
+          docker compose run --rm -T --no-deps
+          -e SCANNER_TEST_POSTGRES_ADMIN_URL -e DATABASE_URL=sqlite://
+          -e ALERT_ENABLED=false
+          scanner-ui python -m backend.storage.verification_smoke
 
       - name: Tear down Compose stack
         if: always()
