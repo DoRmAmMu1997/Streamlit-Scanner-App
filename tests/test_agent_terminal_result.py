@@ -86,3 +86,18 @@ def test_usage_limit_classifier_is_shared_by_every_agent():
     assert fundamental_agent._mentions_usage_limit("billing refused this request")
     assert financial_extractor._mentions_usage_limit is mentions_usage_limit
     assert fundamental_agent._mentions_usage_limit is mentions_usage_limit
+
+
+def test_pinned_sdk_accepts_verbatim_prompts():
+    """The installed Agent SDK must understand the option every runner passes.
+
+    Beginner note:
+        The runner tests swap in fake ``ClaudeAgentOptions`` classes that accept
+        any keyword, so they cannot notice an SDK pin older than 0.2.158, where
+        the real options dataclass rejects ``verbatim_prompts`` with
+        ``TypeError`` and every AI screener would fail at run time. Building the
+        real options object makes that downgrade fail in CI instead.
+    """
+    from claude_agent_sdk import ClaudeAgentOptions
+
+    assert ClaudeAgentOptions(verbatim_prompts=True).verbatim_prompts is True

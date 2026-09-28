@@ -830,6 +830,8 @@ def test_default_sdk_runner_disables_builtin_tools(monkeypatch, tmp_path):
         The SDK has both an allowlist and a built-in-tool selection. An empty
         built-in list makes the boundary explicit, while retaining the one
         intended in-process research tool through ``allowed_tools``.
+        ``verbatim_prompts`` stops the CLI expanding ``@path`` mentions or
+        dispatching ``/commands`` in prompt text before any tool check runs.
     """
     import sys
     import types
@@ -889,3 +891,4 @@ def test_default_sdk_runner_disables_builtin_tools(monkeypatch, tmp_path):
     assert captured["allowed_tools"] == ["mcp__sixty_seven__research_company"]
     assert captured["permission_mode"] == "dontAsk"
     assert captured["setting_sources"] == []
+    assert captured["verbatim_prompts"] is True
