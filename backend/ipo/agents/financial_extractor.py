@@ -1744,6 +1744,11 @@ def _default_run_agent(
         permission_mode="dontAsk",
         # Behaviour comes entirely from our prompt; never load user settings.
         setting_sources=[],
+        # Beginner note: the prompt inlines the company name scraped from SEBI
+        # listings, which is untrusted. Without verbatim delivery the CLI would
+        # expand an "@/some/path" inside that name into the file's contents,
+        # a step that runs before the tool allowlist is ever consulted.
+        verbatim_prompts=True,
     )
 
     async def _run() -> str:
