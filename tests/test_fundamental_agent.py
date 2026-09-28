@@ -550,7 +550,9 @@ def test_default_sdk_runner_disables_builtin_tools(monkeypatch, tmp_path):
         ``allowed_tools`` controls permission for named calls, while the Agent
         SDK's separate ``tools`` option controls which built-in tool families
         are loaded. Passing an empty list closes the filesystem and shell
-        surface even if a future SDK default changes.
+        surface even if a future SDK default changes. ``verbatim_prompts``
+        closes the one path that runs before any tool check: the CLI expanding
+        ``@path`` mentions or dispatching ``/commands`` found in prompt text.
     """
     import sys
     import types
@@ -620,6 +622,7 @@ def test_default_sdk_runner_disables_builtin_tools(monkeypatch, tmp_path):
     ]
     assert captured["permission_mode"] == "dontAsk"
     assert captured["setting_sources"] == []
+    assert captured["verbatim_prompts"] is True
 
 
 def test_fundamental_agent_normalize_verdict_fills_blank_fields(tmp_path):

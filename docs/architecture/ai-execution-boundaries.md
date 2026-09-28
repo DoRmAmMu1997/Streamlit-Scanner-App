@@ -1,7 +1,7 @@
 # ADR — AI execution authorization and Agent SDK containment
 
 **Status:** Accepted
-**Date:** 2026-09-14
+**Date:** 2026-09-14 (amended 2026-09-28 by SEC-005: verbatim prompt delivery)
 **Deciders:** repo maintainer (approved modernization Task 4)
 **Relates to:** [AUTH-003 role model](auth-003-role-model.md) · [shared AI runtime](refactor-003-ai-runtime.md) · [IPO extraction AI](components/ipo-extraction-ai.md)
 
@@ -52,6 +52,33 @@ All four `ClaudeAgentOptions` constructions set `tools=[]`. Each retains its
 reviewed `mcp_servers`, exact MCP `allowed_tools`,
 `permission_mode="dontAsk"`, and `setting_sources=[]` values. The empty built-in
 selection and the named MCP allowlist are complementary parts of the contract.
+
+### Prompts reach the CLI verbatim (SEC-005)
+
+All four constructions also set `verbatim_prompts=True` (claude-agent-sdk
+0.2.158+). By default the Claude CLI pre-processes each user message before the
+model sees it: an `@path` mention anywhere in the text is expanded into that
+file's contents (likewise `@server:resource` MCP mentions), and a message that
+starts with `/` is dispatched as a slash command. That happens before any tool
+call, so `tools=[]`, `allowed_tools`, and `dontAsk` never see it. The IPO
+extraction prompt inlines the company name scraped from SEBI listings, so a
+filing named like `@/etc/passwd` could otherwise make the CLI read a local file
+into the model context. Slash dispatch is not reachable today, because every
+prompt starts with fixed app text, but the option removes it too. The other
+three prompts carry only app-owned values (symbol, run mode, model name,
+candle-derived price facts), and they use the same setting so the contract has
+no per-agent exceptions.
+
+The control has two halves, and they fail differently:
+
+- **SDK.** The option is not feature-detected. An SDK older than 0.2.158
+  rejects the keyword with `TypeError`, so the run fails closed. A test builds
+  the real `ClaudeAgentOptions` so a pin downgrade fails CI first.
+- **CLI.** Claude Code 2.1.248 or later must honor the flag. An older CLI
+  *ignores* it and the SDK only logs a warning, so prompts are expanded as
+  before. The pinned SDK 0.2.159 bundles CLI 2.1.281 and prefers that bundled
+  binary over any `claude` on `PATH`. Do not point `cli_path` at, or deploy
+  without the bundled binary on, an older CLI.
 
 ### Failed IPO runs return typed receipts before parsing
 
@@ -104,6 +131,19 @@ read-only product behavior.
 Rejected. Permission and tool loading are different SDK controls. Explicit
 `tools=[]` makes the no-built-ins property reviewable and regression-testable.
 
+### Scrub `@` and `/` from interpolated prompt text instead of `verbatim_prompts`
+
+Rejected. An app-side escape list would have to track the CLI's expansion
+syntax release by release, and it would mangle legitimate names. The SDK option
+turns the pre-processing step off at its source.
+
+### Feature-detect `verbatim_prompts` like `ThinkingConfigDisabled`
+
+Rejected. Fast mode is an optimization, so a missing toggle can safely fall back
+to the default. Verbatim delivery is a security control, and silently running
+without it would reopen the pre-tool file-read path. Failing closed on an old
+SDK is the intended behavior.
+
 ### Parse failed IPO output if it happens to validate
 
 Rejected. Schema validity says nothing about whether the provider completed the
@@ -116,11 +156,23 @@ proposal candidate.
   scan rows or valid cached fundamentals verdicts.
 - MCP tool availability remains unchanged, while SDK built-in capabilities are
   explicitly absent for all four agents.
+- Prompt text can no longer trigger CLI file expansion or slash commands. The
+  environment running the agents must carry claude-agent-sdk 0.2.158 or newer
+  (the `constraints.txt` pin); an older install fails each AI run with
+  `TypeError` until it is upgraded. The CLI half has no such tripwire (see
+  above), which is why the bundled binary matters.
+- Verbatim turns also skip the CLI's turn-start attachment pass (skill/tool
+  listings and per-turn reminders arrive after the first tool call instead).
+  This is expected to be harmless here: instructions come from the system
+  prompt, `setting_sources=[]` already drops CLAUDE.md, and each agent has at
+  most three small MCP tools. That expectation is checked only by a live agent
+  run, because the unit tests replace the SDK with fakes.
 - IPO batch jobs receive stable, secret-safe operational codes and continue to
   isolate one document's failure from sibling documents.
-- Adding a new agent requires both an explicit built-in `tools` selection and a
-  test that captures the complete SDK options. A runner that consumes streamed
-  results must establish terminal success before returning parseable text.
+- Adding a new agent requires an explicit built-in `tools` selection,
+  `verbatim_prompts=True`, and a test that captures the complete SDK options.
+  A runner that consumes streamed results must establish terminal success
+  before returning parseable text.
 
 ## Verification contract
 
@@ -130,7 +182,11 @@ proposal candidate.
   verdict, both hidden controls, and denial before agent construction for an
   initial or forced action.
 - Each agent test captures `ClaudeAgentOptions` and asserts `tools=[]` beside the
-  unchanged MCP allowlist, `dontAsk`, and empty setting sources.
+  unchanged MCP allowlist, `dontAsk`, empty setting sources, and
+  `verbatim_prompts=True`.
+- `tests/test_agent_terminal_result.py` constructs the real pinned
+  `ClaudeAgentOptions(verbatim_prompts=True)`, because the runner tests' fake
+  options classes accept any keyword and cannot detect an SDK downgrade.
 - IPO tests feed valid proposal JSON through every failed SDK/CLI scenario,
   including assistant-text EOF and an empty stream, and assert a typed code plus
   an empty proposal table. A successful empty terminal result separately proves

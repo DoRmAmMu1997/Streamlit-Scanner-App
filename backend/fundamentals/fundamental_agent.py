@@ -987,6 +987,11 @@ class FundamentalAgent:
             # Do not load the user's Claude Code project/user settings or any
             # CLAUDE.md — this agent's behaviour comes entirely from our prompt.
             "setting_sources": [],
+            # Beginner note: hand the prompt to the CLI exactly as written.
+            # Otherwise the CLI itself would expand an "@path" mention in text
+            # we interpolate into that file's contents (or run a leading
+            # "/command"), before the tool allowlist above is ever consulted.
+            "verbatim_prompts": True,
         }
         if self._fast_mode:
             if ThinkingConfigDisabled is None:

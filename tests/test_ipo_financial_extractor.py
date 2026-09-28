@@ -1319,7 +1319,14 @@ def _install_ipo_sdk_scenario(
 
 
 def test_default_ipo_sdk_runner_disables_builtin_tools(monkeypatch) -> None:
-    """Only the three bounded prospectus readers are exposed to extraction."""
+    """Only the three bounded prospectus readers are exposed to extraction.
+
+    Beginner note:
+        The prompt inlines the company name scraped from SEBI listings.
+        ``verbatim_prompts`` makes the CLI treat that text as plain words, so a
+        filing named ``@/etc/passwd`` cannot make the CLI read that file into
+        the model's context before the tool allowlist is ever consulted.
+    """
     captured = _install_ipo_sdk_scenario(
         monkeypatch, scenario="success", final_text="{}"
     )
@@ -1346,6 +1353,7 @@ def test_default_ipo_sdk_runner_disables_builtin_tools(monkeypatch) -> None:
     ]
     assert captured["permission_mode"] == "dontAsk"
     assert captured["setting_sources"] == []
+    assert captured["verbatim_prompts"] is True
 
 
 @pytest.mark.parametrize(

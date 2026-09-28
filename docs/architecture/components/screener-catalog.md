@@ -10,11 +10,15 @@
 
 ## 1. Purpose & responsibilities
 
-Each file is a self-contained trading strategy: a `BaseScanner` subclass (see
+The eleven stock screeners are self-contained trading strategies: `BaseScanner` subclasses (see
 [screener-framework.md](screener-framework.md)) declaring `SCREENER` metadata,
 `EXTRA_RESULT_COLUMNS`, `compute_signal(...)`, and an optional `build_chart(...)`.
 The strategy decides **what to look for**; all plumbing (data, loop, errors,
 persistence, charts) is inherited or composed from `backend/`.
+
+The twelfth module is an IPO pipeline adapter. It overrides `run` to dispatch
+the [IPO orchestration workflow](../ipo-011-one-button-screener.md); its required
+`compute_signal` method is unused because an IPO filing has no candle series.
 
 **The boundary**: strategy and scan-adapter logic lives here; provider, SDK and
 database operations are delegated to `backend/`. Modules bind their compatibility
@@ -41,7 +45,7 @@ its event-driven pipeline to the backend without requesting candle history.
 
 (Universe keys: see [universe-management.md](universe-management.md). The Check Fundamentals per-row agent — [fundamentals-ai.md](fundamentals-ai.md) — is invoked from the UI on a shortlisted row, not a screener itself.)
 
-## 3. Anatomy of a screener (the contract in practice)
+## 3. Anatomy of a candle screener (the contract in practice)
 
 ```mermaid
 flowchart TD

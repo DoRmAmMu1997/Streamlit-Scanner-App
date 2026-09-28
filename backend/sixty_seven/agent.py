@@ -708,6 +708,10 @@ class SixtySevenAgent:
             "allowed_tools": ["mcp__sixty_seven__research_company"],
             "permission_mode": "dontAsk",
             "setting_sources": [],
+            # Beginner note: hand the prompt to the CLI exactly as written, so it
+            # never expands an "@path" mention in interpolated text into file
+            # contents (or runs a leading "/command") before the allowlist applies.
+            "verbatim_prompts": True,
         }
         if self._fast_mode:
             if ThinkingConfigDisabled is None:

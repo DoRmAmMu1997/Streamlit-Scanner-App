@@ -499,6 +499,12 @@ class TechnicalAnalysisAgent:
             "allowed_tools": allowed_tools,
             "permission_mode": "dontAsk",
             "setting_sources": [],
+            # Beginner note: hand the prompt to the CLI exactly as written, so it
+            # never expands an "@path" mention into file contents (or runs a
+            # leading "/command") before the tool allowlist is consulted. The
+            # prompt here is candle numbers only; this keeps all four agents on
+            # one contract.
+            "verbatim_prompts": True,
         }
         if self._fast_mode:
             if ThinkingConfigDisabled is None:
