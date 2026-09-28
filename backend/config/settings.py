@@ -251,10 +251,12 @@ def _normalize_database_url(url: str) -> str:
     """Name the installed psycopg v3 driver in bare Postgres URLs.
 
     Managed-Postgres providers (Render, Heroku, ...) auto-wire connection strings
-    as ``postgres://`` or ``postgresql://``. SQLAlchemy maps both bare schemes to
-    the psycopg2 driver, which this project does not install (only psycopg v3 is
-    pinned). Rewriting the scheme to ``postgresql+psycopg://`` lets a
-    provider-injected ``DATABASE_URL`` work unedited. SQLite URLs and URLs that
+    as ``postgres://`` or ``postgresql://``. SQLAlchemy does not recognise the
+    short ``postgres://`` scheme at all, and before 2.1 it mapped a bare
+    ``postgresql://`` to psycopg2, which this project does not install (only
+    psycopg v3 is pinned). Rewriting both to ``postgresql+psycopg://`` lets a
+    provider-injected ``DATABASE_URL`` work unedited and keeps the driver choice
+    explicit instead of relying on SQLAlchemy's default. SQLite URLs and URLs that
     already name a driver (``postgresql+psycopg://``, ``postgresql+psycopg2://``)
     are returned unchanged.
     """
