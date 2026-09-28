@@ -55,7 +55,9 @@ def test_obs004a_backfills_legacy_rows_and_restores_original_shape(
 
     command.upgrade(config, "head")
     with engine.connect() as connection:
-        status = connection.execute(
+        # SQLAlchemy 2.1 types a raw ``text()`` result as an open-ended row
+        # (PEP 646), so mypy cannot infer the scalar's type on its own.
+        status: str = connection.execute(
             text("SELECT observation_status FROM universe_health_snapshots")
         ).scalar_one()
     assert status == "legacy_unknown"

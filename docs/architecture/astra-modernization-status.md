@@ -1,6 +1,6 @@
 # Approved modernization implementation status
 
-This is a delivery ledger for the [approved plan](../superpowers/plans/2026-09-06-astra-modernization.md), last updated on 2026-09-27. GitHub readback confirms that the implementation PRs below and the original audit PR #118 were merged on September 24. Subsequent dependency and CI updates are also merged, and the current baseline is `0b9427c34ada3931843131a9c1fb1653c73c372a`. The remaining packages are still in progress. Merge and production deployment remain with the repository owner; this record does not establish deployment.
+This is a delivery ledger for the [approved plan](../superpowers/plans/2026-09-06-astra-modernization.md), last updated on 2026-09-28. GitHub readback confirms that the implementation PRs below and the original audit PR #118 were merged on September 24. Subsequent dependency and CI updates are also merged, and the current baseline is `52f951756cc6b9005511fb5f959862b09be1e9a3`. The remaining packages are still in progress. Merge and production deployment remain with the repository owner; this record does not establish deployment.
 
 ## Merged packages and historical verification
 
@@ -24,7 +24,7 @@ A separate integration worktree first combined #116, #117, #122, #123, #124, #12
 
 The final local #129 candidate ran all 2,128 collected tests: 2,127 passed, one skipped, with 89.85% aggregate coverage including `app.py`. The final #130 candidate ran all 2,053 collected tests: 2,052 passed, one skipped, with 90.25% aggregate coverage including `app.py`. Local runs used recoverable module groups after host interruptions, with separate databases/coverage files and exact clean-commit/interpreter/test identity. Hosted CI subsequently passed the complete single-process suite on both Python versions supported at that time for each PR.
 
-The repository now supports **Python 3.12, 3.13 and 3.14**, deploys Python 3.14, and targets Python 3.12 in Ruff/mypy. PR #131 corrected raw malformed-row preservation after the candle-cache and validation packages were combined. PRs #132–#141 added weekly Dependabot checks and upgraded dependencies, Actions, Python and PostgreSQL. Remaining work must preserve those changes and run fresh verification using the current pins and matrix. The older Python 3.11 results remain historical evidence only.
+The repository now supports **Python 3.12, 3.13 and 3.14**, deploys Python 3.14, and targets Python 3.12 in Ruff/mypy. PR #131 corrected raw malformed-row preservation after the candle-cache and validation packages were combined. PRs #132–#141 added weekly Dependabot checks and upgraded dependencies, Actions, Python and PostgreSQL. Further dependency updates and #146's verbatim Agent SDK prompt delivery are included in the current baseline. Remaining work must preserve those changes and run fresh verification using the current pins and matrix. The older Python 3.11 results remain historical evidence only.
 
 ## Work still required
 
