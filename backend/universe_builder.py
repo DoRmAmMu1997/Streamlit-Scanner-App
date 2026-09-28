@@ -23,17 +23,31 @@ from backend.config import (
     DHAN_SCRIP_MASTER_URL,
     NIFTY_100_URL,
     NIFTY_500_URL,
+    PROJECT_ROOT,
     REQUEST_HEADERS,
     UNIVERSE_DIR,
+    UNIVERSE_SOURCE_DIR,
 )
 
 # The Hemant lists are intentionally local CSVs. Unlike NIFTY 100/500, there is
-# no stable public CSV endpoint to download during startup, so we keep the
-# pinned source lists next to the generated universe files in `data/universes/`.
+# no stable public CSV endpoint to download during startup, so the pinned source
+# lists are committed under `data/universes/sources/`.
+#
+# Beginner note (DEPLOY-005):
+# These paths come from UNIVERSE_SOURCE_DIR, which is anchored to PROJECT_ROOT,
+# NOT from UNIVERSE_DIR, which follows DATA_DIR. That separation matters:
+#   * inputs  - pinned, reviewed, shipped inside the image  -> PROJECT_ROOT
+#   * outputs - regenerated every refresh, deployment state -> DATA_DIR
+# They used to be the same directory, which caused two problems. A deployment
+# that set DATA_DIR (Render, docker-compose) looked for its source lists on an
+# empty volume and `refresh_universe_files()` raised FileNotFoundError, taking
+# the daily-scan cron down with it. And locally, each refresh rewrote the very
+# file it had just read, so a generated artifact was also its own source of
+# truth. Keep these two constants distinct.
 HEMANT_SOURCE_FILES: dict[str, Path] = {
-    "hemant_super_45": UNIVERSE_DIR / "hemant_super_45.csv",
-    "hemant_good_45": UNIVERSE_DIR / "hemant_good_45.csv",
-    "hemant_good_200": UNIVERSE_DIR / "hemant_good_200.csv",
+    "hemant_super_45": UNIVERSE_SOURCE_DIR / "hemant_super_45.csv",
+    "hemant_good_45": UNIVERSE_SOURCE_DIR / "hemant_good_45.csv",
+    "hemant_good_200": UNIVERSE_SOURCE_DIR / "hemant_good_200.csv",
 }
 
 # Some symbols in the Hemant source use the Google Doc's naming, while Dhan's
@@ -539,7 +553,10 @@ def build_symbol_list_universe(
     universe = universe.merge(equity_lookup, on="symbol", how="left")
     universe["universe"] = universe_key
     universe["universe_name"] = UNIVERSE_CONFIG[universe_key]["display_name"]
-    universe["source"] = source or UNIVERSE_CONFIG[universe_key].get("source_file", "")
+    configured_source = UNIVERSE_CONFIG[universe_key].get("source_file", "")
+    universe["source"] = source or (
+        repo_relative_source_label(configured_source) if configured_source else ""
+    )
     # Do not alphabetize custom source lists. Their order comes from the pinned
     # CSV snapshot and may be meaningful to the user reviewing the list.
     return finalize_universe(universe, sort_symbols=False)
@@ -582,6 +599,26 @@ def finalize_universe(universe: pd.DataFrame, sort_symbols: bool = True) -> pd.D
     if sort_symbols:
         result = result.sort_values("symbol")
     return result.reset_index(drop=True)
+
+
+def repo_relative_source_label(path: Path | str) -> str:
+    """Return a machine-independent label for a pinned source file.
+
+    Beginner note (DEPLOY-005):
+    This string is written into every row's ``source`` column, and the generated
+    Hemant universes are committed. An absolute path would therefore bake one
+    developer's home directory into the repository - noise in every diff, and
+    meaningless inside the container, where the repo lives at /app. A
+    repo-relative POSIX path says the same thing on every machine.
+    """
+    candidate = Path(path)
+    try:
+        return candidate.resolve().relative_to(PROJECT_ROOT).as_posix()
+    except ValueError:
+        # A test (or an operator) pointed at a file outside the repository.
+        # Fall back to the bare file name rather than leaking an unrelated
+        # absolute path into a committed CSV.
+        return candidate.name
 
 
 def universe_file_path(universe_key: str, universe_dir: Path | str = UNIVERSE_DIR) -> Path:
@@ -645,7 +682,7 @@ def refresh_universe_files(
                 universe_key=key,
                 raw_symbols=load_symbol_list_csv(source_file),
                 equity_lookup=equity_lookup,
-                source=str(source_file),
+                source=repo_relative_source_label(source_file),
             )
         else:
             source_df = index_sources.get(key)

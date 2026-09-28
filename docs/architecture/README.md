@@ -40,6 +40,7 @@ testing · extension points.
 
 ### Data & persistence
 - [data-acquisition.md](components/data-acquisition.md) — DhanHQ client + Parquet candle cache.
+- [candle-cache-write-transactions.md](candle-cache-write-transactions.md) — shared download/prefetch/repair locking, interval preservation, and atomic publication.
 - [data-quality.md](components/data-quality.md) — candle OHLCV validation + loader-boundary quarantine + per-run quality receipt (DATA-001) + prefetch-time cache repair (DATA-002).
 - [data-002-candle-cache-repair.md](data-002-candle-cache-repair.md) — why/how the cache repair fixes dirty candles instead of only reporting them.
 - [universe-management.md](components/universe-management.md) — universe build/load.
@@ -70,6 +71,7 @@ and dashboard freshness/provenance.
 
 ## Ticket-scoped design docs (historical, still authoritative)
 
+- **[pdf-parser-resource-containment.md](pdf-parser-resource-containment.md)** — killable transcript parsing with OS memory limits, bounded receipts, and Windows IPO worker containment.
 - **[ipo-001-domain-score-contract.md](ipo-001-domain-score-contract.md)** — IPO domain tables, offline score contract, fail-closed verdict policy, and typed CRUD boundary.
 - **[ipo-002-sebi-filing-ingestion.md](ipo-002-sebi-filing-ingestion.md)** — hardened official-SEBI listing inventory, deterministic filing identity, category-atomic persistence, and recovery semantics.
 - **[ipo-003-document-downloader-cache.md](ipo-003-document-downloader-cache.md)** — bounded SEBI PDF retrieval, content-addressed storage, cache provenance, and recovery semantics.
@@ -82,6 +84,7 @@ and dashboard freshness/provenance.
 - **[ipo-010-ai-extraction-proposals.md](ipo-010-ai-extraction-proposals.md)** — bounded PDF extraction, deterministic section classification, and the fail-closed AI proposal/review trust model.
 - **[ipo-011-one-button-screener.md](ipo-011-one-button-screener.md)** — dispatching the whole IPO pipeline from the Run screener button: the `requires_candles` framework opt-out, opt-in auto-approval, web-sourced QIB demand and its containment rule.
 - **[ipo-010-security-integrity-hardening.md](ipo-010-security-integrity-hardening.md)** — PR #108 follow-up ADR: killable PDF parsing, citation-bound financial facts, advisory web-evidence precedence, and atomic/idempotent review and scoring.
+- **[sec-transcript-egress.md](sec-transcript-egress.md)** — transcript PDF egress ADR: validate every public destination and pin each request to its inspected numeric address while preserving TLS hostname verification.
 - **[scan-run-persistence.md](scan-run-persistence.md)** — SCAN-001 scan-run persistence schema (the column-by-column rationale the Storage LLD links to).
 - **[scan-002-handoff.md](scan-002-handoff.md)** — SCAN-002 database-layer implementation handoff brief.
 - **[obs-003-audit-log.md](obs-003-audit-log.md)** — OBS-003 audit log + runtime-config schema, recorder design, and the seven tracked events.
@@ -92,6 +95,7 @@ and dashboard freshness/provenance.
 - **[rank-002-handoff.md](rank-002-handoff.md)** — RANK-002 implemented build brief for the `backend/scoring/` scorer (pure components + config + the `run_scan` call + UI sort/components + tests).
 - **[auth-003-role-model.md](auth-003-role-model.md)** — AUTH-003 role model: hierarchical viewer/analyst/admin, the capability→min-role map, the database-driven `user_roles` store with an `ADMIN_EMAILS` bootstrap floor, resolution precedence, defense-in-depth enforcement, and denial logging/audit.
 - **[auth-003-handoff.md](auth-003-handoff.md)** — AUTH-003 build brief for the `backend/auth/roles.py` policy + `user_roles` table/migration + repository + `require_capability` enforcement + the admin Roles page + tests.
+- **[ai-execution-boundaries.md](ai-execution-boundaries.md)** — current-role authorization for retained scan/fundamentals state, explicit no-built-in Agent SDK tools for all four MCP agents, and typed fail-closed IPO SDK outcomes.
 - **[audit-2026-06.md](audit-2026-06.md)** — June–July 2026 codebase audit and hardening register through PR #107: what was found, fixed, rejected, and deferred across both review waves.
 
 ## Conventions

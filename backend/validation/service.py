@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
@@ -14,8 +15,10 @@ from backend.data_quality import validate_candles
 from backend.storage.database import SessionFactory
 from backend.storage.models import ForwardReturnStatus
 from backend.storage.repository import (
+    BenchmarkForwardReturnWork,
     ForwardReturnWorkItem,
     get_forward_return_work_items,
+    mark_forward_return_attempted,
     update_forward_return_benchmark,
     upsert_forward_return,
 )
@@ -28,10 +31,18 @@ from backend.validation.benchmarks import (
 )
 from backend.validation.forward_return import (
     FORWARD_RETURN_HORIZONS,
+    MISSING_FUTURE_DATA_GRACE_DAYS,
     ForwardReturnPoint,
     compute_forward_return,
     positive_integral,
 )
+
+logger = logging.getLogger(__name__)
+
+# A configured benchmark that still cannot produce a leg this long after the
+# stock leg became terminal is finalized as missing. It mirrors the stock
+# leg's own grace period so neither leg can stay queued forever.
+BENCHMARK_RETRY_GRACE_DAYS = MISSING_FUTURE_DATA_GRACE_DAYS
 
 
 class DailyHistoryLoader(Protocol):
@@ -43,6 +54,8 @@ class DailyHistoryLoader(Protocol):
         start_date: dt.date,
         end_date: dt.date,
         force_refresh: bool = False,
+        *,
+        preserve_malformed_rows: bool = False,
     ) -> tuple[pd.DataFrame, bool]: ...
 
 
@@ -102,14 +115,18 @@ def compute_pending_forward_returns(
 
     Raises:
         ValueError: Invalid horizon or limit, before any external work.
-        ForwardReturnBatchError: Fatal processing/write failure, with the summary
-            of earlier committed signals and the original exception as its cause.
+        ForwardReturnBatchError: At least one signal failed, raised after every
+            other selected signal was processed. It carries the summary of the
+            committed signals and the first failure as its cause.
 
     Beginner note:
         Detached scalar work leaves the read transaction before any universe or
         provider access. Each signal is fully calculated first, then persisted
         atomically in one short context. A later failure cannot erase earlier
         commits, and retrying a pending horizon cannot rewrite a terminal one.
+        A failing signal gets its attempt recorded in its own transaction and
+        the batch moves on; otherwise oldest-first selection would hand that
+        same signal to every future batch and stall the whole queue.
     """
     normalized_horizons = tuple(dict.fromkeys(positive_integral(h, name="horizon") for h in horizons))
     if limit is not None:
@@ -122,6 +139,7 @@ def compute_pending_forward_returns(
         signals = get_forward_return_work_items(session, horizons=normalized_horizons, limit=limit)
     universe_cache: dict[str, pd.DataFrame | None] = {}
     benchmark_cache: dict[tuple[str, dt.date, dt.date], pd.DataFrame | None] = {}
+    first_failure: Exception | None = None
 
     for signal in signals:
         try:
@@ -144,6 +162,8 @@ def compute_pending_forward_returns(
                     point, signal.universe_key, signal.signal_date, as_of_date,
                     loader, benchmark_resolver, benchmark_cache,
                 )
+                if retry and _benchmark_retry_expired(work, signal.signal_date, as_of_date):
+                    retry = False
                 benchmark_results.append((work.horizon_days, benchmark, retry))
             committed = ForwardReturnRunSummary(total_signals=1)
             with session_factory() as session:
@@ -161,8 +181,48 @@ def compute_pending_forward_returns(
             for field in summary.__dataclass_fields__:
                 setattr(summary, field, getattr(summary, field) + getattr(committed, field))
         except Exception as exc:
-            raise ForwardReturnBatchError(summary) from exc
+            first_failure = first_failure or exc
+            logger.warning(
+                "Forward-return signal %s failed (%s); recording the attempt and continuing",
+                signal.result_id, type(exc).__name__,
+            )
+            _record_failed_attempt(session_factory, signal, summary)
+    if first_failure is not None:
+        raise ForwardReturnBatchError(summary) from first_failure
     return summary
+
+
+def _record_failed_attempt(
+    session_factory: SessionFactory,
+    signal: ForwardReturnWorkItem,
+    summary: ForwardReturnRunSummary,
+) -> None:
+    """Commit an attempt receipt for a failed signal, or stop if the DB cannot.
+
+    Beginner note:
+        If even this tiny write fails, the database itself is unusable and the
+        remaining signals would fail the same way, so the batch stops here with
+        the progress already committed.
+    """
+    horizons = (*signal.stock_horizons, *(work.horizon_days for work in signal.benchmark_horizons))
+    try:
+        with session_factory() as session:
+            mark_forward_return_attempted(session, result_id=signal.result_id, horizons=horizons)
+    except Exception as exc:
+        raise ForwardReturnBatchError(summary) from exc
+
+
+def _benchmark_retry_expired(work: BenchmarkForwardReturnWork, signal_date: dt.date, as_of: dt.date) -> bool:
+    """Return whether a benchmark-only retry has outlived its grace period.
+
+    Beginner note:
+        The clock starts when the stock leg became terminal (``computed_at``),
+        falling back to the signal date for legacy rows without it. Measuring
+        against ``as_of`` keeps as-of replays conservative: a replay dated
+        before ``computed_at`` never expires anything.
+    """
+    reference = work.computed_at.date() if work.computed_at is not None else signal_date
+    return (as_of - reference).days > BENCHMARK_RETRY_GRACE_DAYS
 
 
 def _stock_points(
@@ -191,7 +251,9 @@ def _stock_points(
             else:
                 candles = _load_history(loader, instrument, signal.signal_date, as_of)
                 if candles is not None:
-                    return [compute_forward_return(candles, signal.signal_date, horizon, as_of=as_of)
+                    # _load_history already validated this raw frame once.
+                    return [compute_forward_return(candles, signal.signal_date, horizon, as_of=as_of,
+                                                   raw_validated=True)
                             for horizon in signal.stock_horizons]
     return [ForwardReturnPoint(horizon_days=h, status=status) for h in signal.stock_horizons]
 
@@ -245,9 +307,13 @@ def _load_history(
         Do not opt in to an unpublished cache tail: validation is historical.
         The provider boundary must validate before a calculator can drop rows;
         otherwise a missing entry open could shift the entry to the next day.
+        This is the one caller that opts in to raw malformed rows; scans,
+        charts and ranking get them stripped by the loader's default view.
     """
     try:
-        candles, _from_cache = loader.get_daily_history(instrument, start_date, end_date)
+        candles, _from_cache = loader.get_daily_history(
+            instrument, start_date, end_date, preserve_malformed_rows=True,
+        )
     except Exception:
         # Treat loader failures as retryable. Marking them insufficient would turn
         # a transient broker/cache issue into a permanent validation result.
@@ -306,6 +372,7 @@ def _benchmark_for_point(
         entry_date=point.entry_date,
         exit_date=point.exit_date,
         benchmark_key=spec.key,
+        raw_validated=True,
     )
 
     return leg, leg.return_pct is None

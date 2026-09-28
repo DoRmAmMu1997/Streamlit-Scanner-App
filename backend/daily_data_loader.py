@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from backend.candle_cache import TEMP_FILE_GLOB, atomic_write_parquet, cache_write_lock
 from backend.config import (
     DAILY_CACHE_DIR,
     dhan_fetch_workers,
@@ -332,6 +333,29 @@ def _date_bounds(candles: pd.DataFrame) -> tuple[date | None, date | None]:
     if timestamps.empty:
         return None, None
     return timestamps.min().date(), timestamps.max().date()
+
+
+_PRICE_COLUMNS = ("open", "high", "low", "close")
+
+
+def _strip_malformed_rows(candles: pd.DataFrame) -> pd.DataFrame:
+    """Drop rows with an unparseable timestamp or a missing/non-numeric OHLC price.
+
+    Beginner note:
+        Since VALID-005 the Dhan normalizer and the cache keep such raw rows,
+        because forward-return validation must see them rather than silently
+        moving an entry to a later bar. Every other consumer (scans, charts,
+        ranking) gets this pre-VALID-005 view instead, so a single bad vendor
+        row no longer quarantines the whole symbol. Volume is not required,
+        matching the original normalizer.
+    """
+    if candles.empty or "timestamp" not in candles.columns:
+        return candles
+    valid = pd.to_datetime(candles["timestamp"], errors="coerce").notna()
+    for column in _PRICE_COLUMNS:
+        if column in candles.columns:
+            valid &= pd.to_numeric(candles[column], errors="coerce").notna()
+    return candles.loc[valid].reset_index(drop=True)
 
 
 class _RequestPacer:
@@ -649,7 +673,7 @@ class DailyDataLoader:
         if "timestamp" not in candles or pd.to_datetime(candles["timestamp"], errors="coerce").isna().any():
             return
         first_date, _last_date = _date_bounds(candles)
-        if first_date is None:
+        if first_date is None or first_date > self.today_func():
             return
 
         path = self.first_bar_path(symbol, security_id)
@@ -677,44 +701,134 @@ class DailyDataLoader:
             recorded_on=self.today_func(),
         )
 
-    def read_cached_history(self, symbol: str, security_id: str | int) -> pd.DataFrame:
+    def read_cached_history(
+        self,
+        symbol: str,
+        security_id: str | int,
+        *,
+        preserve_malformed_rows: bool = False,
+    ) -> pd.DataFrame:
         """Return the cached daily candles for one stock; empty DataFrame if missing.
 
-        Used by the chart UI: we want to render whatever is already on disk
+        Used by the chart UI and ranking: we want whatever is already on disk
         without ever falling back to a live Dhan fetch (that work belongs to
-        the CLI prefetch).
+        the CLI prefetch). Malformed raw rows are stripped unless the caller
+        opts in (see ``_strip_malformed_rows``).
         """
         path = self.cache_path(symbol, security_id)
         if not path.exists():
             return pd.DataFrame()
         try:
-            return pd.read_parquet(path)
+            cached = pd.read_parquet(path)
         except Exception:
             logger.exception("Failed to read cached parquet for %s", symbol)
             return pd.DataFrame()
+        return cached if preserve_malformed_rows else _strip_malformed_rows(cached)
+
+    def _store_fetched_window(
+        self,
+        symbol: str,
+        security_id: str | int,
+        candles: pd.DataFrame,
+        *,
+        start_date: date | datetime | str,
+        end_date: date | datetime | str,
+        record_earliest: bool = True,
+        clip_to_window: bool = False,
+    ) -> pd.DataFrame:
+        """Overlay a vendor interval on the latest full cache, then publish it.
+
+        Args:
+            symbol: Instrument symbol locating the shared parquet.
+            security_id: Vendor identifier paired with the symbol.
+            candles: Completed vendor response; network work is already over.
+            start_date: Inclusive start of the interval the vendor was asked for.
+            end_date: Inclusive end of that interval.
+            record_earliest: Whether this was a history probe, rather than a
+                tail-only top-up that cannot establish the vendor's first bar.
+            clip_to_window: Direct callers restrict storage to their interval.
+                Prefetch retains unsolicited overlapping vendor corrections so
+                the quality gate can compare them with the prior cached rows.
+
+        Returns:
+            The full merged frame, or the empty response without a disk write.
+
+        Beginner note:
+        Re-read inside the lock: another caller may have downloaded different
+        dates during our network request. Only the requested interval is ours
+        to replace. Conflicting rows inside the new answer and outside-window
+        overlaps survive for the quality gate; only exact rows are redundant.
+        Unreadable parquet raises before replacement, preserving evidence for
+        repair. Readable empty/missing-axis/all-NaT caches retain the existing
+        full-download recovery behavior because they contain no dated history.
+        Undateable rows survive a narrow refresh, which cannot place them. When
+        the window spans every dated cached row, the fresh answer describes the
+        whole history, so stale undateable rows are replaced along with it.
+        """
+        if candles.empty:
+            return candles
+        raw_response = candles
+        if clip_to_window:
+            # Storage keeps raw vendor evidence (VALID-005); stripping malformed
+            # rows happens on read. Valid out-of-window dates are still clipped.
+            candles = self._slice_to_range(candles, start_date, end_date, preserve_malformed_rows=True)
+            if candles.empty:
+                return candles
+        path = self.cache_path(symbol, security_id)
+        with cache_write_lock(path):
+            cached = pd.read_parquet(path) if path.exists() else pd.DataFrame()
+            cached_first, cached_last = _date_bounds(cached) if "timestamp" in cached else (None, None)
+            if not cached.empty and cached_first is not None and cached_last is not None:
+                window_start, window_end = _coerce_date(start_date), _coerce_date(end_date)
+                dates = pd.to_datetime(cached["timestamp"], errors="coerce").dt.date
+                inside = dates.between(window_start, window_end).fillna(False)
+                full_window = window_start <= cached_first and cached_last <= window_end
+                # Keep unparseable rows for a narrow refresh: it is not permission
+                # to remove dirty evidence outside the interval we can identify.
+                # A full-window answer is that permission (see Beginner note).
+                kept = cached.loc[~inside & dates.notna()] if full_window else cached.loc[~inside]
+                merged = pd.concat([kept, candles], ignore_index=True)
+            else:
+                merged = candles.copy()
+            merged = merged.drop_duplicates().sort_values("timestamp", kind="stable").reset_index(drop=True)
+            atomic_write_parquet(merged, path)
+            if record_earliest:
+                # Evidence comes from what the vendor actually returned, not
+                # older rows preserved from a different request in the cache.
+                self._record_vendor_earliest(
+                    symbol, security_id, requested_from=start_date, candles=raw_response
+                )
+            return merged
 
     def _slice_to_range(
         self,
         candles: pd.DataFrame,
         start_date: date | datetime | str,
         end_date: date | datetime | str,
+        *,
+        preserve_malformed_rows: bool = False,
     ) -> pd.DataFrame:
-        """Return in-range candles while retaining undateable corruption evidence.
+        """Return in-range candles, keeping malformed raw rows only on request.
 
         Args:
             candles: Provider or cache frame, before any row-level cleanup.
             start_date: Inclusive beginning of the requested calendar range.
             end_date: Inclusive end, including all times within that day.
+            preserve_malformed_rows: Validation-only authority to also receive
+                rows with an unparseable timestamp or a missing OHLC price.
 
         Returns:
-            In-range rows plus rows whose timestamps cannot be parsed. Empty or
+            In-range rows. With ``preserve_malformed_rows`` also every row whose
+            timestamp cannot be parsed, and malformed prices are kept. Empty or
             timestamp-free inputs remain unchanged for downstream validation.
 
         Beginner note:
             A malformed date cannot prove that its row falls outside this range.
-            Discarding it would hide corruption and shift historical bar counts.
-            Retaining it lets existing scanner and calculator quality checks fail
-            closed, while valid out-of-range dates are still safely excluded.
+            Forward-return validation opts in to see such rows so it can refuse
+            to shift an entry to a later bar. Scans, charts and ranking keep the
+            default: the rows are stripped exactly as the Dhan normalizer did
+            before VALID-005, so one bad vendor row cannot quarantine a symbol
+            from every screener.
         """
         if candles.empty or "timestamp" not in candles.columns:
             return candles
@@ -723,8 +837,10 @@ class DailyDataLoader:
         # captures today's daily candle once it lands.
         end_ts = pd.Timestamp(_coerce_date(end_date)) + pd.Timedelta(hours=23, minutes=59, seconds=59)
         timestamps = pd.to_datetime(candles["timestamp"], errors="coerce")
-        mask = timestamps.isna() | ((timestamps >= start_ts) & (timestamps <= end_ts))
-        return candles.loc[mask].reset_index(drop=True)
+        in_range = (timestamps >= start_ts) & (timestamps <= end_ts)
+        if preserve_malformed_rows:
+            return candles.loc[timestamps.isna() | in_range].reset_index(drop=True)
+        return _strip_malformed_rows(candles.loc[in_range])
 
     def get_daily_history(
         self,
@@ -734,6 +850,7 @@ class DailyDataLoader:
         force_refresh: bool = False,
         *,
         allow_unpublished_tail: bool = False,
+        preserve_malformed_rows: bool = False,
     ) -> tuple[pd.DataFrame, bool]:
         """Return daily candles for one instrument, sliced to the requested range.
 
@@ -745,6 +862,9 @@ class DailyDataLoader:
             force_refresh: Bypass a usable cache and fetch the requested range.
             allow_unpublished_tail: Scanner-only authority to accept a bounded
                 current-session/weekend/marker cache tail.
+            preserve_malformed_rows: Validation-only authority to receive raw
+                rows with unparseable timestamps or missing OHLC prices; every
+                other caller gets them stripped (see ``_slice_to_range``).
 
         Returns:
             The requested candle frame and whether it was served from cache.
@@ -819,7 +939,9 @@ class DailyDataLoader:
                     checked_through=checked_through,
                     allow_unpublished_tail=allow_unpublished_tail,
                 ):
-                    return self._slice_to_range(cached, start_date, end_date), True
+                    return self._slice_to_range(
+                        cached, start_date, end_date, preserve_malformed_rows=preserve_malformed_rows
+                    ), True
 
         # Cache miss (or force_refresh): fetch the requested window from Dhan
         # and save under the stable filename for future calls.
@@ -830,13 +952,12 @@ class DailyDataLoader:
             from_date=start_date,
             to_date=end_date,
         )
-        if not candles.empty:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            candles.to_parquet(path, index=False)
-        self._record_vendor_earliest(
-            symbol, security_id, requested_from=start_date, candles=candles
+        self._store_fetched_window(
+            symbol, security_id, candles, start_date=start_date, end_date=end_date, clip_to_window=True
         )
-        return self._slice_to_range(candles, start_date, end_date), False
+        return self._slice_to_range(
+            candles, start_date, end_date, preserve_malformed_rows=preserve_malformed_rows
+        ), False
 
     def fetch_window(
         self,
@@ -846,11 +967,9 @@ class DailyDataLoader:
     ) -> pd.DataFrame:
         """Fetch one date window from Dhan **without touching the cache file**.
 
-        Every other fetch path here writes what it downloads straight to the
-        symbol's parquet. That is exactly wrong for the DATA-002 repair, which
-        needs to pull a bounded window (say, the day around a corrupt bar) and
-        merge it *over* ten years of otherwise-good history — writing the window
-        directly would truncate the file to those few days.
+        The DATA-002 repair needs to validate a candidate before publication.
+        Normal loader writes preserve dates outside their requested interval,
+        but cannot apply the repair's improvement and dropped-day checks.
 
         So this method deliberately does the network half only: the same
         rate-limit pacing, DH-904 backoff, and optional timeout as every other
@@ -891,6 +1010,14 @@ class DailyDataLoader:
         This is the engine behind the CLI prefetch. The Streamlit UI never
         calls it directly; it reads whatever is already on disk via
         `read_cached_history(...)` or `get_daily_history(...)`.
+
+        Beginner note:
+        The initial read only plans the vendor request. Every nonempty answer
+        is merged with a new read under the shared disk lock, preserving dates
+        outside the requested window even if another process wrote during I/O.
+        Unsolicited older corrections remain beside old values for quality
+        review; only exact duplicates are removed. An unreadable parquet raises
+        before fetching so repair can report its original bytes intact.
         """
         row = dict(instrument)
         symbol = str(row.get("symbol", "")).strip().upper()
@@ -914,11 +1041,8 @@ class DailyDataLoader:
                 from_date=start,
                 to_date=today,
             )
-            if not candles.empty:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                candles.to_parquet(path, index=False)
-            self._record_vendor_earliest(
-                symbol, security_id, requested_from=start, candles=candles
+            candles = self._store_fetched_window(
+                symbol, security_id, candles, start_date=start, end_date=today
             )
             return candles, "fresh_download"
 
@@ -933,10 +1057,8 @@ class DailyDataLoader:
                 from_date=start,
                 to_date=today,
             )
-            if not candles.empty:
-                candles.to_parquet(path, index=False)
-            self._record_vendor_earliest(
-                symbol, security_id, requested_from=start, candles=candles
+            candles = self._store_fetched_window(
+                symbol, security_id, candles, start_date=start, end_date=today
             )
             return candles, "fresh_download"
 
@@ -952,10 +1074,8 @@ class DailyDataLoader:
                 from_date=start,
                 to_date=today,
             )
-            if not candles.empty:
-                candles.to_parquet(path, index=False)
-            self._record_vendor_earliest(
-                symbol, security_id, requested_from=start, candles=candles
+            candles = self._store_fetched_window(
+                symbol, security_id, candles, start_date=start, end_date=today
             )
             return candles, "fresh_download"
 
@@ -976,11 +1096,10 @@ class DailyDataLoader:
                 from_date=start,
                 to_date=today,
             )
-            self._record_vendor_earliest(
-                symbol, security_id, requested_from=start, candles=candles
-            )
             if not candles.empty:
-                candles.to_parquet(path, index=False)
+                candles = self._store_fetched_window(
+                    symbol, security_id, candles, start_date=start, end_date=today
+                )
                 return candles, "backfilled"
             return cached, "fresh"
         # Falling through on purpose: a later listing still needs its daily
@@ -1013,15 +1132,9 @@ class DailyDataLoader:
             self._write_checked_through(symbol, security_id, today)
             return cached, "fresh"
 
-        merged = (
-            pd.concat([cached, new_rows], ignore_index=True)
-            # Keep same-date disagreements for DATA-001/DATA-002 to investigate;
-            # only a row identical across all six canonical columns is redundant.
-            .drop_duplicates()
-            .sort_values("timestamp")
-            .reset_index(drop=True)
+        merged = self._store_fetched_window(
+            symbol, security_id, new_rows, start_date=incremental_start, end_date=today, record_earliest=False
         )
-        merged.to_parquet(path, index=False)
         return merged, "incremental"
 
     def _sleep(self, seconds: float) -> None:
@@ -1658,6 +1771,14 @@ class DailyDataLoader:
                 # A marker without a parquet owner can never be used again.
                 if not sidecar.with_suffix(".parquet").exists():
                     targets.add(sidecar)
+
+        # A writer killed mid-publish leaves an inert ``.<stem>.<random>.tmp``.
+        # Only old ones are removed, so a publish in flight is never disturbed.
+        # ``.lock`` files are deliberately never deleted: they are the stable
+        # identity every writer locks (see backend/candle_cache.py).
+        for temp_file in self.cache_dir.glob(TEMP_FILE_GLOB):
+            if datetime.fromtimestamp(temp_file.stat().st_mtime) < cutoff:
+                targets.add(temp_file)
 
         deleted = 0
         for path in sorted(targets):

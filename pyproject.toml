@@ -12,19 +12,28 @@
 # 120 there is 1. The code was written to a ~120-column style, so codifying
 # 120 keeps the lint signal about real problems instead of wrapping churn.
 line-length = 120
-# CI runs Python 3.11 (see .github/workflows/quality-and-security.yml).
-target-version = "py311"
+# The oldest Python CI tests (see .github/workflows/quality-and-security.yml);
+# tests/test_supply_chain_policy.py keeps this equal to the matrix minimum.
+target-version = "py312"
 
 [tool.ruff.lint]
 # E/W   pycodestyle errors and warnings
 # F     pyflakes (undefined names, unused imports/variables)
 # I     import sorting
 # B     flake8-bugbear (likely bugs: mutable defaults, loop-var closures, ...)
-# UP    pyupgrade (modern 3.11+ syntax)
+# UP    pyupgrade (modern 3.12+ syntax)
 # C4    comprehension correctness/efficiency
 # SIM   simplifiable code
 # RUF   Ruff-native checks (mutable class defaults, unused noqa, ...)
 select = ["E", "W", "F", "I", "B", "UP", "C4", "SIM", "RUF"]
+# PEP 695 rewrites that a 3.12 target newly suggests, deliberately not adopted:
+# UP040 turns `X: TypeAlias = ...` into a lazy `type X = ...` (TypeAliasType),
+#       which changes runtime behavior: backend/scanner_base.py builds its valid
+#       sources with get_args(SignalSource), and get_args() of a `type` alias
+#       is () - the check would silently accept nothing.
+# UP047 rewrites TypeVar generics to `def f[T](...)`. Pure style; adopt it as
+#       its own change, not inside an interpreter upgrade.
+ignore = ["UP040", "UP047"]
 # Keep Ruff's ambiguous-Unicode checks enabled. These are the only two
 # confusable characters the project uses deliberately in formulas and prose;
 # every other look-alike character should continue to produce a lint warning.
@@ -35,9 +44,9 @@ allowed-confusables = ["–", "∪"]
 external = ["BLE"]
 
 [tool.mypy]
-# CI runs 3.11; local development may run newer. Pinning the target version
-# keeps local runs honest about what CI will accept.
-python_version = "3.11"
+# The oldest Python CI tests; local development may run newer. Pinning the
+# target version keeps local runs honest about what CI will accept.
+python_version = "3.12"
 # QUAL-004 started tests/ adoption module-by-module (conftest + the two
 # policy/guard tests); QUAL-007 finished it — the whole test tree is checked,
 # so a fixture or fake that drifts from the typed application API fails here

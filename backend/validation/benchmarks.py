@@ -192,6 +192,7 @@ def compute_benchmark_leg(
     entry_date: dt.date,
     exit_date: dt.date,
     benchmark_key: str,
+    raw_validated: bool = False,
 ) -> BenchmarkLeg:
     """Compute the benchmark over stock dates after validating raw dated OHLC.
 
@@ -200,6 +201,8 @@ def compute_benchmark_leg(
         entry_date: Stored stock entry date whose index open is required.
         exit_date: Stored stock exit date whose index close is required.
         benchmark_key: Stable configured index identifier retained in the result.
+        raw_validated: The caller already validated this exact raw frame once;
+            the per-horizon repeat is skipped. Pure callers keep the default.
 
     Returns:
         A BenchmarkLeg with Decimal prices and return, or the same key with null
@@ -212,7 +215,7 @@ def compute_benchmark_leg(
         benchmark result remains unavailable; the service decides retry policy.
         Volume is optional because this calculation consumes prices only.
     """
-    if validate_candles(
+    if not raw_validated and validate_candles(
         benchmark_candles, symbol=benchmark_key,
         required_columns=("open", "high", "low", "close"),
         allow_identical_daily_duplicates=True,

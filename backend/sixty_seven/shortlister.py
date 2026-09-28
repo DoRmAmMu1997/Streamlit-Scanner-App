@@ -19,8 +19,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from typing import Any, cast
 
+import numpy as np
 import pandas as pd
 
 from backend.indicators import prepare_ohlc
@@ -92,12 +92,12 @@ def shortlist_candidate(
     if highs.dropna().empty or closes.dropna().empty:
         return None
 
-    # idxmax ignores NaN and returns the FIRST bar that reached the highest high.
-    ath_index = highs.idxmax()
+    # nanargmax ignores NaN and returns the FIRST bar that reached the highest
+    # high (what idxmax does), but as a *position*: ``.iloc[int]`` is always one
+    # row, whereas a label lookup could return several rows on a duplicated
+    # index (pandas-stubs rejects ``.loc[Hashable]`` for exactly that reason).
+    ath_row = frame.iloc[int(np.nanargmax(highs.to_numpy(dtype=float)))]
     latest = frame.iloc[-1]
-    # pandas-stubs types ``.loc[scalar]`` as possibly returning a DataFrame
-    # (a duplicated index would), so narrow to the single row idxmax names.
-    ath_row = cast("pd.Series[Any]", frame.loc[ath_index])
     ath_price = float(ath_row["high"])
     latest_close = float(latest["close"])
     # Guard against zero/garbage prices before we divide by them.

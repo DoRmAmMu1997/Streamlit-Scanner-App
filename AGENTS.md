@@ -118,7 +118,9 @@ review → `/code-review` + `/security-review`; everything → `/using-superpowe
 
 ## 6. The CI gate suite (run locally before every PR)
 
-CI (`.github/workflows/quality-and-security.yml`) runs the matrix Python **3.11 + 3.12**.
+CI (`.github/workflows/quality-and-security.yml`) runs the matrix Python **3.12 + 3.13 + 3.14**
+(3.14 is the deployment target in the Dockerfile; Ruff's `target-version` and mypy's
+`python_version` are pinned to the oldest leg, 3.12, and a policy test keeps all three in step).
 Reproduce it locally — these are the exact commands; **all must pass**:
 
 ```bash
@@ -126,7 +128,7 @@ Reproduce it locally — these are the exact commands; **all must pass**:
 python -m pip install -r requirements.txt -r requirements-dev.txt -c constraints.txt
 
 python -m pre_commit validate-config .pre-commit-config.yaml
-python -m pytest -q --cov=backend --cov=screeners --cov=ui --cov-fail-under=89
+python -m pytest -q --cov=app --cov=backend --cov=screeners --cov=ui --cov-fail-under=89
 python -m compileall -q app.py backend screeners ui tests
 python -m ruff check app.py backend screeners ui Dependencies tests
 python -m mypy
@@ -142,6 +144,10 @@ docker compose down --volumes --remove-orphans
 
 Coverage floor is **89%** (measured ~89.7%). Headroom is deliberately thin, so a
 sizeable untested addition fails the gate rather than quietly eroding the suite.
+The measured set includes `app.py` (QUAL-009); it sits at ~76%, which is the main
+reason the headroom is as tight as it is. `Dependencies/` and `migrations/` remain
+unmeasured on purpose - the first is an interactive credential helper, the second
+is hand-written migrations that the Alembic drift guard covers instead.
 `pre-commit` hooks are **non-rewriting**
 (check-only, no `--fix`) so commits stay author-reviewed.
 
@@ -158,6 +164,13 @@ sizeable untested addition fails the gate rather than quietly eroding the suite.
 - **Adding a dependency ⇒ pin it in `constraints.txt`** (and keep `requirements*.txt` in
   sync). On any branch, `git diff origin/main HEAD -- constraints.txt pyproject.toml` must
   be empty unless the change is a deliberate, reviewed bump.
+- **Dependabot (`.github/dependabot.yml`) opens those reviewed bumps weekly**: grouped
+  minor/patch PRs per ecosystem (pip, GitHub Actions, pre-commit) plus separate major PRs,
+  and image PRs for the Dockerfile and Compose file. **A Dependabot `ruff` PR is expected to fail
+  `test_pre_commit_ruff_rev_matches_the_constraints_pin`**: bump the ruff-pre-commit `rev` in
+  `.pre-commit-config.yaml` in that same PR (the pre-commit ecosystem deliberately skips the
+  ruff hook). A Python base-image bump changes the deployment target, and a Postgres major
+  needs a dump/restore, so neither is a routine merge.
 - **Changing a deterministic screener's output ⇒ regenerate goldens** with
   `UPDATE_GOLDEN=1 python -m pytest tests/test_screener_golden_outputs.py` and **review the
   JSON diff** before committing.

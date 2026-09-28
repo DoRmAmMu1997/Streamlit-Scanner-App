@@ -626,8 +626,11 @@ def test_real_normalizer_unknown_date_cannot_create_or_renew_earliest_evidence(t
         loader._write_vendor_earliest("TEST", "1", requested_from=date(2026, 1, 5),
             earliest_available=date(2026, 1, 6), recorded_on=date(2026, 1, 8))
     before = marker.read_bytes() if marker.exists() else None
+    # The validation-only raw view proves the undateable row reached the loader;
+    # scans get it stripped. Either way the marker below must not move.
     frame, _ = loader.get_daily_history(
         {"symbol": "TEST", "security_id": "1"}, date(2026, 1, 5), date(2026, 1, 8),
+        preserve_malformed_rows=True,
     )
     assert frame["timestamp"].isna().sum() == 1
     assert (marker.read_bytes() if marker.exists() else None) == before
