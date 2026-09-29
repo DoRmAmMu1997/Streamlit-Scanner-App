@@ -13,10 +13,11 @@ Two layers of caching:
   the (relatively slow) parse step.
 
 Failure mode: every function returns an empty string or ``None`` on any
-problem (404, malformed PDF, parse error). The agent treats "no text" as
-"no transcript available" and writes its forward outlook from announcements
-+ structured data only. This is intentional: a missing transcript should
-not crash the whole verdict.
+problem (404, a host refusing the request, malformed PDF, parse error). The
+agent treats "no text" as "no transcript available" and writes its forward
+outlook from announcements + structured data only, and the verdict's concall
+section then carries a fixed "Not available" note (SEC-006). This is
+intentional: a missing transcript should not crash the whole verdict.
 
 Extension point: when ``extract_text`` returns ``""`` for what is clearly a
 scanned PDF, a future revision can swap in a HuggingFace OCR pass (e.g.
@@ -53,9 +54,14 @@ _REQUEST_TIMEOUT_SECONDS = 30
 # chunk. The per-request timeout above only bounds a single socket wait, so a
 # host dripping one byte per 29 s would otherwise never be cut off.
 _DOWNLOAD_DEADLINE_SECONDS = 120
+# Beginner note: this still names the tool and its repository, but in the
+# conventional crawler shape "Mozilla/5.0 (compatible; <tool>; +<url>)". BSE
+# began refusing the bare "hemant-scanner/1.0" agent with HTTP 406, while this
+# form was accepted on every probe (SEC-006). It deliberately does not claim to
+# be a real browser; see docs/architecture/sec-transcript-egress.md.
 _PDF_USER_AGENT = (
-    "hemant-scanner/1.0 (+personal use; "
-    "https://github.com/DoRmAmMu1997/Streamlit-Scanner-App)"
+    "Mozilla/5.0 (compatible; hemant-scanner/1.0; "
+    "+https://github.com/DoRmAmMu1997/Streamlit-Scanner-App)"
 )
 # Concall PDFs are streamed to disk and the running byte total is checked
 # against this ceiling. transcript_url values are scraped from screener.in, so
