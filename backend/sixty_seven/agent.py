@@ -55,6 +55,7 @@ from backend.fundamentals.fundamental_agent import (
     FundamentalsUsageLimitError,
     _describe_result_error,
     _mentions_usage_limit,
+    _require_terminal_result,
     _usage_limit_from_message,
 )
 from backend.fundamentals.fundamentals_cache import FundamentalsCache
@@ -697,6 +698,9 @@ class SixtySevenAgent:
 
         server = create_sdk_mcp_server(name="sixty_seven", version="1.0.0", tools=[_research_tool])
         options_kwargs: dict[str, Any] = {
+            # Explicitly disable SDK built-ins. allowed_tools retains the one
+            # intended MCP research call without granting shell/filesystem access.
+            "tools": [],
             "model": model,
             "system_prompt": system_prompt,
             "max_turns": max_turns,
@@ -704,6 +708,10 @@ class SixtySevenAgent:
             "allowed_tools": ["mcp__sixty_seven__research_company"],
             "permission_mode": "dontAsk",
             "setting_sources": [],
+            # Beginner note: hand the prompt to the CLI exactly as written, so it
+            # never expands an "@path" mention in interpolated text into file
+            # contents (or runs a leading "/command") before the allowlist applies.
+            "verbatim_prompts": True,
         }
         if self._fast_mode:
             if ThinkingConfigDisabled is None:
@@ -743,6 +751,7 @@ class SixtySevenAgent:
 
         if usage_limit is not None:
             raise usage_limit
+        _require_terminal_result(result_message, "67 ka Funda agent")
         if result_message is not None and result_message.is_error:
             if getattr(result_message, "api_error_status", None) == 429:
                 raise FundamentalsUsageLimitError()

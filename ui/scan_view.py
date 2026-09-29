@@ -21,6 +21,7 @@ import pandas as pd
 import streamlit as st
 
 from backend.audit import record_audit_event
+from backend.auth.roles import Role
 from backend.observability import EVENT_EXPORT_DOWNLOADED
 from backend.screener_registry import ScreenerDefinition
 from ui.chart_cache import _render_cached_symbol_chart
@@ -43,7 +44,12 @@ def _has_rating_column(results: pd.DataFrame) -> bool:
 
 
 def _render_scan_output(
-    selected: ScreenerDefinition, cache: dict[str, Any], *, can_export: bool
+    selected: ScreenerDefinition,
+    cache: dict[str, Any],
+    *,
+    can_export: bool,
+    current_role: Role,
+    current_email: str | None,
 ) -> None:
     """Render the cached scan: stats + ranked selectable table + chart.
 
@@ -56,6 +62,18 @@ def _render_scan_output(
     no separate server handler — ``st.download_button`` builds its payload at render
     time — so a viewer (no export capability) must never reach the button or the
     bytes build; the whole export block is skipped for them.
+
+    Args:
+        selected: Screener definition corresponding to the retained results.
+        cache: Prior scan payload, including rows, diagnostics, and chart inputs.
+        can_export: Current EXPORT_RESULTS capability, resolved by the caller.
+        current_role: Trusted current role for downstream action checks.
+        current_email: Trusted current identity for downstream denial auditing.
+
+    Beginner note:
+        A scan payload is historical data and can outlive the role that created
+        it. Pass current authorization separately to the Fundamentals panel so
+        reading an old shortlist cannot restore a demoted user's execution rights.
     """
     results: pd.DataFrame = _sort_results_by_final_score(cache["results"])
     stats = cache["stats"]
@@ -81,7 +99,9 @@ def _render_scan_output(
         # Show the Check Fundamentals panel after the chart. The helper chooses
         # criteria mode for curated symbols and universal mode for everything
         # else, so every shortlisted stock can still get a fundamentals view.
-        _render_fundamentals_panel(chart_symbol)
+        _render_fundamentals_panel(
+            chart_symbol, current_role=current_role, current_email=current_email
+        )
         # AUTH-003: only analysts and admins may export. Build the CSV bytes and
         # render the download button only when the role allows it (the button has
         # no post-click handler to re-check, so this conditional IS the boundary).

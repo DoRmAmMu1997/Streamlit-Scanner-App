@@ -184,7 +184,9 @@ def _pagination_value(soup: BeautifulSoup, name: str, default: int) -> int:
         """Report whether an attribute identifies the wanted pagination field."""
         return isinstance(value, str) and value.casefold() == name.casefold()
 
-    element = soup.find(id=_matches) or soup.find(attrs={"name": _matches})
+    # `name` here is the tag-name filter (None = any tag), not the attribute;
+    # beautifulsoup4 4.15's typed overloads require it with an `attrs` dict.
+    element = soup.find(id=_matches) or soup.find(name=None, attrs={"name": _matches})
     raw = element.get("value") if element is not None else None
     if raw is None:
         pattern = re.compile(rf"{re.escape(name)}[^0-9]{{0,40}}([0-9]+)", re.IGNORECASE)

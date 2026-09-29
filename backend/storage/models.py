@@ -58,6 +58,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -497,6 +498,25 @@ class SignalForwardReturn(Base):
     # created_at so a re-run that flips pending → computed is visible in the audit trail.
     computed_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, comment="UTC time the row was last computed"
+    )
+
+    # Every retry records when it was considered so bounded batches can rotate
+    # fairly instead of repeatedly selecting the lowest result id. This is
+    # intentionally separate from computed_at: a transient provider failure is
+    # still an attempt even though no terminal stock fact was produced.
+    last_attempted_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, comment="UTC time this unresolved work was last attempted"
+    )
+
+    # A stock return can be terminal while only its benchmark leg is missing.
+    # Keeping that retry state explicit lets the worker repair the benchmark
+    # later without fetching the stock again or touching its completed fields.
+    benchmark_retry_pending: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+        comment="True when a terminal stock row still needs its benchmark leg",
     )
 
     # When this row was first written. tz-aware UTC, ORM-side default, same as ScanResult.

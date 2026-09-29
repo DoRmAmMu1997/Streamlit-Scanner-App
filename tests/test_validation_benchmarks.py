@@ -187,3 +187,16 @@ def test_load_benchmarks_keeps_blank_id_entries(tmp_path):
 
     assert specs["some_universe"].symbol == "NIFTY 50"
     assert specs["some_universe"].security_id == ""
+
+
+def test_benchmark_rejects_bad_raw_row_before_preparation():
+    """Discarding a bad timestamp must not turn malformed input into a return."""
+    import datetime as dt
+
+    frame = pd.DataFrame([
+        {"timestamp": "2026-01-06", "open": 100, "high": 110, "low": 90, "close": 104},
+        {"timestamp": "bad-date", "open": 100, "high": 110, "low": 90, "close": 104},
+    ])
+    leg = bm.compute_benchmark_leg(frame, entry_date=dt.date(2026, 1, 6),
+                                  exit_date=dt.date(2026, 1, 6), benchmark_key="index")
+    assert leg.return_pct is None

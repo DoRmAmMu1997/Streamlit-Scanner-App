@@ -61,6 +61,7 @@ from backend.fundamentals.fundamental_agent import (
     FundamentalsAgentError,
     FundamentalsUsageLimitError,
     _mentions_usage_limit,
+    _require_terminal_result,
     _usage_limit_from_message,
 )
 from backend.fundamentals.fundamentals_cache import FundamentalsCache
@@ -484,6 +485,10 @@ class TechnicalAnalysisAgent:
             mcp_servers, allowed_tools = build_technical_mcp_server(tool_context)
 
         options_kwargs: dict[str, Any] = {
+            # The SDK's built-in tool selection is independent of the MCP
+            # allowlist below. Keep it empty so only our in-process analyzers
+            # exist even if an SDK release changes its defaults.
+            "tools": [],
             "model": model,
             "system_prompt": system_prompt,
             "max_turns": max_turns,
@@ -494,6 +499,12 @@ class TechnicalAnalysisAgent:
             "allowed_tools": allowed_tools,
             "permission_mode": "dontAsk",
             "setting_sources": [],
+            # Beginner note: hand the prompt to the CLI exactly as written, so it
+            # never expands an "@path" mention into file contents (or runs a
+            # leading "/command") before the tool allowlist is consulted. The
+            # prompt here is candle numbers only; this keeps all four agents on
+            # one contract.
+            "verbatim_prompts": True,
         }
         if self._fast_mode:
             if ThinkingConfigDisabled is None:
@@ -540,6 +551,7 @@ class TechnicalAnalysisAgent:
 
         if usage_limit is not None:
             raise usage_limit
+        _require_terminal_result(result_message, "Technical Analysis agent")
         if result_message is not None and result_message.is_error:
             if getattr(result_message, "api_error_status", None) == 429:
                 raise FundamentalsUsageLimitError()

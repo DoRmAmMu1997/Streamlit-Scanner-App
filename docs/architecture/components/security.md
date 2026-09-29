@@ -3,9 +3,9 @@
 | | |
 |---|---|
 | **Component** | Cross-cutting security utilities |
-| **Source** | [`backend/security/redaction.py`](../../../backend/security/redaction.py), [`backend/security/prompt_injection.py`](../../../backend/security/prompt_injection.py), [`backend/security/__init__.py`](../../../backend/security/__init__.py), [`backend/url_safety.py`](../../../backend/url_safety.py), [`backend/ai_cache_integrity.py`](../../../backend/ai_cache_integrity.py) |
+| **Source** | [`backend/security/redaction.py`](../../../backend/security/redaction.py), [`backend/security/prompt_injection.py`](../../../backend/security/prompt_injection.py), [`backend/security/__init__.py`](../../../backend/security/__init__.py), [`backend/url_safety.py`](../../../backend/url_safety.py), [`backend/fundamentals/pdf_transport.py`](../../../backend/fundamentals/pdf_transport.py), [`backend/ai_cache_integrity.py`](../../../backend/ai_cache_integrity.py) |
 | **Layer** | Foundation (leaf utilities, best-effort, never raise on the safety path) |
-| **Status** | Stable (SEC-001 URL safety · SEC-002 redaction · PROV-003 AI cache integrity · TEST-003 prompt-injection quarantine) |
+| **Status** | Stable (SEC-001 URL safety · SEC-002 redaction · PROV-003 AI cache integrity · TEST-003 prompt-injection quarantine · SEC-005 verbatim agent prompts) |
 | **Related** | [HLD](../high-level-design.md) · [configuration.md](configuration.md) · [observability.md](observability.md) · [scan-service-and-provenance.md](scan-service-and-provenance.md) · [storage-persistence.md](storage-persistence.md) · [ipo-screener.md](ipo-screener.md) · [fundamentals-ai.md](fundamentals-ai.md) · [technical-analysis-ai.md](technical-analysis-ai.md) · [sixty-seven-ka-funda-ai.md](sixty-seven-ka-funda-ai.md) |
 
 ## 1. Purpose & responsibilities
@@ -49,6 +49,8 @@ flowchart LR
       PROV["IPO provenance URL"] --> SAFE --> STORE["store only; never fetched"]
       SEBIURL["fixed SEBI URL / redirect"] --> STRICT["_canonical_sebi_url: exact HTTPS host"]
       STRICT --> BOUNDED["manual redirects + bounded streamed request"]
+      PDFURL["transcript URL / redirect"] --> PIN["pdf_transport: resolve once, reject mixed DNS, pin numeric IP"]
+      PIN --> TLS["original Host/SNI/certificate identity"]
     end
     subgraph AICache[PROV-003 ai_cache_integrity]
       KEY["signing key (env or per-process)"] --> SIGN["sign_cache_envelope (HMAC-SHA256)"]
@@ -104,6 +106,18 @@ are cleaned on every failure and become visible only through same-directory
 atomic rename after hashing and fsync. Persistence compare-and-sets the detached
 source URL/type, so a concurrent provenance correction cannot inherit stale
 bytes.
+
+**Transcript PDF egress enforcement.** `backend/fundamentals/pdf_transport.py` is
+the network boundary for URLs scraped from third-party transcript pages. It
+canonicalizes and validates the initial URL and every relative redirect, rejects
+credentials, malformed authorities, controls, backslashes, non-public addresses,
+and mixed public/private DNS answers, then passes the selected public numeric
+address to urllib3 while retaining the original hostname for the HTTP Host header,
+TLS SNI, and certificate assertion. Every hop uses a fresh `trust_env=False`
+session with empty proxy settings and explicit headers; caller sessions, cookies,
+auth, proxies, and adapters do not cross the boundary. Redirects are bounded and
+response resources close on every success or refusal. See the
+[transcript egress ADR](../sec-transcript-egress.md).
 
 ### AI cache integrity — `backend/ai_cache_integrity.py`
 | Symbol | Contract |
@@ -184,6 +198,7 @@ regexes (which raise the false-positive rate and block legitimate evaluations).
 | **Quarantine fails closed, preserves evidence for audit only** | A hit blocks the *whole* payload to the model and the run yields an error receipt (no verdict, no cache write); the raw evidence survives only in the request-local audit collector. Matches "unsafe outputs fail closed". | Surgically strip the instruction and pass the rest — more bypass-prone; or drop the evidence entirely — no forensics. |
 | **Prompt-injection failures are non-retryable** | Re-running re-fetches the same poisoned page, so injection raises *outside* the AI-004 validation-retry loop. | Retry on injection — wasted Agent SDK credit, identical outcome. |
 | **Normalize for matching, never mutate recorded evidence** | Homoglyph/zero-width folding defeats obfuscation without altering the bytes preserved for audit. | Normalize in place — corrupts the forensic record. |
+| **Agent prompts are delivered verbatim (SEC-005)** | All four Agent SDK runners set `verbatim_prompts=True`, so the Claude CLI never expands an `@path` mention in prompt text into file contents (nor dispatches a leading `/command`). That pre-processing runs before `tools=[]`, `allowed_tools` and `dontAsk` are consulted, and the IPO extraction prompt inlines a company name scraped from SEBI. An SDK older than 0.2.158 rejects the option (fails closed); a CLI older than 2.1.248 silently ignores it, so the SDK's bundled CLI (2.1.281 at the 0.2.159 pin) must be the one used ([ADR](../ai-execution-boundaries.md)). | Rely on the tool boundary alone — misses the pre-tool file read; scrub `@`/`/` from interpolated text — tracks CLI syntax by hand and mangles names. |
 
 ## 5. Failure modes / degradation
 
@@ -202,6 +217,7 @@ regexes (which raise the false-positive rate and block legitimate evaluations).
 - [`tests/test_ai_cache_integrity.py`](../../../tests/test_ai_cache_integrity.py) — tamper detection, key binding, non-finite rejection.
 - [`tests/test_prompt_injection.py`](../../../tests/test_prompt_injection.py) — the shared corpus (blocked detected / benign not), Unicode + homoglyph normalization, and the recursive key/list/sibling scan. The two AI agents add their own quarantine + fail-closed tests on top ([fundamentals-ai.md](fundamentals-ai.md), [sixty-seven-ka-funda-ai.md](sixty-seven-ka-funda-ai.md)).
 - [`tests/test_supply_chain_policy.py`](../../../tests/test_supply_chain_policy.py) — dependency posture.
+- Each Agent SDK runner's options test (fundamentals, technical, 67 Ka Funda, IPO extraction) asserts `verbatim_prompts=True`, and [`tests/test_agent_terminal_result.py`](../../../tests/test_agent_terminal_result.py) builds the real pinned `ClaudeAgentOptions` so an SDK downgrade below 0.2.158 fails CI (the runner tests use permissive fakes).
 - [`tests/test_ipo_sebi_source.py`](../../../tests/test_ipo_sebi_source.py) —
   source-specific host/redirect checks, retries/timeouts, content type, response
   and page caps, hostile HTML parsing, and resource closure with fake sessions.

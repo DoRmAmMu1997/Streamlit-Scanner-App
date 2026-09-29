@@ -372,12 +372,12 @@ def test_a_failed_write_never_leaves_a_half_written_cache(tmp_path: Path, monkey
     path = _write_cache(loader, pd.concat([clean, clean.iloc[[2]]], ignore_index=True))
     original = path.read_bytes()
 
-    import backend.data_quality.cache_repair as cache_repair
+    import backend.candle_cache as candle_cache
 
     def explode(*_args, **_kwargs):
         raise OSError("disk full")
 
-    monkeypatch.setattr(cache_repair.os, "replace", explode)
+    monkeypatch.setattr(candle_cache.os, "replace", explode)
 
     outcome = repair_symbol(loader, ROW, today=TODAY)
 

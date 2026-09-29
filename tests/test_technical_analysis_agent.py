@@ -830,7 +830,9 @@ def test_default_run_registers_only_the_technical_tools(monkeypatch, tmp_path):
 
     With permission_mode="dontAsk" the agent can ONLY call tools listed in
     allowed_tools, so this also confirms the built-in filesystem/bash tools stay
-    out of reach in a headless run.
+    out of reach in a headless run. ``verbatim_prompts`` also stops the CLI
+    expanding ``@path`` mentions or ``/commands`` in prompt text, which happens
+    before any tool check.
     """
     captured, _ = _install_fake_sdk(monkeypatch)
     cache = FundamentalsCache(cache_dir=tmp_path)
@@ -841,8 +843,10 @@ def test_default_run_registers_only_the_technical_tools(monkeypatch, tmp_path):
     options = captured["options"]
     assert SERVER_NAME in options["mcp_servers"]
     assert options["allowed_tools"] == TOOL_NAMES
+    assert options["tools"] == []
     assert options["permission_mode"] == "dontAsk"
     assert options["setting_sources"] == []
+    assert options["verbatim_prompts"] is True
 
 
 # ---------------------------------------------------------------------------

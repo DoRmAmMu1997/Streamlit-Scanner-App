@@ -19,15 +19,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.11 is the deployment target; 3.12 catches forward-compatibility
-        # drift before an interpreter upgrade is forced on us.
-        python-version: ["3.11", "3.12"]
+        # 3.14 is the deployment target (Dockerfile); 3.12 is the oldest
+        # supported interpreter, and Ruff/mypy target it on every leg
+        # (pyproject.toml) so code never needs a newer Python than we support.
+        # tests/test_supply_chain_policy.py keeps these three in agreement.
+        python-version: ["3.12", "3.13", "3.14"]
 
     # Each matrix worker owns an isolated server; fixtures create/drop only
     # UUID databases, never the configured maintenance/application database.
     services:
       postgres:
-        image: postgres:16-bookworm
+        image: postgres:18-bookworm
         env:
           POSTGRES_USER: scanner_test
           POSTGRES_PASSWORD: scanner_ci_only
@@ -38,16 +40,18 @@ jobs:
           --health-cmd "pg_isready -U scanner_test -d postgres"
           --health-interval 5s --health-timeout 5s --health-retries 10
     env:
-      DATABASE_URL: sqlite://
+      # Alembic and application sessions use separate engines. A runner-owned
+      # file shares their schema safely without touching configured app data.
+      DATABASE_URL: sqlite:///${{ runner.temp }}/scanner-default.db
       SCANNER_TEST_POSTGRES_ADMIN_URL: postgresql+psycopg://scanner_test:scanner_ci_only@127.0.0.1:5432/postgres
       SCANNER_REQUIRE_POSTGRES_TESTS: "1"
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -68,7 +72,7 @@ jobs:
           # The floor sits ~two points under the measured 89% (QUAL-005) so
           # routine PRs don't fight the gate, while a large untested addition
           # still fails.
-          python -m pytest -q --cov=backend --cov=screeners --cov=ui --cov-fail-under=89
+          python -m pytest -q --cov=app --cov=backend --cov=screeners --cov=ui --cov-fail-under=89
 
       - name: Compile importable Python files
         run: python -m compileall -q app.py backend screeners ui tests
@@ -107,7 +111,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Build deployment image
         run: docker build --tag streamlit-scanner-app:ci .
