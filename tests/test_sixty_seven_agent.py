@@ -10,6 +10,7 @@ from typing import Any
 import pandas as pd
 import pytest
 
+from backend.ai_cache_integrity import sign_cache_envelope
 from backend.fundamentals.fundamental_agent import AgentRunResult
 from backend.fundamentals.fundamentals_cache import FundamentalsCache
 from backend.sixty_seven import agent as sixty_seven_agent_module
@@ -484,6 +485,7 @@ def test_agent_rejects_tampered_cached_receipt_and_recomputes(tmp_path):
     envelope["provenance"]["evidence_references"][1]["sanitized_url"] = (
         "https://news.example.com/turnaround?token=unsafe"
     )
+    envelope = sign_cache_envelope(envelope, key=agent._cache_signing_key)
     cache.set_verdict("DEMO", cache_key, candidate.signal_date, envelope)
     runner.verdict = _verdict(confidence=4)
     runner.calls = 0

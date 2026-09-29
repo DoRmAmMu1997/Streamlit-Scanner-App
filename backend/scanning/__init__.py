@@ -33,8 +33,11 @@ from backend.scanning.result_contract import (
     ScreenerResult,
     SignalProvenance,
     SignalSource,
+    ai_provenance_from_mapping,
+    evidence_reference_from_mapping,
     normalize_screener_row,
     normalize_secret_safe_json,
+    validate_sha256_digest,
 )
 from backend.scanning.service import ScanRunResult, run_scan
 from backend.storage.models import ScanStatus
@@ -56,8 +59,11 @@ __all__ = [
     "ScreenerResult",
     "SignalProvenance",
     "SignalSource",
+    "ai_provenance_from_mapping",
     "build_scan_comparison",
+    "evidence_reference_from_mapping",
     "normalize_screener_row",
     "normalize_secret_safe_json",
     "run_scan",
+    "validate_sha256_digest",
 ]

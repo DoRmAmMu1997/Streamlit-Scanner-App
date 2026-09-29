@@ -14,6 +14,7 @@ import json
 import pandas as pd
 import pytest
 
+from backend.ai_cache_integrity import sign_cache_envelope
 from backend.fundamentals.fundamental_agent import AgentRunResult
 from backend.fundamentals.fundamentals_cache import FundamentalsCache
 from backend.technical import technical_agent as technical_agent_module
@@ -317,6 +318,7 @@ def test_agent_rejects_tampered_cached_receipt_and_recomputes(tmp_path):
     cache_key = agent._cache_model_key("DEMO", candles, levels)
     envelope = cache.get_verdict("DEMO", cache_key, data_date)
     envelope["provenance"]["evidence_references"][0]["sha256"] = "not-a-hash"
+    envelope = sign_cache_envelope(envelope, key=agent._cache_signing_key)
     cache.set_verdict("DEMO", cache_key, data_date, envelope)
     runner.verdict = _sample_verdict(confidence=4)
     runner.calls = 0
