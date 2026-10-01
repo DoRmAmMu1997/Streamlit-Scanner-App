@@ -296,6 +296,9 @@ def rescore_issue(
     Raises:
         IpoNotFoundError: If the issue disappears before successful publication.
         IpoScoringConflictError: If the three total attempts cannot verify evidence.
+        IpoValidationError: If a historical pair claims the current fingerprint
+            but its scoring or recommendation payload differs from the derived
+            candidate. No current selection or immutable history is changed.
         ValueError: If the injected business clock is naive.
 
     Beginner note:
@@ -303,6 +306,8 @@ def rescore_issue(
         conflict rolls back its complete write scope before a fresh read;
         unrelated persistence errors are not disguised as retryable conflicts.
         Reusing old A after A -> B -> A updates verification, never history.
+        A legacy caller can supply a fingerprint, so matching identity alone
+        cannot authorize reuse: the complete stored receipt must agree as well.
         No network happens here — every input is a repository read, so the
         dashboard's re-score button can safely call this inside a page action.
     """

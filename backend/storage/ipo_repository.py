@@ -13,6 +13,8 @@ remain framework-independent and the repository-boundary CI guard stays true.
 from __future__ import annotations
 
 import datetime as dt
+import json
+from collections.abc import Mapping
 from typing import Any, cast
 
 from sqlalchemy import func, select, update
@@ -1037,6 +1039,79 @@ def list_ipo_enrichment_signal_rows(
     if since is not None:
         stmt = stmt.where(IpoEnrichmentSignal.captured_at >= since)
     return list(session.scalars(stmt))
+
+
+def _canonical_evaluation_value(name: str, value: Any) -> Any:
+    """Represent one receipt field for strict, non-mutating comparison.
+
+    Args:
+        name: Persisted column name from a freshly derived candidate payload.
+        value: Candidate or stored column value; no caller text is normalized away.
+
+    Returns:
+        A stable JSON representation for JSON columns, otherwise the scalar value.
+
+    Raises:
+        TypeError: If a JSON field contains a non-serializable value.
+        ValueError: If a JSON field contains a circular container.
+
+    Beginner note:
+        Sources and missing-factor labels are sets; their order and duplicates do
+        not change meaning. Other receipt lists retain their full ordered content.
+        Canonical JSON sorts mapping keys and distinguishes booleans from numbers,
+        so Python's ``True == 1`` cannot conceal a changed JSON receipt. Scalar
+        Decimal comparisons ignore harmless numeric scale without losing precision.
+    """
+    # Malformed set elements remain uncanonicalized and cannot equal a valid
+    # candidate. Never repair or rewrite historical evidence during this check.
+    if (
+        name in {"source_documents_json", "missing_data_json"}
+        and isinstance(value, list)
+        and all(isinstance(item, str) for item in value)
+    ):
+        value = sorted(set(value))
+    if name.endswith("_json"):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return value
+
+
+def ipo_evaluation_payload_matches(
+    score: IpoScore,
+    recommendation: IpoRecommendation,
+    *,
+    score_values: Mapping[str, Any],
+    recommendation_values: Mapping[str, Any],
+) -> bool:
+    """Check every derived persisted field before trusting a historical pair.
+
+    Args:
+        score: Historical score returned by the semantic uniqueness boundary.
+        recommendation: Its complete paired recommendation.
+        score_values: Full candidate factors, total, contribution/breakdown/reason
+            receipts, missing labels, model and fingerprint derived by the service.
+        recommendation_values: Full candidate verdict, confidence, reasons, missing
+            labels, cautions and source provenance derived by the service.
+
+    Returns:
+        True only when all candidate payload fields agree with persisted content.
+
+    Raises:
+        TypeError: If candidate or stored JSON cannot be serialized.
+        ValueError: If candidate or stored JSON contains a circular container.
+
+    Beginner note:
+        The legacy API lets callers assert a model/fingerprint, so uniqueness is
+        not proof that its scorecard was derived from those inputs. Publication
+        calls this under the state lock and rejects a mismatch before selecting
+        or verifying the pair. IDs and calculation/verification times are absent
+        from candidate payloads and must never make legitimate A-B-A reuse fail.
+        This helper reads loaded values only and never edits historical receipts.
+    """
+    return all(
+        _canonical_evaluation_value(name, getattr(row, name)) == _canonical_evaluation_value(name, value)
+        for row, values in ((score, score_values), (recommendation, recommendation_values))
+        for name, value in values.items()
+    )
 
 
 def insert_ipo_evaluation(

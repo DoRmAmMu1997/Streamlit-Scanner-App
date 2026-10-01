@@ -127,6 +127,7 @@ from backend.storage.ipo_repository import (
     insert_ipo_issue,
     insert_ipo_manual_extraction,
     insert_ipo_subscription,
+    ipo_evaluation_payload_matches,
     list_ipo_document_rows,
     list_ipo_enrichment_signal_rows,
     list_ipo_evaluation_rows,
@@ -1019,9 +1020,26 @@ def load_ipo_factor_inputs_snapshot(
 ) -> IpoFactorInputs:
     """Keep the historical input-only API with revision-validated assembly.
 
+    Args:
+        issue_id: Issue whose complete scoring inputs should be detached.
+        as_of: Aware business clock, normalized to UTC for eligibility rules.
+        session_factory: Caller-owned read transaction factory for this attempt.
+
+    Returns:
+        Detached input bundle whose scalar revision was unchanged around all
+        component and eager-child reads; selection metadata is not returned.
+
+    Raises:
+        IpoNotFoundError: If the issue does not exist or disappears during assembly.
+        IpoScoringConflictError: If the state is missing or changes during this
+            single attempt; callers may reload later without assuming success.
+        ValueError: If as_of has no timezone offset.
+
     Beginner note:
         Conflicts propagate to the caller; this compatibility wrapper introduces
-        no nested retry budget and never writes verification state.
+        no nested retry budget and never writes verification state. Unlike the
+        current-evaluation reader's three-attempt policy, this loader makes one
+        attempt so orchestration can share its budget with publication conflicts.
     """
     return load_ipo_scoring_snapshot(issue_id, as_of=as_of, session_factory=session_factory).inputs
 
@@ -2505,7 +2523,8 @@ def _evaluate_issue_once(
     Raises:
         IpoNotFoundError: If the issue no longer exists.
         IpoScoringConflictError: If revision or live time eligibility changed.
-        IpoValidationError: If company or registered-source ownership fails.
+        IpoValidationError: If company/source ownership fails or an existing pair's
+            payload differs from the complete freshly derived candidate.
 
     Beginner note:
         Conditional state UPDATE precedes subordinate reads and nested insertion,
@@ -2595,6 +2614,16 @@ def _evaluate_issue_once(
             session, issue_id, score_values, recommendation_values
         )
         if expected_revision is not None:
+            # A legacy caller can claim the same fingerprint for arbitrary factors.
+            # Check full content under the lock before granting that row authority;
+            # raising rolls back this attempt without rewriting history or state.
+            if not inserted and not ipo_evaluation_payload_matches(
+                score_row,
+                recommendation_row,
+                score_values=score_values,
+                recommendation_values=recommendation_values,
+            ):
+                raise IpoValidationError("Stored IPO evaluation payload does not match current derived evidence.")
             # Check the clock after insertion too: crossing eligibility must
             # roll back the complete outer transaction, including its savepoint.
             if publication_check is not None:

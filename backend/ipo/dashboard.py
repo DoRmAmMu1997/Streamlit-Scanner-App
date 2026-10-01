@@ -148,6 +148,11 @@ def _row_for_issue(
         Current or explicitly stale historical content with separate calculation,
         verification and overall display-activity timestamps.
 
+    Raises:
+        IpoScoringConflictError: If all three current-read assembly attempts conflict.
+        IpoNotFoundError: If the issue disappears during current or display reads.
+        ValueError: If now has no timezone offset.
+
     Beginner note:
         ``last_updated`` considers every evidence source, while
         ``evaluation_stale`` asks the narrower question: does the revision, model and
@@ -300,6 +305,13 @@ def build_dashboard_snapshot(
 
     Returns:
         Immutable rows classified at the same business-time instant.
+
+    Raises:
+        ValueError: If now has no timezone offset; supply an aware instant.
+        IpoScoringConflictError: If any issue exhausts the current reader's three
+            assembly attempts; retry the render later without certifying old data.
+        IpoNotFoundError: If an issue is deleted after inventory is listed; refresh
+            the inventory rather than treating its old verdict as current.
 
     Beginner note:
         The per-issue reads are simple repository calls rather than one big
