@@ -76,6 +76,41 @@ objects are not exposed to URL content or the model. A caller supplying both a
 legacy Session and an explicit transport selects the explicit transport; the
 legacy object never contributes network configuration.
 
+## Request identity (SEC-006)
+
+Every hop sends exactly two headers, and nothing else:
+
+- `User-Agent: Mozilla/5.0 (compatible; hemant-scanner/1.0; +https://github.com/DoRmAmMu1997/Streamlit-Scanner-App)`
+- `Accept: application/pdf,*/*`
+
+In September 2026 BSE (`www.bseindia.com/.../AnnPdfOpen.aspx`, the host behind
+most screener.in transcript links) began refusing the original agent,
+`hemant-scanner/1.0 (+personal use; <repo>)`, with HTTP 406 (sometimes 403). It
+was refused for TCS and RELIANCE on every probe and intermittently for INFY. The
+pinned transport was not the cause: plain `requests` with the same headers got
+the same 406.
+
+Probes on 2026-09-28/29 compared header variants. Each followed redirects and
+confirmed `%PDF-` bytes, one request at a time with a pause between them.
+
+| Variant | BSE result |
+|---|---|
+| Original honest UA (with or without `Accept-Language`/`Referer`) | 406 for TCS and RELIANCE |
+| `Mozilla/5.0 (compatible; hemant-scanner/1.0; +<repo>)` | 302 → PDF, 8/8 (4 symbols × 2 rounds) |
+| A real Chrome UA (control) | 302 → PDF, same as above |
+
+The repository owner chose the `compatible` form. It is the conventional crawler
+shape (as in `Mozilla/5.0 (compatible; Googlebot/2.1; +…)`), so it still names
+this tool and links its source instead of impersonating a browser. A per-host
+Chrome User-Agent was rejected for that reason. `www.tcs.com` returned 403 to
+every variant, including full browser headers, so no header policy fixes it.
+
+A transcript that is still unavailable is now visible. The fundamentals agent
+replaces the verdict's concall paragraph with a fixed "Not available" note, as
+described in the [fundamentals LLD](components/fundamentals-ai.md).
+`tests/test_pdf_egress.py` pins the exact header dict on every hop, including
+redirects, so a Referer, cookie or other ambient header cannot be added silently.
+
 ## Verification and limits
 
 `tests/test_pdf_egress.py` proves refused destinations have zero target requests,
