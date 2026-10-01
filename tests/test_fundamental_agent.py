@@ -9,6 +9,7 @@ contain. The two screener.in tools are tested directly via their plain
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime
@@ -543,6 +544,88 @@ def test_fundamental_agent_requires_model():
         FundamentalAgent(model="")
 
 
+def test_default_sdk_runner_disables_builtin_tools(monkeypatch, tmp_path):
+    """Only the two declared MCP readers may be available to the model.
+
+    Beginner note:
+        ``allowed_tools`` controls permission for named calls, while the Agent
+        SDK's separate ``tools`` option controls which built-in tool families
+        are loaded. Passing an empty list closes the filesystem and shell
+        surface even if a future SDK default changes. ``verbatim_prompts``
+        closes the one path that runs before any tool check: the CLI expanding
+        ``@path`` mentions or dispatching ``/commands`` found in prompt text.
+    """
+    import sys
+    import types
+
+    captured: dict[str, Any] = {}
+
+    class ClaudeAgentOptions:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    class ResultMessage:
+        def __init__(self) -> None:
+            self.result = "{}"
+            self.total_cost_usd = None
+            self.is_error = False
+
+    class AssistantMessage:
+        pass
+
+    class CLINotFoundError(Exception):
+        pass
+
+    class ProcessError(Exception):
+        pass
+
+    async def query(*, prompt: str, options: object):
+        del prompt, options
+        yield ResultMessage()
+
+    def tool(_name: str, _description: str, _schema: dict[str, type]):
+        return lambda function: function
+
+    def create_sdk_mcp_server(*, name: str, version: str, tools: list[object]):
+        return {"name": name, "version": version, "tools": tools}
+
+    fake_sdk = types.ModuleType("claude_agent_sdk")
+    # ModuleType's static stub cannot name optional SDK attributes. Updating the
+    # runtime namespace mirrors how Python imports expose them without weakening
+    # this test module's type checking with broad ignores.
+    fake_sdk.__dict__.update(
+        {
+            "ClaudeAgentOptions": ClaudeAgentOptions,
+            "ResultMessage": ResultMessage,
+            "AssistantMessage": AssistantMessage,
+            "CLINotFoundError": CLINotFoundError,
+            "ProcessError": ProcessError,
+            "query": query,
+            "tool": tool,
+            "create_sdk_mcp_server": create_sdk_mcp_server,
+        }
+    )
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake_sdk)
+
+    agent = FundamentalAgent(
+        model="test-model", cache=FundamentalsCache(cache_dir=tmp_path)
+    )
+    agent._run_sync(
+        agent._default_run(
+            "prompt", system_prompt="system", model="test-model", max_turns=2
+        )
+    )
+
+    assert captured["tools"] == []
+    assert captured["allowed_tools"] == [
+        "mcp__fundamentals__fetch_company_data",
+        "mcp__fundamentals__read_recent_concall_transcript",
+    ]
+    assert captured["permission_mode"] == "dontAsk"
+    assert captured["setting_sources"] == []
+    assert captured["verbatim_prompts"] is True
+
+
 def test_fundamental_agent_normalize_verdict_fills_blank_fields(tmp_path):
     """If the agent returns a verdict missing model/symbol, stamp them."""
     cache = FundamentalsCache(cache_dir=tmp_path)
@@ -878,6 +961,152 @@ def test_check_allows_benign_tool_evidence(tmp_path):
     # The fetch tool returned the real screener JSON, not a blocked response.
     assert runner.tool_response is not None
     assert json.loads(runner.tool_response) != BLOCKED_EVIDENCE_RESPONSE
+
+
+# The exact owner-approved wording (SEC-006). Pinned as a literal, not imported,
+# so an accidental edit to the production constant fails here.
+_TRANSCRIPT_UNAVAILABLE_NOTE = (
+    "Not available. No concall transcript could be downloaded or read for this "
+    "evaluation, so this outlook relies on announcements and structured data only."
+)
+
+
+def _verdict_text_with_concall(concall_conclusion: str) -> str:
+    """Final agent JSON whose forward outlook carries the given concall paragraph."""
+    verdict = _sample_verdict().model_copy(
+        update={
+            "forward_outlook": ForwardOutlook(
+                announcements_conclusion="Order book grew sharply.",
+                concall_conclusion=concall_conclusion,
+                overall_summary="Steady compounding expected.",
+            )
+        }
+    )
+    return json.dumps(verdict.model_dump(mode="json"))
+
+
+class _TranscriptCallingRunner:
+    """Fake runner that calls the transcript tool, then returns one reply per attempt.
+
+    Beginner note:
+        The tool runs through ``asyncio.to_thread`` inside the real ``check()``
+        context, exactly like the SDK tool wrapper in ``_default_run``. That
+        proves the request-local transcript record reaches the worker thread,
+        which is what production depends on.
+    """
+
+    def __init__(self, agent: FundamentalAgent, replies: list[str]) -> None:
+        self._agent = agent
+        self._replies = replies
+        self.calls = 0
+
+    async def __call__(
+        self, prompt: str, *, system_prompt: str, model: str, max_turns: int
+    ) -> AgentRunResult:
+        self.calls += 1
+        await asyncio.to_thread(self._agent._read_concall_impl, "DEMO")
+        return AgentRunResult(text=self._replies[self.calls - 1], cost_usd=0.01)
+
+
+def _cache_with_concalls(tmp_path: Path) -> tuple[FundamentalsCache, dict[str, Any]]:
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    data = _sample_screener_data()
+    data["concalls"] = [{"month": "Jul 2026", "transcript_url": "https://www.bseindia.com/t.pdf"}]
+    cache.set_data("DEMO", data)
+    return cache, data
+
+
+def test_unusable_transcript_replaces_concall_paragraph_with_fixed_note(tmp_path, monkeypatch):
+    """A refused or empty transcript must be visible, never silently blank.
+
+    Beginner note:
+        BSE began refusing transcript downloads (HTTP 406), the tool returned
+        "", and the panel hid the concall section, so nobody could tell
+        "unavailable" from "not needed". The model also never read a
+        transcript, so anything it wrote there is speculation and is replaced.
+    """
+    cache, data = _cache_with_concalls(tmp_path)
+    monkeypatch.setattr(fundamental_agent_module, "read_recent_concall_text", lambda concalls: "")
+    agent = FundamentalAgent(model="test-model", cache=cache)
+    agent._runner = _TranscriptCallingRunner(
+        agent, [_verdict_text_with_concall("Management guided for 20% growth.")]
+    )
+
+    verdict = agent.check("DEMO")
+
+    assert verdict.forward_outlook.concall_conclusion == _TRANSCRIPT_UNAVAILABLE_NOTE
+    assert verdict.forward_outlook.announcements_conclusion == "Order book grew sharply."
+    assert verdict.forward_outlook.overall_summary == "Steady compounding expected."
+    cached = cache.get_verdict(
+        "DEMO", agent._cache_model_key("criteria"), _data_date_from_payload(data)
+    )
+    assert cached is not None
+    assert cached["forward_outlook"]["concall_conclusion"] == _TRANSCRIPT_UNAVAILABLE_NOTE
+
+
+def test_transcript_called_before_fetch_counts_as_unusable(tmp_path):
+    """Calling the transcript tool before any company data exists reads nothing."""
+    cache = FundamentalsCache(cache_dir=tmp_path)  # no snapshot cached yet
+    agent = FundamentalAgent(model="test-model", cache=cache)
+    agent._runner = _TranscriptCallingRunner(
+        agent, [_verdict_text_with_concall("Management guided for 20% growth.")]
+    )
+
+    verdict = agent.check("DEMO")
+
+    assert verdict.forward_outlook.concall_conclusion == _TRANSCRIPT_UNAVAILABLE_NOTE
+
+
+def test_usable_transcript_keeps_the_models_concall_paragraph(tmp_path, monkeypatch):
+    cache, _ = _cache_with_concalls(tmp_path)
+    monkeypatch.setattr(
+        fundamental_agent_module,
+        "read_recent_concall_text",
+        lambda concalls: "Management reiterated guidance and highlighted steady demand.",
+    )
+    agent = FundamentalAgent(model="test-model", cache=cache)
+    agent._runner = _TranscriptCallingRunner(agent, [_verdict_text_with_concall("Guidance reiterated.")])
+
+    verdict = agent.check("DEMO")
+
+    assert verdict.forward_outlook.concall_conclusion == "Guidance reiterated."
+
+
+def test_transcript_tool_not_called_leaves_concall_section_empty(tmp_path):
+    """Skipping the optional transcript tool is a model choice, not a failure."""
+    cache, _ = _cache_with_concalls(tmp_path)
+    agent = FundamentalAgent(model="test-model", cache=cache, runner=_FakeRunner(_sample_verdict()))
+
+    verdict = agent.check("DEMO")
+
+    assert verdict.forward_outlook.concall_conclusion == ""
+
+
+def test_transcript_outcome_resets_on_each_parse_retry(tmp_path, monkeypatch):
+    """Only the attempt that produced the accepted verdict decides the note.
+
+    Beginner note:
+        The order matters. A usable transcript on the discarded first attempt
+        must not vouch for the accepted second attempt, which read nothing;
+        without the per-attempt reset the stale "usable" record would hide the
+        note and keep the model's unsupported concall paragraph.
+    """
+    monkeypatch.setenv("SCANNER_AI_MAX_ATTEMPTS", "2")
+    cache, _ = _cache_with_concalls(tmp_path)
+    transcripts = iter(["Management reiterated guidance and highlighted steady demand.", ""])
+    monkeypatch.setattr(
+        fundamental_agent_module, "read_recent_concall_text", lambda concalls: next(transcripts)
+    )
+    agent = FundamentalAgent(model="test-model", cache=cache)
+    runner = _TranscriptCallingRunner(
+        agent, ["not JSON at all", _verdict_text_with_concall("Guidance reiterated.")]
+    )
+    agent._runner = runner
+
+    verdict = agent.check("DEMO")
+
+    assert runner.calls == 2
+    assert verdict.forward_outlook.concall_conclusion == _TRANSCRIPT_UNAVAILABLE_NOTE
 
 
 def test_invalid_cached_fundamental_verdict_is_refreshed(tmp_path):

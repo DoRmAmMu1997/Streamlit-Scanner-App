@@ -31,7 +31,7 @@ flowchart LR
     Streamlit --> App["app.main"]
     App --> Data[("scanner-data:/data")]
     App --> DB["scanner-ui -> postgres"]
-    PG --> PGData[("postgres-data:/var/lib/postgresql/data")]
+    PG --> PGData[("postgres-data:/var/lib/postgresql")]
     App --> Secrets["read-only /app/.streamlit/secrets.toml"]
 ```
 
@@ -49,7 +49,7 @@ port on the developer machine.
 | **HTTP** | Streamlit listens on `0.0.0.0:8501`; Compose publishes `${SCANNER_UI_PORT:-8501}:8501`; the image declares `EXPOSE 8501`. |
 | **Health** | Docker `HEALTHCHECK` probes `http://127.0.0.1:8501/_stcore/health`; Compose waits for `postgres` with `pg_isready` before starting `scanner-ui`. |
 | **Runtime data** | `scanner-data` mounts at `/data`; `DATA_DIR=/data`. |
-| **Database** | `postgres:16-bookworm` stores data in `postgres-data`; `DATABASE_URL=postgresql+psycopg://...@postgres:5432/...`. |
+| **Database** | `postgres:18-bookworm` stores data in `postgres-data` (mounted at `/var/lib/postgresql`; the 18+ image keeps the cluster in `18/docker` beneath it); `DATABASE_URL=postgresql+psycopg://...@postgres:5432/...`. |
 | **Secrets/config** | Root `.env` feeds non-secret and secret env values to Compose; `.streamlit/secrets.toml` is mounted read-only for Google OIDC. |
 | **Daily scan job** | `docker compose run --rm scanner-ui python -m backend.jobs.run_daily_scan --config config/daily_scans.yaml`. |
 | **IPO filing inventory** | `docker compose run --rm scanner-ui python -m backend.jobs.scan_ipo_filings`; the image contains the CLI, but Compose and Render do not schedule it. |
@@ -58,7 +58,7 @@ port on the developer machine.
 
 | Decision | Rationale | Alternative rejected |
 |---|---|---|
-| **`python:3.11-slim-bookworm` base** | 3.11 is the deployment target in CI; slim Debian keeps the runtime small and boring. | Full `python` image (bloat) / Alpine (musl wheel friction). |
+| **`python:3.14-slim-bookworm` base** | 3.14 is the deployment target and the newest CI leg (CI tests 3.12–3.14; a policy test keeps the base image inside the matrix); slim Debian keeps the runtime small and boring. | Full `python` image (bloat) / Alpine (musl wheel friction). |
 | **Install `requirements.txt` constrained by `constraints.txt`, before `COPY . .`** | Runtime-only deps (no dev/optional accelerators); copying deps first lets Docker cache the install layer across source edits. | Install everything / copy source first — slower rebuilds, larger image. |
 | **`streamlit run app.py`, not `python app.py`** | The plain-Python entrypoint does local prefetch-then-launch-browser; a container should become a web server immediately. | `python app.py` — would try to open a browser and run the prefetch wrapper at boot. |
 | **Production + auth-required defaults** | A deployed image and Compose stack fail closed until real prod env + OIDC secrets are present. | Permissive defaults — an exposed container would run unauthenticated. |
@@ -69,7 +69,7 @@ port on the developer machine.
 | **Secrets mounted, not baked** | `.streamlit/secrets.toml` contains Google OIDC credentials and belongs outside Docker layers and build context. | `COPY` secrets into the image — leaks through image history and registries. |
 | **CI image + Compose smoke** | Local machines may lack Docker; CI proves both the image and the Compose stack start on every PR. | Trust docs/tests only — broken Compose could ship unnoticed. |
 | **Render Blueprint reuses the image; disk on web only, cron ephemeral (DEPLOY-003 / DEPLOY-003B)** | A Render persistent disk is **single-attach**, and the only state both processes must share is scan history — which already lives in the managed Postgres. So the disk (candle cache) attaches to the web service, and the cron runs ephemerally, re-fetching candles and writing results to the shared database. DEPLOY-003B keeps the cron deployable by committing `config/daily_scans.yaml`, the deterministic default schedule with AI-heavy jobs disabled. | Give the cron its own disk (a second copy of the cache, still cold daily) / put the cache in object storage (more infra for a first deploy). |
-| **Normalize the auto-wired DATABASE_URL (DEPLOY-003)** | Render's `fromDatabase` emits a bare `postgresql://` URL, which SQLAlchemy maps to the absent psycopg2 driver. `settings._normalize_database_url` rewrites it to the pinned `postgresql+psycopg://` so the Blueprint self-wires and survives DB password rotation. | Hand-paste `postgresql+psycopg://…` in the dashboard — fragile, breaks on rotation. |
+| **Normalize the auto-wired DATABASE_URL (DEPLOY-003)** | Render's `fromDatabase` emits a bare `postgresql://` URL, which SQLAlchemy before 2.1 mapped to the absent psycopg2 driver (and the short `postgres://` form is never accepted). `settings._normalize_database_url` rewrites both to the pinned `postgresql+psycopg://`, so the Blueprint self-wires, survives DB password rotation, and does not depend on SQLAlchemy's default driver. | Hand-paste `postgresql+psycopg://…` in the dashboard — fragile, breaks on rotation. |
 
 ## 5. Failure modes / degradation
 
@@ -148,7 +148,7 @@ port on the developer machine.
   watermark window.
 - **Slim the image** further by adding `tests/`, `docs/`, `.github/` to
   `.dockerignore` (deferred — marginal while the image is small).
-- **Pin the base by digest** (`python:3.11-slim-bookworm@sha256:...`) for fully
+- **Pin the base by digest** (`python:3.14-slim-bookworm@sha256:...`) for fully
   reproducible builds.
 - **Add system libraries** only if a future runtime dep needs them (insert an
   `apt-get install ... && rm -rf /var/lib/apt/lists/*` layer before the pip

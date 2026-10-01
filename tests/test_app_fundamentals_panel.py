@@ -17,6 +17,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from backend.auth.roles import RUN_SCAN, Role
 from backend.fundamentals.fundamental_agent import (
     AgentVerdict,
     CriterionResult,
@@ -144,9 +145,73 @@ def fake_st(monkeypatch):
     return fake
 
 
+@pytest.mark.parametrize("has_cached_verdict", [False, True])
+def test_viewer_cannot_run_analysis_after_retained_session_state(
+    fake_st, monkeypatch, has_cached_verdict: bool
+):
+    """A demoted analyst keeps cached evidence but loses both execution controls.
+
+    Beginner note:
+        Scan results and verdicts survive Streamlit reruns. Previously that
+        retained state exposed the agent buttons even after the trusted role
+        changed to Viewer. Neither a queued click nor an old verdict grants
+        authority to construct an agent; existing evidence must still render.
+    """
+    monkeypatch.setattr(fundamentals_panel, "_is_eligible_for_fundamentals", lambda symbol: True)
+    key = "fundamentals_verdict::INFY::test-model::criteria"
+    if has_cached_verdict:
+        fake_st.session_state[key] = _verdict().model_dump(mode="json")
+    fake_st.button_responses = [True, True]
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Viewer constructed an analysis agent from retained state")
+
+    monkeypatch.setattr(fundamentals_panel, "_get_fundamental_agent", forbidden)
+    fundamentals_panel._render_fundamentals_panel(
+        "INFY", current_role=Role.VIEWER, current_email="demoted@example.com"
+    )
+    assert fake_st.buttons == []
+    assert ("Fundamental rating", "8/10") in fake_st.metrics if has_cached_verdict else not fake_st.metrics
+
+
+@pytest.mark.parametrize("refresh", [False, True])
+def test_action_authorization_precedes_agent_construction(fake_st, monkeypatch, refresh: bool):
+    """Initial and forced analyses recheck the current role at the action boundary.
+
+    Beginner note:
+        Hiding buttons improves the UI but does not protect a stale or forged
+        widget event. This test makes the visible-control check permissive, then
+        denies the action check. The agent factory must never be reached and the
+        guard must receive the trusted current identity and RUN_SCAN capability.
+    """
+    monkeypatch.setattr(fundamentals_panel, "_is_eligible_for_fundamentals", lambda symbol: True)
+    monkeypatch.setattr(fundamentals_panel, "role_has_capability", lambda *args: True, raising=False)
+    if refresh:
+        fake_st.session_state["fundamentals_verdict::INFY::test-model::criteria"] = _verdict().model_dump(mode="json")
+    fake_st.button_responses = [False, True] if refresh else [True]
+    calls: list[tuple[object, object, object]] = []
+
+    def deny(st_module, *, role, capability, email):
+        calls.append((role, capability, email))
+        raise PermissionError("test action denied")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Agent constructed before action authorization")
+
+    monkeypatch.setattr(fundamentals_panel, "require_capability", deny, raising=False)
+    monkeypatch.setattr(fundamentals_panel, "_get_fundamental_agent", forbidden)
+    with pytest.raises(PermissionError, match="test action denied"):
+        fundamentals_panel._render_fundamentals_panel(
+            "INFY", current_role=Role.VIEWER, current_email="demoted@example.com"
+        )
+    assert calls == [(Role.VIEWER, RUN_SCAN, "demoted@example.com")]
+
+
 def test_no_symbol_renders_nothing(fake_st, monkeypatch):
     """The panel stays hidden only when no symbol is selected."""
-    fundamentals_panel._render_fundamentals_panel(None)
+    fundamentals_panel._render_fundamentals_panel(
+        None, current_role=Role.VIEWER, current_email="viewer@example.com"
+    )
     assert fake_st.subheaders == []
     assert fake_st.captions == []
     assert fake_st.buttons == []
@@ -155,7 +220,9 @@ def test_no_symbol_renders_nothing(fake_st, monkeypatch):
 def test_eligible_symbol_gets_criteria_caption(fake_st, monkeypatch):
     """HS45/N100 symbols run criteria mode: nine-criteria caption, no verdict yet."""
     monkeypatch.setattr(fundamentals_panel, "_is_eligible_for_fundamentals", lambda s: True)
-    fundamentals_panel._render_fundamentals_panel("INFY")
+    fundamentals_panel._render_fundamentals_panel(
+        "INFY", current_role=Role.ANALYST, current_email="analyst@example.com"
+    )
     assert fake_st.subheaders == ["Fundamentals"]
     assert any("nine user-defined criteria" in caption for caption in fake_st.captions)
     # Button rendered enabled (no cached verdict) and not clicked -> no verdict block.
@@ -168,7 +235,9 @@ def test_eligible_symbol_gets_criteria_caption(fake_st, monkeypatch):
 def test_ineligible_symbol_gets_universal_caption(fake_st, monkeypatch):
     """Everything else runs universal mode and the caption explains WHY (UI-002)."""
     monkeypatch.setattr(fundamentals_panel, "_is_eligible_for_fundamentals", lambda s: False)
-    fundamentals_panel._render_fundamentals_panel("ZOMATO")
+    fundamentals_panel._render_fundamentals_panel(
+        "ZOMATO", current_role=Role.ANALYST, current_email="analyst@example.com"
+    )
     universal = [caption for caption in fake_st.captions if "Universal mode" in caption]
     assert universal, fake_st.captions
     assert "ZOMATO" in universal[0]
@@ -182,7 +251,9 @@ def test_cached_verdict_disables_primary_and_renders_block(fake_st, monkeypatch)
     key = "fundamentals_verdict::INFY::test-model::criteria"
     fake_st.session_state[key] = _verdict().model_dump(mode="json")
 
-    fundamentals_panel._render_fundamentals_panel("INFY")
+    fundamentals_panel._render_fundamentals_panel(
+        "INFY", current_role=Role.ANALYST, current_email="analyst@example.com"
+    )
 
     primary_label, primary_kwargs = fake_st.buttons[0]
     assert primary_label == "View cached verdict: INFY"
@@ -214,7 +285,9 @@ def test_click_runs_agent_in_mode_and_caches_verdict(fake_st, monkeypatch):
     )
     fake_st.button_responses = [True]  # primary button clicked
 
-    fundamentals_panel._render_fundamentals_panel("ZOMATO")
+    fundamentals_panel._render_fundamentals_panel(
+        "ZOMATO", current_role=Role.ANALYST, current_email="analyst@example.com"
+    )
 
     assert calls == [("ZOMATO", False, "universal")]
     cached = fake_st.session_state["fundamentals_verdict::ZOMATO::test-model::universal"]
@@ -249,7 +322,9 @@ def test_rerun_button_forces_refresh_replaces_cache_and_renders_new_verdict(
     )
     fake_st.button_responses = [False, True]
 
-    fundamentals_panel._render_fundamentals_panel("INFY")
+    fundamentals_panel._render_fundamentals_panel(
+        "INFY", current_role=Role.ANALYST, current_email="analyst@example.com"
+    )
 
     assert calls == [("INFY", True, "criteria")]
     assert fake_st.session_state[key]["rating"] == 9
@@ -270,7 +345,9 @@ def test_usage_limit_shows_gentle_warning_not_error(fake_st, monkeypatch):
     )
     fake_st.button_responses = [True]
 
-    fundamentals_panel._render_fundamentals_panel("INFY")
+    fundamentals_panel._render_fundamentals_panel(
+        "INFY", current_role=Role.ANALYST, current_email="analyst@example.com"
+    )
 
     assert fake_st.warnings and "usage limit" in fake_st.warnings[0]
     assert fake_st.errors == []
@@ -291,7 +368,9 @@ def test_agent_failure_shows_error_and_keeps_session_clean(fake_st, monkeypatch)
     )
     fake_st.button_responses = [True]
 
-    fundamentals_panel._render_fundamentals_panel("INFY")
+    fundamentals_panel._render_fundamentals_panel(
+        "INFY", current_role=Role.ANALYST, current_email="analyst@example.com"
+    )
 
     assert fake_st.errors and "Fundamental check failed" in fake_st.errors[0]
     assert "supersecret123456" not in fake_st.errors[0]
@@ -305,7 +384,9 @@ def test_invalid_cached_verdict_is_cleared_with_error(fake_st, monkeypatch):
     key = "fundamentals_verdict::INFY::test-model::criteria"
     fake_st.session_state[key] = {"rating": "api_key=supersecret123456"}
 
-    fundamentals_panel._render_fundamentals_panel("INFY")
+    fundamentals_panel._render_fundamentals_panel(
+        "INFY", current_role=Role.ANALYST, current_email="analyst@example.com"
+    )
 
     assert key not in fake_st.session_state
     assert fake_st.errors and "could not be parsed" in fake_st.errors[0]

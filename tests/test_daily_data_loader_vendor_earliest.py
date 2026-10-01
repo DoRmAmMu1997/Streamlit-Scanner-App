@@ -599,3 +599,38 @@ def test_listed_late_client_returns_no_rows_after_its_configured_through_date() 
     )
 
     assert frame.empty
+
+
+@pytest.mark.parametrize("existing_marker", [False, True])
+def test_real_normalizer_unknown_date_cannot_create_or_renew_earliest_evidence(tmp_path: Path, existing_marker):
+    """Undateable provider rows cannot certify a precise first trading date.
+
+    Beginner note:
+        Bounds computed by dropping NaT would claim January 7 is the first bar,
+        although the unknown row could belong to January 5. Exercise the real
+        client normalizer and loader, replacing only the SDK network response.
+        Inconclusive evidence must neither create a marker nor rewrite one.
+    """
+    from types import SimpleNamespace
+
+    response = {"status": "success", "data": [
+        {"timestamp": day, "open": 100, "high": 110, "low": 90, "close": 104, "volume": 1000}
+        for day in ("2026-01-07", "bad-date", "2026-01-08")
+    ]}
+    loader = DailyDataLoader(
+        DhanDataClient(raw_client=SimpleNamespace(historical_daily_data=lambda **_: response)),
+        cache_dir=tmp_path, request_delay_seconds=0, today_func=lambda: date(2026, 1, 8),
+    )
+    marker = loader.first_bar_path("TEST", "1")
+    if existing_marker:
+        loader._write_vendor_earliest("TEST", "1", requested_from=date(2026, 1, 5),
+            earliest_available=date(2026, 1, 6), recorded_on=date(2026, 1, 8))
+    before = marker.read_bytes() if marker.exists() else None
+    # The validation-only raw view proves the undateable row reached the loader;
+    # scans get it stripped. Either way the marker below must not move.
+    frame, _ = loader.get_daily_history(
+        {"symbol": "TEST", "security_id": "1"}, date(2026, 1, 5), date(2026, 1, 8),
+        preserve_malformed_rows=True,
+    )
+    assert frame["timestamp"].isna().sum() == 1
+    assert (marker.read_bytes() if marker.exists() else None) == before

@@ -50,6 +50,7 @@ from pydantic import Field, ValidationError, ValidationInfo, field_validator
 # The aliased import keeps this module's call sites unchanged: the shared
 # extractor pulls the AgentVerdict JSON out of the model's final message
 # (AI-006 — one tolerant implementation for all three agents).
+from backend.agent_usage_limits import USAGE_LIMIT_MARKERS, mentions_usage_limit
 from backend.ai_runtime import extract_json_object as _extract_json_object
 from backend.ai_runtime import run_agent_coroutine
 from backend.ai_validation import StrictAIModel, parse_with_retry
@@ -89,6 +90,20 @@ _EVIDENCE_COLLECTOR: contextvars.ContextVar[list[Any] | None] = contextvars.Cont
     "fundamentals_evidence_collector",
     default=None,
 )
+# Request-local record of each transcript-tool call: True when it returned a
+# usable transcript. Like the evidence collector it stays None outside a
+# `check()`, and `check()` clears it on every parse-retry attempt.
+_TRANSCRIPT_ATTEMPTS: contextvars.ContextVar[list[bool] | None] = contextvars.ContextVar(
+    "fundamentals_transcript_attempts",
+    default=None,
+)
+
+# Shown in the verdict's concall section when the transcript tool ran but no
+# transcript could be used (SEC-006). App-owned text, never model output.
+TRANSCRIPT_UNAVAILABLE_NOTE = (
+    "Not available. No concall transcript could be downloaded or read for this "
+    "evaluation, so this outlook relies on announcements and structured data only."
+)
 
 
 def _record_external_evidence(value: Any) -> None:
@@ -97,6 +112,13 @@ def _record_external_evidence(value: Any) -> None:
     if collector is None:
         return
     collector.append(json.loads(json.dumps(value, default=str)))
+
+
+def _record_transcript_attempt(usable: bool) -> None:
+    """Note whether one transcript-tool call produced text the model could read."""
+    attempts = _TRANSCRIPT_ATTEMPTS.get()
+    if attempts is not None:
+        attempts.append(usable)
 
 
 # ---------------------------------------------------------------------------
@@ -152,23 +174,27 @@ class _FundamentalEvidenceError(Exception):
         self.error_type = error_type
 
 
-# Substrings that mark a usage/limit failure in *unstructured* CLI error text.
-# The structured signals (RateLimitEvent / AssistantMessage.error) are checked
-# first; this list is only the fallback for raw process-error messages.
-_USAGE_LIMIT_MARKERS = (
-    "rate limit",
-    "usage limit",
-    "limit reached",
-    "out of credit",
-    "credit balance",
-    "quota",
-)
+# The unstructured-text fallback lives in one shared leaf so all four SDK
+# runners (including IPO extraction) classify refusals identically. The
+# private names are kept because the technical and 67 agents import them here.
+_USAGE_LIMIT_MARKERS = USAGE_LIMIT_MARKERS
+_mentions_usage_limit = mentions_usage_limit
 
 
-def _mentions_usage_limit(*texts: str | None) -> bool:
-    """True if any of `texts` reads like a usage/credit-limit message."""
-    haystack = " ".join(text for text in texts if text).lower()
-    return any(marker in haystack for marker in _USAGE_LIMIT_MARKERS)
+def _require_terminal_result(result_message: Any, agent_label: str) -> None:
+    """Refuse text from an SDK stream that ended without a terminal result.
+
+    Beginner note:
+        A stream can carry polished JSON in an assistant message and then end
+        (CLI crash, dropped connection) without the ``ResultMessage`` that
+        confirms the run finished. That text is unconfirmed, so it must not
+        become a verdict. Raising the ordinary agent error keeps the existing
+        retry policy: a transient crash gets another attempt.
+    """
+    if result_message is None:
+        raise FundamentalsAgentError(
+            f"The {agent_label} run ended without a terminal result; its output is unconfirmed."
+        )
 
 
 def _format_usage_limit_message(resets_at: int | None) -> str:
@@ -218,7 +244,9 @@ class ForwardOutlook(StrictAIModel):
     - `concall_conclusion` is sourced from the most recent quarterly
       Concall transcript and stays empty when the agent did not call the
       `read_recent_concall_transcript` tool — the agent must NOT speculate
-      about transcript contents it never read.
+      about transcript contents it never read. When the tool ran but got no
+      usable transcript, `check()` overwrites it with the app-owned
+      `TRANSCRIPT_UNAVAILABLE_NOTE` (SEC-006), so that text is not model output.
     - `overall_summary` is the agent's integrated view that ties both
       signals plus broader sector knowledge into a forward projection.
     """
@@ -867,12 +895,14 @@ class FundamentalAgent:
         # or announcement text.
         normalized = (requested_symbol or _REQUESTED_SYMBOL.get() or symbol or "").strip().upper()
         if not normalized:
+            _record_transcript_attempt(False)
             return ""
 
         data = self._cache.get_data(normalized)
         if data is None:
             # The model called the transcript tool before fetch_company_data —
             # signal that so it knows to call fetch first.
+            _record_transcript_attempt(False)
             return "[no company data cached yet; call fetch_company_data first]"
 
         concalls = data.get("concalls") or []
@@ -882,7 +912,9 @@ class FundamentalAgent:
             logger.warning(
                 "Concall transcript fetch failed for %s", normalized, exc_info=True
             )
+            _record_transcript_attempt(False)
             return ""
+        _record_transcript_attempt(bool(transcript.strip()))
         return self._quarantine_text(transcript, normalized)
 
     # ------------------------------------------------------------------
@@ -962,6 +994,10 @@ class FundamentalAgent:
         )
 
         options_kwargs: dict[str, Any] = {
+            # Empty built-in tools is a separate SDK boundary from allowed_tools.
+            # The latter keeps our MCP names callable; this prevents SDK defaults
+            # from also loading filesystem, shell, or other built-in capabilities.
+            "tools": [],
             "model": model,
             "system_prompt": system_prompt,
             "max_turns": max_turns,
@@ -978,6 +1014,11 @@ class FundamentalAgent:
             # Do not load the user's Claude Code project/user settings or any
             # CLAUDE.md — this agent's behaviour comes entirely from our prompt.
             "setting_sources": [],
+            # Beginner note: hand the prompt to the CLI exactly as written.
+            # Otherwise the CLI itself would expand an "@path" mention in text
+            # we interpolate into that file's contents (or run a leading
+            # "/command"), before the tool allowlist above is ever consulted.
+            "verbatim_prompts": True,
         }
         if self._fast_mode:
             if ThinkingConfigDisabled is None:
@@ -1031,6 +1072,7 @@ class FundamentalAgent:
         # Translate recognised conditions into typed errors the UI can react to.
         if usage_limit is not None:
             raise usage_limit
+        _require_terminal_result(result_message, "Check Fundamentals agent")
         if result_message is not None and result_message.is_error:
             if getattr(result_message, "api_error_status", None) == 429:
                 raise FundamentalsUsageLimitError()
@@ -1090,6 +1132,10 @@ class FundamentalAgent:
         # exposing the hostile text to the model.
         evidence_collector: list[Any] = []
         collector_token = _EVIDENCE_COLLECTOR.set(evidence_collector)
+        # Whether each transcript-tool call yielded a usable transcript, so an
+        # unusable one is shown in the verdict instead of silently left blank.
+        transcript_attempts: list[bool] = []
+        transcript_token = _TRANSCRIPT_ATTEMPTS.set(transcript_attempts)
 
         try:
             # 1. Try the verdict cache first (free re-clicks on the same day).
@@ -1128,6 +1174,7 @@ class FundamentalAgent:
                 # SDK / CLI / usage-limit failures here propagate (not retried);
                 # only malformed AI JSON is retried by parse_with_retry below.
                 evidence_collector.clear()
+                transcript_attempts.clear()
                 run_result = self._run_sync(
                     runner(
                         prompt,
@@ -1171,9 +1218,23 @@ class FundamentalAgent:
                     f"policy [{exc.error_type}]."
                 ) from None
         finally:
+            _TRANSCRIPT_ATTEMPTS.reset(transcript_token)
             _EVIDENCE_COLLECTOR.reset(collector_token)
             _FORCE_REFRESH.reset(refresh_token)
             _REQUESTED_SYMBOL.reset(symbol_token)
+
+        # Beginner note: when the transcript tool ran but nothing usable came
+        # back (none listed, host refused, unreadable PDF), the model never read
+        # a transcript, so any concall paragraph it wrote is speculation. Replace
+        # it with fixed app-owned text before caching, so the UI shows the gap.
+        if transcript_attempts and not any(transcript_attempts):
+            verdict = verdict.model_copy(
+                update={
+                    "forward_outlook": verdict.forward_outlook.model_copy(
+                        update={"concall_conclusion": TRANSCRIPT_UNAVAILABLE_NOTE}
+                    )
+                }
+            )
 
         # 4. Persist the verdict to the cache so the next click is instant.
         # Cache key includes mode plus fast-mode state so each setting reuses

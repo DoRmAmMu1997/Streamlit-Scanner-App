@@ -1127,6 +1127,95 @@ def test_main_passes_authenticated_email_as_scan_trigger(monkeypatch):
     assert captured["triggered_by"] == "ui:sunny@example.com"
 
 
+def test_main_renders_retained_scan_with_current_viewer_identity(monkeypatch):
+    """A demotion or fail-closed role lookup keeps results but revokes AI actions.
+
+    Beginner note:
+        ``scan_cache`` belongs to the browser session, so an Analyst can run a
+        scan and then become a Viewer before the next Streamlit rerun. The old
+        rows remain useful read-only evidence. This test proves the app passes
+        the freshly resolved Viewer identity beside that retained payload;
+        downstream renderers must never infer authority from who created it.
+    """
+    selected = ScreenerDefinition(
+        key="demo",
+        name="Demo",
+        description="Test-only screener",
+        universe="demo_universe",
+        timeframe="daily",
+        lookback_days=30,
+        default_params={},
+        module_name="screeners.demo",
+        run=lambda *_args, **_kwargs: pd.DataFrame(),
+        requires_candles=False,
+    )
+    retained_cache = {"screener_key": selected.key, "results": pd.DataFrame()}
+    rendered: list[tuple[object, object, dict[str, object]]] = []
+
+    monkeypatch.setattr(
+        app,
+        "get_settings",
+        lambda: get_settings(env={"AUTH_REQUIRED": "true"}),
+    )
+    monkeypatch.setattr(app, "ensure_project_dirs", lambda: None)
+    monkeypatch.setattr(app, "_configure_logging", lambda: None)
+    monkeypatch.setattr(app, "ensure_database_schema", lambda: True)
+    monkeypatch.setattr(
+        app,
+        "require_authorized_user",
+        lambda _st: app.AuthenticatedUser(
+            email="demoted@example.com",
+            name="Demoted analyst",
+            role=Role.VIEWER,
+        ),
+    )
+    monkeypatch.setattr(app, "discover_screeners", lambda: {selected.key: selected})
+    monkeypatch.setattr(app, "_render_sidebar", lambda _screeners, **_kwargs: selected)
+    monkeypatch.setattr(
+        app,
+        "_execute_screener",
+        lambda *_args, **_kwargs: pytest.fail("Viewer rerun executed a new scan"),
+    )
+    monkeypatch.setattr(
+        app,
+        "_render_scan_output",
+        lambda selected_arg, cache_arg, **kwargs: rendered.append(
+            (selected_arg, cache_arg, kwargs)
+        ),
+    )
+    session_state = {"pending_run": False, "scan_cache": retained_cache}
+    monkeypatch.setattr(
+        app,
+        "st",
+        SimpleNamespace(
+            session_state=session_state,
+            set_page_config=lambda **_kwargs: None,
+            markdown=lambda *_args, **_kwargs: None,
+            title=lambda *_args, **_kwargs: None,
+            caption=lambda *_args, **_kwargs: None,
+            subheader=lambda *_args, **_kwargs: None,
+            write=lambda *_args, **_kwargs: None,
+            radio=lambda *_args, **_kwargs: "Scanner",
+            error=lambda message: (_ for _ in ()).throw(AssertionError(message)),
+        ),
+    )
+
+    app.main()
+
+    assert session_state["scan_cache"] is retained_cache
+    assert rendered == [
+        (
+            selected,
+            retained_cache,
+            {
+                "can_export": False,
+                "current_role": Role.VIEWER,
+                "current_email": "demoted@example.com",
+            },
+        )
+    ]
+
+
 def test_main_stops_before_runtime_dirs_when_production_settings_are_invalid(monkeypatch):
     """Misconfigured production should fail before local fallback folders appear."""
     errors: list[str] = []

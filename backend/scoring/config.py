@@ -16,7 +16,7 @@ from typing import Any
 
 import yaml
 
-DEFAULT_MODEL_VERSION = "rank-1.0"
+DEFAULT_MODEL_VERSION = "rank-1.1"
 DEFAULT_WEIGHTS: dict[str, float] = {
     "technical": 0.45,
     "risk": 0.25,

@@ -29,6 +29,10 @@ Dependencies/all_instrument*.csv
 data/cache/
 data/ipo/
 data/universes/*
+# DEPLOY-005: the pinned Hemant symbol lists must reach the image, or
+# refresh_universe_files() cannot rebuild those universes in a container.
+!data/universes/sources/
+!data/universes/sources/*.csv
 !data/universes/hemant_super_45.csv
 !data/universes/hemant_good_45.csv
 !data/universes/hemant_good_200.csv

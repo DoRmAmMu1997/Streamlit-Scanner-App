@@ -39,7 +39,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, TextIO
+from typing import TYPE_CHECKING, Any, TextIO
 
 import pandas as pd
 
@@ -72,6 +72,11 @@ from backend.security import (
 from backend.storage.database import ensure_database_schema, session_scope
 from backend.universe_loader import load_universe
 
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
+
+    from backend.data_quality.universe_health import UniverseHealthReport
+
 logger = logging.getLogger(__name__)
 
 
@@ -97,6 +102,7 @@ UniverseLoader = Callable[[str], pd.DataFrame]
 DataClientFactory = Callable[[], Any]
 DataLoaderFactory = Callable[[], Any]
 ScanRunner = Callable[..., ScanRunResult]
+UniverseHealthChecker = Callable[["Session"], "UniverseHealthReport"]
 
 
 @dataclass(frozen=True)
@@ -145,6 +151,10 @@ class DailyScanSummary:
     """
 
     outcomes: list[DailyScanOutcome]
+    # OBS-004: one line per universe that lost mapped symbols since the previous
+    # run. Defaulted so every existing construction (including the pre-scan
+    # failure paths below) keeps working unchanged.
+    universe_warnings: tuple[str, ...] = ()
 
     @property
     def exit_code(self) -> int:
@@ -166,6 +176,7 @@ def run_daily_scan(
     data_loader_factory: DataLoaderFactory | None = None,
     scan_runner: ScanRunner = run_scan,
     session_factory: SessionFactory = session_scope,
+    universe_health_checker: UniverseHealthChecker | None = None,
     today: date | None = None,
     output: TextIO | None = None,
 ) -> DailyScanSummary:
@@ -184,6 +195,11 @@ def run_daily_scan(
        screener's configured default) and build a Dhan-backed data loader.
     5. Delegate the actual scan/persistence lifecycle to ``run_scan``.
     6. Print one line per screener and return one summary exit code.
+
+    ``universe_health_checker`` is injectable for the same isolation reason as
+    the scanner dependencies above. Tests using a stub scanner pair it with a
+    test-bound session factory, so merely exercising orchestration can never
+    read or write the configured production database.
     """
     out = output or sys.stdout
     run_date = today or date.today()
@@ -257,6 +273,15 @@ def run_daily_scan(
         flush=True,
     )
 
+    # OBS-004: check mapping health BEFORE scanning, so an operator reading the
+    # log sees "this run covered a universe that just lost two symbols" rather
+    # than discovering it after the results look thin.
+    universe_warnings = _check_universe_health(
+        session_factory,
+        out,
+        health_checker=universe_health_checker,
+    )
+
     outcomes: list[DailyScanOutcome] = []
     for entry in enabled_entries:
         definition = registry.get(entry.screener_key)
@@ -287,12 +312,55 @@ def run_daily_scan(
         outcomes.append(outcome)
         _print_outcome(out, outcome)
 
-    summary = DailyScanSummary(outcomes=outcomes)
+    summary = DailyScanSummary(outcomes=outcomes, universe_warnings=universe_warnings)
     if summary.exit_code:
         print("[daily-scan] Finished with fatal failure(s).", file=out, flush=True)
     else:
         print("[daily-scan] Finished successfully.", file=out, flush=True)
     return summary
+
+
+def _check_universe_health(
+    session_factory: SessionFactory,
+    out: TextIO,
+    *,
+    health_checker: UniverseHealthChecker | None = None,
+) -> tuple[str, ...]:
+    """Best-effort OBS-004 mapping-health check; never affects the exit code.
+
+    Returns one human-readable line per universe that lost mapped symbols since
+    the previous recorded check, ready to paste into the daily alert.
+
+    Beginner note:
+    This owns the durable baseline (it writes today's snapshot), which is why the
+    Streamlit prefetch only *logs* health and does not record it - if two writers
+    moved the baseline, a symbol that dropped out in the morning would already be
+    "known" by the evening and the alert would never fire.
+
+    ``session_factory`` owns the transaction boundary: it commits when this
+    block exits normally and rolls back when the checker raises. Calling
+    ``session.commit()`` here would duplicate that ownership and violate the
+    repository-layer rule that keeps transaction policy at one outer boundary.
+
+    Wrapped in a broad except on purpose: a universe CSV that will not parse is a
+    reason to warn, never a reason to skip the night's scan.
+    """
+    try:
+        if health_checker is None:
+            from backend.data_quality.universe_health import check_universe_health
+
+            health_checker = check_universe_health
+
+        with session_factory() as session:
+            report = health_checker(session)
+    except Exception:  # noqa: BLE001 - a health check must never fail the job
+        logger.warning("universe health check failed", exc_info=True)
+        return ()
+
+    warnings = tuple(regression.describe() for regression in report.regressions)
+    for warning in warnings:
+        print(f"[daily-scan] Universe mapping regressed - {warning}", file=out, flush=True)
+    return warnings
 
 
 def _send_scan_notification(summary: DailyScanSummary) -> None:

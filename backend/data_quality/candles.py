@@ -113,6 +113,7 @@ def validate_candles(
     expected_latest_date: date | None = None,
     required_columns: Collection[str] | None = None,
     stale_tolerance_days: int = STALE_LATEST_TOLERANCE_DAYS,
+    allow_identical_daily_duplicates: bool = False,
 ) -> CandleQualityReport:
     """Validate a daily OHLCV frame without mutating caller-owned data.
 
@@ -137,6 +138,17 @@ def validate_candles(
             on a non-trading day (or before the vendor publishes the current EOD
             bar) does not flag every symbol as stale; pass ``0`` for an exact
             comparison.
+        allow_identical_daily_duplicates: when true, repeated rows for one date
+            are accepted only if every required numeric value is identical.
+            Conflicting rows remain fatal. This is useful at calculation
+            boundaries that validate raw vendor rows before a later canonical
+            deduplication step.
+
+    Beginner note:
+        The duplicate option does not make conflicting prices acceptable. It
+        only permits two byte-level source rows that describe the same OHLC
+        facts. Validation still runs before either row can be discarded, so a
+        second row with a different open, high, low, or close is never hidden.
     """
     # Normalize the label once so every finding message reads the same, even if
     # the caller passed "  reliance " or an empty string.
@@ -213,6 +225,11 @@ def validate_candles(
     # waiting to happen (e.g. a doubled volume), so it is fatal. ``keep=False``
     # flags *every* member of a duplicate group, not just the repeats.
     duplicate_mask = parsed_dates.duplicated(keep=False)
+    if duplicate_mask.any() and allow_identical_daily_duplicates:
+        duplicate_mask = _conflicting_duplicate_mask(
+            parsed_dates,
+            {column: pd.to_numeric(df[column], errors="coerce") for column in required},
+        )
     if duplicate_mask.any():
         findings.append(
             DataQualityFinding(
@@ -250,7 +267,7 @@ def validate_candles(
     low = numeric["low"]
     open_ = numeric["open"]
     close = numeric["close"]
-    volume = numeric["volume"]
+    volume = numeric.get("volume")
 
     # A bar where high < low is physically impossible (the high is the day's peak).
     high_below_low = high < low
@@ -291,8 +308,8 @@ def validate_candles(
             )
         )
 
-    negative_volume = volume < 0
-    if negative_volume.any():
+    negative_volume = volume < 0 if volume is not None else None
+    if negative_volume is not None and negative_volume.any():
         findings.append(
             DataQualityFinding(
                 code="NEGATIVE_VOLUME",
@@ -329,6 +346,28 @@ def validate_candles(
     findings.extend(_calendar_gap_findings(symbol_label, parsed_dates))
     findings.extend(_price_gap_findings(symbol_label, parsed_dates, open_, close))
     return _report(symbol_label, row_count, latest_date, findings)
+
+
+def _conflicting_duplicate_mask(
+    parsed_dates: pd.Series,
+    numeric: dict[str, pd.Series],
+) -> pd.Series:
+    """Return rows whose date is duplicated with different numeric facts.
+
+    Beginner note:
+    A later normalizer may safely collapse two identical vendor rows. It must
+    never choose arbitrarily between two different daily candles, because that
+    choice changes entry, exit, and excursion results. This helper marks every
+    row in only those conflicting date groups.
+    """
+    values = pd.DataFrame(numeric, index=parsed_dates.index).copy()
+    values["_date"] = parsed_dates
+    conflicting_dates = {
+        day
+        for day, group in values.groupby("_date", dropna=False)
+        if len(group.index) > 1 and len(group.drop(columns="_date").drop_duplicates().index) > 1
+    }
+    return parsed_dates.isin(conflicting_dates)
 
 
 def _extract_dates(df: pd.DataFrame) -> pd.Series | None:

@@ -52,7 +52,7 @@ QUAL_007_IGNORE_ERRORS_BASELINE = frozenset(
 )
 CI_COMMANDS = (
     "python -m pre_commit validate-config .pre-commit-config.yaml",
-    "python -m pytest -q --cov=backend --cov=screeners --cov=ui --cov-fail-under=89",
+    "python -m pytest -q --cov=app --cov=backend --cov=screeners --cov=ui --cov-fail-under=89",
     "python -m compileall -q app.py backend screeners ui tests",
     "python -m ruff check app.py backend screeners ui Dependencies tests",
     "python -m mypy",
@@ -62,6 +62,9 @@ CI_COMMANDS = (
     "docker compose config",
     "docker compose up --build --wait --wait-timeout 180",
     "docker compose down --volumes --remove-orphans",
+)
+DEVELOPMENT_TOOLS = frozenset(
+    {"pytest", "pytest-cov", "ruff", "bandit", "pip-audit", "mypy", "pre-commit"}
 )
 
 
@@ -114,6 +117,55 @@ def test_qual_007_mypy_ignore_errors_guard_rejects_new_modules():
         _assert_qual_007_ignore_errors_only_shrinks(expanded)
 
 
+def _ruff_pin_from_constraints() -> str:
+    """Return the exact ruff version CI installs, e.g. ``0.16.3``."""
+    text = (ROOT / "constraints.txt").read_text(encoding="utf-8")
+    match = re.search(r"^ruff==(?P<version>[^\s#]+)\s*$", text, flags=re.MULTILINE)
+    assert match is not None, "constraints.txt must pin ruff with an exact =="
+    return match.group("version")
+
+
+def _ruff_pre_commit_rev(config: dict) -> str:
+    """Return the rev the local ruff hook is pinned to, without its ``v``."""
+    repos = [
+        repository
+        for repository in config["repos"]
+        if repository["repo"].rstrip("/").endswith("astral-sh/ruff-pre-commit")
+    ]
+    assert len(repos) == 1, "expected exactly one ruff-pre-commit repo entry"
+    rev = str(repos[0]["rev"])
+    assert rev.startswith("v"), f"expected a vX.Y.Z tag, got {rev!r}"
+    return rev[1:]
+
+
+def test_pre_commit_ruff_rev_matches_the_constraints_pin():
+    """The commit hook must lint with the same ruff version CI installs.
+
+    Beginner note (QUAL-008):
+    `.pre-commit-config.yaml` pins its own copy of ruff by git tag, while CI
+    installs the `ruff==` pin from `constraints.txt`. Nothing tied the two
+    together, and they drifted a whole minor version apart (hook v0.15.1 vs
+    CI 0.16.3) - so the hook could pass code that CI then rejected, which
+    defeats the point of having a commit-time check at all. The config file
+    already asked for this invariant in a comment; this test is what actually
+    holds it.
+    """
+    config = yaml.safe_load((ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
+
+    assert _ruff_pre_commit_rev(config) == _ruff_pin_from_constraints()
+
+
+def test_pre_commit_ruff_rev_guard_rejects_a_drifted_pin():
+    """Prove the guard fails when the hook and the constraints pin disagree."""
+    config = yaml.safe_load((ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
+    drifted = copy.deepcopy(config)
+    for repository in drifted["repos"]:
+        if repository["repo"].rstrip("/").endswith("astral-sh/ruff-pre-commit"):
+            repository["rev"] = "v0.0.1"
+
+    assert _ruff_pre_commit_rev(drifted) != _ruff_pin_from_constraints()
+
+
 def test_ci_workflow_runs_quality_and_dependency_security_checks():
     """CI should run the same checks maintainers run locally."""
     workflow = ROOT / ".github" / "workflows" / "quality-and-security.yml"
@@ -121,10 +173,10 @@ def test_ci_workflow_runs_quality_and_dependency_security_checks():
 
     assert "permissions:\n  contents: read" in text
     assert "pip install -r requirements.txt -r requirements-dev.txt -c constraints.txt" in text
-    assert 'python-version: ["3.11", "3.12"]' in text
+    assert 'python-version: ["3.12", "3.13", "3.14"]' in text
     assert "python -m pre_commit validate-config .pre-commit-config.yaml" in text
     assert (
-        "python -m pytest -q --cov=backend --cov=screeners --cov=ui "
+        "python -m pytest -q --cov=app --cov=backend --cov=screeners --cov=ui "
         "--cov-fail-under=89"
         in text
     )
@@ -140,6 +192,92 @@ def test_ci_workflow_runs_quality_and_dependency_security_checks():
     assert "docker compose up --build --wait --wait-timeout 180" in text
     assert "docker compose down --volumes --remove-orphans" in text
     assert "python -m pip_audit -r requirements.txt -r requirements-dev.txt" not in text
+
+
+def test_deployed_python_is_tested_and_static_checks_target_the_oldest_leg():
+    """Deploy only an interpreter CI tests, and lint/type-check for the oldest one.
+
+    Beginner note:
+    The Dockerfile decides which Python production runs, the CI matrix decides
+    which Pythons the gates prove, and Ruff/mypy decide which syntax is allowed.
+    A Dependabot base-image bump once moved production to 3.14 while CI stopped
+    at 3.13. Tying the three together makes that an explicit, reviewed change:
+    the deployed version must be in the matrix, and Ruff's ``target-version``
+    and mypy's ``python_version`` must match the matrix's oldest version so code
+    never uses syntax an older supported interpreter cannot run.
+    """
+    workflow = (ROOT / ".github" / "workflows" / "quality-and-security.yml").read_text(encoding="utf-8")
+    matrix_match = re.search(r"python-version: \[([^\]]*)\]", workflow)
+    assert matrix_match is not None
+    matrix = [version.strip().strip('"') for version in matrix_match.group(1).split(",")]
+
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    base_match = re.search(r"^FROM python:(\d+\.\d+)-", dockerfile, flags=re.MULTILINE)
+    assert base_match is not None
+    assert base_match.group(1) in matrix
+
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        config = tomllib.load(handle)
+    oldest = min(matrix, key=lambda version: tuple(int(part) for part in version.split(".")))
+    assert config["tool"]["mypy"]["python_version"] == oldest
+    assert config["tool"]["ruff"]["target-version"] == "py" + oldest.replace(".", "")
+
+
+RUFF_PRE_COMMIT_HOOK = "https://github.com/astral-sh/ruff-pre-commit"
+
+
+def _dependabot_updates() -> dict[str, dict]:
+    """Return the Dependabot ``updates`` entries keyed by package ecosystem."""
+    config = yaml.safe_load((ROOT / ".github" / "dependabot.yml").read_text(encoding="utf-8"))
+    assert config["version"] == 2
+    updates = {entry["package-ecosystem"]: entry for entry in config["updates"]}
+    assert len(updates) == len(config["updates"]), "expected one entry per ecosystem"
+    return updates
+
+
+def test_dependabot_watches_every_pinned_dependency_source():
+    """Every file that pins a dependency must be kept current automatically.
+
+    Beginner note:
+    ``constraints.txt`` holds the Python pins CI installs, the workflow pins
+    GitHub Actions, ``.pre-commit-config.yaml`` pins hook revisions, and the
+    Dockerfile/Compose file pin container images. Dependabot only bumps the
+    ecosystems it is told about, so dropping one would let that source go stale
+    silently.
+    """
+    updates = _dependabot_updates()
+
+    assert set(updates) == {"pip", "github-actions", "pre-commit", "docker", "docker-compose"}
+    for ecosystem, entry in updates.items():
+        assert entry["directory"] == "/", ecosystem
+        assert entry["schedule"]["interval"] == "weekly", ecosystem
+
+
+def test_dependabot_groups_routine_bumps_but_isolates_majors_and_ruff():
+    """Weekly batches must not hide breaking bumps or break the ruff pin pair.
+
+    Beginner note:
+    Grouping minor/patch bumps keeps review load low, but a major upgrade in the
+    batch could fail CI and block every other bump, so majors get their own PR.
+    Ruff is pinned twice (``constraints.txt`` and the pre-commit hook rev) and
+    ``test_pre_commit_ruff_rev_matches_the_constraints_pin`` requires the two
+    to agree. Dependabot bumps each ecosystem separately, so ruff gets its own
+    pip PR (the sync test then names the hook rev to bump in that same PR) and
+    the pre-commit ecosystem skips the ruff hook instead of opening a second,
+    always-failing PR.
+    """
+    updates = _dependabot_updates()
+
+    for ecosystem in ("pip", "github-actions", "pre-commit"):
+        groups = updates[ecosystem].get("groups", {})
+        assert groups, f"{ecosystem} should batch routine bumps"
+        for group in groups.values():
+            assert set(group["update-types"]) <= {"minor", "patch"}, ecosystem
+
+    assert all("ruff" in group.get("exclude-patterns", []) for group in updates["pip"]["groups"].values())
+    assert not any(rule.get("dependency-name") == "ruff" for rule in updates["pip"].get("ignore", []))
+    ignored_hooks = {rule["dependency-name"] for rule in updates["pre-commit"].get("ignore", [])}
+    assert RUFF_PRE_COMMIT_HOOK in ignored_hooks
 
 
 def test_pre_commit_configuration_is_non_rewriting():
@@ -180,6 +318,7 @@ def test_constraints_pin_direct_runtime_and_developer_dependencies():
         "psycopg",
         "psycopg-binary",
         "requests",
+        "urllib3",
         "python-dotenv",
         "dhanhq",
         "pyyaml",
@@ -246,6 +385,223 @@ def test_runtime_requirements_install_the_documented_postgres_driver():
     assert re.search(r"^psycopg\[binary\]$", text, flags=re.IGNORECASE | re.MULTILINE)
 
 
+def test_developer_tools_stay_out_of_the_runtime_requirements():
+    """Verification tooling must not ship inside the production image.
+
+    Beginner note (SEC-004):
+    `Dockerfile` installs `requirements.txt` and nothing else, so every name in
+    that file lands in the deployed container. `pytest` was listed there under a
+    "Test runner." heading as well as in `requirements-dev.txt`, so the test
+    runner and its dependency tree were shipped to production for no benefit.
+    Each of the names below has a legitimate home in `requirements-dev.txt`; the
+    point of this guard is that they only have one home.
+    """
+    runtime = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    dev = (ROOT / "requirements-dev.txt").read_text(encoding="utf-8")
+
+    _assert_developer_tools_stay_out_of_runtime_requirements(runtime, dev)
+
+
+def _normalize_requirement_name(name: str) -> str:
+    """Return the canonical spelling used when comparing requirement names.
+
+    Beginner note: Python package names are case-insensitive, and packaging
+    treats runs of dots, hyphens, and underscores as equivalent. Canonicalizing
+    them before comparison prevents a policy bypass through cosmetic spelling.
+
+    Args:
+        name: The project name token extracted from a requirements line.
+
+    Returns:
+        A case-folded name with equivalent separators represented as hyphens.
+    """
+    return re.sub(r"[-_.]+", "-", name).casefold()
+
+
+def _requirement_names(text: str) -> set[str]:
+    """Extract normalized project names from simple requirements-file text.
+
+    Beginner note: this guard only needs the project token, not dependency
+    resolution. Removing comments and environment markers keeps the check small
+    while still covering the requirement forms maintainers use. The leading-name
+    match naturally leaves extras and version syntax out of the name; lines
+    beginning with an option are ignored because they do not name a project.
+
+    Args:
+        text: Requirements-file contents to inspect.
+
+    Returns:
+        The normalized project names found in the supplied text.
+    """
+    names: set[str] = set()
+    for raw_line in text.splitlines():
+        line = raw_line.split("#", maxsplit=1)[0].strip()
+        if not line or line.startswith("-"):
+            continue
+        line = line.split(";", maxsplit=1)[0].strip()
+        match = re.match(r"([A-Za-z0-9][A-Za-z0-9._-]*)", line)
+        if match:
+            names.add(_normalize_requirement_name(match.group(1)))
+    return names
+
+
+def _assert_developer_tools_stay_out_of_runtime_requirements(
+    runtime: str, dev: str
+) -> None:
+    """Assert that developer tools have only a development-requirements home.
+
+    Beginner note: ``Dockerfile`` installs the runtime file into production,
+    while CI installs both files. Checking both sides catches accidentally
+    shipping a test tool and accidentally deleting the tool from CI at once.
+
+    Args:
+        runtime: Contents of the production requirements file.
+        dev: Contents of the development requirements file.
+
+    Raises:
+        AssertionError: If a development tool is in the runtime set or absent
+            from the development set.
+    """
+    runtime_names = _requirement_names(runtime)
+    dev_names = _requirement_names(dev)
+    for name in DEVELOPMENT_TOOLS:
+        normalized_name = _normalize_requirement_name(name)
+        assert normalized_name not in runtime_names, (
+            f"{name} is a developer tool and must not be in requirements.txt"
+        )
+        assert normalized_name in dev_names, (
+            f"{name} should still be declared in requirements-dev.txt"
+        )
+
+
+@pytest.mark.parametrize(
+    "runtime_line",
+    (
+        "pytest==9.1.1",
+        "pytest # inline comment",
+        'pytest ; python_version >= "3.11"',
+        "pytest_cov",
+        "pytest.cov",
+        "pytest[extra]>=9",
+    ),
+)
+def test_developer_tool_guard_rejects_requirement_syntax_variants(
+    monkeypatch: pytest.MonkeyPatch, runtime_line: str
+):
+    """The guard must reject tool declarations hidden by requirement syntax.
+
+    Beginner note: the original guard matched an entire line such as exactly
+    ``pytest``. A version, comment, marker, extra, or alternate separator made
+    the same project invisible to that check, allowing it back into production.
+    """
+    runtime = f"requests\n{runtime_line}\npsycopg[binary]\n"
+    dev = "pytest\npytest-cov\nruff\nbandit\npip-audit\nmypy\npre-commit\n"
+
+    with pytest.raises(AssertionError, match="pytest"):
+        _run_developer_tool_guard_with_sources(monkeypatch, runtime, dev)
+
+
+def test_developer_tool_guard_ignores_benign_runtime_requirements(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Runtime packages must not be mistaken for development tooling.
+
+    Beginner note: a parser that flags every requirement, or matches partial
+    names, could reject legitimate runtime packages and hide the real policy
+    failure. This case proves ordinary runtime dependencies remain allowed.
+    """
+    runtime = "requests>=2\nPyYAML\npsycopg[binary]\n"
+    dev = "pytest\npytest-cov\nruff\nbandit\npip-audit\nmypy\npre-commit\n"
+
+    _run_developer_tool_guard_with_sources(monkeypatch, runtime, dev)
+
+
+def test_developer_tool_guard_accepts_requirement_syntax_in_development_file(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The presence check accepts normal requirement syntax in the dev file.
+
+    Beginner note: the policy has two halves. It must reject tools in the image
+    inputs and still recognize them when CI declares versions, extras, markers,
+    comments, or equivalent project-name spelling in its own input.
+    """
+    runtime = "requests>=2\nPyYAML\npsycopg[binary]\n"
+    dev = (
+        "pytest==9.1.1 # pinned test runner\n"
+        'pytest.cov[plugin]>=7 ; python_version >= "3.11"\n'
+        "Ruff\n"
+        'BANDIT ; python_version >= "3.11"\n'
+        "pip_audit[security]\n"
+        "MyPy # static types\n"
+        "pre.commit\n"
+    )
+
+    _run_developer_tool_guard_with_sources(monkeypatch, runtime, dev)
+
+
+def test_developer_tool_guard_requires_each_tool_in_development_requirements(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Removing a tool from the development file must fail the policy guard.
+
+    Beginner note: a clean runtime file alone does not prove CI is configured;
+    silently dropping a tool from the development file would make its checks
+    unavailable. The missing ``mypy`` declaration must therefore fail loudly.
+    """
+    runtime = "requests\n"
+    dev = "pytest\npytest-cov\nruff\nbandit\npip-audit\npre-commit\n"
+
+    with pytest.raises(AssertionError, match="mypy"):
+        _run_developer_tool_guard_with_sources(monkeypatch, runtime, dev)
+
+
+def test_developer_tool_guard_normalizes_case_and_name_separators(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Case and separator spelling must not bypass the guard.
+
+    Beginner note: if only one spelling were normalized, an equivalent name
+    such as ``pytest_cov`` or ``pre_commit`` could bypass the development-file
+    presence check. This verifies those alternate forms remain recognized.
+    """
+    runtime = "requests\n"
+    dev = "PyTeSt\npytest_cov\nruff\nbandit\npip-audit\nmypy\npre_commit\n"
+
+    _run_developer_tool_guard_with_sources(monkeypatch, runtime, dev)
+
+
+def _run_developer_tool_guard_with_sources(
+    monkeypatch: pytest.MonkeyPatch, runtime: str, dev: str
+) -> None:
+    """Run the policy guard against supplied text without touching files.
+
+    Beginner note: replacing only the two file reads keeps these regressions
+    focused on the real guard while avoiding temporary files or edits to the
+    checked-in dependency declarations.
+
+    Args:
+        monkeypatch: Pytest fixture that restores ``Path.read_text`` afterward.
+        runtime: In-memory production requirements contents.
+        dev: In-memory development requirements contents.
+
+    Returns:
+        None. The wrapped guard raises ``AssertionError`` for a policy failure.
+    """
+    original_read_text = Path.read_text
+
+    def read_text(
+        path: Path, encoding: str | None = None, errors: str | None = None
+    ) -> str:
+        if path == ROOT / "requirements.txt":
+            return runtime
+        if path == ROOT / "requirements-dev.txt":
+            return dev
+        return original_read_text(path, encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    test_developer_tools_stay_out_of_the_runtime_requirements()
+
+
 def test_readme_documents_local_quality_and_security_commands():
     """The README should teach users how to reproduce the CI checks locally."""
     text = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -253,7 +609,7 @@ def test_readme_documents_local_quality_and_security_commands():
     assert "pip install -r requirements.txt -c constraints.txt" in text
     assert "pip install -r requirements-dev.txt -c constraints.txt" in text
     assert (
-        "python -m pytest -q --cov=backend --cov=screeners --cov=ui "
+        "python -m pytest -q --cov=app --cov=backend --cov=screeners --cov=ui "
         "--cov-fail-under=89"
         in text
     )

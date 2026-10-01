@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from typing import Any
 
 from sqlalchemy import create_engine, event, inspect
@@ -31,6 +31,11 @@ from backend.config import get_settings
 from backend.storage.models import Base
 
 logger = logging.getLogger(__name__)
+
+# Shared by services that must open several short caller-owned transactions.
+# Exporting one precise alias avoids each subsystem weakening the same boundary
+# to ``Any`` as more background workers adopt this pattern.
+SessionFactory = Callable[[], AbstractContextManager[Session]]
 
 
 def get_database_url() -> str:

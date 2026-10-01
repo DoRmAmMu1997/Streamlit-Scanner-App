@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Component** | Historical signal validation (VALID-002 / VALID-004) |
+| **Component** | Historical signal validation (VALID-002 / VALID-004 / VALID-005) |
 | **Source** | [`backend/validation/`](../../../backend/validation), [`backend/storage/repository.py`](../../../backend/storage/repository.py), [`backend/jobs/compute_forward_returns.py`](../../../backend/jobs/compute_forward_returns.py) |
 | **Layer** | Backend service + pure calculation + aggregate/dashboard read models + headless job |
 | **Status** | Implemented for per-signal forward-return rows, backend aggregate metrics, the read-only Validation / Signal Performance dashboard, and the headless forward-return compute job |
@@ -27,7 +27,7 @@ VALID-004 adds the headless operator job:
 python -m backend.jobs.compute_forward_returns --limit 500
 ```
 
-The job bootstraps schema, builds the Dhan-backed loader, calls `compute_pending_forward_returns()`, commits through `session_scope()`, and exits non-zero only for fatal setup/batch failures. It is schedulable but not wired into Render as a second cron in this task.
+The job bootstraps schema, builds the Dhan-backed loader, calls `compute_pending_forward_returns()`, passes the typed `SessionFactory` so the service commits each signal through short `session_scope()` contexts, and exits non-zero only for fatal setup/batch failures. It is schedulable but not wired into Render as a second cron in this task.
 
 ## 2. Position in the system
 
@@ -54,9 +54,9 @@ flowchart TD
 | `compute_benchmark_leg(candles, *, entry_date, exit_date, benchmark_key)` | Pure benchmark return over the exact stock entry/exit dates; missing dates return null prices/return. |
 | `benchmark_for_universe(universe_key)` | Returns a `BenchmarkSpec` only when its Dhan `IDX_I` `security_id` is configured in `config/benchmarks.yaml`. A blank/absent id returns `None` (graceful-null). |
 | `resolve_index_security_ids(instrument_master, wanted=...)` | Reads verified `IDX_I` index ids (NSE / `SEGMENT=I` / `INSTRUMENT=INDEX`) from the Dhan instrument master, matching each name on `SYMBOL_NAME` or `DISPLAY_NAME`. Used to verify/update the committed config; unknown or ambiguous names are omitted. |
-| `compute_pending_forward_returns(session, loader, *, as_of=None, horizons=(20, 60, 120), limit=None)` | Loads eligible stored signals, resolves instruments, computes each horizon, and upserts rows idempotently. |
+| `compute_pending_forward_returns(session_factory, loader, *, as_of=None, horizons=(20, 60, 120), limit=None)` | Reads detached unresolved stock/benchmark work, fetches outside transactions, and commits each signal atomically with fair retry ordering. |
 | `python -m backend.jobs.compute_forward_returns --limit 500` | Headless VALID-004 operator/scheduler entrypoint. Bootstraps schema, calls the service above, prints a secret-safe summary, and returns scheduler-friendly exit codes. |
-| `get_signals_needing_forward_returns(...)` / `upsert_forward_return(...)` | Repository-only query/write helpers for missing/pending rows and `(result_id, horizon_days)` upserts. |
+| `get_forward_return_work_items(...)` / `upsert_forward_return(...)` / `mark_forward_return_attempted(...)` | Repository-only helpers: SQL-side fair selection of missing/pending/benchmark-retry work, conditional `(result_id, horizon_days)` upserts, and fact-free attempt receipts for failed signals. |
 | `summarize_validation_metrics(session, *, screener_key=None, universe_key=None, horizon_days=None, signal_date_from=None, signal_date_to=None)` | Read-only aggregate metrics over stored forward-return rows. Filters by `scan_results.signal_date` inclusively, de-duplicates reruns (latest run wins), and returns typed `ValidationSummary` / `ValidationMetricRow` objects. |
 | `summarize_validation_dashboard(..., sector_lookup=None)` | Read-only dashboard aggregate over the same de-duplicated rows: summary metrics, return buckets, horizon win rates, benchmark-relative rows, monthly signal counts, and sector concentration. |
 | `load_universe_sector_lookup(universe_keys)` | Best-effort local metadata helper. Reads universe CSVs for `sector` / `industry` / `macro_sector` / `sector_name`; missing metadata becomes `Unknown` in dashboard concentration rows. |
@@ -67,7 +67,12 @@ flowchart TD
 - `COMPUTED`: entry/exit bars exist and `exit_date <= as_of`.
 - `PENDING`: the exit date is after `as_of`, or the candle frame is recently incomplete within the 7-calendar-day data-lag grace window.
 - `INSUFFICIENT_DATA`: the signal date is absent, prices are invalid, symbol mapping is missing, or the required future bar is still absent after the grace window.
-- Loader failures are retryable and stored as `PENDING`, not terminal `INSUFFICIENT_DATA`.
+- Loader failures and malformed raw stock candles are retryable and stored as `PENDING`. Raw OHLC is checked before dropping or deduplicating rows; OHLC-only inputs may omit volume.
+- Stock and benchmark history requests stop at `as_of`; future signals make no request. Terminal stock receipts are preserved by conditional SQL writes.
+- Configured benchmark failures remain in a benchmark-only retry queue. Recovery updates benchmark fields only; intentionally absent configuration clears the retry flag.
+- Batches rotate by oldest unresolved attempt time (missing horizons use signal creation time), then signal date and ID. The CLI defaults to 500 distinct signals.
+- A fatal later signal rolls back only that signal; the job reports earlier committed progress through `ForwardReturnBatchError.summary`.
+- The full transaction, concurrency, and migration contract is in [VALID-005 ADR](../valid-005-forward-return-integrity.md).
 - Benchmark IDs are not guessed: the `IDX_I` index ids in `config/benchmarks.yaml` (VALID-002B) are resolved from the Dhan instrument master. A universe with a blank/absent id still computes stock returns while benchmark/excess stay null (graceful-null).
 - Aggregate hit rate is `forward_return_pct > 0` over computed rows with stored returns only. Pending and insufficient rows stay visible as counts but never count as losses.
 - Average/median forward, excess, MAE, and MFE metrics use fixed-point `Decimal` values; missing benchmark/excess values are ignored, and empty metric sets return null instead of zero.

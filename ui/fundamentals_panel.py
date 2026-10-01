@@ -22,6 +22,8 @@ from typing import Literal
 import pandas as pd
 import streamlit as st
 
+from backend.auth.roles import RUN_SCAN, Role, role_has_capability
+from backend.auth.session import require_capability
 from backend.config import get_agent_fast_mode, get_fundamentals_model
 from backend.fundamentals.fundamental_agent import (
     AgentVerdict,
@@ -80,17 +82,24 @@ def _get_fundamental_agent(model: str, fast_mode: bool) -> FundamentalAgent:
     return FundamentalAgent(model=model, fast_mode=fast_mode)
 
 
-def _render_fundamentals_panel(symbol: str | None) -> None:
+def _render_fundamentals_panel(
+    symbol: str | None, *, current_role: Role, current_email: str | None
+) -> None:
     """Render the per-stock Check Fundamentals section under the chart.
 
-    The button is now visible for ANY selected symbol — eligibility just
-    determines how many criteria the agent applies:
-      - Hemant Super 45 ∪ Nifty 100 symbols → criteria mode (all NINE criteria
-        + observations + outlook + rating).
-      - Anything else → universal mode (the SEVEN universal criteria, skipping
-        Business Age and Market Leader, + observations + outlook + rating).
+    Args:
+        symbol: Selected stock; None suppresses this section entirely.
+        current_role: Trusted role resolved for this rerun, never from scan or
+            verdict session state. RUN_SCAN permits new and refreshed analyses.
+        current_email: Trusted current identity used by the action-denial audit.
 
-    Stays hidden only when no symbol is selected.
+    Beginner note:
+        Authentication identifies the person; authorization decides whether that
+        person may start analysis now. Cached results can survive a demotion and
+        remain readable, but they do not grant execution rights. Controls are
+        hidden for Viewers and the action rechecks RUN_SCAN before obtaining an
+        agent. Symbol eligibility chooses nine-criteria or seven-criteria mode;
+        it never changes the user's permissions.
     """
     if not symbol:
         return
@@ -123,35 +132,45 @@ def _render_fundamentals_panel(symbol: str | None) -> None:
     session_key = f"fundamentals_verdict::{symbol}::{model}::{mode}"
     cached_verdict_dict = st.session_state.get(session_key)
 
-    button_col, rerun_col, _spacer = st.columns([2, 1, 2])
-    primary_label = (
-        f"View cached verdict: {symbol}"
-        if cached_verdict_dict is not None
-        else f"Check Fundamentals: {symbol}"
-    )
-    run_now = button_col.button(
-        primary_label,
-        type="primary",
-        key=f"check_fund_btn::{symbol}::{model}::{mode}",
-        disabled=cached_verdict_dict is not None,
-    )
+    run_now = False
     rerun_now = False
-    if cached_verdict_dict is not None:
-        rerun_now = rerun_col.button(
-            "Re-run analysis",
-            key=f"rerun_fund_btn::{symbol}::{model}::{mode}",
-            help="Bypass the cache and re-fetch screener.in + re-query the LLM.",
+    can_run = role_has_capability(current_role, RUN_SCAN)
+    # Widget state is retained across reruns, including role changes. Never
+    # instantiate execution widgets for a role that cannot use them now.
+    if can_run:
+        button_col, rerun_col, _spacer = st.columns([2, 1, 2])
+        primary_label = (
+            f"View cached verdict: {symbol}"
+            if cached_verdict_dict is not None
+            else f"Check Fundamentals: {symbol}"
         )
+        run_now = button_col.button(
+            primary_label,
+            type="primary",
+            key=f"check_fund_btn::{symbol}::{model}::{mode}",
+            disabled=cached_verdict_dict is not None,
+        )
+        if cached_verdict_dict is not None:
+            rerun_now = rerun_col.button(
+                "Re-run analysis",
+                key=f"rerun_fund_btn::{symbol}::{model}::{mode}",
+                help="Bypass the cache and re-fetch screener.in + re-query the LLM.",
+            )
+    elif cached_verdict_dict is None:
+        st.caption("No cached fundamentals verdict is available for this stock.")
     if cached_verdict_dict is not None and not rerun_now:
         # UI-002: make the staleness provenance explicit up front — the verdict
         # below is served from this browser session, and its "Data fetched"
         # caption (bottom of the block) is the age that matters.
-        st.caption(
-            "Showing a verdict cached in this session — see \"Data fetched\" below "
-            "for its age; \"Re-run analysis\" refreshes screener.in data and the model's view."
-        )
+        freshness_caption = 'Showing a verdict cached in this session — see "Data fetched" below for its age.'
+        if can_run:
+            freshness_caption += ' "Re-run analysis" refreshes screener.in data and the model\'s view.'
+        st.caption(freshness_caption)
 
     if run_now or rerun_now:
+        # Recheck at the action boundary, outside agent error handling. Denial
+        # must stop this rerun before construction or a cached agent is obtained.
+        require_capability(st, role=current_role, capability=RUN_SCAN, email=current_email)
         try:
             agent = _get_fundamental_agent(model, get_agent_fast_mode())
         except Exception as exc:  # noqa: BLE001

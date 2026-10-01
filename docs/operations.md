@@ -94,6 +94,22 @@ also silently freezes the candle cache at the date the token expired. Re-run
 The command bootstraps the database schema, builds the same Dhan-backed
 `DailyDataLoader` used by scans, calls the idempotent
 `compute_pending_forward_returns()` service, and prints a secret-safe summary.
+The worker reads detached work, closes its read transaction before any provider
+call, and commits all horizons for each signal atomically. If a later signal fails,
+the nonzero job outcome includes earlier committed progress; rerunning safely
+continues unresolved work. Default batches contain at most 500 distinct signals,
+rotating by oldest unresolved attempt time rather than repeatedly choosing the
+same oldest signal. Configured benchmark failures remain eligible even after the
+stock return completes; these retries fetch only the index and preserve stock facts.
+An intentionally unconfigured benchmark exits that retry queue.
+
+Apply `alembic upgrade head` before running the updated worker against an existing
+database. VALID-005 adds attempt timing and benchmark retry metadata and backfills
+legacy computed rows with missing benchmarks. History requests stop at `--as-of`;
+future signals remain pending without a request. Positive integral horizons and
+limits are required, repeated horizons are deduplicated, and the Python service
+accepts an empty horizon sequence as a no-op. See the
+[VALID-005 ADR](architecture/valid-005-forward-return-integrity.md) for details.
 It does not re-run screeners, mutate scan history, or enable any AI jobs. Render
 does not get a second cron service in this task; deployments can schedule this
 command explicitly when they are ready for validation backfills.
@@ -590,8 +606,8 @@ Cloud SQL) from step 3 onward — the app-side steps are identical.
    docker run -d --name scanner-postgres \
      --env-file postgres.env \
      -p 5432:5432 \
-     -v scanner-pgdata:/var/lib/postgresql/data \
-     postgres:16
+     -v scanner-pgdata:/var/lib/postgresql \
+     postgres:18
    ```
 
    Never commit `postgres.env`; use the host's secret manager when one is
@@ -772,7 +788,7 @@ The two long-lived services are:
 - `scanner-ui` - builds the local `Dockerfile`, listens on
   `${SCANNER_UI_PORT:-8501}:8501`, runs with `APP_ENV=production`,
   `AUTH_REQUIRED=true`, and stores app-generated files under `/data`.
-- `postgres` - runs `postgres:16-bookworm` on the private Compose network with
+- `postgres` - runs `postgres:18-bookworm` on the private Compose network with
   no host port. The UI reaches it through
   `postgresql+psycopg://...@postgres:5432/...`.
 
@@ -780,8 +796,10 @@ The volumes are intentionally separate:
 
 - `scanner-data` backs `/data` for candle caches, fundamentals caches, and any
   local fallback artifacts.
-- `postgres-data` backs `/var/lib/postgresql/data` so scan history survives
-  container replacement.
+- `postgres-data` backs `/var/lib/postgresql` so scan history survives
+  container replacement. (Postgres 18+ images keep the cluster in
+  `/var/lib/postgresql/18/docker`; the pre-18 `.../data` mount point would be
+  ignored.)
 
 Stop the stack without deleting those volumes:
 
@@ -912,6 +930,36 @@ For a local restore into a fresh Compose database, start from
 `docker compose down --volumes`, bring the stack back up, then load the dump with
 `docker compose exec -T postgres psql -U "$POSTGRES_USER" "$POSTGRES_DB" < scanner.sql`.
 
+#### Upgrading the Compose Postgres major version (16 → 18)
+
+A new Postgres major cannot open the previous major's data files. The
+Postgres 18 image also moved its data directory (`/var/lib/postgresql/18/docker`
+under a volume at `/var/lib/postgresql`). An existing stack would therefore start
+**empty** on 18, with the old data still sitting unused in the volume. Move the
+data with a dump and restore, **before** pulling the new `docker-compose.yml`
+(or with the old image still selected):
+
+```bash
+# 1. While still on 16: dump scan history.
+docker compose exec postgres pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB" > scanner-pg16.sql
+
+# 2. Stop the stack and remove ONLY the Postgres volume. `down --volumes`
+#    would also delete scanner-data (the candle and fundamentals caches).
+docker compose down
+docker volume ls --filter name=postgres-data   # e.g. <project>_postgres-data
+docker volume rm <project>_postgres-data
+
+# 3. Switch to the 18 docker-compose.yml, start Postgres alone, and restore.
+docker compose up -d --wait postgres
+docker compose exec -T postgres psql -U "$POSTGRES_USER" "$POSTGRES_DB" < scanner-pg16.sql
+
+# 4. Start the full stack. The app's schema bootstrap sees the restored
+#    Alembic revision and does not re-create tables.
+docker compose up -d --wait
+```
+
+Keep `scanner-pg16.sql` until the app shows your previous scan history.
+
 The candle cache (`data/cache/daily/*.parquet`) is *re-downloadable* and does
 not need backup; the scan-history database is the part you cannot regenerate.
 
@@ -962,7 +1010,9 @@ The disk attaches to `scanner-web` only (Render disks are single-attach) and is
 mounted at `DATA_DIR`. Both default to `/data`; change them together to
 relocate the persistent path. The disk starts empty, so after the first deploy
 open a **Render Shell** on `scanner-web` and seed the universe CSVs the UI needs
-for screener selection:
+for screener selection. This works on an empty disk because the pinned Hemant
+symbol lists ship inside the image under `data/universes/sources/` and are
+resolved relative to the code, not to `DATA_DIR` (DEPLOY-005):
 
 ```bash
 python -c "from backend.universe_builder import refresh_universe_files; refresh_universe_files()"
@@ -1022,7 +1072,7 @@ The "Quality and security" workflow runs the same gates you can run locally:
 
 ```bash
 python -m pre_commit validate-config .pre-commit-config.yaml
-python -m pytest -q --cov=backend --cov=screeners --cov=ui --cov-fail-under=89
+python -m pytest -q --cov=app --cov=backend --cov=screeners --cov=ui --cov-fail-under=89
 python -m compileall -q app.py backend screeners ui tests
 python -m ruff check app.py backend screeners ui Dependencies tests
 python -m mypy
@@ -1048,3 +1098,37 @@ that avoids surprise failures:
    `constraints.txt`. If you deliberately change a CI command or add a dev
    dependency, update that policy test (and `constraints.txt`) in the same
    commit - that is the test doing its job of making such changes explicit.
+
+The workflow runs every gate on Python 3.12, 3.13 and 3.14. 3.14 is the
+deployment target (the Dockerfile base image), and 3.12 is the oldest supported
+interpreter, which Ruff and mypy target. `tests/test_supply_chain_policy.py`
+fails if the deployed version leaves the matrix or the static-check targets stop
+matching its oldest leg.
+
+### Dependency updates (Dependabot)
+
+`.github/dependabot.yml` checks every Monday morning (IST) and opens pull
+requests; it never merges anything. Each PR runs the full workflow above.
+
+| Source | Ecosystem | PRs |
+|---|---|---|
+| `constraints.txt` pins | `pip` | one grouped minor/patch PR, separate PRs for majors and for `ruff` (3-day cooldown on new releases) |
+| workflow actions | `github-actions` | one grouped minor/patch PR, separate majors |
+| `.pre-commit-config.yaml` hooks | `pre-commit` | one grouped minor/patch PR, separate majors; the ruff hook is skipped |
+| `Dockerfile` base image | `docker` | one PR per newer image |
+| `docker-compose.yml` images | `docker-compose` | one PR per newer image |
+
+Merge notes:
+
+- **`ruff` PRs fail CI on purpose.** `ruff==` in `constraints.txt` and the
+  ruff-pre-commit hook `rev` must match (QUAL-008), and Dependabot bumps them
+  in different ecosystems. Push the matching `rev` bump to the ruff PR, then merge.
+- **A newer Python base image changes the deployment target.** Its PR fails the
+  policy test until the new version is added to the CI matrix. Decide
+  deliberately whether to drop the oldest leg, and if you do, move Ruff's
+  `target-version` and mypy's `python_version` up with it.
+- **A Postgres major bump needs a data migration.** `pg_dump`, recreate the
+  `postgres-data` volume, then restore (see "Backing up scan history") before
+  merging.
+- Security updates for known-vulnerable versions are a separate repository
+  setting (enabled) and still arrive as individual PRs.

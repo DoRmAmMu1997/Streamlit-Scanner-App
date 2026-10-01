@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -34,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
+from backend.candle_cache import atomic_write_parquet, cache_revision, cache_write_lock
 from backend.data_quality.candles import CandleQualityReport, validate_candles
 from backend.data_quality.repair import (
     ACTION_NO_ACTION_VENDOR_DATA,
@@ -61,10 +61,6 @@ logger = logging.getLogger(__name__)
 #: different suffix from the loader's existing ``.checked`` marker so the two
 #: never overwrite each other.
 REPAIR_SIDECAR_SUFFIX = ".repaired"
-
-#: Temporary file used for the atomic write. Named so a crash leaves an obvious
-#: artefact rather than a plausible-looking cache file.
-_TEMP_SUFFIX = ".repair.tmp"
 
 #: How many per-symbol outcomes the persisted receipt keeps. The aggregate counts
 #: always describe the whole run; this only bounds the detail sample, exactly
@@ -282,6 +278,13 @@ def repair_symbol(
     Never raises for a bad file: every failure becomes a ``failed`` outcome with
     a redacted message, because one unreadable parquet must not abort a
     600-symbol pass.
+
+    Beginner note:
+    Read and fingerprint the same revision under the loader's write lock, then
+    release it before vendor I/O. Before publishing, reacquire that lock and
+    check the fingerprint. If another download or repair changed the file, skip
+    this stale decision including its retry marker. Holding the lock only for
+    disk work keeps slow vendors from blocking other downloads for this symbol.
     """
     from backend.daily_data_loader import DEFAULT_HISTORY_YEARS_BACK, history_start_date
 
@@ -305,7 +308,9 @@ def repair_symbol(
     )
 
     try:
-        cached = pd.read_parquet(path)
+        with cache_write_lock(path):
+            cached = pd.read_parquet(path)
+            revision = cache_revision(path)
     except Exception as exc:  # noqa: BLE001 - one bad file must not stop the pass
         return _failure(symbol, exc, "could not read the cached parquet")
 
@@ -426,14 +431,6 @@ def repair_symbol(
     # also makes "unrepairable means untouched" a real, testable invariant.
     changed = bool(actions) and not _frames_equal(cached, working)
     improved = changed and _is_improvement(report, after_report)
-    if improved and not dry_run:
-        try:
-            _atomic_write_parquet(working, path)
-        except Exception as exc:  # noqa: BLE001 - report, never corrupt
-            return _failure(
-                symbol, exc, "could not write the repaired parquet", before_codes=before_codes
-            )
-
     status: str
     message: str | None
     if not improved:
@@ -448,7 +445,28 @@ def repair_symbol(
         message = fetch_error
 
     if not dry_run:
-        _record_attempt(sidecar, today, after_codes, refetched=refetch_count > 0)
+        try:
+            with cache_write_lock(path):
+                if cache_revision(path) != revision:
+                    return SymbolRepairOutcome(
+                        symbol=symbol,
+                        status="skipped",
+                        before_codes=before_codes,
+                        rows_before=rows_before,
+                        dates_before=dates_before,
+                        refetch_count=refetch_count,
+                        message="cached parquet changed during repair; retry against the new revision",
+                    )
+                if improved:
+                    atomic_write_parquet(working, path)
+                # Keep the receipt in the same transaction as the decision it
+                # describes: a rejected stale candidate must never suppress a
+                # later repair by leaving behind a misleading retry marker.
+                _record_attempt(sidecar, today, after_codes, refetched=refetch_count > 0)
+        except Exception as exc:  # noqa: BLE001 - report, never corrupt
+            return _failure(
+                symbol, exc, "could not write the repaired parquet", before_codes=before_codes
+            )
 
     outcome = SymbolRepairOutcome(
         symbol=symbol,
@@ -638,22 +656,6 @@ def _merge_window(
     columns = [column for column in cached.columns if column in merged.columns]
     extra = [column for column in merged.columns if column not in columns]
     return merged[columns + extra]
-
-
-def _atomic_write_parquet(frame: pd.DataFrame, path: Path) -> None:
-    """Write ``frame`` to ``path`` so an interrupted run cannot corrupt the cache.
-
-    The parquet goes to a sibling temp file first; ``os.replace`` then swaps it
-    into place in a single filesystem operation. If anything fails the original
-    file is still whole and the temp file is removed.
-    """
-    temp_path = path.with_suffix(_TEMP_SUFFIX)
-    try:
-        frame.to_parquet(temp_path, index=False)
-        os.replace(temp_path, path)
-    finally:
-        # ``missing_ok`` keeps the happy path (already renamed away) quiet.
-        temp_path.unlink(missing_ok=True)
 
 
 def _recently_attempted(
