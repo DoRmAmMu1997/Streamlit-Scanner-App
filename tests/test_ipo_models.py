@@ -232,6 +232,9 @@ def test_public_ipo_package_exports_the_domain_and_repository_contract() -> None
         "evaluate_issue",
         "fetch_sebi_filings",
         "get_document",
+        # Current selection adds freshness semantics without replacing the
+        # immutable history lookup that existing callers already import.
+        "get_current_evaluation",
         "get_evaluation",
         "get_financial",
         "get_issue",

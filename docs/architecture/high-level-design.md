@@ -24,7 +24,9 @@ job — is recorded to a scan-history database. Access is gated behind Google SS
 with an email allowlist for the interactive Streamlit surface.
 
 The backend also inventories official SEBI DRHP, RHP, and final-offer listings
-and stores immutable IPO score/recommendation history. The explicit IPO screener
+and stores immutable IPO score/recommendation history with a separate verified
+current selection ([IPO-013](ipo-013-current-evaluation-state.md)).
+Input revisions guard publication; current views check model and time freshness. The explicit IPO screener
 job composes inventory, verified DRHP/RHP download, optional advisory enrichment,
 optional citation-bound extraction proposals, and deterministic re-scoring.
 Administrators may enter evidence manually or approve a proposal; only approved

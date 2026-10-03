@@ -1053,6 +1053,11 @@ def test_lost_approval_race_rolls_back_the_manual_revision(
         lambda *_args, **_kwargs: None,
     )
 
+    from backend.storage.ipo_repository import get_ipo_scoring_state_values
+
+    with file_session_factory() as session:
+        state_before = get_ipo_scoring_state_values(session, issue.id)
+
     with pytest.raises(IpoValidationError, match="reviewed concurrently"):
         approve_extraction_proposal(
             proposal.id,
@@ -1064,6 +1069,9 @@ def test_lost_approval_race_rolls_back_the_manual_revision(
     assert get_latest_manual_profile(
         issue.id, session_factory=file_session_factory
     ) is None
+
+    with file_session_factory() as session:
+        assert get_ipo_scoring_state_values(session, issue.id) == state_before
 
 
 def test_pending_proposal_blocks_document_deletion_but_reviewed_history_survives(
