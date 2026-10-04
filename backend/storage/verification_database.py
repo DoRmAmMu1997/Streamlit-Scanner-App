@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
 from sqlalchemy.pool import NullPool
 
 
@@ -23,8 +24,9 @@ def disposable_postgres_database(admin_url: str) -> Iterator[str]:
         A URL for the newly created private database, using the pinned driver.
 
     Raises:
-        ValueError: The URL is not PostgreSQL.
-        RuntimeError: Provisioning or cleanup fails; credentials are suppressed.
+        ValueError: The URL cannot be parsed or does not name PostgreSQL.
+        RuntimeError: Engine setup, provisioning or cleanup fails; configuration
+            and credentials are suppressed from the public exception message.
 
     Beginner note:
         A shared ``public`` schema is never disposable. The only DROP target is
@@ -33,23 +35,34 @@ def disposable_postgres_database(admin_url: str) -> Iterator[str]:
         cannot run in a transaction, and pooled scratch connections block DROP.
         FORCE terminates only connections to our own scratch database on supported PostgreSQL.
     """
-    url = make_url(admin_url)
+    # URL parsing and engine construction can fail before engine.connect. Keep
+    # those phases inside the same safe-error policy: parser/plugin errors may
+    # otherwise repeat opaque values from the supplied connection setting.
+    try:
+        url = make_url(admin_url)
+    except (ArgumentError, TypeError, ValueError):
+        raise ValueError("Verification provisioning requires a valid PostgreSQL URL") from None
     if url.get_backend_name() != "postgresql":
         raise ValueError("Verification provisioning requires a PostgreSQL URL")
     url = url.set(drivername="postgresql+psycopg")
     # No caller-controlled identifiers enter these DDL strings. Even a hostile
     # database component in admin_url cannot change the generated DROP target.
     database_name = "scanner_verify_" + uuid4().hex
-    engine = create_engine(
-        url, isolation_level="AUTOCOMMIT", poolclass=NullPool,
-        connect_args={"connect_timeout": 5},
-    )
+    try:
+        engine = create_engine(
+            url, isolation_level="AUTOCOMMIT", poolclass=NullPool,
+            connect_args={"connect_timeout": 5},
+        )
+    except Exception:
+        raise RuntimeError("Cannot configure the disposable PostgreSQL verification connection") from None
     created = False
     try:
         try:
             with engine.connect() as connection:
                 connection.exec_driver_sql(f'CREATE DATABASE "{database_name}" TEMPLATE template0')
-            created = True
+                # CREATE is already committed. Track ownership before connection
+                # cleanup can raise so finally still drops our private database.
+                created = True
         except Exception:
             raise RuntimeError(
                 "Cannot provision disposable PostgreSQL database; check the explicit test URL and CREATEDB privilege"

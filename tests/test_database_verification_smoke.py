@@ -39,6 +39,87 @@ def test_disposable_postgres_rejects_other_dialects() -> None:
         pytest.fail("Unsupported provisioning URL was accepted")
 
 
+def test_disposable_postgres_hides_malformed_url_components() -> None:
+    """A malformed provisioning URL must not echo its opaque contents.
+
+    Beginner note:
+        URL parsing used to happen before the safe-error boundary. A malformed
+        port was repeated verbatim by ValueError even though the helper promises
+        secret-safe failures. This fails before any connection can be attempted.
+    """
+    from backend.storage.verification_database import disposable_postgres_database
+
+    marker = "PRIVATE_CONFIGURATION_VALUE"
+    with pytest.raises(ValueError) as error, disposable_postgres_database(
+        f"postgresql://fixture:fixture@127.0.0.1:{marker}/postgres"
+    ):
+        pytest.fail("Malformed connection URL was accepted")
+    assert marker not in str(error.value)
+    assert "valid PostgreSQL URL" in str(error.value)
+
+
+def test_disposable_postgres_hides_engine_configuration_errors() -> None:
+    """Engine construction must use the same safe boundary as connection setup.
+
+    Beginner note:
+        An unknown SQLAlchemy plugin fails before a connection exists and echoes
+        its URL option. This fake option demonstrates the leak without reaching
+        a server; all configuration details must stay out of the public error.
+    """
+    from backend.storage.verification_database import disposable_postgres_database
+
+    marker = "PRIVATE_UNKNOWN_PLUGIN"
+    with pytest.raises(Exception) as error, disposable_postgres_database(
+        f"postgresql://fixture:fixture@127.0.0.1/postgres?plugin={marker}"
+    ):
+        pytest.fail("An unknown engine plugin was accepted")
+    assert marker not in str(error.value)
+    assert isinstance(error.value, RuntimeError)
+
+
+def test_disposable_postgres_cleans_up_when_create_connection_exit_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Track a successful CREATE before its connection context can raise.
+
+    Beginner note:
+        Creation is committed immediately in AUTOCOMMIT. If connection cleanup
+        then fails, the private database still exists and must be dropped. This
+        fixture records DDL without reaching a server and proves the DROP target
+        is exactly the generated CREATE target, never the configured database.
+    """
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from backend.storage import verification_database
+
+    commands: list[str] = []
+    disposed: list[bool] = []
+
+    @contextmanager
+    def connection():
+        """Model a close failure only after the first committed DDL statement.
+
+        Beginner note:
+            The second context is the finally cleanup path and closes normally;
+            changing the flag after the first context exits would miss that path.
+        """
+        yield SimpleNamespace(exec_driver_sql=commands.append)
+        if len(commands) == 1:
+            raise RuntimeError("Fixture close failure")
+
+    monkeypatch.setattr(verification_database, "create_engine", lambda *_args, **_kwargs: SimpleNamespace(
+        connect=connection, dispose=lambda: disposed.append(True),
+    ))
+    with pytest.raises(RuntimeError, match="Cannot provision"), verification_database.disposable_postgres_database(
+        "postgresql://fixture:fixture@127.0.0.1/existing_database"
+    ):
+        pytest.fail("A failed provisioning connection was yielded")
+    assert len(commands) == 2
+    created_name = commands[0].split('"')[1]
+    assert created_name.startswith("scanner_verify_")
+    assert commands[1] == f'DROP DATABASE "{created_name}" WITH (FORCE)'
+    assert disposed == [True]
+
+
 def test_explicit_unreachable_postgres_is_failure() -> None:
     """A requested but unreachable server must fail rather than silently skip.
 
