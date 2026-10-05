@@ -106,7 +106,7 @@ network or model stages. All persistence still routes through `backend/storage`.
 | `backend/ipo/financials/ratio_engine.py` | Pure Decimal formulas, typed status receipts, reconciliation, source/price snapshot. | stdlib, `manual_extraction` |
 | `backend/ipo/scoring/factor_derivation.py` | Pure seven-factor derivation plus typed, negation-aware debt-purpose evidence. | `models`, `ratio_engine`, `manual_extraction` |
 | `backend/ipo/scoring/caution_flags.py` | Seven fixed-order hard cautions over typed evidence authority. | `models`, `factor_derivation`, `ratio_engine` |
-| `backend/ipo/scoring/service.py` | One-transaction input snapshot, semantic fingerprint, idempotent evaluation orchestration. | `repository`, pure scoring modules |
+| `backend/ipo/scoring/service.py` | Revision-validated input snapshot, semantic fingerprint, conditional current selection. | `repository`, pure scoring modules |
 | `backend/ipo/documents/table_extractor.py` | Parent-owned PDF facade, worker supervision, result-budget validation, typed parse receipts. | stdlib, `backend/ipo_pdf_worker.py` |
 | `backend/ipo_pdf_worker.py` | Dependency-light spawn entrypoint; applies Linux address-space policy before lazy pdfplumber import and emits primitive JSON only. | stdlib, lazy `pdfplumber` |
 | `backend/ipo/documents/section_classifier.py` | Page/span-preserving heading ownership and safe chunks. | `table_extractor` |
@@ -131,7 +131,7 @@ no IPO module imports Streamlit, and network clients are allowed only under
 | `score_ipo(IpoScoreInput) -> IpoScoreResult` | Applies the fixed weights; missing factors contribute zero and are never renormalized. |
 | `build_recommendation(IpoScoreResult) -> IpoRecommendationResult` | Maps a score to the binary verdict + confidence; `.to_dict()` includes all seven typed breakdown rows. |
 | `evaluate_issue(issue_id, IpoScoreInput)` | Computes and atomically persists one immutable score/verdict pair; a semantic uniqueness race returns the winning pair. |
-| `load_ipo_factor_inputs_snapshot(issue_id, as_of=...)` | Reads issue/profile/subscription/enrichment in one transaction, then derives ratios from that exact detached snapshot. |
+| `load_ipo_factor_inputs_snapshot(issue_id, as_of=...)` | Validates scalar revision around all input reads, then derives ratios from the detached bundle. |
 | `extract_document_pages(path, budget=...)` | Compatible PDF facade returning a typed success or review-required receipt from a killable child. |
 | `collect_enrichment_signals(issue_id, ...)` | Uses persisted issuer/price identity, quarantines each result, and semantically upserts advisory observations. |
 | `propose_extraction(issue_id, document_id, force_extract=False)` | Produces a citation-bound review proposal or a stable skip/failure receipt; never scoring evidence. |
@@ -332,3 +332,20 @@ design doc:
 
 Any extension must preserve URL safety, never invent missing evidence, and route
 all SQL through `backend/storage`.
+
+## Current evaluation and verification (IPO-013)
+
+[IPO-013](../ipo-013-current-evaluation-state.md) separates immutable receipts from
+`ipo_scoring_state`: one monotonic scoring-input revision and mutable current
+pointer, evaluated revision and verification time per issue. All scoring writers
+lock that state before subordinate changes. Snapshot assembly validates fresh SQL
+scalar state before/after all component reads; publication conditionally locks the
+same captured revision. Both conflict sites share three total attempts.
+
+`get_latest_evaluation`, `list_evaluations` and `get_latest_recommendation` are
+historical APIs. `get_current_evaluation` checks ownership, complete pair, verified
+revision, current model and semantic/time fingerprint. Dashboard renders check
+freshness every rerun; stale history cannot enter actionable recommendation
+sections or screener ratings. Calculation time, verification time and display
+activity are distinct. Migration `20260921ipo013` follows `20260909valid005` and
+backfills only unverified display pointers, preserving every historical receipt.

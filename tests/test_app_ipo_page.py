@@ -134,6 +134,8 @@ def test_rows_frame_carries_every_spec_column() -> None:
         "Source documents",
         "Last updated",
         "Evaluation stale",
+        "Calculated at",
+        "Last verified at",
     ]
     record = frame.iloc[0]
     assert record["Company"] == "Example Ltd"
@@ -388,7 +390,7 @@ def test_rescore_button_runs_the_service_audits_and_refreshes(monkeypatch) -> No
     ipo_page._render_ipo_page(can_rescore=True, user_email="admin@example.com")
 
     assert rescored == [1, 2]
-    assert loader.cleared == 1
+    assert loader.cleared == 0
     assert audits[0]["user_email"] == "admin@example.com"
     assert audits[0]["metadata"]["skipped_unchanged"] == 2
     assert any("Re-score complete" in message for message in fake_st.successes)
@@ -416,3 +418,17 @@ def test_rescore_failures_are_counted_never_raised(monkeypatch) -> None:
 
     assert any("1 failed" in message for message in fake_st.successes)
     assert any("1 evaluated" in message for message in fake_st.successes)
+
+def test_snapshot_loader_checks_current_state_every_call(monkeypatch) -> None:
+    """Beginner note: a global TTL hid other sessions' writes and clock expiry."""
+    from ui import ipo_page
+
+    outputs = iter([
+        IpoDashboardSnapshot(generated_at=_SCORED_AT, rows=()),
+        IpoDashboardSnapshot(generated_at=_SCORED_AT + dt.timedelta(seconds=1), rows=()),
+    ])
+    monkeypatch.setattr(ipo_page, "build_dashboard_snapshot", lambda: next(outputs))
+    first = ipo_page._load_snapshot()
+    second = ipo_page._load_snapshot()
+    assert first.generated_at == _SCORED_AT
+    assert second.generated_at == _SCORED_AT + dt.timedelta(seconds=1)

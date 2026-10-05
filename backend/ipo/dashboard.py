@@ -29,8 +29,6 @@ from backend.ipo.models import (
 )
 from backend.ipo.repository import (
     SessionFactory,
-    get_latest_evaluation,
-    get_latest_manual_profile,
     list_documents,
     list_enrichment_signals,
     list_extraction_proposals,
@@ -38,6 +36,8 @@ from backend.ipo.repository import (
     list_subscriptions,
 )
 from backend.ipo.scoring.score_model import PDF_WEIGHTS
+from backend.ipo.scoring.service import get_current_evaluation
+from backend.ipo.scoring.state import normalize_scoring_time
 from backend.storage import session_scope
 
 # Selection thresholds for the strengths/risks columns: a factor earning at
@@ -80,6 +80,8 @@ class IpoDashboardRow:
     documents_total: int
     breakdown: tuple[ScoreBreakdownItem, ...] = ()
     evaluation_stale: bool = False
+    calculated_at: dt.datetime | None = None
+    last_verified_at: dt.datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -133,23 +135,39 @@ def top_positive_and_risk_reasons(
 
 
 def _row_for_issue(
-    issue: Any, *, session_factory: SessionFactory
+    issue: Any, *, now: dt.datetime, session_factory: SessionFactory
 ) -> IpoDashboardRow:
     """Denormalize one issue's stored state into a display-ready row.
 
+    Args:
+        issue: Issue identity from the inventory; scoring fields are reread together.
+        now: Shared aware UTC render instant for semantic time-eligibility checks.
+        session_factory: Caller-owned repository transaction factory.
+
+    Returns:
+        Current or explicitly stale historical content with separate calculation,
+        verification and overall display-activity timestamps.
+
+    Raises:
+        IpoScoringConflictError: If all three current-read assembly attempts conflict.
+        IpoNotFoundError: If the issue disappears during current or display reads.
+        ValueError: If now has no timezone offset.
+
     Beginner note:
         ``last_updated`` considers every evidence source, while
-        ``evaluation_stale`` asks the narrower question: did any evidence
-        change after the displayed score was computed? Keeping both concepts
+        ``evaluation_stale`` asks the narrower question: does the revision, model and
+        semantic fingerprint still match at this render time? Keeping both concepts
         explicit prevents a fresh-looking timestamp from hiding an old verdict.
     """
+    current = get_current_evaluation(issue.id, as_of=now, session_factory=session_factory)
+    issue = current.snapshot.inputs.issue
+    profile = current.snapshot.inputs.profile
     documents = [
         document
         for document in list_documents(issue.id, session_factory=session_factory)
         if document.document_type in {"drhp", "rhp"}
     ]
     downloaded = sum(1 for document in documents if document.content_sha256)
-    profile = get_latest_manual_profile(issue.id, session_factory=session_factory)
     proposals = list_extraction_proposals(
         issue_id=issue.id,
         session_factory=session_factory,
@@ -164,24 +182,8 @@ def _row_for_issue(
     enrichment = list_enrichment_signals(
         issue.id, session_factory=session_factory
     )
-    evaluation = get_latest_evaluation(issue.id, session_factory=session_factory)
-    source_documents = tuple(
-        dict.fromkeys(
-            (
-                *(
-                    document.document_url
-                    for document in documents
-                    if getattr(document, "document_url", None)
-                ),
-                *(
-                    (profile.source_document_url,)
-                    if profile is not None
-                    and getattr(profile, "source_document_url", None)
-                    else ()
-                ),
-            )
-        )
-    )
+    evaluation = current.evaluation
+    source_documents = current.snapshot.inputs.source_documents
     evidence_times = [
         value
         for value in (
@@ -219,16 +221,13 @@ def _row_for_issue(
         if value is not None
     ]
     latest_evidence_at = max(evidence_times, default=None)
-    evaluation_stale = bool(
-        evaluation is not None
-        and latest_evidence_at is not None
-        and latest_evidence_at > evaluation.scored_at
-    )
+    evaluation_stale = not current.fresh
     last_updated = max(
         (
             value
             for value in (
                 latest_evidence_at,
+                current.last_verified_at,
                 evaluation.scored_at if evaluation is not None else None,
             )
             if value is not None
@@ -288,6 +287,8 @@ def _row_for_issue(
         documents_total=len(documents),
         breakdown=result.breakdown,
         evaluation_stale=evaluation_stale,
+        calculated_at=evaluation.scored_at,
+        last_verified_at=current.last_verified_at,
     )
 
 
@@ -298,15 +299,29 @@ def build_dashboard_snapshot(
 ) -> IpoDashboardSnapshot:
     """Read every issue's stored state into one display-ready snapshot.
 
+    Args:
+        now: Optional aware render clock; defaults to the current UTC instant.
+        session_factory: Transaction factory used only for repository reads.
+
+    Returns:
+        Immutable rows classified at the same business-time instant.
+
+    Raises:
+        ValueError: If now has no timezone offset; supply an aware instant.
+        IpoScoringConflictError: If any issue exhausts the current reader's three
+            assembly attempts; retry the render later without certifying old data.
+        IpoNotFoundError: If an issue is deleted after inventory is listed; refresh
+            the inventory rather than treating its old verdict as current.
+
     Beginner note:
         The per-issue reads are simple repository calls rather than one big
         join because the IPO universe is dozens of issues, not thousands; the
-        page additionally caches the snapshot, so clarity wins over query
-        golf here.
+        page rebuilds actionable snapshots each render with one UTC clock.
+        A TTL alone cannot detect another session writing or GMP expiring.
     """
-    when = now if now is not None else dt.datetime.now(dt.UTC)
+    when = normalize_scoring_time(now) if now is not None else dt.datetime.now(dt.UTC)
     rows = tuple(
-        _row_for_issue(issue, session_factory=session_factory)
+        _row_for_issue(issue, now=when, session_factory=session_factory)
         for issue in list_issues(session_factory=session_factory)
     )
     return IpoDashboardSnapshot(generated_at=when, rows=rows)
@@ -361,13 +376,13 @@ def section_recommended(snapshot: IpoDashboardSnapshot) -> tuple[IpoDashboardRow
 
     Beginner note:
         Filtering uses the stored evaluation only. It never recalculates a
-        score, so stale evaluations stay visible and are also routed to the
-        review queue for an explicit re-score.
+        score. Stale evaluations remain visible in history/all-issues only,
+        and enter the review queue for an explicit re-score.
     """
     return tuple(
         row
         for row in snapshot.rows
-        if row.recommendation == Recommendation.RECOMMENDED.value
+        if not row.evaluation_stale and row.recommendation == Recommendation.RECOMMENDED.value
     )
 
 
@@ -382,7 +397,7 @@ def section_not_recommended(snapshot: IpoDashboardSnapshot) -> tuple[IpoDashboar
     return tuple(
         row
         for row in snapshot.rows
-        if row.recommendation == Recommendation.NOT_RECOMMENDED.value
+        if not row.evaluation_stale and row.recommendation == Recommendation.NOT_RECOMMENDED.value
     )
 
 

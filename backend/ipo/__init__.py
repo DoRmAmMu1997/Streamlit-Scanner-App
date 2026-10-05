@@ -134,6 +134,7 @@ from backend.ipo.scoring.score_model import score_ipo
 from backend.ipo.scoring.service import (
     SCREENER_MODEL_VERSION,
     IpoRescoreOutcome,
+    get_current_evaluation,
     rescore_issue,
 )
 from backend.ipo.sources.enrichment import (
@@ -229,6 +230,7 @@ __all__ = [
     "evaluate_caution_flags",
     "evaluate_issue",
     "fetch_sebi_filings",
+    "get_current_evaluation",
     "get_document",
     "get_evaluation",
     "get_financial",
