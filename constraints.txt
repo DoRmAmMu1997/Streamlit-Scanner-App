@@ -19,14 +19,14 @@ requests==2.34.2
 # pdf_transport.py uses urllib3's inspected 2.7.0 pool API directly; this
 # declares the already-tested transitive version without upgrading it.
 urllib3==2.8.0
-python-dotenv==1.2.3
+python-dotenv==1.2.4
 dhanhq==2.2.0
 PyYAML==6.0.3
 beautifulsoup4==4.15.0
 lxml==6.1.3
 pdfplumber==0.11.10
-claude-agent-sdk==0.2.159
-SQLAlchemy==2.1.0
+claude-agent-sdk==0.2.163
+SQLAlchemy==2.1.1
 # Keep Alembic pinned with SQLAlchemy so local migrations and CI use the same
 # migration behavior every time.
 alembic==1.20.0
@@ -40,12 +40,12 @@ pytest==9.1.1
 ruff==0.16.9
 bandit==1.9.4
 pip-audit==2.10.1
-mypy==2.3.1
+mypy==2.4.0
 types-requests==2.33.0.20260906
 types-PyYAML==6.0.12.20260906
 # pandas-stubs tracks the pinned pandas 3.0.5 series (QUAL-006); types-pytz is
 # its declared dependency.
 pandas-stubs==3.0.5.260914
-types-pytz==2026.3.1.20260727
+types-pytz==2026.4.0.20260926
 pytest-cov==7.1.0
 pre-commit==4.6.2
