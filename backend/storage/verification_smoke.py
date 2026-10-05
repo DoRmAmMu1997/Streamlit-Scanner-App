@@ -72,11 +72,11 @@ def _seed_history(engine: Engine) -> tuple[int, int]:
         lets both dialects generate IDs so sequence state remains realistic.
     """
     with engine.begin() as connection:
-        run_id = connection.execute(text(
+        run_id: int = connection.execute(text(
             "INSERT INTO scan_runs (started_at, finished_at, status, screener_key, universe_key) "
             "VALUES (:started, :started, 'success', 'verification_legacy', 'nifty_100') RETURNING id"
         ), {"started": dt.datetime(2026, 6, 4, tzinfo=dt.UTC).isoformat()}).scalar_one()
-        result_id = connection.execute(text(
+        result_id: int = connection.execute(text(
             "INSERT INTO scan_results (run_id, symbol, close_price, raw_result_json, created_at) "
             "VALUES (:run_id, 'LEGACY', 123.4500, :payload, :created) RETURNING id"
         ), {"run_id": run_id, "payload": '{"symbol":"LEGACY","history_marker":"retain"}',
