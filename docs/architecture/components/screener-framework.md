@@ -68,7 +68,16 @@ flowchart TD
 | `result_columns` / `empty_result()` | `COMMON_RESULT_COLUMNS` + extras + trailing `PROVENANCE_COLUMN`, dedup-ordered / correctly-shaped empty frame. |
 | `build_chart(candles, params) -> dict|None` | Optional Lightweight-Charts spec; default `None`. |
 
-`export_module_compat(scanner)` bundles module-level aliases (`SCREENER`, `RESULT_COLUMNS`, `run`, `build_chart`) for legacy test imports.
+Screener modules bind their compatibility aliases explicitly to a module-local
+scanner instance. Candle screeners generally expose `SCREENER`, `RESULT_COLUMNS`,
+`run` and `build_chart`; the event-driven IPO screener exposes `SCREENER` and `run`.
+The registry discovers the class contract independently of those aliases.
+
+**Beginner note:** an alias such as `run = _scanner.run` lets older callers keep
+using the module-level API while the implementation lives on the scanner class.
+Keep each module's existing aliases when refactoring it. There is no separate
+export helper to call: explicit assignments show readers which names the module
+actually promises to support.
 
 ### `screener_registry`
 | Symbol | Contract |
