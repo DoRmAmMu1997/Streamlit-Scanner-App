@@ -294,9 +294,12 @@ def _result_row(
 
     if failed:
         triggered_rules.append("scoring_failed")
-    if row.recommendation_type:
+    if row.evaluation_stale:
+        triggered_rules.append("evaluation_stale")
+    if row.recommendation_type and not row.evaluation_stale:
         triggered_rules.append(f"verdict:{row.recommendation_type}")
-    triggered_rules.extend(row.triggered_flags)
+    if not row.evaluation_stale:
+        triggered_rules.extend(row.triggered_flags)
     if row.missing_data:
         triggered_rules.append("missing_data")
     if not triggered_rules:
@@ -322,7 +325,8 @@ def _result_row(
 
     return {
         "symbol": f"IPO:{row.issue_id}",
-        "rating": row.recommendation,
+        "rating": row.recommendation if not row.evaluation_stale else None,
+        "historical_recommendation": row.recommendation,
         # Deliberately null. A forward return is "the price N sessions after
         # the signal date", which an IPO issue has no series for: the VALID-002
         # job selects every result carrying a signal_date, could never resolve
@@ -330,13 +334,14 @@ def _result_row(
         # these rows as PENDING forever, consuming its batch budget. The
         # evaluation date is still reported, in its own column.
         "signal_date": None,
-        "scored_on": row.last_updated.date() if row.last_updated else None,
+        "scored_on": row.calculated_at.date() if row.calculated_at else None,
         "close": row.score,
         "reason": row.reasons[0] if row.reasons else "No evaluation yet.",
         "company_name": row.company_name,
         "issue_status": row.issue_status.value,
         "ipo_score": row.score,
-        "recommendation_type": row.recommendation_type,
+        "recommendation_type": row.recommendation_type if not row.evaluation_stale else None,
+        "historical_recommendation_type": row.recommendation_type,
         "confidence": row.confidence,
         "top_positives": "; ".join(row.top_positives),
         "top_risks": "; ".join((*row.triggered_flags, *row.top_risks)),

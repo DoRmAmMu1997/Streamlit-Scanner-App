@@ -11,7 +11,7 @@ leaves the proposal pending instead of losing it.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 from backend.ipo.agents.auto_approval import (
     AUTOMATION_ACTOR_EMAIL,
@@ -23,6 +23,7 @@ from backend.ipo.models import (
     IpoValidationError,
 )
 from backend.observability import EVENT_IPO_PROPOSAL_AUTO_APPROVED
+from backend.storage import SessionFactory
 
 
 def _proposal(proposal_id: int, confidence: Confidence) -> Any:
@@ -53,7 +54,7 @@ def test_disabled_by_default_touches_nothing(monkeypatch) -> None:
         raise AssertionError("auto-approval must not run when disabled")
 
     outcome = auto_approve_ready_proposals(
-        enabled=False, approver=_must_not_approve, session_factory=object
+        enabled=False, approver=_must_not_approve, session_factory=cast(SessionFactory, object)
     )
 
     assert outcome.disabled is True
@@ -87,7 +88,7 @@ def test_only_high_confidence_proposals_are_approved(monkeypatch) -> None:
         enabled=True,
         approver=_approver,
         audit_recorder=lambda **_kwargs: True,
-        session_factory=object,
+        session_factory=cast(SessionFactory, object),
     )
 
     assert approved_ids == [1]
@@ -116,7 +117,7 @@ def test_approval_is_attributed_to_the_automation_identity(monkeypatch) -> None:
         enabled=True,
         approver=_approver,
         audit_recorder=_record_audit,
-        session_factory=object,
+        session_factory=cast(SessionFactory, object),
     )
 
     assert seen["reviewed_by_email"] == AUTOMATION_ACTOR_EMAIL
@@ -145,7 +146,7 @@ def test_one_failing_proposal_stays_pending_without_blocking_siblings(
         enabled=True,
         approver=_approver,
         audit_recorder=lambda **_kwargs: True,
-        session_factory=object,
+        session_factory=cast(SessionFactory, object),
     )
 
     assert approved_ids == [2]
@@ -161,7 +162,7 @@ def test_environment_switch_drives_the_default(monkeypatch) -> None:
     monkeypatch.setattr(
         auto_approval, "get_ipo_auto_approve_high_confidence", lambda: False
     )
-    assert auto_approve_ready_proposals(session_factory=object).disabled is True
+    assert auto_approve_ready_proposals(session_factory=cast(SessionFactory, object)).disabled is True
 
     monkeypatch.setattr(
         auto_approval, "get_ipo_auto_approve_high_confidence", lambda: True
@@ -169,7 +170,7 @@ def test_environment_switch_drives_the_default(monkeypatch) -> None:
     outcome = auto_approve_ready_proposals(
         approver=lambda proposal_id, **_kwargs: SimpleNamespace(id=proposal_id),
         audit_recorder=lambda **_kwargs: True,
-        session_factory=object,
+        session_factory=cast(SessionFactory, object),
     )
     assert outcome.disabled is False
     assert outcome.approved == (1,)

@@ -389,6 +389,32 @@ def test_failures_stay_isolated_but_drive_the_exit_code() -> None:
     assert result.exit_code == 1
 
 
+def test_scoring_conflict_is_retryable_failure_and_keeps_sibling_success() -> None:
+    """Beginner note: exhausted publication conflicts cannot count as a current score."""
+    from backend.ipo.scoring.state import IpoScoringConflictError
+
+    issues = [_issue(1, "Acme Ltd"), _issue(2, "Beta Ltd")]
+
+    def rescorer(issue_id, **kwargs):
+        """Simulate bounded conflict exhaustion, followed by a successful sibling."""
+        if issue_id == 1:
+            raise IpoScoringConflictError("untrusted details must not be printed")
+        return _rescore(issues[1], "skipped_unchanged", _evaluation(
+            score="70.00", recommendation="Recommended", recommendation_type=APPLY_AND_HOLD,
+        ))
+
+    out = io.StringIO()
+    result = run_ipo_screener(skip_scan=True, skip_download=True, skip_enrich=True,
+        ensure_schema=lambda: True, issue_lister=lambda **kwargs: issues,
+        document_lister=lambda *args, **kwargs: [], rescorer=rescorer, session_factory=object, output=out)
+    assert result.issues[0].status == "failed"
+    assert result.issues[0].retryable is True
+    assert result.issues[0].failure_code == "ipo_scoring_conflict"
+    assert result.issues[1].status == "skipped_unchanged"
+    assert result.exit_code == 1
+    assert "untrusted details" not in out.getvalue()
+
+
 def test_missing_serpapi_key_is_a_graceful_skip_not_a_failure() -> None:
     """The first no-key outcome stops further queries and stays exit 0."""
     issues = [_issue(1, "Acme Ltd"), _issue(2, "Beta Ltd")]

@@ -13,7 +13,7 @@ from __future__ import annotations
 import datetime as dt
 from decimal import Decimal
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 from backend.ipo import dashboard
 from backend.ipo.dashboard import (
@@ -39,6 +39,7 @@ from backend.ipo.models import (
     IpoStatus,
     Recommendation,
 )
+from backend.storage import SessionFactory
 
 _SCORED_AT = dt.datetime(2026, 7, 13, 9, 0, tzinfo=dt.UTC)
 
@@ -193,6 +194,16 @@ def test_missing_data_queue_catches_every_evidence_gap() -> None:
     assert [row.issue_id for row in queued] == [2, 3, 4, 5]
 
 
+def test_stale_receipts_never_enter_actionable_sections() -> None:
+    """Beginner note: the old sections treated stale positive/negative history as current."""
+    rows = (_row(evaluation_stale=True), _row(issue_id=2, evaluation_stale=True, recommendation="Not Recommended"))
+    snapshot = IpoDashboardSnapshot(generated_at=_SCORED_AT, rows=rows)
+    assert section_recommended(snapshot) == ()
+    assert section_not_recommended(snapshot) == ()
+    assert section_available_filings(snapshot) == rows
+    assert section_missing_data_queue(snapshot) == rows
+
+
 def test_build_snapshot_denormalizes_stored_state_per_issue(monkeypatch) -> None:
     """The builder reads repositories only and flattens them into rows."""
     issue_updated = _SCORED_AT - dt.timedelta(days=2)
@@ -248,18 +259,6 @@ def test_build_snapshot_denormalizes_stored_state_per_issue(monkeypatch) -> None
     )
     monkeypatch.setattr(
         dashboard,
-        "get_latest_manual_profile",
-        lambda issue_id, **_kwargs: (
-            SimpleNamespace(
-                source_document_url="https://www.sebi.gov.in/scored-rhp",
-                submitted_at=issue_updated,
-            )
-            if issue_id == 1
-            else None
-        ),
-    )
-    monkeypatch.setattr(
-        dashboard,
         "list_extraction_proposals",
         lambda **kwargs: (
             [
@@ -284,12 +283,18 @@ def test_build_snapshot_denormalizes_stored_state_per_issue(monkeypatch) -> None
         lambda *_args, **_kwargs: [],
     )
     monkeypatch.setattr(
-        dashboard,
-        "get_latest_evaluation",
-        lambda issue_id, **_kwargs: evaluation if issue_id == 1 else None,
+        dashboard, "get_current_evaluation",
+        lambda issue_id, **_kwargs: SimpleNamespace(
+            evaluation=evaluation if issue_id == 1 else None,
+            fresh=issue_id == 1, last_verified_at=_SCORED_AT if issue_id == 1 else None,
+            snapshot=SimpleNamespace(inputs=SimpleNamespace(
+                issue=issues[issue_id - 1], source_documents=tuple(d.document_url for d in documents[issue_id]),
+                profile=SimpleNamespace(submitted_at=issue_updated) if issue_id == 1 else None,
+            )),
+        ),
     )
 
-    snapshot = build_dashboard_snapshot(now=_SCORED_AT, session_factory=object)
+    snapshot = build_dashboard_snapshot(now=_SCORED_AT, session_factory=cast(SessionFactory, object))
 
     assert snapshot.generated_at == _SCORED_AT
     scored, fresh = snapshot.rows
@@ -310,7 +315,7 @@ def test_build_snapshot_denormalizes_stored_state_per_issue(monkeypatch) -> None
 def test_newer_evidence_marks_the_displayed_evaluation_stale(
     monkeypatch,
 ) -> None:
-    """Fresh evidence after scored_at routes the issue back to the review queue."""
+    """A changed input revision routes the issue back to the review queue."""
     newer = _SCORED_AT + dt.timedelta(hours=1)
     issue = SimpleNamespace(
         id=1,
@@ -330,14 +335,6 @@ def test_newer_evidence_marks_the_displayed_evaluation_stale(
         dashboard, "list_documents", lambda *_args, **_kwargs: [document]
     )
     monkeypatch.setattr(
-        dashboard,
-        "get_latest_manual_profile",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            source_document_url=document.document_url,
-            submitted_at=_SCORED_AT,
-        ),
-    )
-    monkeypatch.setattr(
         dashboard, "list_extraction_proposals", lambda **_kwargs: []
     )
     monkeypatch.setattr(
@@ -351,16 +348,20 @@ def test_newer_evidence_marks_the_displayed_evaluation_stale(
         dashboard, "list_enrichment_signals", lambda *_args, **_kwargs: []
     )
     monkeypatch.setattr(
-        dashboard,
-        "get_latest_evaluation",
-        lambda *_args, **_kwargs: _evaluation(
-            contributions={"business_quality": "21.25"}
+        dashboard, "get_current_evaluation",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            evaluation=_evaluation(contributions={"business_quality": "21.25"}),
+            fresh=False, last_verified_at=_SCORED_AT,
+            snapshot=SimpleNamespace(inputs=SimpleNamespace(
+                issue=issue, source_documents=(document.document_url,),
+                profile=SimpleNamespace(submitted_at=_SCORED_AT),
+            )),
         ),
     )
 
     snapshot = build_dashboard_snapshot(
         now=newer,
-        session_factory=object,
+        session_factory=cast(SessionFactory, object),
     )
 
     assert snapshot.rows[0].evaluation_stale is True

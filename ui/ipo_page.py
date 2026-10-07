@@ -60,14 +60,13 @@ _SECTIONS = (
 _VERDICT_FILTERS = ("All", "Recommended", "Not Recommended")
 
 
-@st.cache_data(ttl=300, show_spinner=False)
 def _load_snapshot() -> IpoDashboardSnapshot:
-    """Read (and briefly cache) the dashboard snapshot for this session.
+    """Read current evidence at every render without a global snapshot cache.
 
     Beginner note:
-        ``st.cache_data`` keeps Streamlit's rerun-per-interaction model cheap:
-        clicking a filter does not re-read every issue. The re-score handler
-        calls ``.clear()`` so its fresh evaluations appear immediately.
+        Other sessions and jobs can write while this page is open, and GMP
+        can expire without a write. A fixed TTL cannot certify actionable
+        freshness. Each rerun rebuilds with one shared UTC evaluation clock.
     """
     return build_dashboard_snapshot()
 
@@ -76,7 +75,8 @@ def _verdict_label(row: IpoDashboardRow) -> str:
     """Map one stored recommendation_type onto its display wording."""
     if row.recommendation_type is None:
         return "Not scored yet"
-    return _RECOMMENDATION_TYPE_LABELS.get(row.recommendation_type, row.recommendation_type)
+    label = _RECOMMENDATION_TYPE_LABELS.get(row.recommendation_type, row.recommendation_type)
+    return f"Historical: {label}" if row.evaluation_stale else label
 
 
 def _apply_verdict_filter(
@@ -85,7 +85,7 @@ def _apply_verdict_filter(
     """Narrow rows to one binary verdict; unscored rows only pass 'All'."""
     if choice == "All":
         return rows
-    return tuple(row for row in rows if row.recommendation == choice)
+    return tuple(row for row in rows if not row.evaluation_stale and row.recommendation == choice)
 
 
 def _rows_frame(rows: tuple[IpoDashboardRow, ...]) -> pd.DataFrame:
@@ -127,6 +127,8 @@ def _rows_frame(rows: tuple[IpoDashboardRow, ...]) -> pd.DataFrame:
                 "Source documents": "; ".join(row.source_documents),
                 "Last updated": row.last_updated.isoformat() if row.last_updated else "",
                 "Evaluation stale": row.evaluation_stale,
+                "Calculated at": row.calculated_at.isoformat() if row.calculated_at else "",
+                "Last verified at": row.last_verified_at.isoformat() if row.last_verified_at else "",
             }
             for row in rows
         ]
@@ -205,8 +207,12 @@ def _render_breakdowns(rows: tuple[IpoDashboardRow, ...]) -> None:
                 )
             if row.evaluation_stale:
                 st.caption(
-                    "Evaluation stale: newer evidence is waiting to be scored."
+                    "Historical evaluation: re-score to check current evidence and eligibility."
                 )
+            if row.calculated_at:
+                st.caption(f"Calculated at {row.calculated_at.isoformat()}.")
+            if row.last_verified_at:
+                st.caption(f"Last verified at {row.last_verified_at.isoformat()}.")
             if row.source_documents:
                 st.caption(
                     "Source documents: "
@@ -254,7 +260,7 @@ def _render_ipo_page(*, can_rescore: bool, user_email: str | None = None) -> Non
 
     Beginner note:
         Rendering is read-only. The one explicit button calls the shared
-        repository-only scoring service, invalidates the short snapshot cache,
+        repository-only scoring service, rebuilds the current snapshot,
         and records an attributable audit event.
     """
     st.subheader("IPO dashboard")
@@ -266,7 +272,6 @@ def _render_ipo_page(*, can_rescore: bool, user_email: str | None = None) -> Non
 
     if can_rescore and st.button("Re-score all issues", key="ipo_rescore_all"):
         counts = _run_rescore_all(_load_snapshot(), user_email)
-        _load_snapshot.clear()
         st.success(
             "Re-score complete: "
             f"{counts['evaluated']} evaluated, "

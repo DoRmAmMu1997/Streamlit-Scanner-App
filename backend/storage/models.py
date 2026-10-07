@@ -1341,6 +1341,31 @@ class IpoSubscription(Base):
     issue: Mapped[IpoIssue] = relationship(back_populates="subscriptions")
 
 
+class IpoScoringState(Base):
+    """Mutable selection and verification metadata beside immutable history.
+
+    Beginner note:
+        The input revision is an invalidation token, not a count of manual edits.
+        An unchanged evidence refresh may reuse an old score but must verify the
+        new revision. A score pointer alone never certifies current evidence.
+    """
+
+    __tablename__ = "ipo_scoring_state"
+    __table_args__ = (
+        CheckConstraint("input_revision >= 0", name="ck_ipo_scoring_state_input_revision"),
+        CheckConstraint(
+            "evaluated_revision >= 0 AND evaluated_revision <= input_revision",
+            name="ck_ipo_scoring_state_evaluated_revision",
+        ),
+    )
+
+    issue_id: Mapped[int] = mapped_column(ForeignKey("ipo_issues.id", ondelete="CASCADE"), primary_key=True)
+    input_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    current_score_id: Mapped[int | None] = mapped_column(ForeignKey("ipo_scores.id", ondelete="SET NULL"))
+    evaluated_revision: Mapped[int | None] = mapped_column(Integer)
+    last_verified_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class IpoScore(Base):
     """Persist one immutable seven-factor calculation and its audit breakdown.
 
