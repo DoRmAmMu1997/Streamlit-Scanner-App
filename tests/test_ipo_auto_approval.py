@@ -10,6 +10,7 @@ leaves the proposal pending instead of losing it.
 
 from __future__ import annotations
 
+import datetime as dt
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -31,6 +32,9 @@ def _proposal(proposal_id: int, confidence: Confidence) -> Any:
     return SimpleNamespace(
         id=proposal_id,
         issue_id=100 + proposal_id,
+        document_id=proposal_id,
+        baseline_manual_revision=0,
+        needs_review_reasons=(),
         confidence=confidence,
         status=IpoExtractionProposalStatus.PENDING,
     )
@@ -42,6 +46,15 @@ def _install(monkeypatch, proposals: list[Any]) -> None:
 
     monkeypatch.setattr(
         auto_approval, "list_extraction_proposals", lambda **_kwargs: proposals
+    )
+    monkeypatch.setattr(
+        auto_approval,
+        "list_documents",
+        lambda issue_id, **_kwargs: [
+            SimpleNamespace(id=proposal.document_id, document_type="rhp", filing_date=dt.date(2025, 2, 1))
+            for proposal in proposals if proposal.issue_id == issue_id
+        ],
+        raising=False,
     )
 
 
@@ -174,3 +187,91 @@ def test_environment_switch_drives_the_default(monkeypatch) -> None:
     )
     assert outcome.disabled is False
     assert outcome.approved == (1,)
+
+
+
+def test_current_document_policy_never_falls_back_to_ready_older_draft():
+    """Use full inventory chronology without falling back to an older draft.
+
+    Beginner note:
+        Queue order previously let an older DRHP replace a newer RHP. Selection
+        must be stable under reordered input, while missing/tied/contradictory
+        dates require review. Proposal readiness does not affect this decision.
+    """
+    from backend.ipo import approval
+
+    assert hasattr(approval, "current_document_id"), "automation needs an inventory-based current-source policy"
+    # The pure selector reads only these three fields; full document/cache
+    # ownership is exercised by the repository approval tests separately.
+    older: Any = SimpleNamespace(id=1, document_type="drhp", filing_date=dt.date(2025, 1, 1))
+    latest: Any = SimpleNamespace(id=2, document_type="rhp", filing_date=dt.date(2025, 2, 1))
+    assert approval.current_document_id([older, latest]) == 2
+    assert approval.current_document_id([latest, older]) == 2
+    assert approval.current_document_id([older]) == 1
+    assert approval.current_document_id([]) is None
+    assert approval.current_document_id([latest, cast(Any, SimpleNamespace(
+        id=3, document_type="drhp", filing_date=None))]) is None
+    assert approval.current_document_id([older, latest, cast(Any, SimpleNamespace(
+        id=3, document_type="rhp", filing_date=latest.filing_date))]) is None
+    assert approval.current_document_id([older, cast(Any, SimpleNamespace(
+        id=2, document_type="rhp", filing_date=None))]) is None
+    assert approval.current_document_id([latest, cast(Any, SimpleNamespace(
+        id=3, document_type="drhp", filing_date=dt.date(2025, 3, 1)))]) is None
+
+
+def test_automatic_queue_approves_only_current_source_for_each_issue(monkeypatch) -> None:
+    """A ready older draft must not win merely because the queue returns it first.
+
+    Beginner note:
+        Previously both proposals could create evidence, and the last processed
+        one became the newest revision. Selection must use the document inventory
+        and request a second authority check inside the approval transaction.
+    """
+    from backend.ipo.agents import auto_approval
+
+    old, current = _proposal(1, Confidence.HIGH), _proposal(2, Confidence.HIGH)
+    current.issue_id = old.issue_id
+    _install(monkeypatch, [old, current])
+    monkeypatch.setattr(auto_approval, "list_documents", lambda *_args, **_kwargs: [
+        SimpleNamespace(id=1, document_type="drhp", filing_date=dt.date(2025, 1, 1)),
+        SimpleNamespace(id=2, document_type="rhp", filing_date=dt.date(2025, 2, 1)),
+    ])
+    calls: list[tuple[int, bool]] = []
+
+    def approve(proposal_id: int, **kwargs: Any) -> Any:
+        """Record the selection and whether final transactional checking is requested."""
+        calls.append((proposal_id, kwargs.get("require_current_candidate", False)))
+        return SimpleNamespace(id=900)
+
+    outcome = auto_approve_ready_proposals(
+        enabled=True, approver=approve, audit_recorder=lambda **_kwargs: True,
+        session_factory=cast(SessionFactory, object),
+    )
+    assert calls == [(2, True)]
+    assert outcome.approved == (2,)
+
+
+def test_unready_current_source_never_falls_back_to_an_older_proposal(monkeypatch) -> None:
+    """Low confidence on the newest RHP cannot grant authority to an older DRHP.
+
+    Beginner note:
+        Readiness and chronology are separate checks. The source selector must
+        inspect the complete inventory before the queue's confidence filter.
+    """
+    from backend.ipo.agents import auto_approval
+
+    old, current = _proposal(1, Confidence.HIGH), _proposal(2, Confidence.LOW)
+    current.issue_id = old.issue_id
+    _install(monkeypatch, [old, current])
+    monkeypatch.setattr(auto_approval, "list_documents", lambda *_args, **_kwargs: [
+        SimpleNamespace(id=1, document_type="drhp", filing_date=dt.date(2025, 1, 1)),
+        SimpleNamespace(id=2, document_type="rhp", filing_date=dt.date(2025, 2, 1)),
+    ])
+    calls: list[int] = []
+    outcome = auto_approve_ready_proposals(
+        enabled=True, approver=lambda proposal_id, **_kwargs: calls.append(proposal_id),
+        audit_recorder=lambda **_kwargs: True, session_factory=cast(SessionFactory, object),
+    )
+    assert calls == []
+    assert outcome.skipped_low_confidence == 1
+    assert outcome.skipped_needs_review == 1

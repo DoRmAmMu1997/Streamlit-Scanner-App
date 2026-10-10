@@ -68,7 +68,12 @@ def test_ipo013_backfills_complete_history_without_certifying_it(monkeypatch, tm
         receipts = list(connection.execute(text("SELECT * FROM ipo_recommendations ORDER BY id")))
     command.upgrade(config, "head")
     with engine.connect() as connection:
-        states = list(connection.execute(text("SELECT * FROM ipo_scoring_state ORDER BY issue_id")))
+        # Later migrations may add authority metadata. Keep this regression
+        # focused on IPO-013's selection and verification columns at final head.
+        states = list(connection.execute(text(
+            "SELECT issue_id, input_revision, current_score_id, evaluated_revision, last_verified_at "
+            "FROM ipo_scoring_state ORDER BY issue_id"
+        )))
         assert states == [(issue_id, 0, scores[1], None, None), (empty_id, 0, None, None, None)]
         assert list(connection.execute(text("SELECT * FROM ipo_scores ORDER BY id"))) == original
         assert list(connection.execute(text("SELECT * FROM ipo_recommendations ORDER BY id"))) == receipts
@@ -84,6 +89,136 @@ def test_ipo013_backfills_complete_history_without_certifying_it(monkeypatch, tm
     command.downgrade(config, "20260909valid005")
     assert "ipo_scoring_state" not in inspect(engine).get_table_names()
     engine.dispose()
+
+
+def test_ipo014_counts_manual_history_without_trusting_legacy_proposals(monkeypatch, tmp_path: Path) -> None:
+    """Upgrade populated IPO-013 data without rewriting or certifying old evidence.
+
+    Beginner note:
+        A manual generation counts committed revisions, independently of scoring
+        changes, timestamps and global row IDs. Even HIGH-confidence approved or
+        pending legacy proposals have no recorded extraction-time baseline and
+        must remain NULL. Exact history snapshots also protect the immutable
+        headers, financial children and peer rows during SQLite batch recreation.
+    """
+    from sqlalchemy import MetaData, Table
+    from sqlalchemy.exc import IntegrityError
+
+    from backend.storage.models import IpoDocument, IpoManualFinancialPeriod, IpoManualPeerValuation
+
+    url = f"sqlite:///{(tmp_path / 'ipo014-history.db').as_posix()}"
+    monkeypatch.setenv("DATABASE_URL", url)
+    config = Config("alembic.ini")
+    command.upgrade(config, "20260921ipo013")
+    engine = database._make_engine(url)
+    try:
+        with Session(engine) as session:
+            issues = [IpoIssue(company_name=f"Legacy {index}", issue_type="mainboard",
+                               status="rhp_filed", source_confidence="high") for index in range(3)]
+            session.add_all(issues)
+            session.flush()
+            issue_ids = [issue.id for issue in issues]
+            document = IpoDocument(issue_id=issue_ids[0], document_type="rhp",
+                                  document_url="https://www.sebi.gov.in/legacy.pdf", source_confidence="high")
+            session.add(document)
+            session.flush()
+            document_id = document.id
+            # Headers deliberately have unequal per-issue counts. The third
+            # issue's row ID is three but its correct generation is only one.
+            manual_ids: list[int] = []
+            numeric = ("net_worth", "total_debt", "cash", "cash_flow_from_operations", "equity_shares",
+                       "eps", "nav_book_value", "fresh_issue_amount", "ofs_amount",
+                       "promoter_holding_pre_issue", "promoter_holding_post_issue")
+            for owner in (issue_ids[0], issue_ids[0], issue_ids[2]):
+                values: dict[str, object] = {name: Decimal("1") for name in numeric}
+                values.update({f"{name}_page": 1 for name in numeric})
+                header = IpoManualExtraction(
+                    issue_id=owner, source_document_url=document.document_url,
+                    source_content_sha256="a" * 64, financial_amount_unit="crore_inr",
+                    issue_amount_unit="crore_inr", equity_share_unit="lakh_shares",
+                    objects_of_issue="Preserve this original text.", objects_of_issue_page=1,
+                    entered_by_email="legacy@example.com", submitted_at=dt.datetime(2000, 1, 1, tzinfo=dt.UTC),
+                    **values,
+                )
+                header.periods = [IpoManualFinancialPeriod(
+                    ordinal=index + 1, period_end=dt.date(2023 + index, 3, 31),
+                    revenue=Decimal("10"), revenue_page=1, ebitda=Decimal("2"), ebitda_page=1,
+                    pat=Decimal("1"), pat_page=1,
+                ) for index in range(3)]
+                header.peers = [IpoManualPeerValuation(company_name="Peer Ltd", company_key="peer ltd",
+                    source_page=1, metrics_json={"pe": "10"})]
+                session.add(header)
+                session.flush()
+                manual_ids.append(header.id)
+            session.commit()
+        with engine.begin() as connection:
+            for identifier in issue_ids:
+                connection.execute(text(
+                    "INSERT INTO ipo_scoring_state (issue_id, input_revision) VALUES (:issue_id, 9)"
+                ), {"issue_id": identifier})
+            # Reflect the OLD table because the current ORM intentionally knows
+            # the new column; using it here would not simulate a pre-upgrade DB.
+            proposals = Table("ipo_extraction_proposals", MetaData(), autoload_with=connection)
+            for index, status in enumerate(("pending", "approved", "rejected")):
+                connection.execute(proposals.insert().values(
+                    issue_id=issue_ids[0], document_id=document_id, status=status,
+                    document_url_snapshot="https://www.sebi.gov.in/legacy.pdf",
+                    payload_json={"original": status}, evidence_schema_version="cited-financial-fact/v2",
+                    semantic_fingerprint=f"{index + 1:064x}", confidence="high", needs_review_reasons_json=[],
+                    model_version="legacy", agent_model="fixture", source_content_sha256="a" * 64, page_count=1,
+                    created_at=dt.datetime(2000, 1, 1),
+                    manual_extraction_id=manual_ids[0] if status == "approved" else None,
+                    reviewed_by_email="legacy@example.com" if status != "pending" else None,
+                    reviewed_at=dt.datetime(2000, 1, 1) if status != "pending" else None,
+                ))
+        tables = ("ipo_manual_extractions", "ipo_manual_financial_periods", "ipo_manual_peer_valuations",
+                  "ipo_extraction_proposals", "ipo_scoring_state")
+        columns = {name: [column["name"] for column in inspect(engine).get_columns(name)] for name in tables}
+
+        def history_snapshot():
+            """Read old columns exactly, excluding only newly added authority metadata.
+
+            Beginner note:
+                Identifiers come exclusively from this private schema's reflection;
+                values never enter SQL text. Comparing raw rows detects changes to
+                stored JSON, source citations, authors, timestamps and child values.
+            """
+            quote = engine.dialect.identifier_preparer.quote
+            with engine.connect() as connection:
+                return {name: list(connection.execute(text(
+                    f"SELECT {', '.join(quote(column) for column in names)} FROM {quote(name)} ORDER BY 1"
+                ))) for name, names in columns.items()}
+
+        before = history_snapshot()
+        indexes = inspect(engine).get_indexes("ipo_extraction_proposals")
+        expected_indexes = {
+            (item["name"], tuple(item["column_names"]), item["unique"],
+             str(item.get("dialect_options", {}).get("sqlite_where", ""))) for item in indexes
+        }
+        command.upgrade(config, "head")
+        assert history_snapshot() == before
+        with engine.connect() as connection:
+            assert connection.execute(text(
+                "SELECT issue_id, manual_revision FROM ipo_scoring_state ORDER BY issue_id"
+            )).all() == [(issue_ids[0], 2), (issue_ids[1], 0), (issue_ids[2], 1)]
+            assert connection.execute(text(
+                "SELECT baseline_manual_revision FROM ipo_extraction_proposals ORDER BY id"
+            )).all() == [(None,), (None,), (None,)]
+        actual_indexes = {
+            (item["name"], tuple(item["column_names"]), item["unique"],
+             str(item.get("dialect_options", {}).get("sqlite_where", "")))
+            for item in inspect(engine).get_indexes("ipo_extraction_proposals")
+        }
+        assert actual_indexes == expected_indexes
+        for table, column in (("ipo_scoring_state", "manual_revision"),
+                              ("ipo_extraction_proposals", "baseline_manual_revision")):
+            with pytest.raises(IntegrityError), engine.begin() as connection:
+                connection.execute(text(f"UPDATE {table} SET {column}=-1"))
+        command.downgrade(config, "20260921ipo013")
+        assert history_snapshot() == before
+        assert "manual_revision" not in {item["name"] for item in inspect(engine).get_columns("ipo_scoring_state")}
+    finally:
+        engine.dispose()
 
 
 def test_obs004a_backfills_legacy_rows_and_restores_original_shape(

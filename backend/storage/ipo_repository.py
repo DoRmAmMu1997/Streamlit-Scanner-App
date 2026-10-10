@@ -90,6 +90,23 @@ def advance_ipo_scoring_input_revision(session: Session, issue_id: int) -> None:
         raise ValueError("IPO issue is missing its scoring state.")
 
 
+def get_ipo_manual_revision(session: Session, issue_id: int) -> int | None:
+    """Read the fresh manual-only generation in the caller's transaction.
+
+    Args:
+        session: Caller-owned scope, locked first when used for authority.
+        issue_id: Parent issue identifier.
+
+    Returns:
+        Generation, or None for a missing state (never interpreted as zero).
+
+    Beginner note:
+        Select a scalar so an ORM identity cached before a concurrent commit
+        cannot hide a newer manual correction. Backdated writes count too.
+    """
+    return session.scalar(select(IpoScoringState.manual_revision).where(IpoScoringState.issue_id == issue_id))
+
+
 def get_ipo_scoring_state_values(
     session: Session, issue_id: int
 ) -> tuple[int, int | None, int | None, dt.datetime | None] | None:
@@ -306,9 +323,13 @@ def update_ipo_document_values(
         The flushed document.
 
     Beginner note:
-        URL/type changes alter scoring provenance and acquire the state lock
-        before mutation. Cache-only metadata is display activity; the scorer does
-        not consume it, so downloading unchanged bytes cannot stale a score."""
+        All document mutations acquire the state lock before changing approval
+        inputs. Only URL/type changes invalidate scoring provenance. Cache/date
+        metadata is not consumed by scoring, so it must serialize with approval
+        without making an otherwise unchanged score stale.
+    """
+    if not lock_ipo_scoring_state(session, document.issue_id):
+        raise ValueError("IPO issue is missing its scoring state.")
     if {"document_url", "document_type"}.intersection(values):
         advance_ipo_scoring_input_revision(session, document.issue_id)
     for name, value in values.items():
@@ -350,8 +371,12 @@ def update_ipo_document_row(
         Flushed document, or None if the ownership lookup fails.
 
     Beginner note:
-        Lock the state before changing provenance. Cache-only metadata does not
-        change the score's semantic inputs and therefore needs no revision bump."""
+        Lock the state before changing source or cache authority. Cache/date
+        metadata does not change scoring semantics and therefore takes the lock
+        without a scoring revision bump.
+    """
+    if not lock_ipo_scoring_state(session, issue_id):
+        raise ValueError("IPO issue is missing its scoring state.")
     if {"document_url", "document_type"}.intersection(values):
         advance_ipo_scoring_input_revision(session, issue_id)
     row = get_ipo_document(session, issue_id, document_id)
@@ -380,6 +405,10 @@ def update_ipo_document_cache_if_source_matches(
     the ``WHERE`` predicate false, so stale bytes cannot be attributed to the
     revised document.
     """
+    # Cache identity participates in approval authority even though it is not
+    # a semantic scoring input. Serialize it without staling an unchanged score.
+    if not lock_ipo_scoring_state(session, issue_id):
+        raise ValueError("IPO issue is missing its scoring state.")
     stmt = (
         update(IpoDocument)
         .where(
@@ -512,6 +541,10 @@ def insert_ipo_manual_extraction(
         unchanged re-observation may reuse history after explicit verification.
     """
     advance_ipo_scoring_input_revision(session, issue_id)
+    # SQL arithmetic and the shared transaction make both tokens rollback together.
+    session.execute(update(IpoScoringState).where(IpoScoringState.issue_id == issue_id)
+                    .values(manual_revision=IpoScoringState.manual_revision + 1)
+                    .execution_options(synchronize_session=False))
     row = IpoManualExtraction(issue_id=issue_id, **header_values)
     row.periods = [
         IpoManualFinancialPeriod(**values) for values in period_values

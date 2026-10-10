@@ -1374,6 +1374,7 @@ class IpoExtractionProposalRecord:
     manual_extraction_id: int | None
     evidence_schema_version: str = "legacy-unbound/v0"
     semantic_fingerprint: str | None = None
+    baseline_manual_revision: int | None = None
 
     def __post_init__(self) -> None:
         """Freeze the proposed payload so a detached record stays read-only."""

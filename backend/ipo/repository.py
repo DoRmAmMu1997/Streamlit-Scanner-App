@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from backend.audit import record_audit_event
 from backend.config import get_settings
+from backend.ipo.approval import IpoManualEditContext, current_document_id, same_source
 from backend.ipo.documents.downloader import (
     IpoDocumentDownloadError,
     IpoDocumentDownloadErrorCode,
@@ -114,6 +115,7 @@ from backend.storage.ipo_repository import (
     get_ipo_issue,
     get_ipo_issue_by_sebi_key,
     get_ipo_manual_extraction,
+    get_ipo_manual_revision,
     get_ipo_scoring_state_values,
     get_ipo_subscription,
     get_latest_ipo_evaluation_rows,
@@ -758,23 +760,121 @@ def _manual_record(row: Any) -> IpoManualExtractionRecord:
     )
 
 
+def load_manual_edit_context(
+    issue_id: int, document_id: int, *, session_factory: SessionFactory = session_scope,
+) -> IpoManualEditContext:
+    """Capture a coherent source and manual baseline before slow editing/work.
+
+    Args:
+        issue_id: Owning IPO issue.
+        document_id: Selected registered source.
+        session_factory: Short caller-visible transaction boundary.
+
+    Returns:
+        Detached issue, document, latest profile and manual-only generation.
+
+    Raises:
+        IpoNotFoundError: If the issue or owned source is absent.
+        IpoValidationError: If required state is missing.
+
+    Beginner note:
+        Lock first, then read every component. Separate READ COMMITTED reads
+        could otherwise pair yesterday's form values with today's generation.
+        The lock is released before PDF parsing, hashing, agent retries or UI work.
+    """
+    with session_factory() as session:
+        if not lock_ipo_scoring_state(session, issue_id):
+            if get_ipo_issue(session, issue_id) is None:
+                raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
+            raise IpoValidationError("IPO issue is missing its required manual baseline state.")
+        issue = get_ipo_issue(session, issue_id)
+        document = get_ipo_document(session, issue_id, document_id)
+        if issue is None or document is None:
+            raise IpoNotFoundError(f"Document {document_id} was not found for IPO issue {issue_id}.")
+        revision = get_ipo_manual_revision(session, issue_id)
+        if revision is None:
+            raise IpoValidationError("IPO issue is missing its required manual baseline state.")
+        profile = get_latest_ipo_manual_extraction(session, issue_id)
+        return IpoManualEditContext(
+            issue=_issue_record(issue), document=_document_record(document), manual_revision=revision,
+            latest_profile=_manual_record(profile) if profile is not None else None,
+        )
+
+
+def _check_manual_baseline(expected: int | None, current: int | None) -> None:
+    """Fail closed on unknown or superseded manual authority.
+
+    Args:
+        expected: Original host-captured generation; None means never captured.
+        current: Fresh storage scalar read under the issue state lock.
+
+    Returns:
+        None if both generations are known and identical.
+
+    Raises:
+        IpoProposalConflictError: For an unknown baseline or changed/missing state.
+
+    Beginner note:
+        NULL means extraction never captured an authority baseline; zero is a
+        trusted observation of empty history. Neither human review nor HIGH
+        confidence grants permission to overwrite a later correction.
+    """
+    if expected is None:
+        raise IpoProposalConflictError(
+            "unknown_manual_baseline",
+            "This proposal has no trusted manual baseline. Reload and re-enter manual evidence.",
+        )
+    if current is None or expected != current:
+        raise IpoProposalConflictError(
+            "manual_revision_changed",
+            "Newer manual evidence exists. Reload and review before entering a fresh revision.",
+        )
+
+
 def submit_manual_extraction(
     issue_id: int,
     data: IpoManualExtractionData,
     *,
     entered_by_email: str,
     data_dir: Path | None = None,
+    expected_context: IpoManualEditContext | None = None,
+    verify_copied_citations: bool = False,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
     audit_recorder: AuditRecorder = record_audit_event,
     session_factory: SessionFactory = session_scope,
 ) -> IpoManualExtractionRecord:
-    """Verify cached source bytes, then atomically append one complete revision.
+    """Verify a source-bound draft, then atomically append a complete revision.
+
+    Args:
+        issue_id: Issue that owns the selected prospectus.
+        data: Validated reported values, units, periods, peers and source pages.
+        entered_by_email: Authenticated caller identity, never a payload author.
+        data_dir: Verified cache root override, primarily for disposable tests.
+        expected_context: Retained context from when editing began. Browser forms
+            must supply it. Omitted programmatic contexts are captured at entry
+            and protect only this call's file-verification window, not prior edits.
+        verify_copied_citations: Require deterministic matching against the selected
+            PDF for every fact copied from previous evidence; no AI is called.
+        now: Aware timestamp supplier for the immutable receipt.
+        audit_recorder: Best-effort audit sink invoked after commit.
+        session_factory: Caller-visible transaction scopes.
+
+    Returns:
+        Complete detached immutable revision with its periods and peers.
+
+    Raises:
+        IpoNotFoundError: If the issue or selected source is absent.
+        IpoProposalConflictError: If newer manual evidence supersedes the draft.
+        IpoValidationError: For invalid actor/time, changed source, bad cache or
+            copied citations that do not match the selected PDF.
 
     Beginner note:
-    The first transaction reads and detaches source metadata. Hashing the PDF
-    happens after that transaction closes, so a large file never holds a DB
-    connection or lock. The second short transaction compares the source facts
-    again before inserting all rows, closing the time-of-check/time-of-use gap.
+        Capture and final checks use short state-first transactions. Hashing and
+        bounded PDF parsing run outside those scopes. The final baseline/source
+        check and all child inserts share a lock and transaction, so a concurrent
+        correction cannot slip between validation and commit. The revision token
+        advances even for a backdated receipt; chronological display order stays
+        unchanged. A failed write restores both manual and scoring generations.
     """
     actor = _manual_email(entered_by_email)
     submitted_at = now()
@@ -782,15 +882,18 @@ def submit_manual_extraction(
         raise IpoValidationError("The manual-extraction clock must return a timezone-aware datetime.")
     submitted_at = submitted_at.astimezone(dt.UTC)
 
-    with session_factory() as session:
-        if get_ipo_issue(session, issue_id) is None:
-            raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
-        row = get_ipo_document(session, issue_id, data.source_document_id)
-        if row is None:
-            raise IpoValidationError(
-                f"Source document {data.source_document_id} does not belong to IPO issue {issue_id}."
-            )
-        document = _document_record(row)
+    # Legacy programmatic callers capture only their own verification window.
+    # Browser forms MUST pass their retained context from when editing began.
+    context = expected_context or load_manual_edit_context(
+        issue_id, data.source_document_id, session_factory=session_factory,
+    )
+    if context.issue.id != issue_id or context.document.id != data.source_document_id:
+        raise IpoValidationError("The manual draft does not belong to this issue and source.")
+    observed = load_manual_edit_context(issue_id, data.source_document_id, session_factory=session_factory)
+    if not same_source(context.document, observed.document):
+        raise IpoValidationError("The selected IPO source document changed before submission.")
+    _check_manual_baseline(context.manual_revision, observed.manual_revision)
+    document = context.document
 
     if document.document_type not in {"drhp", "rhp"}:
         raise IpoValidationError("Manual extraction accepts only a cached DRHP or RHP document.")
@@ -800,12 +903,21 @@ def submit_manual_extraction(
     except IpoDocumentDownloadError as exc:
         raise IpoValidationError("Manual extraction requires a verified cached PDF.") from exc
 
+    if verify_copied_citations:
+        from backend.ipo.agents.financial_extractor import verify_manual_copy_citations
+
+        verify_manual_copy_citations(data, cache_root=cache_root, file_path=verified.file_path)
+
     with session_factory() as session:
+        if not lock_ipo_scoring_state(session, issue_id):
+            raise IpoValidationError("IPO issue is missing its required manual baseline state.")
+        _check_manual_baseline(context.manual_revision, get_ipo_manual_revision(session, issue_id))
         current = get_ipo_document(session, issue_id, data.source_document_id)
         if current is None:
             raise IpoValidationError("The selected IPO source document changed before submission.")
         if (
-            current.document_type != document.document_type
+            not same_source(document, _document_record(current))
+            or current.document_type != document.document_type
             or current.document_url != document.document_url
             or current.content_sha256 != verified.content_sha256
             or current.file_path != verified.file_path
@@ -1992,6 +2104,7 @@ def _extraction_proposal_record(row: Any) -> IpoExtractionProposalRecord:
         manual_extraction_id=row.manual_extraction_id,
         evidence_schema_version=row.evidence_schema_version,
         semantic_fingerprint=row.semantic_fingerprint,
+        baseline_manual_revision=row.baseline_manual_revision,
     )
 
 
@@ -2006,17 +2119,48 @@ def submit_extraction_proposal(
     agent_model: str,
     source_content_sha256: str,
     page_count: int,
+    baseline_context: IpoManualEditContext | None = None,
     data_dir: Path | None = None,
     session_factory: SessionFactory = session_scope,
 ) -> IpoExtractionProposalRecord:
-    """Queue one AI-proposed extraction for human review.
+    """Queue one citation-bound draft with its original host authority baseline.
+
+    Args:
+        issue_id: Parent issue owning the selected source.
+        document_id: Registered DRHP/RHP source identifier.
+        payload: Model-proposed values plus independently verified source receipts.
+        confidence: Host-derived factual matching confidence, not source authority.
+        needs_review_reasons: Unresolved verifier notes for human review.
+        model_version: Extraction contract version.
+        agent_model: Model identity retained in the immutable proposal receipt.
+        source_content_sha256: Digest of the exact PDF used during extraction.
+        page_count: Positive count of parsed source pages.
+        baseline_context: Context captured before parsing and agent retries. None
+            stays explicitly unknown; submission never infers current authority.
+        data_dir: Verified document-cache root override.
+        session_factory: Caller-visible short transaction scopes.
+
+    Returns:
+        A detached pending proposal retaining the original manual generation,
+        even if a human correction committed while extraction was in progress.
+
+    Raises:
+        IpoNotFoundError: If the owning issue no longer exists.
+        IpoProposalConflictError: For a pending or semantic duplicate proposal.
+        IpoValidationError: For invalid shape, citations, source binding or bytes.
 
     Beginner note:
-        The payload is validated for *shape* here (it must reconstruct into
-        the strict manual contract) before anything is stored, so the review
-        queue can never hold a proposal that would be impossible to approve.
-        One pending proposal per document keeps the queue free of duplicates.
+        Shape and PDF receipts are verified before persistence. Baseline freshness
+        never creates new semantic content: an identical old proposal is not
+        rewritten or silently granted a newer baseline. Preserving the original
+        generation retains drafted work while final approval rejects stale work.
+        One pending proposal per source is still enforced by the partial index.
     """
+    if baseline_context is not None and (
+        baseline_context.issue.id != issue_id or baseline_context.document.id != document_id
+        or baseline_context.document.content_sha256 != source_content_sha256
+    ):
+        raise IpoValidationError("The proposal baseline is bound to a different issue or source.")
     _proposal_payload_to_manual_data(payload, document_id)
     evidence_schema_version = _validate_cited_fact_binding(
         payload,
@@ -2038,6 +2182,8 @@ def submit_extraction_proposal(
                 f"Source document {document_id} does not belong to IPO issue {issue_id}."
             )
         document = _document_record(document_row)
+        if baseline_context is not None and not same_source(baseline_context.document, document):
+            raise IpoValidationError("The extraction source changed after baseline capture.")
         if document.content_sha256 != source_content_sha256:
             raise IpoValidationError(
                 "Proposal source SHA does not match the current document."
@@ -2078,6 +2224,7 @@ def submit_extraction_proposal(
 
     values = {
         "status": IpoExtractionProposalStatus.PENDING.value,
+        "baseline_manual_revision": baseline_context.manual_revision if baseline_context is not None else None,
         "document_url_snapshot": document.document_url,
         "payload_json": normalize_secret_safe_json(dict(payload)),
         "evidence_schema_version": evidence_schema_version,
@@ -2092,9 +2239,12 @@ def submit_extraction_proposal(
         "page_count": int(page_count),
     }
     with session_factory() as session:
+        if not lock_ipo_scoring_state(session, issue_id):
+            raise IpoValidationError("IPO issue is missing its required manual baseline state.")
         current = get_ipo_document(session, issue_id, document_id)
         if (
             current is None
+            or not same_source(document, _document_record(current))
             or current.document_url != document.document_url
             or current.document_type != document.document_type
             or current.content_sha256 != verified.content_sha256
@@ -2159,11 +2309,41 @@ def approve_extraction_proposal(
     *,
     reviewed_by_email: str,
     data_dir: Path | None = None,
+    require_current_candidate: bool = False,
+    accept_authority_change: bool = False,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
     audit_recorder: AuditRecorder = record_audit_event,
     session_factory: SessionFactory = session_scope,
 ) -> IpoManualExtractionRecord:
     """Convert one pending proposal into an immutable manual-extraction revision.
+
+    Args:
+        proposal_id: Pending host-verified proposal selected for review.
+        reviewed_by_email: Trusted caller's reviewer identity, recorded as the
+            evidence author. Authentication and action authorization belong to
+            the calling application, not to model-controlled proposal text.
+        data_dir: Verified document-cache root; defaults to runtime settings.
+        require_current_candidate: True for automation. Adds current prospectus,
+            confidence, review-reason and issue-term checks under the issue lock.
+            False is the explicit human-review path and still checks the captured
+            manual baseline, ownership, source identity, hashes and citations.
+        accept_authority_change: Explicit human acknowledgement of noncurrent or
+            ambiguous chronology, unknown prior source, or changed stored terms.
+            Has no effect in automatic mode and never bypasses baseline checks.
+        now: Callable returning an aware review timestamp.
+        audit_recorder: Best-effort recorder invoked after the write commits.
+        session_factory: Caller-owned transaction context factory.
+
+    Returns:
+        The complete immutable manual revision committed with the proposal's
+        approved state and any verified issue terms.
+
+    Raises:
+        IpoNotFoundError: If the proposal or owning issue no longer exists.
+        IpoProposalConflictError: If the manual baseline is unknown/stale or an
+            automatic candidate lacks current source or issue-term authority.
+        IpoValidationError: If actor, clock, payload, source bytes, citations or
+            pending review state fail validation. No partial revision commits.
 
     Beginner note:
         Approval is an attestation: the reviewer becomes ``entered_by_email``
@@ -2206,6 +2386,8 @@ def approve_extraction_proposal(
         record.payload,
         source_content_sha256=record.source_content_sha256,
     )
+    if document.document_url != record.document_url or document.document_type not in {"drhp", "rhp"}:
+        raise IpoValidationError("The proposal source identity changed; use fresh manual review.")
     if document.content_sha256 != record.source_content_sha256:
         raise IpoValidationError(
             f"Extraction proposal {proposal_id} is stale because its source SHA "
@@ -2231,6 +2413,8 @@ def approve_extraction_proposal(
     )
 
     with session_factory() as session:
+        if not lock_ipo_scoring_state(session, record.issue_id):
+            raise IpoValidationError("IPO issue is missing its required manual baseline state.")
         current_proposal = get_ipo_extraction_proposal(session, proposal_id)
         if (
             current_proposal is None
@@ -2240,9 +2424,13 @@ def approve_extraction_proposal(
             raise IpoValidationError(
                 f"Extraction proposal {proposal_id} was reviewed concurrently."
             )
+        if _extraction_proposal_record(current_proposal) != record:
+            raise IpoValidationError("The proposal changed before approval; reload its review.")
+        _check_manual_baseline(record.baseline_manual_revision, get_ipo_manual_revision(session, record.issue_id))
         current_document = get_ipo_document(session, record.issue_id, document.id)
         if (
             current_document is None
+            or not same_source(document, _document_record(current_document))
             or current_document.document_url != document.document_url
             or current_document.document_type != document.document_type
             or current_document.content_sha256 != verified.content_sha256
@@ -2253,6 +2441,59 @@ def approve_extraction_proposal(
                 "changed before approval."
             )
         current_record = _document_record(current_document)
+        issue_term_values = {
+            field: Decimal(str(record.payload[field]))
+            for field in _ISSUE_TERM_FACT_FIELDS
+            if record.payload.get(field) is not None
+        }
+        inventory = [_document_record(row) for row in list_ipo_document_rows(session, record.issue_id)]
+        is_current = current_document_id(inventory) == current_record.id
+        latest_manual = get_latest_ipo_manual_extraction(session, record.issue_id)
+        dated_sources = {item.id: item for item in inventory
+                         if item.document_type in {"drhp", "rhp"} and item.filing_date is not None}
+        prior_source = (dated_sources.get(latest_manual.source_document_id)
+                        if latest_manual is not None and latest_manual.source_document_id is not None else None)
+        unknown_prior_source = latest_manual is not None and (
+            prior_source is None or prior_source.document_url != latest_manual.source_document_url
+            or prior_source.content_sha256 != latest_manual.source_content_sha256
+        )
+        current_issue = get_ipo_issue(session, record.issue_id)
+        if current_issue is None:
+            raise IpoNotFoundError(f"IPO issue {record.issue_id} was not found.")
+        conflicting_terms = any(
+            getattr(current_issue, field) is not None and getattr(current_issue, field) != proposed
+            for field, proposed in issue_term_values.items()
+        )
+        proposed_high = issue_term_values.get("price_band_high")
+        if current_issue.price_band_low is not None and proposed_high is not None and (
+            proposed_high < current_issue.price_band_low
+        ):
+            raise IpoValidationError("The proposed cap price is below the recorded price-band floor.")
+        # Every authority input is read after the shared lock and before inserting
+        # evidence. Human acknowledgement cannot bypass the earlier baseline,
+        # source/citation checks, or weaken the strict automatic mode.
+        if require_current_candidate:
+            if record.confidence is not Confidence.HIGH or record.needs_review_reasons:
+                raise IpoProposalConflictError(
+                    "proposal_needs_review", "The extraction still requires human factual review."
+                )
+            if not is_current:
+                raise IpoProposalConflictError(
+                    "noncurrent_source", "The proposal is not bound to one unambiguous current prospectus."
+                )
+            if unknown_prior_source:
+                raise IpoProposalConflictError(
+                    "unknown_prior_manual_source", "The prior manual source requires human chronology review."
+                )
+            if conflicting_terms:
+                raise IpoProposalConflictError(
+                    "conflicting_issue_terms", "Verified proposal terms conflict with the recorded issue."
+                )
+        elif (not is_current or unknown_prior_source or conflicting_terms) and accept_authority_change is not True:
+            raise IpoProposalConflictError(
+                "authority_decision_required",
+                "An explicit human decision is required for this source chronology or changed issue terms.",
+            )
         inserted = insert_ipo_manual_extraction(
             session,
             record.issue_id,
@@ -2269,30 +2510,7 @@ def approve_extraction_proposal(
         # were verified by the same citation machinery. Applying them here
         # keeps the revision, the issue update, and the proposal transition in
         # one transaction, so a concurrent-review rollback undoes all three.
-        issue_term_values = {
-            field: Decimal(str(record.payload[field]))
-            for field in _ISSUE_TERM_FACT_FIELDS
-            if record.payload.get(field) is not None
-        }
         if issue_term_values:
-            # The issue row carries a CHECK requiring the cap to sit at or
-            # above a stored floor. Comparing here turns a genuine conflict
-            # into the same typed "needs review" error every other approval
-            # failure raises, instead of an IntegrityError surfacing as a raw
-            # traceback in the admin page and aborting an autonomous run.
-            issue_row = get_ipo_issue(session, record.issue_id)
-            stored_low = getattr(issue_row, "price_band_low", None)
-            proposed_high = issue_term_values.get("price_band_high")
-            if (
-                stored_low is not None
-                and proposed_high is not None
-                and proposed_high < Decimal(str(stored_low))
-            ):
-                raise IpoValidationError(
-                    f"Extraction proposal {proposal_id} claims a cap price below "
-                    "the price-band floor already recorded on the issue; it "
-                    "needs human review rather than automatic approval."
-                )
             update_ipo_issue_row(session, record.issue_id, issue_term_values)
         marked = mark_ipo_extraction_proposal_reviewed(
             session,

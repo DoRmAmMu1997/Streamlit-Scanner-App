@@ -50,20 +50,19 @@ from backend.ipo.documents.table_extractor import (
     IpoDocumentParseError,
     extract_document_pages,
 )
-from backend.ipo.manual_extraction import IpoAmountUnit, IpoPeerMetric, IpoShareUnit
+from backend.ipo.manual_extraction import IpoAmountUnit, IpoManualExtractionData, IpoPeerMetric, IpoShareUnit
 from backend.ipo.models import (
     CitedFinancialFact,
     CitedTextEvidence,
     Confidence,
     IpoExtractionProposalRecord,
     IpoExtractionProposalStatus,
+    IpoValidationError,
 )
 from backend.ipo.repository import (
-    IpoNotFoundError,
     SessionFactory,
-    get_document,
-    get_issue,
     list_extraction_proposals,
+    load_manual_edit_context,
     submit_extraction_proposal,
 )
 from backend.observability import (
@@ -1498,6 +1497,99 @@ def verify_cited_receipts_against_pages(
         return False
 
 
+def verify_manual_copy_citations(
+    data: IpoManualExtractionData,
+    *,
+    cache_root: Path,
+    file_path: str,
+) -> None:
+    """Require every copied fact to match the newly selected, verified PDF.
+
+    Args:
+        data: Complete manual values and newly entered source pages, expressed
+            in the declared reported units rather than converted money floats.
+        cache_root: Caller-owned root of the verified content-addressed cache.
+        file_path: Cache-relative PDF path returned by hash verification. The
+            caller must verify its bytes first and recheck document identity
+            and the loaded manual revision before committing any evidence.
+
+    Returns:
+        None when every numeric, unit, fiscal-period, peer and narrative citation
+        matches the selected source. This helper does not persist evidence.
+
+    Raises:
+        IpoValidationError: If the source escapes the cache, parsing fails, data
+            cannot satisfy the citation schema, or even one fact is unverified.
+
+    Beginner note:
+        Copying is an editing convenience, not provenance. Reusing the strict
+        host matcher checks exact value tokens together with their labels,
+        periods, units and peer columns; a coincidental number elsewhere on the
+        page is insufficient. The existing killable PDF worker contains parsing,
+        and no agent or network request runs here. Call this outside a database
+        transaction, then let the repository perform its final locked checks.
+    """
+    try:
+        root = cache_root.resolve()
+        pdf_path = (root / file_path).resolve()
+        if not pdf_path.is_relative_to(root):
+            raise ValueError("The selected source escapes the verified cache.")
+
+        # Project only the established proposal schema. Manual author, issue ID
+        # and any prior receipt metadata cannot enter the source-verification
+        # input. Decimal text preserves the exact reported value and scale.
+        payload: dict[str, Any] = {
+            name: getattr(data, name)
+            for name in _ProposalModel.model_fields
+            if name not in {"periods", "peers"} and hasattr(data, name)
+        }
+        for name, value in payload.items():
+            if isinstance(value, Decimal):
+                payload[name] = format(value, "f")
+        payload.update({
+            "financial_amount_unit": data.financial_amount_unit.value,
+            "issue_amount_unit": data.issue_amount_unit.value,
+            "equity_share_unit": data.equity_share_unit.value,
+            # Manual forms cite values, without separate unit-page widgets.
+            # Use an already-cited value page for each representative unit
+            # reference. The matcher still checks the unit context of EVERY
+            # financial/issue/share fact; this does not borrow units across pages.
+            "financial_amount_unit_page": data.periods[0].revenue_page,
+            "issue_amount_unit_page": data.fresh_issue_amount_page,
+            "equity_share_unit_page": data.equity_shares_page,
+        })
+        periods: list[dict[str, Any]] = []
+        for period in data.periods:
+            values = {name: getattr(period, name) for name in _PeriodModel.model_fields}
+            for name, value in values.items():
+                if isinstance(value, Decimal):
+                    values[name] = format(value, "f")
+                elif isinstance(value, dt.date):
+                    values[name] = value.isoformat()
+            periods.append(values)
+        payload["periods"] = periods
+        payload["peers"] = [
+            {
+                "company_name": peer.company_name,
+                "source_page": peer.source_page,
+                "metrics": {
+                    metric.value if isinstance(metric, IpoPeerMetric) else metric: format(value, "f")
+                    for metric, value in peer.metrics.items()
+                },
+            }
+            for peer in data.peers
+        ]
+        proposal = _ProposalModel.model_validate(payload)
+        pages = extract_document_pages(pdf_path)
+        confidence, reasons = _verify_proposal(proposal, pages)
+        if confidence is not Confidence.HIGH or reasons:
+            # MEDIUM is useful for drafting a review queue item, but copied
+            # evidence cannot be written with any unresolved source mismatch.
+            raise ValueError("Copied facts are not completely verified.")
+    except (ValueError, TypeError, OSError, IpoDocumentParseError, _ExtractionOutputError) as exc:
+        raise IpoValidationError("Copied values could not be verified against the selected source.") from exc
+
+
 def _payload_from_model(
     proposal: _ProposalModel,
     cited_facts: tuple[CitedFinancialFact, ...],
@@ -1936,14 +2028,10 @@ def _propose_extraction_inner(
         proposal is persisted until deterministic host code has rebound the
         output to the exact source document.
     """
-    issue = get_issue(issue_id, session_factory=session_factory)
-    if issue is None:
-        raise IpoNotFoundError(f"IPO issue {issue_id} was not found.")
-    document = get_document(issue_id, document_id, session_factory=session_factory)
-    if document is None:
-        raise IpoNotFoundError(
-            f"Document {document_id} was not found for IPO issue {issue_id}."
-        )
+    # Capture once, before parsing and retries. A later human edit deliberately
+    # leaves this proposal stale rather than silently rebasing its authority.
+    baseline_context = load_manual_edit_context(issue_id, document_id, session_factory=session_factory)
+    issue, document = baseline_context.issue, baseline_context.document
     if document.document_type not in {"drhp", "rhp"}:
         raise IpoExtractionError(
             "unsupported_document", "Extraction accepts only a cached DRHP or RHP."
@@ -2069,6 +2157,7 @@ def _propose_extraction_inner(
         agent_model=agent_model,
         source_content_sha256=verified.content_sha256 or "",
         page_count=len(pages),
+        baseline_context=baseline_context,
         data_dir=cache_root,
         session_factory=session_factory,
     )

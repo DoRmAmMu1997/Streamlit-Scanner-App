@@ -238,6 +238,7 @@ def _cached_pdf_document(file_session_factory, data_dir: Path):
         issue.id,
         IpoDocumentData(
             document_type="rhp",
+            filing_date=dt.date(2025, 1, 1),
             document_url="https://www.sebi.gov.in/filings/example-rhp.html",
             source_confidence=Confidence.HIGH,
         ),
@@ -1438,3 +1439,51 @@ def test_successful_empty_terminal_result_uses_prior_assistant_text(
         issue_id=issue.id, session_factory=file_session_factory
     )
     assert [proposal.id for proposal in proposals] == [result.id]
+
+
+@pytest.mark.parametrize("retry", [False, True])
+def test_extraction_retains_manual_baseline_across_human_save_and_retry(
+    file_session_factory, tmp_path: Path, retry: bool,
+) -> None:
+    """A correction while the agent runs must never be overwritten by its draft.
+
+    Beginner note:
+        The injected runner commits a real human revision after extraction has
+        captured empty generation zero. A formatting retry must not recapture
+        generation one; source confidence and valid citations cannot rebase it.
+    """
+    from backend.ipo import repository
+
+    issue, document, _digest = _cached_pdf_document(file_session_factory, tmp_path)
+    calls = 0
+
+    def runner(_prompt: str) -> str:
+        """Commit a human edit during slow work, optionally forcing one retry."""
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            data = repository._proposal_payload_to_manual_data(json.loads(_agent_json()), document.id)
+            repository.submit_manual_extraction(
+                issue.id, data, entered_by_email="human@example.com", data_dir=tmp_path,
+                session_factory=file_session_factory,
+            )
+            if retry:
+                return "not valid JSON"
+        return _agent_json()
+
+    proposal = propose_extraction(
+        issue.id, document.id, data_dir=tmp_path, model="fixture-model", run_agent=runner,
+        session_factory=file_session_factory,
+    )
+    assert isinstance(proposal, IpoExtractionProposalRecord)
+    assert proposal.baseline_manual_revision == 0
+    assert calls == (2 if retry else 1)
+    assert repository.load_manual_edit_context(
+        issue.id, document.id, session_factory=file_session_factory,
+    ).manual_revision == 1
+    with pytest.raises(repository.IpoProposalConflictError) as error:
+        repository.approve_extraction_proposal(
+            proposal.id, reviewed_by_email="reviewer@example.com", data_dir=tmp_path,
+            session_factory=file_session_factory,
+        )
+    assert error.value.code == "manual_revision_changed"
