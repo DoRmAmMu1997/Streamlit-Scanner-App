@@ -90,6 +90,20 @@ _EVIDENCE_COLLECTOR: contextvars.ContextVar[list[Any] | None] = contextvars.Cont
     "fundamentals_evidence_collector",
     default=None,
 )
+# Request-local record of each transcript-tool call: True when it returned a
+# usable transcript. Like the evidence collector it stays None outside a
+# `check()`, and `check()` clears it on every parse-retry attempt.
+_TRANSCRIPT_ATTEMPTS: contextvars.ContextVar[list[bool] | None] = contextvars.ContextVar(
+    "fundamentals_transcript_attempts",
+    default=None,
+)
+
+# Shown in the verdict's concall section when the transcript tool ran but no
+# transcript could be used (SEC-006). App-owned text, never model output.
+TRANSCRIPT_UNAVAILABLE_NOTE = (
+    "Not available. No concall transcript could be downloaded or read for this "
+    "evaluation, so this outlook relies on announcements and structured data only."
+)
 
 
 def _record_external_evidence(value: Any) -> None:
@@ -98,6 +112,13 @@ def _record_external_evidence(value: Any) -> None:
     if collector is None:
         return
     collector.append(json.loads(json.dumps(value, default=str)))
+
+
+def _record_transcript_attempt(usable: bool) -> None:
+    """Note whether one transcript-tool call produced text the model could read."""
+    attempts = _TRANSCRIPT_ATTEMPTS.get()
+    if attempts is not None:
+        attempts.append(usable)
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +244,9 @@ class ForwardOutlook(StrictAIModel):
     - `concall_conclusion` is sourced from the most recent quarterly
       Concall transcript and stays empty when the agent did not call the
       `read_recent_concall_transcript` tool — the agent must NOT speculate
-      about transcript contents it never read.
+      about transcript contents it never read. When the tool ran but got no
+      usable transcript, `check()` overwrites it with the app-owned
+      `TRANSCRIPT_UNAVAILABLE_NOTE` (SEC-006), so that text is not model output.
     - `overall_summary` is the agent's integrated view that ties both
       signals plus broader sector knowledge into a forward projection.
     """
@@ -872,12 +895,14 @@ class FundamentalAgent:
         # or announcement text.
         normalized = (requested_symbol or _REQUESTED_SYMBOL.get() or symbol or "").strip().upper()
         if not normalized:
+            _record_transcript_attempt(False)
             return ""
 
         data = self._cache.get_data(normalized)
         if data is None:
             # The model called the transcript tool before fetch_company_data —
             # signal that so it knows to call fetch first.
+            _record_transcript_attempt(False)
             return "[no company data cached yet; call fetch_company_data first]"
 
         concalls = data.get("concalls") or []
@@ -887,7 +912,9 @@ class FundamentalAgent:
             logger.warning(
                 "Concall transcript fetch failed for %s", normalized, exc_info=True
             )
+            _record_transcript_attempt(False)
             return ""
+        _record_transcript_attempt(bool(transcript.strip()))
         return self._quarantine_text(transcript, normalized)
 
     # ------------------------------------------------------------------
@@ -1105,6 +1132,10 @@ class FundamentalAgent:
         # exposing the hostile text to the model.
         evidence_collector: list[Any] = []
         collector_token = _EVIDENCE_COLLECTOR.set(evidence_collector)
+        # Whether each transcript-tool call yielded a usable transcript, so an
+        # unusable one is shown in the verdict instead of silently left blank.
+        transcript_attempts: list[bool] = []
+        transcript_token = _TRANSCRIPT_ATTEMPTS.set(transcript_attempts)
 
         try:
             # 1. Try the verdict cache first (free re-clicks on the same day).
@@ -1143,6 +1174,7 @@ class FundamentalAgent:
                 # SDK / CLI / usage-limit failures here propagate (not retried);
                 # only malformed AI JSON is retried by parse_with_retry below.
                 evidence_collector.clear()
+                transcript_attempts.clear()
                 run_result = self._run_sync(
                     runner(
                         prompt,
@@ -1186,9 +1218,23 @@ class FundamentalAgent:
                     f"policy [{exc.error_type}]."
                 ) from None
         finally:
+            _TRANSCRIPT_ATTEMPTS.reset(transcript_token)
             _EVIDENCE_COLLECTOR.reset(collector_token)
             _FORCE_REFRESH.reset(refresh_token)
             _REQUESTED_SYMBOL.reset(symbol_token)
+
+        # Beginner note: when the transcript tool ran but nothing usable came
+        # back (none listed, host refused, unreadable PDF), the model never read
+        # a transcript, so any concall paragraph it wrote is speculation. Replace
+        # it with fixed app-owned text before caching, so the UI shows the gap.
+        if transcript_attempts and not any(transcript_attempts):
+            verdict = verdict.model_copy(
+                update={
+                    "forward_outlook": verdict.forward_outlook.model_copy(
+                        update={"concall_conclusion": TRANSCRIPT_UNAVAILABLE_NOTE}
+                    )
+                }
+            )
 
         # 4. Persist the verdict to the cache so the next click is instant.
         # Cache key includes mode plus fast-mode state so each setting reuses

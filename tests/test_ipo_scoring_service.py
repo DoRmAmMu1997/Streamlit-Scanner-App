@@ -261,6 +261,137 @@ def test_return_to_a_selects_old_receipt_as_current(file_session_factory, tmp_pa
     assert current.last_verified_at is not None
 
 
+def test_legacy_claimed_fingerprint_cannot_certify_invented_scorecard(
+    file_session_factory, tmp_path: Path, caplog
+) -> None:
+    """Reject a fabricated legacy scorecard even when its fingerprint is genuine.
+
+    Beginner note:
+        The old reuse path selected a caller's 100-point score instead of the
+        result derived from stored evidence. A failed verification must preserve
+        both the immutable history and the unverified current-selection state.
+    """
+    from backend.ipo import repository
+    from backend.ipo.models import FactorAssessment, IpoValidationError
+    from backend.ipo.scoring import service
+    from backend.ipo.scoring.factor_derivation import derive_score_input
+    from backend.ipo.scoring.score_model import score_ipo
+    from backend.storage.ipo_repository import get_ipo_scoring_state_values
+
+    issue = _scored_issue(file_session_factory, tmp_path)
+    snapshot = repository.load_ipo_scoring_snapshot(issue.id, as_of=_AS_OF, session_factory=file_session_factory)
+    legitimate = derive_score_input(snapshot.inputs)
+    invented_factor = FactorAssessment(Decimal("100"), "Caller supplied assessment")
+    invented = dataclasses.replace(
+        legitimate,
+        business_quality=invented_factor,
+        financial_growth=invented_factor,
+        return_ratios=invented_factor,
+        valuation=invented_factor,
+        qib_subscription=invented_factor,
+        promoter_quality=invented_factor,
+        gmp_sentiment=invented_factor,
+    )
+    legacy = repository.evaluate_issue(issue.id, invented,
+        inputs_fingerprint=compute_inputs_fingerprint(snapshot.inputs), model_version=SCREENER_MODEL_VERSION,
+        session_factory=file_session_factory)
+    assert legacy.result.score != score_ipo(legitimate).score
+    with file_session_factory() as session:
+        state_before = get_ipo_scoring_state_values(session, issue.id)
+    with pytest.raises(IpoValidationError, match="payload"):
+        rescore_issue(issue.id, as_of=_AS_OF, session_factory=file_session_factory)
+    with file_session_factory() as session:
+        assert get_ipo_scoring_state_values(session, issue.id) == state_before
+    assert repository.list_evaluations(issue.id, session_factory=file_session_factory) == [legacy]
+    assert not service.get_current_evaluation(issue.id, as_of=_AS_OF, session_factory=file_session_factory).fresh
+    assert not any("ipo_issue_scored" in record.message for record in caplog.records)
+
+
+@pytest.mark.parametrize(("half", "field", "replacement"), [
+    *(("score", name, Decimal("37.25")) for name in (
+        "business_quality", "financial_growth", "return_ratios", "valuation",
+        "qib_subscription", "promoter_quality", "gmp_sentiment", "total_score",
+    )),
+    ("score", "contributions_json", {}),
+    ("score", "breakdown_json", []),
+    ("score", "missing_data_json", ["business_quality"]),
+    ("score", "reasons_json", ["Caller supplied score explanation"]),
+    ("recommendation", "recommendation", "Not Recommended"),
+    ("recommendation", "recommendation_type", "Skip"),
+    ("recommendation", "confidence", "high"),
+    ("recommendation", "reasons_json", ["Caller supplied verdict explanation"]),
+    ("recommendation", "missing_data_json", ["business_quality"]),
+    ("recommendation", "source_documents_json", []),
+    ("recommendation", "caution_flags_json", []),
+])
+def test_reuse_compares_complete_receipt_not_only_total_or_identity(
+    file_session_factory, tmp_path: Path, half, field, replacement
+) -> None:
+    """Reject each changed receipt component without certifying or rewriting it.
+
+    Beginner note:
+        The old path compared identity alone. The fixture changes one field at
+        a time while retaining the fingerprint, proving that factors, verdicts,
+        reasons and source receipts all participate in verification. The chosen
+        replacement must actually differ from the fixture's stored value.
+    """
+    from backend.ipo import repository
+    from backend.ipo.models import IpoValidationError
+    from backend.ipo.scoring.caution_flags import evaluate_caution_flags
+    from backend.ipo.scoring.factor_derivation import derive_score_input
+    from backend.storage.ipo_repository import get_ipo_evaluation_rows, get_ipo_scoring_state_values
+
+    issue = _scored_issue(file_session_factory, tmp_path)
+    inputs = repository.load_ipo_factor_inputs_snapshot(issue.id, as_of=_AS_OF, session_factory=file_session_factory)
+    legacy = repository.evaluate_issue(issue.id, derive_score_input(inputs),
+        caution_flags=evaluate_caution_flags(inputs), inputs_fingerprint=compute_inputs_fingerprint(inputs),
+        model_version=SCREENER_MODEL_VERSION, session_factory=file_session_factory)
+    with file_session_factory() as session:
+        rows = get_ipo_evaluation_rows(session, issue.id, legacy.score_id)
+        assert rows is not None
+        row = rows[0] if half == "score" else rows[1]
+        assert getattr(row, field) != replacement, "Fixture must change actual persisted semantics"
+        setattr(row, field, replacement)
+    history_before = repository.list_evaluations(issue.id, session_factory=file_session_factory)
+    with file_session_factory() as session:
+        state_before = get_ipo_scoring_state_values(session, issue.id)
+    with pytest.raises(IpoValidationError, match="payload"):
+        rescore_issue(issue.id, as_of=_AS_OF, session_factory=file_session_factory)
+    assert repository.list_evaluations(issue.id, session_factory=file_session_factory) == history_before
+    with file_session_factory() as session:
+        assert get_ipo_scoring_state_values(session, issue.id) == state_before
+
+
+def test_matching_legacy_receipt_can_be_verified_with_reordered_source_set(
+    file_session_factory, tmp_path: Path
+) -> None:
+    """Verify a matching historical pair despite harmless source-set reordering.
+
+    Beginner note:
+        Refusing every old pair would break idempotency and A-B-A reuse. Source
+        URLs describe a set, so changing their order must still select the same
+        immutable receipt and leave its original calculation timestamp intact.
+    """
+    from backend.ipo import repository
+    from backend.ipo.scoring import service
+    from backend.ipo.scoring.caution_flags import evaluate_caution_flags
+    from backend.ipo.scoring.factor_derivation import derive_score_input
+
+    issue = _scored_issue(file_session_factory, tmp_path)
+    create_document(issue.id, IpoDocumentData(document_type="drhp",
+        document_url="https://www.sebi.gov.in/filings/older-drhp.html", source_confidence=Confidence.HIGH),
+        session_factory=file_session_factory)
+    inputs = repository.load_ipo_factor_inputs_snapshot(issue.id, as_of=_AS_OF, session_factory=file_session_factory)
+    score_input = derive_score_input(inputs)
+    legacy = repository.evaluate_issue(issue.id,
+        dataclasses.replace(score_input, source_documents=tuple(reversed(score_input.source_documents))),
+        caution_flags=evaluate_caution_flags(inputs), inputs_fingerprint=compute_inputs_fingerprint(inputs),
+        model_version=SCREENER_MODEL_VERSION, session_factory=file_session_factory)
+    outcome = rescore_issue(issue.id, as_of=_AS_OF, session_factory=file_session_factory)
+    assert outcome.status == "skipped_unchanged" and outcome.evaluation == legacy
+    assert service.get_current_evaluation(issue.id, as_of=_AS_OF, session_factory=file_session_factory).fresh
+
+
 def test_registered_sources_enter_semantic_identity(file_session_factory, tmp_path: Path) -> None:
     """Beginner note: missing source URLs in the hash reused an incomplete receipt."""
     issue = _scored_issue(file_session_factory, tmp_path)

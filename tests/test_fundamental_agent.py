@@ -9,6 +9,7 @@ contain. The two screener.in tools are tested directly via their plain
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import UTC, datetime
@@ -960,6 +961,152 @@ def test_check_allows_benign_tool_evidence(tmp_path):
     # The fetch tool returned the real screener JSON, not a blocked response.
     assert runner.tool_response is not None
     assert json.loads(runner.tool_response) != BLOCKED_EVIDENCE_RESPONSE
+
+
+# The exact owner-approved wording (SEC-006). Pinned as a literal, not imported,
+# so an accidental edit to the production constant fails here.
+_TRANSCRIPT_UNAVAILABLE_NOTE = (
+    "Not available. No concall transcript could be downloaded or read for this "
+    "evaluation, so this outlook relies on announcements and structured data only."
+)
+
+
+def _verdict_text_with_concall(concall_conclusion: str) -> str:
+    """Final agent JSON whose forward outlook carries the given concall paragraph."""
+    verdict = _sample_verdict().model_copy(
+        update={
+            "forward_outlook": ForwardOutlook(
+                announcements_conclusion="Order book grew sharply.",
+                concall_conclusion=concall_conclusion,
+                overall_summary="Steady compounding expected.",
+            )
+        }
+    )
+    return json.dumps(verdict.model_dump(mode="json"))
+
+
+class _TranscriptCallingRunner:
+    """Fake runner that calls the transcript tool, then returns one reply per attempt.
+
+    Beginner note:
+        The tool runs through ``asyncio.to_thread`` inside the real ``check()``
+        context, exactly like the SDK tool wrapper in ``_default_run``. That
+        proves the request-local transcript record reaches the worker thread,
+        which is what production depends on.
+    """
+
+    def __init__(self, agent: FundamentalAgent, replies: list[str]) -> None:
+        self._agent = agent
+        self._replies = replies
+        self.calls = 0
+
+    async def __call__(
+        self, prompt: str, *, system_prompt: str, model: str, max_turns: int
+    ) -> AgentRunResult:
+        self.calls += 1
+        await asyncio.to_thread(self._agent._read_concall_impl, "DEMO")
+        return AgentRunResult(text=self._replies[self.calls - 1], cost_usd=0.01)
+
+
+def _cache_with_concalls(tmp_path: Path) -> tuple[FundamentalsCache, dict[str, Any]]:
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    data = _sample_screener_data()
+    data["concalls"] = [{"month": "Jul 2026", "transcript_url": "https://www.bseindia.com/t.pdf"}]
+    cache.set_data("DEMO", data)
+    return cache, data
+
+
+def test_unusable_transcript_replaces_concall_paragraph_with_fixed_note(tmp_path, monkeypatch):
+    """A refused or empty transcript must be visible, never silently blank.
+
+    Beginner note:
+        BSE began refusing transcript downloads (HTTP 406), the tool returned
+        "", and the panel hid the concall section, so nobody could tell
+        "unavailable" from "not needed". The model also never read a
+        transcript, so anything it wrote there is speculation and is replaced.
+    """
+    cache, data = _cache_with_concalls(tmp_path)
+    monkeypatch.setattr(fundamental_agent_module, "read_recent_concall_text", lambda concalls: "")
+    agent = FundamentalAgent(model="test-model", cache=cache)
+    agent._runner = _TranscriptCallingRunner(
+        agent, [_verdict_text_with_concall("Management guided for 20% growth.")]
+    )
+
+    verdict = agent.check("DEMO")
+
+    assert verdict.forward_outlook.concall_conclusion == _TRANSCRIPT_UNAVAILABLE_NOTE
+    assert verdict.forward_outlook.announcements_conclusion == "Order book grew sharply."
+    assert verdict.forward_outlook.overall_summary == "Steady compounding expected."
+    cached = cache.get_verdict(
+        "DEMO", agent._cache_model_key("criteria"), _data_date_from_payload(data)
+    )
+    assert cached is not None
+    assert cached["forward_outlook"]["concall_conclusion"] == _TRANSCRIPT_UNAVAILABLE_NOTE
+
+
+def test_transcript_called_before_fetch_counts_as_unusable(tmp_path):
+    """Calling the transcript tool before any company data exists reads nothing."""
+    cache = FundamentalsCache(cache_dir=tmp_path)  # no snapshot cached yet
+    agent = FundamentalAgent(model="test-model", cache=cache)
+    agent._runner = _TranscriptCallingRunner(
+        agent, [_verdict_text_with_concall("Management guided for 20% growth.")]
+    )
+
+    verdict = agent.check("DEMO")
+
+    assert verdict.forward_outlook.concall_conclusion == _TRANSCRIPT_UNAVAILABLE_NOTE
+
+
+def test_usable_transcript_keeps_the_models_concall_paragraph(tmp_path, monkeypatch):
+    cache, _ = _cache_with_concalls(tmp_path)
+    monkeypatch.setattr(
+        fundamental_agent_module,
+        "read_recent_concall_text",
+        lambda concalls: "Management reiterated guidance and highlighted steady demand.",
+    )
+    agent = FundamentalAgent(model="test-model", cache=cache)
+    agent._runner = _TranscriptCallingRunner(agent, [_verdict_text_with_concall("Guidance reiterated.")])
+
+    verdict = agent.check("DEMO")
+
+    assert verdict.forward_outlook.concall_conclusion == "Guidance reiterated."
+
+
+def test_transcript_tool_not_called_leaves_concall_section_empty(tmp_path):
+    """Skipping the optional transcript tool is a model choice, not a failure."""
+    cache, _ = _cache_with_concalls(tmp_path)
+    agent = FundamentalAgent(model="test-model", cache=cache, runner=_FakeRunner(_sample_verdict()))
+
+    verdict = agent.check("DEMO")
+
+    assert verdict.forward_outlook.concall_conclusion == ""
+
+
+def test_transcript_outcome_resets_on_each_parse_retry(tmp_path, monkeypatch):
+    """Only the attempt that produced the accepted verdict decides the note.
+
+    Beginner note:
+        The order matters. A usable transcript on the discarded first attempt
+        must not vouch for the accepted second attempt, which read nothing;
+        without the per-attempt reset the stale "usable" record would hide the
+        note and keep the model's unsupported concall paragraph.
+    """
+    monkeypatch.setenv("SCANNER_AI_MAX_ATTEMPTS", "2")
+    cache, _ = _cache_with_concalls(tmp_path)
+    transcripts = iter(["Management reiterated guidance and highlighted steady demand.", ""])
+    monkeypatch.setattr(
+        fundamental_agent_module, "read_recent_concall_text", lambda concalls: next(transcripts)
+    )
+    agent = FundamentalAgent(model="test-model", cache=cache)
+    runner = _TranscriptCallingRunner(
+        agent, ["not JSON at all", _verdict_text_with_concall("Guidance reiterated.")]
+    )
+    agent._runner = runner
+
+    verdict = agent.check("DEMO")
+
+    assert runner.calls == 2
+    assert verdict.forward_outlook.concall_conclusion == _TRANSCRIPT_UNAVAILABLE_NOTE
 
 
 def test_invalid_cached_fundamental_verdict_is_refreshed(tmp_path):

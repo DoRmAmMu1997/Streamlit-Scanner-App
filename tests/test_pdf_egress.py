@@ -60,6 +60,30 @@ def test_injected_session_cannot_skip_private_dns(tmp_path: Path, monkeypatch, c
     assert "Session injection is unsupported" in caplog.text
 
 
+def test_every_hop_sends_only_the_pinned_identity_headers(tmp_path: Path):
+    """The downloader's request identity is an owner decision, so pin it exactly.
+
+    Beginner note:
+        BSE refuses the bare ``hemant-scanner/1.0`` agent (HTTP 406) but accepts
+        the conventional crawler form ``Mozilla/5.0 (compatible; <tool>; +<url>)``,
+        which still names this tool and repository instead of impersonating a
+        browser (SEC-006). Exact equality also proves no Referer, cookies or
+        other ambient headers leak onto any hop, including redirects.
+    """
+    transport = RecordingSession([response(302, location="/final.pdf"), response()])
+    assert pdf_reader.download_pdf("https://example.com/start.pdf", cache_dir=tmp_path,
+                                   resolver=lambda *_: ["8.8.8.8"], transport=transport) is not None
+    assert len(transport.calls) == 2
+    for _, options in transport.calls:
+        assert options["headers"] == {
+            "User-Agent": (
+                "Mozilla/5.0 (compatible; hemant-scanner/1.0; "
+                "+https://github.com/DoRmAmMu1997/Streamlit-Scanner-App)"
+            ),
+            "Accept": "application/pdf,*/*",
+        }
+
+
 def test_redirect_is_followed_manually_after_public_validation(tmp_path: Path, monkeypatch):
     """Removing the manual redirect loop loses a valid public transcript."""
     monkeypatch.setattr(socket, "getaddrinfo", lambda *_a, **_k: [
