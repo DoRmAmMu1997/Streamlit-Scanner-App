@@ -40,6 +40,44 @@ def _freeze(value: Any) -> Any:
     return str(value)
 
 
+def _sqlite_index_definitions(engine: Engine, table: str) -> frozenset[tuple[object, ...]]:
+    """Retain index key semantics that generic SQLite reflection leaves out.
+
+    Args:
+        engine: Caller-owned SQLite verification engine.
+        table: Reflected table name, quoted as an identifier before each PRAGMA.
+
+    Returns:
+        Index origins, uniqueness, partial-index flags, and ordered key/auxiliary
+        columns with their sort direction and collation. Explicit index names
+        remain significant; generated constraint-index names are excluded.
+
+    Raises:
+        sqlalchemy.exc.SQLAlchemyError: SQLite cannot return the index metadata.
+
+    Beginner note:
+        BINARY and NOCASE unique indexes accept different values even when their
+        names and columns match. ``index_xinfo`` exposes those comparison rules
+        and DESC order, which SQLAlchemy's generic reflection silently omits.
+        ``index_list`` also includes indexes backing UNIQUE and PRIMARY KEY
+        constraints. Their generated suffixes depend on declaration order, so
+        compare their actual definitions instead of incidental autoindex names.
+        See https://www.sqlite.org/pragma.html#pragma_index_xinfo.
+    """
+    quote = engine.dialect.identifier_preparer.quote_identifier
+    definitions: set[tuple[object, ...]] = set()
+    with engine.connect() as connection:
+        indexes = connection.exec_driver_sql(f"PRAGMA index_list({quote(table)})").all()
+        for index in indexes:
+            columns = connection.exec_driver_sql(f"PRAGMA index_xinfo({quote(index[1])})").all()
+            # Preserve index order and key/auxiliary status; table-column numeric
+            # offsets are incidental because the logical column name is retained.
+            keys = tuple((column[0], *column[2:]) for column in columns)
+            name = index[1] if index[3] == "c" else None
+            definitions.add((name, index[2], index[3], index[4], keys))
+    return frozenset(definitions)
+
+
 def reflect_schema(engine: Engine) -> dict[str, dict[str, object]]:
     """Fingerprint database-enforced contracts, excluding Alembic bookkeeping.
 
@@ -49,6 +87,13 @@ def reflect_schema(engine: Engine) -> dict[str, dict[str, object]]:
     Returns:
         Tables with columns, defaults, primary keys, checks, unique constraints,
         complete index definitions and foreign-key targets/actions/options.
+
+    Raises:
+        sqlalchemy.exc.SQLAlchemyError: The caller's database cannot be queried
+            or its schema cannot be reflected.
+        sqlalchemy.exc.SAWarning: Index reflection is incomplete, for example
+            when the dialect cannot describe an expression index. Such a schema
+            must not be reported as matching from partial evidence.
 
     Beginner note:
         A matching index name says nothing about its columns or WHERE clause.
@@ -109,6 +154,9 @@ def reflect_schema(engine: Engine) -> dict[str, dict[str, object]]:
             "checks": {_freeze(check) for check in inspector.get_check_constraints(table)},
             "unique_constraints": {_freeze(unique) for unique in inspector.get_unique_constraints(table)},
             "indexes": indexes,
+            "sqlite_index_definitions": (
+                _sqlite_index_definitions(engine, table) if engine.dialect.name == "sqlite" else None
+            ),
             "foreign_keys": foreign_keys,
             "sqlite_foreign_key_actions": sqlite_foreign_key_actions,
         }

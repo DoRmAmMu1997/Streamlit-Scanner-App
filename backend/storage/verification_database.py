@@ -18,13 +18,15 @@ def disposable_postgres_database(admin_url: str) -> Iterator[str]:
 
     Args:
         admin_url: Explicit test-server URL whose role can CREATE DATABASE.
-            Its configured database is only a maintenance connection target.
+            Its path database is only a maintenance connection target. A query
+            ``dbname`` override is refused; TLS and other driver options remain.
 
     Yields:
         A URL for the newly created private database, using the pinned driver.
 
     Raises:
-        ValueError: The URL cannot be parsed or does not name PostgreSQL.
+        ValueError: The URL cannot be parsed, does not name PostgreSQL, or has a
+            query option that would override the owned scratch database name.
         RuntimeError: Engine setup, provisioning or cleanup fails; configuration
             and credentials are suppressed from the public exception message.
 
@@ -44,6 +46,12 @@ def disposable_postgres_database(admin_url: str) -> Iterator[str]:
         raise ValueError("Verification provisioning requires a valid PostgreSQL URL") from None
     if url.get_backend_name() != "postgresql":
         raise ValueError("Verification provisioning requires a PostgreSQL URL")
+    # SQLAlchemy applies query parameters after translating the URL path into
+    # psycopg's dbname argument. Keeping a query override would route our yielded
+    # scratch URLs back into an existing database despite URL.set(database=...).
+    # Refuse it before constructing an engine or issuing any provisioning DDL.
+    if "dbname" in url.query:
+        raise ValueError("Verification URLs cannot contain a database-routing query option")
     url = url.set(drivername="postgresql+psycopg")
     # No caller-controlled identifiers enter these DDL strings. Even a hostile
     # database component in admin_url cannot change the generated DROP target.

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.exc import IntegrityError
 from test_scan_storage_migrations import _reflect_schema
 
 
@@ -60,6 +61,89 @@ def test_same_named_index_drift_is_visible(tmp_path: Path, before: str, after: s
             connection.exec_driver_sql("CREATE TABLE sample (id INTEGER, code TEXT)")
             connection.exec_driver_sql(statement)
         schemas.append(_reflect_schema(engine))
+    assert schemas[0] != schemas[1]
+
+
+@pytest.mark.parametrize("index_kind", ["index", "unique", "primary_key"])
+def test_sqlite_unique_index_collation_drift_is_visible(tmp_path: Path, index_kind: str) -> None:
+    """Expose different accepted values despite identical reflected index columns.
+
+    Beginner note:
+        SQLAlchemy omits SQLite index collations without a warning. Previously
+        the comparator treated BINARY and NOCASE unique indexes as equivalent,
+        even though only one accepts two differently capitalized spellings.
+        Table-level UNIQUE and PRIMARY KEY rules use implicit indexes and need
+        the same check.
+    """
+    schemas = []
+    accepted_case_variant = []
+    for position, collation in enumerate(("BINARY", "NOCASE")):
+        engine = create_engine(f"sqlite:///{tmp_path / f'collation-{position}.db'}")
+        try:
+            with engine.begin() as connection:
+                if index_kind != "index":
+                    constraint = "UNIQUE" if index_kind == "unique" else "PRIMARY KEY"
+                    connection.exec_driver_sql(
+                        f"CREATE TABLE sample (code TEXT, {constraint} (code COLLATE {collation}))"
+                    )
+                else:
+                    connection.exec_driver_sql("CREATE TABLE sample (code TEXT)")
+                    connection.exec_driver_sql(
+                        f"CREATE UNIQUE INDEX sample_idx ON sample (code COLLATE {collation})"
+                    )
+                connection.exec_driver_sql("INSERT INTO sample VALUES ('Mixed')")
+                try:
+                    connection.exec_driver_sql("INSERT INTO sample VALUES ('mixed')")
+                except IntegrityError:
+                    accepted_case_variant.append(False)
+                else:
+                    accepted_case_variant.append(True)
+            schemas.append(_reflect_schema(engine))
+        finally:
+            engine.dispose()
+    assert accepted_case_variant == [True, False]
+    assert schemas[0] != schemas[1]
+
+
+def test_sqlite_implicit_index_numbering_does_not_create_false_drift(tmp_path: Path) -> None:
+    """Compare constraint definitions independently of SQLite autoindex suffixes.
+
+    Beginner note:
+        Reordering two equivalent UNIQUE declarations changes SQLite's generated
+        index names. The new collation guard must retain both constraints while
+        ignoring those incidental names, so harmless migration formatting does
+        not become a false schema mismatch.
+    """
+    schemas = []
+    for position, constraints in enumerate(("UNIQUE (id), UNIQUE (code)", "UNIQUE (code), UNIQUE (id)")):
+        engine = create_engine(f"sqlite:///{tmp_path / f'autoindex-{position}.db'}")
+        try:
+            with engine.begin() as connection:
+                connection.exec_driver_sql(f"CREATE TABLE sample (id INTEGER, code TEXT, {constraints})")
+            schemas.append(_reflect_schema(engine))
+        finally:
+            engine.dispose()
+    assert schemas[0] == schemas[1]
+
+
+def test_sqlite_index_sort_direction_drift_is_visible(tmp_path: Path) -> None:
+    """Retain descending index order that SQLite's generic reflection drops.
+
+    Beginner note:
+        Both indexes have the same name and column list, but the second key's
+        direction changes the ordering that the index supports. The fingerprint
+        must compare the actual key definition, not just the column names.
+    """
+    schemas = []
+    for position, direction in enumerate(("ASC", "DESC")):
+        engine = create_engine(f"sqlite:///{tmp_path / f'direction-{position}.db'}")
+        try:
+            with engine.begin() as connection:
+                connection.exec_driver_sql("CREATE TABLE sample (id INTEGER, code TEXT)")
+                connection.exec_driver_sql(f"CREATE INDEX sample_idx ON sample (id ASC, code {direction})")
+            schemas.append(_reflect_schema(engine))
+        finally:
+            engine.dispose()
     assert schemas[0] != schemas[1]
 
 

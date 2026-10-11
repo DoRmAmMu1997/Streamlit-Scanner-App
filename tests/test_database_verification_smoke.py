@@ -77,6 +77,72 @@ def test_disposable_postgres_hides_engine_configuration_errors() -> None:
     assert isinstance(error.value, RuntimeError)
 
 
+def test_disposable_postgres_rejects_database_override_before_engine_setup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reject a query database that would override both generated scratch URLs.
+
+    Beginner note:
+        SQLAlchemy lets a ``dbname`` query option override the URL path passed
+        to psycopg. Replacing only the path used to leave both supposedly private
+        URLs targeting the caller's database. Refusal must happen before CREATE
+        or any connection, and diagnostics must not repeat the supplied value.
+    """
+    from backend.storage import verification_database
+
+    created_engines = []
+
+    def unexpected_engine(*args, **kwargs):
+        """Record an unsafe early engine setup without contacting PostgreSQL."""
+        created_engines.append(True)
+        raise AssertionError("Database override reached engine construction")
+
+    monkeypatch.setattr(verification_database, "create_engine", unexpected_engine)
+    marker = "PRIVATE_EXISTING_DATABASE"
+    with pytest.raises(ValueError, match="query") as error, verification_database.disposable_postgres_database(
+        f"postgresql://fixture:fixture@127.0.0.1/postgres?dbname={marker}"
+    ):
+        pytest.fail("A database-overriding URL was accepted")
+    assert created_engines == []
+    assert marker not in str(error.value)
+
+
+def test_disposable_postgres_driver_targets_generated_database_and_keeps_tls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check actual driver arguments, not just the displayed scratch URL path.
+
+    Beginner note:
+        A safe-looking URL is insufficient when query options can override its
+        path. This no-network fixture runs SQLAlchemy's real psycopg argument
+        conversion and proves the generated CREATE target is also the effective
+        connection database. Legitimate TLS options must survive the boundary.
+    """
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from sqlalchemy.dialects.postgresql.psycopg import PGDialect_psycopg
+    from sqlalchemy.engine import make_url
+
+    from backend.storage import verification_database
+
+    commands: list[str] = []
+
+    @contextmanager
+    def connection():
+        """Record scratch CREATE/DROP statements without opening a connection."""
+        yield SimpleNamespace(exec_driver_sql=commands.append)
+
+    monkeypatch.setattr(verification_database, "create_engine", lambda *_args, **_kwargs: SimpleNamespace(
+        connect=connection, dispose=lambda: None,
+    ))
+    with verification_database.disposable_postgres_database(
+        "postgresql://fixture:fixture@127.0.0.1/postgres?sslmode=verify-full"
+    ) as private_url:
+        created_name = commands[0].split('"')[1]
+        _args, kwargs = PGDialect_psycopg().create_connect_args(make_url(private_url))
+        assert kwargs["dbname"] == created_name
+        assert created_name.startswith("scanner_verify_")
+        assert kwargs["sslmode"] == "verify-full"
+    assert commands[1] == f'DROP DATABASE "{created_name}" WITH (FORCE)'
+
+
 def test_disposable_postgres_cleans_up_when_create_connection_exit_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     """Track a successful CREATE before its connection context can raise.
 

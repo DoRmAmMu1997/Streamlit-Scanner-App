@@ -35,6 +35,12 @@ from backend.storage.verification_database import disposable_postgres_database
 def _migration_url(url: str) -> Iterator[None]:
     """Temporarily direct Alembic's environment reader at a private database.
 
+    Args:
+        url: Caller-provisioned scratch database URL for this synchronous block.
+
+    Yields:
+        None while ``DATABASE_URL`` names the scratch database.
+
     Beginner note:
         Alembic reads DATABASE_URL at invocation time. Restore the original
         value even on failure so an integration test cannot redirect later tests.
@@ -54,6 +60,10 @@ def _migration_url(url: str) -> Iterator[None]:
 def migration_config() -> Config:
     """Return a config anchored to the installed application migration directory.
 
+    Returns:
+        An Alembic configuration that locates the packaged migration scripts.
+        The database URL is supplied separately by ``_migration_url``.
+
     Beginner note:
         A programmatic Config preserves the application's logging/redaction
         setup. Resolving from __file__ also works from a non-repository cwd.
@@ -65,6 +75,16 @@ def migration_config() -> Config:
 
 def _seed_history(engine: Engine) -> tuple[int, int]:
     """Insert initial-revision rows using only columns that existed then.
+
+    Args:
+        engine: Caller-owned scratch engine upgraded to ``20260604scan002``.
+
+    Returns:
+        The committed historical scan-run and result IDs, in that order.
+
+    Raises:
+        sqlalchemy.exc.SQLAlchemyError: The historical insert cannot complete;
+            the engine transaction rolls back both fixture rows together.
 
     Beginner note:
         Current ORM INSERTs cannot seed an old schema: they mention columns
@@ -86,6 +106,16 @@ def _seed_history(engine: Engine) -> tuple[int, int]:
 
 def _verify_repository(engine: Engine, legacy_run_id: int, legacy_result_id: int) -> None:
     """Prove durable repository writes, rollback, uniqueness and database cascade.
+
+    Args:
+        engine: Caller-owned private engine already migrated to the current head.
+        legacy_run_id: Historical run identity returned by ``_seed_history``.
+        legacy_result_id: Historical result identity returned by that helper.
+
+    Raises:
+        AssertionError: A persisted value or database-enforced invariant differs
+            from the expected history, transaction, uniqueness, or cascade behavior.
+        sqlalchemy.exc.SQLAlchemyError: An unexpected database operation fails.
 
     Beginner note:
         Separate transactions ensure reads observe committed storage rather than
@@ -160,6 +190,9 @@ def verify_database_pair(migrated_url: str, metadata_url: str) -> dict[str, bool
 
     Raises:
         AssertionError: Database identity, history, repository, or schema differs.
+        alembic.util.exc.CommandError: The migration chain cannot be loaded or applied.
+        sqlalchemy.exc.SQLAlchemyError: Database access or schema reflection fails.
+        sqlalchemy.exc.SAWarning: Reflection cannot describe an index completely.
 
     Beginner note:
         Refuse nonempty databases BEFORE any DDL. Provisioning and eventual
@@ -204,6 +237,10 @@ def verify_database_pair(migrated_url: str, metadata_url: str) -> dict[str, bool
 def verify_relocated_universe_sources() -> None:
     """Read packaged source universes after moving mutable data to an empty dir.
 
+    Raises:
+        AssertionError: A curated source follows mutable ``DATA_DIR`` or does
+            not yield any symbols through the application's CSV loader.
+
     Beginner note:
         PR116 separates curated source CSVs from generated DATA_DIR files. This
         check must read the package's sources even when the private runtime
@@ -221,6 +258,11 @@ def verify_relocated_universe_sources() -> None:
 
 def run_image_verification() -> None:
     """Verify image sources/storage after the launcher sets private environment.
+
+    Raises:
+        SystemExit: Verification or scratch-database cleanup fails. Fixed
+            assertion diagnostics remain readable; unexpected exception messages
+            are replaced with their type so database credentials cannot leak.
 
     Beginner note:
         Run in the launcher's fresh process so import-time path constants read
@@ -244,6 +286,13 @@ def run_image_verification() -> None:
 
 def main() -> int:
     """Run image verification using explicitly authorized scratch resources.
+
+    Returns:
+        Zero after the isolated child completes all source and storage checks.
+
+    Raises:
+        SystemExit: The explicit test-server setting is absent or the child fails.
+        subprocess.TimeoutExpired: The child exceeds the 180-second smoke budget.
 
     Beginner note:
         The package creates its normal lazy engine at import time but does not

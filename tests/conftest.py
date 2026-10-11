@@ -147,3 +147,42 @@ def postgres_database_pair(postgres_admin_url: str) -> Iterator[tuple[str, str]]
         disposable_postgres_database(postgres_admin_url) as metadata,
     ):
         yield migrated, metadata
+
+
+@pytest.fixture
+def postgres_session_factory(postgres_admin_url: str) -> Iterator[SessionFactory]:
+    """Yield independent transactions on one private, fully migrated database.
+
+    Args:
+        postgres_admin_url: Explicit test-server provisioning URL, never DATABASE_URL.
+
+    Yields:
+        Commit-on-success session scopes using distinct pooled connections.
+
+    Beginner note:
+        Migrate synchronously before any worker starts: Alembic temporarily reads
+        DATABASE_URL, which is process-wide. Real PostgreSQL transactions then
+        exercise row locking rather than SQLite's database-wide writer lock.
+        Server-side timeouts bound broken locks even if a worker cannot finish;
+        dispose all pooled connections before dropping the UUID-owned database.
+    """
+    from alembic import command
+
+    from backend.storage.verification_database import disposable_postgres_database
+    from backend.storage.verification_smoke import _migration_url, migration_config
+
+    with disposable_postgres_database(postgres_admin_url) as database_url:
+        with _migration_url(database_url):
+            command.upgrade(migration_config(), "head")
+        engine = create_engine(
+            database_url,
+            future=True,
+            connect_args={
+                "connect_timeout": 5,
+                "options": "-c statement_timeout=15000 -c lock_timeout=10000",
+            },
+        )
+        try:
+            yield _session_scope_factory(engine)
+        finally:
+            engine.dispose()

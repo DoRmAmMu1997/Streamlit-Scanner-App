@@ -269,7 +269,12 @@ Foreign-key and primary-key names are not enforcement semantics: SQLite batch
 migrations name some FKs that ORM metadata leaves unnamed. Ordered columns,
 referred schema/table/columns and every reflected option are still compared.
 SQLite PRAGMA also captures actual FK update/delete actions because reflection
-of inline REFERENCES syntax can omit those options.
+of inline REFERENCES syntax can omit those options. `index_list` and
+`index_xinfo` retain collations and sort directions for explicit indexes and
+the implicit indexes backing UNIQUE/PRIMARY KEY constraints. Generated index
+names are excluded because their suffixes depend on declaration order.
+The collation regression inserts case-distinct values: one schema accepts them
+and the other rejects them, proving an enforcement difference beyond DDL text.
 
 `tests/conftest.py` owns opt-in PostgreSQL fixtures. Set
 `SCANNER_TEST_POSTGRES_ADMIN_URL` to a **test server's** maintenance database URL
@@ -278,7 +283,10 @@ than shell arguments. The fixture creates two `scanner_verify_<UUID>` databases
 through the existing pinned psycopg driver. It never clears a shared public
 schema or uses the application's DATABASE_URL as a fallback. Both databases
 are dropped in finally blocks; a failed second creation also cleans up the
-first. Connection/provisioning failures are failures once the URL is supplied.
+first. A query `dbname` option is rejected before engine construction because
+the driver would otherwise let it override the generated scratch database.
+Put the maintenance database in the URL path; TLS options remain supported.
+Connection/provisioning failures are failures once the URL is supplied.
 No URL means a local skip, unless `SCANNER_REQUIRE_POSTGRES_TESTS=1` requires the
 lane; CI sets both variables so it cannot silently skip.
 
@@ -297,3 +305,13 @@ bypasses ORM cascade so missing database cascade cannot be masked. Unrelated
 historical rows must remain. A second database built from ORM metadata provides
 the comparison reference. Existing nonempty verification targets are refused
 before DDL. This is a verification tool, not a runtime schema repair routine.
+
+`tests/test_ipo_postgres_concurrency.py` uses a separate migrated database per
+scenario to exercise the IPO state contract with real PostgreSQL sessions:
+identical concurrent calculations publish one complete pair, a paused older
+calculation cannot supersede newer evidence, and an outer rollback removes a
+staged evaluation together with its input revision. Barriers and events establish
+the intended ordering; bounded waits and database timeouts limit failed tests.
+An independent reader checks committed state while a writer remains open.
+SQLite tests of the same scenarios are useful local checks, but they cannot
+establish PostgreSQL row-lock behavior. The required hosted lane must run them.
