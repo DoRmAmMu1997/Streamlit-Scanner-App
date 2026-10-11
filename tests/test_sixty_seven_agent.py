@@ -426,6 +426,83 @@ def test_agent_parses_fenced_json(tmp_path):
     assert agent.verify("DEMO", _candidate()).fall_reason_category == "fundamental"
 
 
+@pytest.mark.parametrize(
+    "link",
+    ["http://127.0.0.1/private", "https://10.0.0.1/report", "file:///report", "", 123],
+)
+def test_agent_rejects_supplied_unsafe_search_link_without_local_downgrade(tmp_path, link):
+    """Unsafe external URLs must not become apparently valid local evidence.
+
+    Beginner note:
+        The sanitizer used to return None for an unsafe supplied link, and the
+        producer then signed a successful receipt as though that link was local.
+        The evaluation must fail once, without publishing a verdict or cache.
+    """
+    payload = _research_payload()
+    payload["search_results"][0]["link"] = link
+    runner = _FakeRunner(_verdict(), research_payload=payload)
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    agent = SixtySevenAgent(model="test-model", cache=cache, runner=runner)
+    candidate = _candidate()
+
+    result = agent.evaluate("DEMO", candidate)
+
+    assert result.verdict is None
+    assert result.error_type == "MalformedResearchEvidence"
+    assert result.provenance.evidence_references == []
+    assert runner.calls == 1
+    assert cache.get_verdict(
+        "DEMO", agent._cache_model_key("DEMO", candidate), candidate.signal_date
+    ) is None
+
+
+@pytest.mark.parametrize("omit_link", [False, True])
+def test_agent_preserves_research_without_a_supplied_link(tmp_path, omit_link):
+    """An absent link remains distinct from an externally supplied unsafe URL."""
+    payload = _research_payload()
+    if omit_link:
+        del payload["search_results"][0]["link"]
+    else:
+        payload["search_results"][0]["link"] = None
+    agent = SixtySevenAgent(
+        model="test-model",
+        cache=FundamentalsCache(cache_dir=tmp_path),
+        runner=_FakeRunner(_verdict(), research_payload=payload),
+    )
+
+    result = agent.evaluate("DEMO", _candidate())
+
+    assert result.error_type is None
+    assert result.verdict is not None
+    assert result.provenance.evidence_references[1].sanitized_url is None
+
+
+def test_agent_recomputes_signed_cache_when_reference_url_field_is_missing(tmp_path):
+    """A valid HMAC cannot make an incomplete external reference trustworthy.
+
+    Beginner note:
+        Re-signing the edited envelope ensures this reaches schema validation;
+        signature rejection alone would never catch the missing-field bug.
+    """
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    runner = _FakeRunner(_verdict(confidence=8))
+    agent = SixtySevenAgent(model="test-model", cache=cache, runner=runner)
+    candidate = _candidate()
+    agent.evaluate("DEMO", candidate)
+    cache_key = agent._cache_model_key("DEMO", candidate)
+    envelope = cache.get_verdict("DEMO", cache_key, candidate.signal_date)
+    del envelope["provenance"]["evidence_references"][1]["sanitized_url"]
+    envelope = sign_cache_envelope(envelope, key=agent._cache_signing_key)
+    cache.set_verdict("DEMO", cache_key, candidate.signal_date, envelope)
+    runner.verdict = _verdict(confidence=4)
+
+    result = agent.evaluate("DEMO", candidate)
+
+    assert result.verdict is not None and result.verdict.confidence == 4
+    assert result.provenance.cache_hit is False
+    assert result.provenance.evidence_references[1].sanitized_url == "https://news.example.com/turnaround"
+
+
 def test_agent_caches_verdict_per_symbol_model_and_candidate_context(tmp_path):
     runner = _FakeRunner(_verdict())
     agent = SixtySevenAgent(

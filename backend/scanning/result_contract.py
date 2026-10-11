@@ -534,14 +534,18 @@ def evidence_reference_from_mapping(value: Any) -> EvidenceReference:
 
     Beginner note:
         This helper deliberately delegates to the domain model so cache reads,
-        persistence, and direct construction share exactly one rule set.
+        persistence, and direct construction share exactly one rule set. Every
+        field must be present: an explicit ``sanitized_url=None`` records local
+        evidence, while an omitted URL field is an incomplete receipt.
     """
     if not isinstance(value, Mapping):
         raise ValueError("Cached evidence reference must be an object.")
+    if any(field not in value for field in ("source_label", "sanitized_url", "sha256")):
+        raise ValueError("Cached evidence reference must include source_label, sanitized_url, and sha256.")
     return EvidenceReference(
-        source_label=value.get("source_label"),
-        sanitized_url=value.get("sanitized_url"),
-        sha256=value.get("sha256"),
+        source_label=value["source_label"],
+        sanitized_url=value["sanitized_url"],
+        sha256=value["sha256"],
     )
 
 

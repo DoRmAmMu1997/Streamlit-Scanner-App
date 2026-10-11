@@ -227,6 +227,8 @@ def _cached_ai_provenance(reference):
     "reference",
     [
         "not-an-object",
+        # Omission must not turn an incomplete signed receipt into local evidence.
+        {"source_label": "web result", "sha256": "a" * 64},
         {
             "source_label": "web result",
             "sanitized_url": None,

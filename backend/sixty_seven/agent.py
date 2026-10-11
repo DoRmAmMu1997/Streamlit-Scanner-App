@@ -384,7 +384,23 @@ def _research_payload_has_prompt_injection(payload: dict[str, Any]) -> bool:
 def _research_evidence_references(
     symbol: str, payload: dict[str, Any]
 ) -> list[EvidenceReference]:
-    """Hash full research records while persisting only safe labels and URLs."""
+    """Hash full research records while persisting only safe labels and URLs.
+
+    Args:
+        symbol: Normalized company symbol for the trusted Screener.in URL.
+        payload: Validated request-local research records collected by the tool.
+
+    Returns:
+        References containing only bounded labels, sanitized URLs, and hashes.
+
+    Raises:
+        _ResearchEvidenceError: If a supplied search link cannot be sanitized.
+
+    Beginner note:
+        Missing search links may represent evidence without a web citation.
+        A supplied unsafe link must instead fail the evaluation: converting it
+        to None would falsely mark external evidence as intentionally local.
+    """
     references = [
         EvidenceReference(
             source_label="Screener.in snapshot",
@@ -397,7 +413,12 @@ def _research_evidence_references(
     for item in payload.get("search_results", []):
         if not isinstance(item, dict):
             continue
-        sanitized_url = sanitize_evidence_url(item.get("link"))
+        supplied_link = item.get("link")
+        sanitized_url = sanitize_evidence_url(supplied_link)
+        if supplied_link is not None and sanitized_url is None:
+            # Sanitization failure is different from an intentionally absent URL.
+            # The existing research-error path publishes no verdict or cache.
+            raise _ResearchEvidenceError("MalformedResearchEvidence")
         domain = ""
         if sanitized_url:
             domain = urlsplit(sanitized_url).netloc.lower()
