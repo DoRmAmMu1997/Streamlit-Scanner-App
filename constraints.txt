@@ -41,7 +41,7 @@ ruff==0.16.10
 bandit==1.9.4
 pip-audit==2.10.1
 mypy==2.4.0
-types-requests==2.33.0.20260906
+types-requests==2.33.0.20261006
 types-PyYAML==6.0.12.20260906
 # pandas-stubs tracks the pinned pandas 3.0.5 series (QUAL-006); types-pytz is
 # its declared dependency.
