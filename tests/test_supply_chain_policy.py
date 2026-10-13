@@ -746,10 +746,15 @@ def test_ci_requires_real_postgres_and_application_image_smoke():
         The ordinary suite also needs a private file-backed SQLite default:
         Alembic and application sessions otherwise open different in-memory
         databases, so a successful upgrade cannot initialize the later session.
+        GitHub resolves job-level environment before a runner exists. The
+        runner.temp expression must live on the test step, where that context
+        is available, or GitHub rejects the workflow before creating any jobs.
     """
     workflow = yaml.safe_load((ROOT / ".github/workflows/quality-and-security.yml").read_text(encoding="utf-8"))
     verify = workflow["jobs"]["verify"]
-    assert verify["env"]["DATABASE_URL"] == "sqlite:///${{ runner.temp }}/scanner-default.db"
+    assert "DATABASE_URL" not in verify["env"]
+    test_step = next(step for step in verify["steps"] if step["name"] == "Run tests with coverage gate")
+    assert test_step["env"]["DATABASE_URL"] == "sqlite:///${{ runner.temp }}/scanner-default.db"
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
     assert verify["services"]["postgres"]["image"] == compose["services"]["postgres"]["image"]
     assert verify["env"]["SCANNER_REQUIRE_POSTGRES_TESTS"] == "1"
