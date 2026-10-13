@@ -49,6 +49,7 @@ from backend.ipo.scoring.recommendation import (
     SKIP,
 )
 from backend.ipo.scoring.service import IpoRescoreOutcome, rescore_issue
+from backend.ipo.scoring.state import IpoScoringConflictError
 from backend.ipo.sources.enrichment import collect_enrichment_signals
 from backend.jobs.scan_ipo_filings import IpoFilingJobOutcome, run_scan_ipo_filings
 from backend.observability import (
@@ -122,6 +123,8 @@ class IpoScreenerIssueOutcome:
     triggered_flags: tuple[str, ...] = ()
     missing: tuple[str, ...] = ()
     error_type: str | None = None
+    failure_code: str | None = None
+    retryable: bool = False
 
 
 @dataclass(frozen=True)
@@ -530,6 +533,18 @@ def run_ipo_screener(
         try:
             outcome = _issue_outcome_from_rescore(
                 rescorer(issue.id, session_factory=session_factory)
+            )
+        except IpoScoringConflictError as exc:
+            # Beginner note: all three attempts were already consumed by the
+            # service. Preserve sibling commits and expose a safe retry hint,
+            # never the exception message or a misleading successful verdict.
+            outcome = IpoScreenerIssueOutcome(
+                issue_id=issue.id,
+                company_name=issue.company_name,
+                status="failed",
+                error_type=type(exc).__name__,
+                failure_code=exc.code,
+                retryable=exc.retryable,
             )
         except Exception as exc:  # noqa: BLE001 - per-issue isolation
             outcome = IpoScreenerIssueOutcome(
