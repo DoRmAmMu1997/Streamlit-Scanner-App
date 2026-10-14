@@ -186,3 +186,38 @@ universe CSVs are per-service: persistent on the web disk, ephemeral on the cron
 
 The operator runbook (first deploy, secret file, seeding universes) is in
 [operations.md → "Deploying to Render"](../../operations.md#deploying-to-render-managed).
+
+## Application storage smoke in the final image
+
+The quality workflow provisions a PostgreSQL service matching the Compose image for each Python matrix
+worker and requires the PostgreSQL fixture lane. The Docker job still verifies
+image build and Compose health, then runs:
+
+```text
+docker compose run --rm -T --no-deps -e SCANNER_TEST_POSTGRES_ADMIN_URL -e DATABASE_URL=sqlite:// -e ALERT_ENABLED=false scanner-ui python -m backend.storage.verification_smoke
+```
+
+`SCANNER_TEST_POSTGRES_ADMIN_URL` must already be loaded from a protected
+**test-server** environment; CI supplies only its disposable Compose template
+credentials. Do not point it at a production server. The helper provisions
+unique databases, leaving the configured application database untouched. No
+market data, AI provider or alert delivery is invoked. The image needs only
+runtime dependencies; it does not install pytest/dev tools for the smoke.
+
+Beginner note: Streamlit's healthy HTTP endpoint proves that its web process is
+alive, not that migrations or repository writes work. This command upgrades
+seeded historical data, compares migration/ORM schemas and exercises repository
+transactions, uniqueness and database cascade inside the actual image. It also
+reads packaged curated universe CSVs with an empty relocated DATA_DIR, protecting
+the separation of immutable PR116 source lists from generated universe files.
+The launcher starts a fresh Python child with DATA_DIR set before imports so
+module-level path constants cannot keep the parent's original /data value.
+The private directory is removed after the child exits. The PostgreSQL contexts
+remove their databases on ordinary success or exception; CI's always-run Compose
+teardown removes the entire server/volumes even if a process is forcibly killed.
+
+A zero exit prints a JSON proof receipt. Any missing opt-in, source packaging
+failure, migration error, schema drift or repository violation fails the step.
+Database URLs/driver exception text are not printed. Local machines without
+Docker or an explicitly configured disposable PostgreSQL server cannot claim
+these lanes passed; hosted CI evidence is required before release.
