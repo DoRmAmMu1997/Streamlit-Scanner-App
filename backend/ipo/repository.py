@@ -28,7 +28,12 @@ from typing import TYPE_CHECKING, Any, cast
 
 from backend.audit import record_audit_event
 from backend.config import get_settings
-from backend.ipo.approval import IpoManualEditContext, current_document_id, same_source
+from backend.ipo.approval import (
+    IpoManualEditContext,
+    current_document_id,
+    has_conflicting_current_terms,
+    same_source,
+)
 from backend.ipo.documents.downloader import (
     IpoDocumentDownloadError,
     IpoDocumentDownloadErrorCode,
@@ -2498,6 +2503,16 @@ def approve_extraction_proposal(
             if not is_current:
                 raise IpoProposalConflictError(
                     "noncurrent_source", "The proposal is not bound to one unambiguous current prospectus."
+                )
+            # Public proposal insertion takes this same state lock. Fresh pending
+            # rows therefore include a writer that won before verification ended,
+            # while later writers wait until our complete evidence commit finishes.
+            pending_cohort = [_extraction_proposal_record(row) for row in list_ipo_extraction_proposal_rows(
+                session, issue_id=record.issue_id, status=IpoExtractionProposalStatus.PENDING.value,
+            )]
+            if has_conflicting_current_terms(record, inventory, pending_cohort):
+                raise IpoProposalConflictError(
+                    "conflicting_proposal_terms", "Current prospectus proposals contain conflicting issue terms."
                 )
             if unknown_prior_source:
                 raise IpoProposalConflictError(

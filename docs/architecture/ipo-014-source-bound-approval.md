@@ -1,6 +1,6 @@
 # IPO-014: source-bound drafts and manual approval baselines
 
-Status: accepted for implementation (2026-09-28).
+Status: implemented; competing-claim policy refined after independent review (2026-10-13).
 
 ## Decision
 
@@ -33,6 +33,18 @@ unready current document require review. Never fall back to an older queued sour
 At most one proposal per issue is attempted in one pass; the final transaction
 repeats the same policy. Human review uses an explicit decision for changed terms
 or a noncurrent document, but cannot bypass a stale manual generation.
+
+The latest-equivalent term cohort consists of registered DRHP/RHP documents on the
+selected current document's exact filing date. Compare supported non-null
+`price_band_high` claims only from pending HIGH proposals with no review reasons,
+the same known manual baseline, and matching source URL/SHA snapshots. Unequal
+Decimal values require human review even if the stored issue cap is NULL. Equal
+values and absent claims create no conflict and never fill or erase missing terms.
+A strictly older DRHP, rejected history, or stale baseline does not gain authority.
+The initial selector and final locked approval use the same pure cohort policy.
+Final approval rereads pending proposals under the issue lock; public proposal
+submission takes that lock before insertion, so a competing writer either commits
+before the fresh read or waits until the evidence transaction has finished.
 
 ## Browser drafts
 

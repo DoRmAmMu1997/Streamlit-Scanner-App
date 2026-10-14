@@ -12,8 +12,10 @@
 
 Draft one review-queue proposal — a manual-extraction-shaped payload with a
 page citation on every value — from one cached, hash-verified DRHP/RHP PDF.
-The agent's output is never evidence: an administrator must approve it in
-the review UI before scoring can see a number.
+The agent's output remains a proposal until explicit administrator review or the
+opt-in IPO-011/014 automatic policy approves it. Both paths verify source receipts
+and the captured manual baseline; automation additionally requires one current
+source and no conflicting stored or latest-equivalent pending issue terms.
 
 ## 2. Position in the pipeline
 
@@ -22,7 +24,7 @@ verified cache (IPO-003) -> spawned bounded PDF worker -> parse receipt
     -> page/span-aware classify_pages -> page-safe agent tools
     -> host verification -> typed CitedFinancialFact set
     -> ipo_extraction_proposals (pending, one per document)
-    -> admin Approve -> atomic revision + compare-and-set review transition
+    -> admin review OR strict opt-in auto-approval -> atomic revision + review CAS
 ```
 
 ## 3. Public interface
@@ -49,7 +51,7 @@ verified cache (IPO-003) -> spawned bounded PDF worker -> parse receipt
 | `objects_of_issue` uses exact `CitedTextEvidence` | A model paraphrase is useful review context but cannot impersonate an original prospectus line or table cell. |
 | Submission and approval re-resolve receipts from bounded cached-PDF pages | Public callers cannot forge otherwise well-shaped receipt metadata; the current row SHA, cached bytes, and every source location must agree twice. |
 | Exactly three distinct oldest-first annual periods | Duplicate, reversed, or nonannual rows fail before review persistence. |
-| Proposals, never records | The worst outcome of a bad run is a rejected queue item plus an error receipt — scoring only ever consumes human-attested revisions. |
+| Proposals, never records | The worst outcome of a bad run is a rejected queue item plus an error receipt — scoring consumes only committed approved revisions, attributed either to the human reviewer or reserved automation actor. |
 
 Approval is one caller-owned transaction: strict reconstruction, cache
 re-verification, revision header/children, and proposal compare-and-set either
@@ -140,3 +142,12 @@ the draft for inspection but disables stale save. A different source starts blan
 and requires new citations to match the newly selected PDF deterministically before
 saving. Ordinary hand-entered evidence remains a human attestation. Successful save
 reloads the draft context. No copy action runs an agent or downloads a source.
+
+
+Automatic term checks compare only eligible pending claims from DRHP/RHPs on the
+current source's exact filing date, including an equal-date RHP/DRHP pair. HIGH
+confidence and a NULL stored cap do not resolve unequal verified cap claims.
+The shared selector/locked approval policy excludes genuinely older drafts,
+rejected history, changed source snapshots and stale or unknown manual baselines;
+missing/equal claims are not conflicts. See the IPO-014 ADR for the full cohort
+contract and the state-first proposal-writer serialization boundary.

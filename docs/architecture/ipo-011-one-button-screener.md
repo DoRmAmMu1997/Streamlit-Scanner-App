@@ -172,3 +172,15 @@ the draft for inspection but disables stale save. A different source starts blan
 and requires new citations to match the newly selected PDF deterministically before
 saving. Ordinary hand-entered evidence remains a human attestation. Successful save
 reloads the draft context. No copy action runs an agent or downloads a source.
+
+
+### Latest-equivalent pending term claims
+
+Before automatically applying a cap, compare eligible pending HIGH claims from all
+DRHP/RHPs dated exactly the same as the selected current source. Matching manual
+baseline and source URL/SHA are required. Decimal-unequal non-null caps require
+review even when the stored issue cap is unknown. Equal or missing claims do not
+create conflicts; older drafts and rejected history are not current authority.
+This policy runs both during queue selection and again on fresh rows under the
+approval state lock, preventing a proposal inserted during PDF verification from
+being missed. No older candidate is tried when this comparison rejects approval.

@@ -35,6 +35,7 @@ def _proposal(proposal_id: int, confidence: Confidence) -> Any:
         document_id=proposal_id,
         baseline_manual_revision=0,
         needs_review_reasons=(),
+        payload={},
         confidence=confidence,
         status=IpoExtractionProposalStatus.PENDING,
     )

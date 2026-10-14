@@ -30,7 +30,7 @@ from typing import Final
 
 from backend.audit import record_audit_event
 from backend.config import get_ipo_auto_approve_high_confidence
-from backend.ipo.approval import current_document_id
+from backend.ipo.approval import current_document_id, has_conflicting_current_terms
 from backend.ipo.models import (
     Confidence,
     IpoExtractionProposalRecord,
@@ -149,9 +149,8 @@ def auto_approve_ready_proposals(
         # No approval occurs until its actual current source is selected below.
         proposal = high[0]
         try:
-            selected_document = current_document_id(
-                list_documents(proposal.issue_id, session_factory=session_factory)
-            )
+            inventory = list_documents(proposal.issue_id, session_factory=session_factory)
+            selected_document = current_document_id(inventory)
             candidates = [item for item in queued if item.document_id == selected_document]
             if selected_document is None or len(candidates) != 1:
                 needs_review += len(high)
@@ -167,6 +166,10 @@ def auto_approve_ready_proposals(
                 needs_review += len(high)
                 continue
             needs_review += len(high) - 1
+            if has_conflicting_current_terms(proposal, inventory, queued):
+                raise IpoProposalConflictError(
+                    "conflicting_proposal_terms", "Current prospectus proposals contain conflicting issue terms."
+                )
             revision = approver(
                 proposal.id,
                 reviewed_by_email=AUTOMATION_ACTOR_EMAIL,

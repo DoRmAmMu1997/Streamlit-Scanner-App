@@ -758,12 +758,25 @@ def insert_ipo_extraction_proposal(
 ) -> IpoExtractionProposal:
     """Stage one pending AI proposal under its issue and source document.
 
+    Args:
+        session: Caller-owned transaction that already holds the owning issue's
+            state lock before any proposal insert or subordinate row write.
+        issue_id: Parent issue owning the proposal and source.
+        document_id: Registered source identifier.
+        values: Host-validated proposal fields including its captured baseline.
+
+    Returns:
+        Flushed pending proposal, without committing the caller's transaction.
+
     The caller supplies already validated values; database checks and partial
     unique indexes remain the final lifecycle and concurrency guards.
 
     Beginner note:
         ``flush`` obtains the generated identifier and runs constraints without
-        committing; the caller still owns rollback of the whole workflow.
+        committing; the caller still owns rollback of the whole workflow. This
+        low-level helper does not acquire the issue lock itself. Public submission
+        takes it before calling here so approval's final pending cohort cannot
+        gain a competing claim between its locked read and evidence commit.
     """
     row = IpoExtractionProposal(issue_id=issue_id, document_id=document_id, **values)
     session.add(row)

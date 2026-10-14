@@ -1585,3 +1585,225 @@ def test_approval_rejects_a_source_url_relabelled_after_proposal_submission(
     with pytest.raises(IpoValidationError, match="source identity"):
         approve_extraction_proposal(proposal.id, reviewed_by_email="human@example.com",
             accept_authority_change=True, data_dir=tmp_path, session_factory=file_session_factory)
+
+
+
+def _competing_cap_claims(file_session_factory, tmp_path, monkeypatch, *, other_cap="244", older=False):
+    """Build independent verified PDFs and a delayed same-date draft submission.
+
+    Args:
+        file_session_factory: Disposable caller-owned transaction factory.
+        tmp_path: Private content-addressed cache root.
+        monkeypatch: Restores deterministic parser seams after the regression.
+        other_cap: Competing cap, None for an absent claim.
+        older: Whether the DRHP genuinely predates the current RHP.
+
+    Returns:
+        Owning issue, pending RHP, competing document, and a callable that commits
+        the competing pending proposal using a baseline captured before any race.
+
+    Beginner note:
+        Each source has separate real cache bytes and matching host receipts.
+        Delaying only the public submission lets tests place the competing write
+        precisely before or after approval's state lock without timing sleeps.
+    """
+    from backend.ipo import repository
+
+    issue, rhp, digest = _cached_document(file_session_factory, tmp_path, priced=False)
+    other = create_document(issue.id, IpoDocumentData(
+        document_type="drhp", document_url="https://www.sebi.gov.in/filings/equivalent-drhp.html",
+        filing_date=dt.date(2024, 12, 31) if older else dt.date(2025, 1, 1), source_confidence=Confidence.HIGH,
+    ), session_factory=file_session_factory)
+    pdf = b"%PDF-1.7\ncompeting prospectus fixture\n%%EOF"
+    other_digest = hashlib.sha256(pdf).hexdigest()
+    other_path = f"ipo/documents/{other_digest}.pdf"
+    (tmp_path / other_path).write_bytes(pdf)
+    with file_session_factory() as session:
+        assert update_ipo_document_cache_if_source_matches(session, issue.id, other.id,
+            expected_document_url=other.document_url, expected_document_type="drhp",
+            values={"content_sha256": other_digest, "file_path": other_path,
+                    "parse_status": "pending", "downloaded_at": _NOW})
+    rhp_pages = _verified_parsed_pages()
+    other_pages = tuple(replace(page, text=page.text.replace("Rs 242", f"Rs {other_cap or '242'}"))
+                        for page in rhp_pages)
+    monkeypatch.setattr(table_extractor, "extract_document_pages",
+        lambda path: other_pages if Path(path).name.startswith(other_digest) else rhp_pages)
+    selected = _submit(issue.id, rhp.id, digest, file_session_factory, data_dir=tmp_path,
+                       payload_overrides={"price_band_high": "242", "price_band_high_page": 1})
+    with monkeypatch.context() as receipt_patch:
+        receipt_patch.setattr(__import__(__name__, fromlist=["_verified_parsed_pages"]),
+                             "_verified_parsed_pages", lambda: other_pages)
+        payload = _bound_payload(other_digest, price_band_high=other_cap,
+                                 price_band_high_page=1 if other_cap is not None else None)
+    baseline = load_manual_edit_context(issue.id, other.id, session_factory=file_session_factory)
+
+    def submit_competitor():
+        """Commit through the production insertion path with an original baseline."""
+        return repository.submit_extraction_proposal(issue.id, other.id, payload=payload, confidence=Confidence.HIGH,
+            needs_review_reasons=(), model_version="ipo-010-extractor-v1", agent_model="fixture-model",
+            source_content_sha256=other_digest, page_count=16, baseline_context=baseline,
+            data_dir=tmp_path, session_factory=file_session_factory)
+    return issue, selected, other, submit_competitor
+
+
+@pytest.mark.parametrize("other_cap", ["242.00", "244", None])
+@pytest.mark.parametrize("reverse_queue", [False, True])
+def test_same_date_current_cap_claims_are_order_independent(
+    file_session_factory, tmp_path: Path, monkeypatch, other_cap, reverse_queue: bool,
+) -> None:
+    """Unresolved same-date caps require review; equal or missing caps do not.
+
+    Beginner note:
+        The real approver and independent PDF receipts remain active. Reversing
+        only the detached queue proves SQL order cannot adjudicate two claims.
+        A missing DRHP cap neither erases nor invents the selected RHP's term.
+    """
+    from backend.ipo.agents import auto_approval
+
+    issue, selected, _other, submit_competitor = _competing_cap_claims(
+        file_session_factory, tmp_path, monkeypatch, other_cap=other_cap,
+    )
+    competitor = submit_competitor()
+    queue = [selected, competitor] if reverse_queue else [competitor, selected]
+    monkeypatch.setattr(auto_approval, "list_extraction_proposals", lambda **_kwargs: queue)
+    result = auto_approval.auto_approve_ready_proposals(issue_id=issue.id, enabled=True,
+        data_dir=tmp_path, session_factory=file_session_factory)
+    assert result.failed == 0
+    if other_cap == "244":
+        assert result.approved == ()
+        assert result.skipped_needs_review == 2
+        current_issue = get_issue(issue.id, session_factory=file_session_factory)
+        assert current_issue is not None and current_issue.price_band_high is None
+        assert get_latest_manual_profile(issue.id, session_factory=file_session_factory) is None
+    else:
+        assert result.approved == (selected.id,)
+        current_issue = get_issue(issue.id, session_factory=file_session_factory)
+        assert current_issue is not None and current_issue.price_band_high == Decimal("242")
+
+
+@pytest.mark.parametrize("competing_state", ["pending", "older", "rejected"])
+def test_strict_approval_checks_only_current_pending_cap_cohort(
+    file_session_factory, tmp_path: Path, monkeypatch, competing_state: str,
+) -> None:
+    """Direct automatic calls cannot bypass conflicts or promote rejected history.
+
+    Beginner note:
+        A genuinely older DRHP does not outrank a later RHP, and rejection removes
+        a competing proposal from authority. Only the same-date pending case must
+        fail, even if an irrelevant human acknowledgement flag is also supplied.
+    """
+    from backend.ipo import repository
+
+    issue, selected, _other, submit_competitor = _competing_cap_claims(
+        file_session_factory, tmp_path, monkeypatch, older=competing_state == "older",
+    )
+    competing = submit_competitor()
+    if competing_state == "rejected":
+        reject_extraction_proposal(competing.id, reviewed_by_email="human@example.com", reason="Incorrect terms",
+                                   session_factory=file_session_factory)
+    def approve():
+        return approve_extraction_proposal(selected.id, reviewed_by_email="ipo-automation@screener.local",
+            require_current_candidate=True, accept_authority_change=True,
+            data_dir=tmp_path, session_factory=file_session_factory)
+    if competing_state == "pending":
+        with pytest.raises(repository.IpoProposalConflictError) as error:
+            approve()
+        assert error.value.code == "conflicting_proposal_terms"
+        assert get_latest_manual_profile(issue.id, session_factory=file_session_factory) is None
+    else:
+        assert approve().source_document_id == selected.document_id
+
+
+def test_competing_cap_inserted_during_verification_is_seen_under_final_lock(
+    file_session_factory, tmp_path: Path, monkeypatch,
+) -> None:
+    """A queue-time clean candidate must be rejected after a competing writer wins.
+
+    Beginner note:
+        Insert a complete, verified competing proposal between PDF verification
+        and the final state lock. Reusing the old queue would miss this claim;
+        fresh locked proposal reads must preserve both pending rows and no evidence.
+    """
+    from backend.ipo import repository
+
+    issue, selected, _other, submit_competitor = _competing_cap_claims(file_session_factory, tmp_path, monkeypatch)
+    verify = repository._verify_cited_receipts_from_cached_pdf
+    inserted = False
+    def insert_after_verification(*args, **kwargs):
+        nonlocal inserted
+        verify(*args, **kwargs)
+        if not inserted:
+            inserted = True
+            submit_competitor()
+    monkeypatch.setattr(repository, "_verify_cited_receipts_from_cached_pdf", insert_after_verification)
+    with pytest.raises(repository.IpoProposalConflictError) as error:
+        approve_extraction_proposal(selected.id, reviewed_by_email="ipo-automation@screener.local",
+            require_current_candidate=True, data_dir=tmp_path, session_factory=file_session_factory)
+    assert error.value.code == "conflicting_proposal_terms"
+    assert len(list_extraction_proposals(issue_id=issue.id, session_factory=file_session_factory)) == 2
+    assert get_latest_manual_profile(issue.id, session_factory=file_session_factory) is None
+
+
+def test_competing_proposal_writer_waits_for_approval_state_lock(
+    file_session_factory, file_db_engine, tmp_path: Path, monkeypatch,
+) -> None:
+    """A later proposal insertion cannot enter approval's already-locked cohort.
+
+    Beginner note:
+        Events prove the public writer reaches its state UPDATE while approval
+        holds that lock, then cannot finish until approval commits. Its original
+        baseline remains zero after the winner advances it, preventing a later
+        pass from treating the delayed proposal as fresh manual authority.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event, current_thread
+
+    from sqlalchemy import event
+
+    from backend.ipo import repository
+
+    issue, selected, _other, submit_competitor = _competing_cap_claims(file_session_factory, tmp_path, monkeypatch)
+    held, release, attempted, finished = Event(), Event(), Event(), Event()
+    lock = repository.lock_ipo_scoring_state
+    def hold_approval(session, issue_id, **kwargs):
+        locked = lock(session, issue_id, **kwargs)
+        if current_thread().name.startswith("cohort-approval"):
+            held.set()
+            assert release.wait(15)
+        return locked
+    def observe_writer(_conn, _cursor, statement, _parameters, _context, _many):
+        if current_thread().name.startswith("cohort-writer") and statement.startswith("UPDATE ipo_scoring_state"):
+            attempted.set()
+    def write():
+        try:
+            return submit_competitor()
+        finally:
+            finished.set()
+    monkeypatch.setattr(repository, "lock_ipo_scoring_state", hold_approval)
+    event.listen(file_db_engine, "before_cursor_execute", observe_writer)
+    try:
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="cohort-approval") as approvals, ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="cohort-writer",
+        ) as writers:
+            approved = approvals.submit(approve_extraction_proposal, selected.id,
+                reviewed_by_email="ipo-automation@screener.local", require_current_candidate=True,
+                data_dir=tmp_path, session_factory=file_session_factory)
+            assert held.wait(15)
+            written = writers.submit(write)
+            try:
+                assert attempted.wait(15)
+                assert not finished.is_set()
+            finally:
+                release.set()
+            assert approved.result(timeout=15).source_document_id == selected.document_id
+            competing = written.result(timeout=15)
+    finally:
+        release.set()
+        event.remove(file_db_engine, "before_cursor_execute", observe_writer)
+    assert competing.baseline_manual_revision == 0
+    assert load_manual_edit_context(issue.id, selected.document_id,
+                                    session_factory=file_session_factory).manual_revision == 1
+    with pytest.raises(repository.IpoProposalConflictError) as error:
+        approve_extraction_proposal(competing.id, reviewed_by_email="ipo-automation@screener.local",
+            require_current_candidate=True, data_dir=tmp_path, session_factory=file_session_factory)
+    assert error.value.code == "manual_revision_changed"

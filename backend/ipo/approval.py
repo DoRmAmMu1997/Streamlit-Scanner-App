@@ -4,9 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 
 from backend.ipo.manual_extraction import IpoManualExtractionRecord
-from backend.ipo.models import IpoDocumentRecord, IpoIssueRecord, IpoValidationError
+from backend.ipo.models import (
+    Confidence,
+    IpoDocumentRecord,
+    IpoExtractionProposalRecord,
+    IpoExtractionProposalStatus,
+    IpoIssueRecord,
+    IpoValidationError,
+)
 
 
 @dataclass(frozen=True)
@@ -108,3 +116,67 @@ def current_document_id(documents: Sequence[IpoDocumentRecord]) -> int | None:
         # to resolve the inventory instead of choosing either document by guess.
         return None
     return latest[0].id
+
+
+
+def has_conflicting_current_terms(
+    candidate: IpoExtractionProposalRecord,
+    documents: Sequence[IpoDocumentRecord],
+    proposals: Sequence[IpoExtractionProposalRecord],
+) -> bool:
+    """Compare supported claims in the selected filing's same-date pending cohort.
+
+    Args:
+        candidate: Selected pending proposal whose baseline must already be known
+            and, at final approval, equal the locked current manual generation.
+        documents: Complete issue-owned inventory used to select the current PDF.
+        proposals: Fresh issue-owned pending proposals at final approval; initial
+            queue selection may pass its detached snapshot as an early hint.
+
+    Returns:
+        True when eligible non-null cap claims disagree by Decimal value, or an
+        eligible non-null cap is malformed. Missing and equal claims do not
+        manufacture conflicts and this function never supplies a missing term.
+
+    Beginner note:
+        RHP precedence chooses the current document, but cannot settle competing
+        HIGH-confidence statements published on the same date. The bounded cohort
+        contains only DRHP/RHPs on that exact date, pending HIGH proposals without
+        review reasons, the candidate's known manual baseline, and matching source
+        URL/SHA snapshots. Older drafts, stale baselines and rejected history do
+        not acquire authority. A final caller must reread the cohort under the
+        shared state lock; this pure check cannot itself close a write race.
+    """
+    source = next((document for document in documents if document.id == candidate.document_id), None)
+    if source is None or source.filing_date is None or candidate.baseline_manual_revision is None:
+        # Current-document and baseline guards own these failures. Unknown data
+        # cannot be used to invent a competing chronology or trusted generation.
+        return False
+    cohort = {document.id: document for document in documents
+              if document.document_type in {"drhp", "rhp"} and document.filing_date == source.filing_date}
+    caps: set[Decimal] = set()
+    for proposal in proposals:
+        document = cohort.get(proposal.document_id) if proposal.document_id is not None else None
+        if (
+            document is None or proposal.issue_id != candidate.issue_id
+            or proposal.status is not IpoExtractionProposalStatus.PENDING
+            or proposal.confidence is not Confidence.HIGH or proposal.needs_review_reasons
+            or proposal.baseline_manual_revision != candidate.baseline_manual_revision
+        ):
+            continue
+        raw_cap = proposal.payload.get("price_band_high")
+        if raw_cap is None:
+            continue
+        if (proposal.document_url != document.document_url
+                or proposal.source_content_sha256 != document.content_sha256):
+            continue
+        try:
+            cap = Decimal(str(raw_cap))
+            if not cap.is_finite() or cap <= 0:
+                return True
+        except (InvalidOperation, ValueError):
+            return True
+        caps.add(cap)
+        if len(caps) > 1:
+            return True
+    return False
