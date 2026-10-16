@@ -30,6 +30,7 @@ from backend.scanning.result_contract import (
     RuleCheck,
     ScreenerResult,
     SignalProvenance,
+    ai_provenance_from_mapping,
     normalize_screener_row,
     normalize_secret_safe_json,
 )
@@ -132,6 +133,141 @@ def test_typed_models_describe_the_common_result_and_provenance_contract():
         ],
         "input_context_hash": "c" * 64,
     }
+
+
+@pytest.mark.parametrize(
+    "unsafe_url",
+    [
+        "http://127.0.0.1/private",
+        "https://user:password@example.com/report",
+        "https://example.com/report?token=secret",
+        "javascript:alert(1)",
+    ],
+)
+def test_evidence_reference_rejects_every_provided_unsafe_or_noncanonical_url(
+    unsafe_url,
+):
+    """A supplied URL must never be converted into apparently local evidence.
+
+    Regression intent: replacing the exception with ``sanitized_url=None``
+    would erase the difference between a legitimate local chart hash and a
+    hostile or secret-bearing URL supplied by an external source.
+    """
+    with pytest.raises(ValueError, match="canonical and safe"):
+        EvidenceReference(
+            source_label="exchange filing",
+            sanitized_url=unsafe_url,
+            sha256="a" * 64,
+        )
+
+
+def test_evidence_reference_allows_local_and_canonical_http_evidence():
+    """Local derived inputs may omit a URL while public references retain one."""
+    local = EvidenceReference("daily OHLC window", None, "a" * 64)
+    public = EvidenceReference(
+        "exchange filing",
+        "https://example.com/report",
+        "B" * 64,
+    )
+
+    assert local.sanitized_url is None
+    assert public.sanitized_url == "https://example.com/report"
+    assert public.sha256 == "b" * 64
+
+
+@pytest.mark.parametrize(
+    "invalid_digest",
+    [None, 123, "a" * 63, "g" * 64],
+)
+def test_evidence_reference_rejects_incomplete_or_nonstring_sha256(invalid_digest):
+    """Hashes must be complete text digests rather than coercible lookalikes."""
+    with pytest.raises(ValueError, match="full SHA-256"):
+        EvidenceReference("annual report", None, invalid_digest)
+
+
+def test_evidence_reference_redacts_and_caps_source_label():
+    """Durable source labels cannot retain a secret or grow without a bound."""
+    reference = EvidenceReference(
+        source_label="token=source-secret " + ("x" * 200),
+        sanitized_url=None,
+        sha256="a" * 64,
+    )
+
+    assert "source-secret" not in reference.source_label
+    assert "***REDACTED***" in reference.source_label
+    assert len(reference.source_label) == 160
+
+
+def test_ai_provenance_direct_construction_validates_receipt_hashes():
+    """Callers cannot bypass full-hash checks by skipping a cache parser."""
+    with pytest.raises(ValueError, match="full SHA-256"):
+        AIProvenance(
+            model_name="test-model",
+            prompt_version="v1",
+            prompt_sha256="short",
+            generated_at=datetime(2026, 6, 13, tzinfo=UTC),
+            cache_hit=False,
+        )
+
+
+def _cached_ai_provenance(reference):
+    """Return a literal cache receipt so parser expectations stay independent."""
+    return {
+        "model_name": "test-model",
+        "prompt_version": "v1",
+        "prompt_sha256": "b" * 64,
+        "generated_at": "2026-06-13T00:00:00+00:00",
+        "cache_hit": False,
+        "evidence_references": [reference],
+        "input_context_hash": "c" * 64,
+    }
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "not-an-object",
+        # Omission must not turn an incomplete signed receipt into local evidence.
+        {"source_label": "web result", "sha256": "a" * 64},
+        {
+            "source_label": "web result",
+            "sanitized_url": None,
+            "sha256": int("1" * 64),
+        },
+        {
+            "source_label": "web result",
+            "sanitized_url": None,
+            "sha256": "a" * 12,
+        },
+        {
+            "source_label": "web result",
+            "sanitized_url": "https://example.com/report?token=unsafe",
+            "sha256": "a" * 64,
+        },
+    ],
+)
+def test_cached_ai_provenance_rejects_malformed_evidence_consistently(reference):
+    """Every agent cache parser must reject the same invalid reference shapes."""
+    with pytest.raises(ValueError):
+        ai_provenance_from_mapping(_cached_ai_provenance(reference))
+
+
+def test_cached_ai_provenance_redacts_and_caps_labels_consistently():
+    """Signed cache labels receive the same durable-display normalization."""
+    receipt = ai_provenance_from_mapping(
+        _cached_ai_provenance(
+            {
+                "source_label": "token=cached-secret " + ("x" * 200),
+                "sanitized_url": "https://example.com/report",
+                "sha256": "a" * 64,
+            }
+        )
+    )
+
+    label = receipt.evidence_references[0].source_label
+    assert "cached-secret" not in label
+    assert "***REDACTED***" in label
+    assert len(label) == 160
 
 
 def test_signal_provenance_accepts_optional_score_breakdown_receipt():

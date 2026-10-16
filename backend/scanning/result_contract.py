@@ -33,6 +33,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, is_dataclass
 from decimal import Decimal
@@ -56,6 +57,8 @@ MASKED_PARAMETER = MASK
 
 _SIGNAL_SOURCES = frozenset({"deterministic", "ai", "hybrid"})
 _AI_EVALUATION_OUTCOMES = frozenset({"approved", "rejected", "error"})
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_MAX_EVIDENCE_LABEL_LENGTH = 160
 _DROP = object()
 
 
@@ -83,11 +86,43 @@ class RuleCheck:
 
 @dataclass(frozen=True)
 class EvidenceReference:
-    """One durable evidence pointer without storing fetched document contents."""
+    """One validated evidence pointer without fetched document contents.
+
+    ``sanitized_url=None`` explicitly means that the evidence was derived
+    locally, such as a chart window. A URL supplied by a caller must already be
+    in the canonical safe form returned by :func:`sanitize_evidence_url`.
+
+    Beginner note:
+        Turning an unsafe URL into ``None`` would make hostile remote evidence
+        look like legitimate local evidence. Validation therefore rejects a
+        bad supplied URL while continuing to allow a deliberately absent URL.
+    """
 
     source_label: str
     sanitized_url: str | None
     sha256: str
+
+    def __post_init__(self) -> None:
+        """Normalize safe display fields and reject ambiguous references."""
+        if not isinstance(self.source_label, str):
+            raise ValueError("Evidence source label must be text.")
+        label = cast(str, redact_text(self.source_label)).strip()
+        if not label:
+            raise ValueError("Evidence reference requires a source label.")
+        object.__setattr__(self, "source_label", label[:_MAX_EVIDENCE_LABEL_LENGTH])
+
+        if self.sanitized_url is not None:
+            if not isinstance(self.sanitized_url, str):
+                raise ValueError("Evidence URL must be canonical and safe.")
+            canonical_url = sanitize_evidence_url(self.sanitized_url)
+            if canonical_url is None or canonical_url != self.sanitized_url:
+                raise ValueError("Evidence URL must be canonical and safe.")
+
+        object.__setattr__(
+            self,
+            "sha256",
+            validate_sha256_digest(self.sha256, field_name="evidence sha256"),
+        )
 
 
 @dataclass(frozen=True)
@@ -104,6 +139,36 @@ class AIProvenance:
     verdict: str | None = None
     confidence: Decimal | int | float | str | None = None
     decision_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        """Enforce receipt hashes even when callers bypass cache parsers.
+
+        Beginner note:
+            Cache readers are not the only way to create this model. Keeping
+            the invariant on the model prevents a direct constructor call from
+            creating a receipt that persistence would later treat as trusted.
+        """
+        object.__setattr__(
+            self,
+            "prompt_sha256",
+            validate_sha256_digest(self.prompt_sha256, field_name="prompt_sha256"),
+        )
+        if self.input_context_hash is not None:
+            object.__setattr__(
+                self,
+                "input_context_hash",
+                validate_sha256_digest(
+                    self.input_context_hash,
+                    field_name="input_context_hash",
+                ),
+            )
+        if not isinstance(self.evidence_references, list) or not all(
+            isinstance(reference, EvidenceReference)
+            for reference in self.evidence_references
+        ):
+            raise ValueError(
+                "AI provenance evidence_references must contain EvidenceReference values."
+            )
 
 
 @dataclass(frozen=True)
@@ -426,6 +491,133 @@ def sanitize_evidence_url(value: Any) -> str | None:
         return None
     parsed = urlsplit(safe_text)
     return urlunsplit((parsed.scheme.lower(), parsed.netloc, parsed.path, "", ""))
+
+
+def validate_sha256_digest(value: Any, *, field_name: str = "sha256") -> str:
+    """Return one canonical full SHA-256 digest or raise ``ValueError``.
+
+    Args:
+        value: Candidate digest. It must already be text; integers and other
+            values are rejected instead of being coerced into misleading data.
+        field_name: Human-readable field name used in the validation error.
+
+    Returns:
+        The lowercase 64-character hexadecimal digest.
+
+    Raises:
+        ValueError: If ``value`` is not a complete hexadecimal SHA-256 string.
+
+    Beginner note:
+        A short digest is not equivalent evidence. Requiring all 256 bits also
+        prevents different callers from quietly accepting different formats.
+    """
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a full SHA-256 digest.")
+    digest = value.strip().lower()
+    if not _SHA256_RE.fullmatch(digest):
+        raise ValueError(f"{field_name} must be a full SHA-256 digest.")
+    return digest
+
+
+def evidence_reference_from_mapping(value: Any) -> EvidenceReference:
+    """Build one evidence reference from an untrusted cache/persistence value.
+
+    Args:
+        value: Mapping containing ``source_label``, ``sanitized_url``, and
+            ``sha256`` fields.
+
+    Returns:
+        A validated :class:`EvidenceReference` with a redacted, bounded label.
+
+    Raises:
+        ValueError: If the object, URL, label, or digest is malformed.
+
+    Beginner note:
+        This helper deliberately delegates to the domain model so cache reads,
+        persistence, and direct construction share exactly one rule set. Every
+        field must be present: an explicit ``sanitized_url=None`` records local
+        evidence, while an omitted URL field is an incomplete receipt.
+    """
+    if not isinstance(value, Mapping):
+        raise ValueError("Cached evidence reference must be an object.")
+    if any(field not in value for field in ("source_label", "sanitized_url", "sha256")):
+        raise ValueError("Cached evidence reference must include source_label, sanitized_url, and sha256.")
+    return EvidenceReference(
+        source_label=value["source_label"],
+        sanitized_url=value["sanitized_url"],
+        sha256=value["sha256"],
+    )
+
+
+def ai_provenance_from_mapping(value: Any) -> AIProvenance:
+    """Parse and validate one cached AI provenance receipt.
+
+    Args:
+        value: Mapping decoded from a signed verdict-cache envelope.
+
+    Returns:
+        An :class:`AIProvenance` whose hashes and evidence references satisfy
+        the same model-level contract as newly generated receipts.
+
+    Raises:
+        ValueError: If a required cache field or evidence reference is invalid.
+        KeyError: If a required provenance field is absent.
+
+    Beginner note:
+        The HMAC proves that bytes were signed; it does not prove those bytes
+        match today's receipt schema. This parser performs that second check so
+        malformed signed cache entries become cache misses rather than trusted
+        provenance.
+    """
+    if not isinstance(value, Mapping):
+        raise ValueError("Cached AI provenance must be an object.")
+    references = value.get("evidence_references", [])
+    if not isinstance(references, list):
+        raise ValueError("Cached evidence references must be a list.")
+    cache_hit = value.get("cache_hit")
+    if not isinstance(cache_hit, bool):
+        raise ValueError("Cached AI provenance cache_hit must be boolean.")
+
+    model_name = value["model_name"]
+    prompt_version = value["prompt_version"]
+    if not isinstance(model_name, str) or not model_name.strip():
+        raise ValueError("Cached AI provenance requires a model name.")
+    if not isinstance(prompt_version, str) or not prompt_version.strip():
+        raise ValueError("Cached AI provenance requires a prompt version.")
+
+    try:
+        generated_at = dt.datetime.fromisoformat(str(value["generated_at"]))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Cached AI provenance generated_at must be ISO-8601.") from exc
+    if generated_at.tzinfo is None:
+        generated_at = generated_at.replace(tzinfo=dt.UTC)
+
+    return AIProvenance(
+        model_name=model_name.strip(),
+        prompt_version=prompt_version.strip(),
+        prompt_sha256=validate_sha256_digest(
+            value["prompt_sha256"], field_name="prompt_sha256"
+        ),
+        generated_at=generated_at.astimezone(dt.UTC),
+        cache_hit=cache_hit,
+        evidence_references=[
+            evidence_reference_from_mapping(reference) for reference in references
+        ],
+        input_context_hash=(
+            validate_sha256_digest(
+                value["input_context_hash"], field_name="input_context_hash"
+            )
+            if value.get("input_context_hash") is not None
+            else None
+        ),
+        verdict=str(value["verdict"]) if value.get("verdict") is not None else None,
+        confidence=value.get("confidence"),
+        decision_reason=(
+            str(value["decision_reason"])
+            if value.get("decision_reason") is not None
+            else None
+        ),
+    )
 
 
 def _json_safe_mapping(value: Mapping[Any, Any]) -> dict[str, JSONValue]:
