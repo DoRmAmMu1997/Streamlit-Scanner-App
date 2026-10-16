@@ -1514,11 +1514,36 @@ def test_two_proposals_with_same_baseline_commit_only_one_revision(
     verify = repository._verify_cited_receipts_from_cached_pdf
 
     def synchronize(*args, **kwargs):
+        """Finish real citation checks before releasing both approval workers.
+
+        Args:
+            *args: Positional arguments forwarded to the original verifier.
+            **kwargs: Keyword arguments forwarded without changing verification.
+
+        Raises:
+            threading.BrokenBarrierError: Both workers do not reach the barrier.
+
+        Beginner note:
+            Waiting after verification makes the workers compete for the same
+            baseline at publication; sleeping would not establish that ordering.
+        """
         verify(*args, **kwargs)
         both_verified.wait(timeout=15)
 
     monkeypatch.setattr(repository, "_verify_cited_receipts_from_cached_pdf", synchronize)
     def approve(proposal):
+        """Expose the winning revision or the losing authority-conflict code.
+
+        Args:
+            proposal: One verified proposal captured before the competing writes.
+
+        Returns:
+            Its committed manual record, or the typed conflict's stable code.
+
+        Beginner note:
+            Catch only the expected authority exception. Unrelated validation
+            or database failures must still fail the worker and this regression.
+        """
         try:
             return repository.approve_extraction_proposal(proposal.id, reviewed_by_email="human@example.com",
                 accept_authority_change=True, data_dir=tmp_path, session_factory=file_session_factory)
@@ -1551,6 +1576,17 @@ def test_source_mutation_during_verification_rejects_before_manual_insert(
     proposal = _submit(issue.id, document.id, digest, file_session_factory, data_dir=tmp_path)
     verify = repository._verify_cited_receipts_from_cached_pdf
     def mutate_after_verify(*args, **kwargs):
+        """Commit a source edit between citation verification and final approval.
+
+        Args:
+            *args: Original positional verification arguments.
+            **kwargs: Original keyword verification arguments.
+
+        Beginner note:
+            A separate real transaction wins this race deterministically. The
+            approval must reread its source after taking the lock, before any
+            manual row is inserted, rather than trusting these earlier checks.
+        """
         verify(*args, **kwargs)
         value = {"filing_date": dt.date(2026, 10, 1), "content_sha256": "b" * 64,
                  "file_path": "ipo/documents/replaced.pdf", "document_url": "https://www.sebi.gov.in/new.pdf",
@@ -1702,6 +1738,18 @@ def test_strict_approval_checks_only_current_pending_cap_cohort(
         reject_extraction_proposal(competing.id, reviewed_by_email="human@example.com", reason="Incorrect terms",
                                    session_factory=file_session_factory)
     def approve():
+        """Call the strict automatic boundary for each competing-claim scenario.
+
+        Returns:
+            The committed manual record when the remaining cohort is unambiguous.
+
+        Raises:
+            IpoProposalConflictError: Pending same-date cap claims still disagree.
+
+        Beginner note:
+            The human acknowledgement flag is deliberately also True. It must
+            not relax the separately requested automatic-approval policy.
+        """
         return approve_extraction_proposal(selected.id, reviewed_by_email="ipo-automation@screener.local",
             require_current_candidate=True, accept_authority_change=True,
             data_dir=tmp_path, session_factory=file_session_factory)
@@ -1730,6 +1778,17 @@ def test_competing_cap_inserted_during_verification_is_seen_under_final_lock(
     verify = repository._verify_cited_receipts_from_cached_pdf
     inserted = False
     def insert_after_verification(*args, **kwargs):
+        """Publish one competing claim after checking the selected proposal's PDF.
+
+        Args:
+            *args: Original positional verification arguments.
+            **kwargs: Original keyword verification arguments.
+
+        Beginner note:
+            Public submission also verifies its PDF through this callback. Set
+            the one-shot guard first to avoid recursion while retaining real
+            verification and persistence for both proposals.
+        """
         nonlocal inserted
         verify(*args, **kwargs)
         if not inserted:
@@ -1766,15 +1825,55 @@ def test_competing_proposal_writer_waits_for_approval_state_lock(
     held, release, attempted, finished = Event(), Event(), Event(), Event()
     lock = repository.lock_ipo_scoring_state
     def hold_approval(session, issue_id, **kwargs):
+        """Hold the real approval lock until the competing writer has attempted it.
+
+        Args:
+            session: Caller-owned transaction forwarded to the real lock helper.
+            issue_id: Issue whose authority row serializes these operations.
+            **kwargs: Revision conditions forwarded unchanged.
+
+        Returns:
+            The real lock helper's success flag.
+
+        Raises:
+            AssertionError: The controlling test does not release the worker.
+
+        Beginner note:
+            Only the approval thread pauses, and only after acquiring the lock.
+            The public insertion thread must wait on that actual database lock.
+        """
         locked = lock(session, issue_id, **kwargs)
         if current_thread().name.startswith("cohort-approval"):
             held.set()
             assert release.wait(15)
         return locked
     def observe_writer(_conn, _cursor, statement, _parameters, _context, _many):
+        """Signal that the writer is about to execute its authority-row UPDATE.
+
+        Args:
+            _conn: SQLAlchemy connection supplied by the event hook.
+            _cursor: Driver cursor supplied by the event hook.
+            statement: SQL text inspected only for the known lock operation.
+            _parameters: Bound values, intentionally neither read nor logged.
+            _context: SQLAlchemy execution context, unused by the signal.
+            _many: Whether the call is an executemany operation, unused here.
+
+        Beginner note:
+            This event proves an attempt, not a committed write. The separate
+            finished event must remain unset while approval retains its lock.
+        """
         if current_thread().name.startswith("cohort-writer") and statement.startswith("UPDATE ipo_scoring_state"):
             attempted.set()
     def write():
+        """Submit the competing proposal and signal termination on either outcome.
+
+        Returns:
+            The real submitted proposal, still carrying its captured baseline.
+
+        Beginner note:
+            The finally signal also fires on errors. Future.result still raises
+            those errors, so a failed writer cannot masquerade as a safe wait.
+        """
         try:
             return submit_competitor()
         finally:

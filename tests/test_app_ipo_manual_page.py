@@ -784,6 +784,15 @@ def test_unknown_baseline_review_never_calls_approval(monkeypatch) -> None:
     monkeypatch.setattr(ipo_manual_page, "st", fake)
     monkeypatch.setattr(ipo_manual_page, "list_extraction_proposals", lambda **_kwargs: [proposal])
     def forbidden(*_args, **_kwargs):
+        """Fail if an unknown-baseline browser click reaches the write boundary.
+
+        Raises:
+            AssertionError: Always, because this fixture must never be called.
+
+        Beginner note:
+            The fake button reports an old click even when disabled. The page's
+            current authorization decision must suppress the backend call itself.
+        """
         raise AssertionError("unknown-baseline review reached the approver")
     monkeypatch.setattr(ipo_manual_page, "approve_extraction_proposal", forbidden)
     ipo_manual_page._render_proposal_review(ADMIN)
@@ -831,6 +840,15 @@ def test_review_read_failure_disables_approval_after_context_load(monkeypatch) -
     monkeypatch.setattr(ipo_manual_page, "list_extraction_proposals", lambda **_kwargs: [proposal])
     monkeypatch.setattr(ipo_manual_page, "load_manual_edit_context", lambda *_args: _draft_context(3))
     def unavailable(*_args):
+        """Model an inventory failure after the manual context loaded successfully.
+
+        Raises:
+            RuntimeError: Always, to interrupt the second authority read.
+
+        Beginner note:
+            An earlier successful check cannot leave approval enabled when a
+            later required read fails. No real database outage is needed here.
+        """
         raise RuntimeError("fixture inventory unavailable")
     monkeypatch.setattr(ipo_manual_page, "list_documents", unavailable)
     approvals = []

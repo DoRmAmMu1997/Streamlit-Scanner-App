@@ -464,6 +464,20 @@ def test_programmatic_manual_save_captures_before_file_verification(
     verify = repository.verify_cached_document_file
     inserted = False
     def concurrent_save(source, **kwargs):
+        """Commit a nested human correction while the outer save is verifying.
+
+        Args:
+            source: Original cached source forwarded to the real verifier.
+            **kwargs: Cache-verification options forwarded unchanged.
+
+        Returns:
+            The original verified-cache result after the human write commits.
+
+        Beginner note:
+            Set the one-shot flag before the nested public save because it uses
+            this verifier too. Returning the original result lets the outer call
+            continue and prove that its final baseline check detects the edit.
+        """
         nonlocal inserted
         result = verify(source, **kwargs)
         if not inserted:
