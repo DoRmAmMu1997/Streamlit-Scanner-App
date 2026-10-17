@@ -603,8 +603,6 @@ def _render_entry_workflow(
     if isinstance(notice, str):
         st.success(notice)
     stale = draft.context.manual_revision != current_context.manual_revision
-    if stale:
-        st.warning("Newer evidence has been saved. Reload latest evidence before saving this draft.")
     reload_column, copy_column = st.columns(2)
     if reload_column.button("Reload latest evidence", key=f"ipo_manual_reload_{draft.form_key}"):
         draft = _manual_draft(current_context, state=draft_state, reload=True)
@@ -615,6 +613,11 @@ def _render_entry_workflow(
         help="Copy values and units, then enter and verify page citations for this prospectus.",
     ):
         draft = _manual_draft(current_context, state=draft_state, copy_previous=True)
+    # A reload replaces the retained baseline within this very rerun. Render
+    # feedback afterward so a newly valid form cannot keep an already-emitted
+    # stale warning until another interaction; the save gate uses the same flag.
+    if stale:
+        st.warning("Newer evidence has been saved. Reload latest evidence before saving this draft.")
     if draft.copied and draft.seed is not None:
         st.caption(_neutralize_markdown(_redact_secrets(
             f"Values copied from revision #{draft.seed.id} ({draft.seed.source_document_url}). "

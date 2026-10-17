@@ -200,15 +200,36 @@ def test_real_manual_widgets_reset_on_a_b_a_source_switch(monkeypatch) -> None:
         Comparing key strings alone cannot prove Streamlit drops old values.
         Type an amount and page into A, select B and return to A; both new forms
         must show empty source-bound fields while retaining the source selector.
+        An incomplete submit sends those fields through AppTest's form protocol
+        without persisting evidence. Assert the dirty state first so a discarded
+        test input cannot make the later empty-field checks pass vacuously.
     """
     from streamlit.testing.v1 import AppTest
 
     _install_entry_contexts(monkeypatch, {1: _draft_context(1), 2: _draft_context(2)})
+
+    def forbidden_save(*_args, **_kwargs):
+        """Keep the source-switch regression entirely outside persistence.
+
+        Raises:
+            AssertionError: An incomplete fixture unexpectedly reaches storage.
+
+        Beginner note:
+            Only form widget state should be committed to the test runner. The
+            missing units must prevent an application evidence write.
+        """
+        raise AssertionError("Incomplete source-switch form reached persistence")
+
+    monkeypatch.setattr(ipo_manual_page, "submit_manual_extraction", forbidden_save)
     app = AppTest.from_function(_manual_entry_test_app, default_timeout=15).run()
     assert not app.exception
     next(widget for widget in app.text_input if widget.label == "Net worth").set_value("999")
     next(widget for widget in app.number_input if widget.label == "Net worth page").set_value(9)
-    app.run()
+    next(widget for widget in app.button if widget.label == "Save immutable revision").click().run()
+    assert not app.exception
+    assert any("Select the reported" in error.value for error in app.error)
+    assert next(widget for widget in app.text_input if widget.label == "Net worth").value == "999"
+    assert next(widget for widget in app.number_input if widget.label == "Net worth page").value == 9
     for index in (1, 0):
         next(widget for widget in app.selectbox if widget.label == "Cached source document").select_index(index).run()
         assert not app.exception
@@ -225,13 +246,35 @@ def test_real_manual_form_retains_stale_input_until_explicit_reload(monkeypatch)
         The administrator can inspect their typed value after a concurrent save.
         Explicit reload clears it and advances the loaded baseline; backend
         revision checks still protect the later race between rendering and saving.
+        AppTest now batches form edits until its submit button is clicked, just
+        like the browser sends form data. A deliberately invalid submission
+        records the entered value without saving evidence. Browser checks cover
+        the separate, not-yet-submitted client buffer that AppTest does not model.
     """
     from streamlit.testing.v1 import AppTest
 
     contexts = {1: _draft_context(1)}
     _install_entry_contexts(monkeypatch, contexts)
+
+    def forbidden_save(*_args, **_kwargs):
+        """Refuse persistence while exercising the real form submission protocol.
+
+        Raises:
+            AssertionError: The incomplete form unexpectedly reaches storage.
+
+        Beginner note:
+            Empty required unit selections make this an unsaved draft. The test
+            must not accidentally commit evidence just to initialize widget state.
+        """
+        raise AssertionError("Incomplete form reached manual persistence")
+
+    monkeypatch.setattr(ipo_manual_page, "submit_manual_extraction", forbidden_save)
     app = AppTest.from_function(_manual_entry_test_app, default_timeout=15).run()
-    next(widget for widget in app.text_input if widget.label == "Net worth").set_value("999").run()
+    next(widget for widget in app.text_input if widget.label == "Net worth").set_value("999")
+    next(widget for widget in app.button if widget.label == "Save immutable revision").click().run()
+    assert not app.exception
+    assert any("Select the reported" in error.value for error in app.error)
+    assert next(widget for widget in app.text_input if widget.label == "Net worth").value == "999"
     contexts[1] = _draft_context(1, revision=1)
     app.run()
     assert not app.exception
@@ -242,6 +285,7 @@ def test_real_manual_form_retains_stale_input_until_explicit_reload(monkeypatch)
     assert not app.exception
     assert app.session_state["ipo_manual_edit_draft"].context.manual_revision == 1
     assert next(widget for widget in app.text_input if widget.label == "Net worth").value == ""
+    assert not any("Newer evidence" in warning.value for warning in app.warning)
 
 
 def test_widget_keys_are_scoped_to_the_selected_issue() -> None:
