@@ -16,7 +16,7 @@ import hashlib
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from sqlalchemy.exc import IntegrityError
@@ -49,12 +49,189 @@ from backend.ipo.repository import (
     submit_extraction_proposal,
 )
 from backend.observability import EVENT_IPO_EXTRACTION_PROPOSAL_REVIEWED
+from backend.storage import SessionFactory
 from backend.storage.ipo_repository import (
     insert_ipo_extraction_proposal,
     update_ipo_document_cache_if_source_matches,
 )
 
 _NOW = dt.datetime(2026, 7, 13, 10, 0, tzinfo=dt.UTC)
+
+
+@pytest.fixture(params=("file_session_factory", "postgres_session_factory"), ids=("sqlite", "postgres"))
+def approval_session_factory(request: pytest.FixtureRequest) -> SessionFactory:
+    """Run authority interleavings against both supported transaction backends.
+
+    Args:
+        request: Pytest request selecting an existing disposable storage fixture.
+
+    Returns:
+        A caller-owned transaction factory for the selected isolated database.
+
+    Beginner note:
+        Reusing the same assertions prevents the PostgreSQL test from proving a
+        weaker contract than SQLite. The PostgreSQL fixture uses an explicitly
+        configured test server and fails in required CI if that server is absent;
+        it never falls back to the application's database URL.
+    """
+    return cast(SessionFactory, request.getfixturevalue(request.param))
+
+
+def test_human_save_during_verification_keeps_its_revision(
+    approval_session_factory: SessionFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A human commit during PDF verification must defeat the older proposal.
+
+    Args:
+        approval_session_factory: Isolated SQLite or PostgreSQL transactions.
+        tmp_path: Private content-addressed PDF cache used only by this test.
+        monkeypatch: Installs the deterministic scheduling hook and restores it.
+
+    Beginner note:
+        Verification happens outside the approval transaction. A real independent
+        human save is inserted into that gap on both databases. Approval must
+        reload the manual token under its final lock instead of using the token
+        it saw before verification; the human history and pending proposal survive.
+    """
+    from backend.ipo import repository
+
+    session_factory = approval_session_factory
+    issue, document, digest = _cached_document(session_factory, tmp_path)
+    context = repository.load_manual_edit_context(issue.id, document.id, session_factory=session_factory)
+    proposal = _submit(issue.id, document.id, digest, session_factory, data_dir=tmp_path)
+    verify = repository._verify_cited_receipts_from_cached_pdf
+    saved = []
+
+    def save_after_verification(*args: Any, **kwargs: Any) -> None:
+        """Commit the human correction after genuine deterministic citation checks.
+
+        Args:
+            *args: Positional inputs forwarded unchanged to the verifier.
+            **kwargs: Keyword inputs forwarded unchanged to the verifier.
+
+        Beginner note:
+            Only the scheduling point is intercepted. Both the verification and
+            human transaction use production code, so no fake revision counter
+            can conceal an approval that accepts stale state.
+        """
+        verify(*args, **kwargs)
+        saved.append(repository.submit_manual_extraction(
+            issue.id, repository._proposal_payload_to_manual_data(proposal.payload, document.id),
+            entered_by_email="human@example.com", expected_context=context,
+            data_dir=tmp_path, session_factory=session_factory,
+        ))
+
+    monkeypatch.setattr(repository, "_verify_cited_receipts_from_cached_pdf", save_after_verification)
+    with pytest.raises(repository.IpoProposalConflictError) as rejected:
+        repository.approve_extraction_proposal(
+            proposal.id, reviewed_by_email="reviewer@example.com", data_dir=tmp_path,
+            session_factory=session_factory,
+        )
+    assert rejected.value.code == "manual_revision_changed"
+    assert repository.list_manual_extractions(issue.id, session_factory=session_factory) == saved
+    assert repository.list_extraction_proposals(issue_id=issue.id, session_factory=session_factory) == [proposal]
+    assert repository.load_manual_edit_context(
+        issue.id, document.id, session_factory=session_factory,
+    ).manual_revision == 1
+
+
+@pytest.mark.parametrize("change", ("filing_date", "cache_sha", "insert"))
+def test_postgres_source_writers_cannot_escape_approval_row_lock(
+    postgres_session_factory: SessionFactory, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch, change: str,
+) -> None:
+    """Require PostgreSQL to refuse competing source writes while approval holds its lock.
+
+    Args:
+        postgres_session_factory: Real transactions on a disposable migrated database.
+        tmp_path: Private PDF cache containing the proposal's source bytes.
+        monkeypatch: Pauses the approval after its real lock has been acquired.
+        change: Source mutation path attempted by the competing transaction.
+
+    Beginner note:
+        SQLite serializes all writers, which can hide a missing per-issue lock.
+        Here an actual approval holds its PostgreSQL row lock while a separate
+        transaction attempts each storage write path. PostgreSQL's lock-timeout
+        SQLSTATE proves blocking; there is no sleep or elapsed-time assertion.
+        The failed source transaction rolls back before approval is released.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    from sqlalchemy import text
+    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.orm import Session
+
+    from backend.ipo import repository
+    from backend.storage import ipo_repository as storage
+
+    issue, document, digest = _cached_document(postgres_session_factory, tmp_path)
+    proposal = _submit(issue.id, document.id, digest, postgres_session_factory, data_dir=tmp_path)
+    held, release = Event(), Event()
+    lock = repository.lock_ipo_scoring_state
+
+    def hold_approval(
+        session: Session, issue_id: int, *, expected_revision: int | None = None,
+    ) -> bool:
+        """Pause only after the approval has acquired its real issue-state lock.
+
+        Args:
+            session: Approval's real caller-owned transaction.
+            issue_id: Issue whose serialization row must be held.
+            expected_revision: Optional revision precondition forwarded unchanged.
+
+        Returns:
+            The original lock operation's success result after the writer probe.
+
+        Raises:
+            AssertionError: The test fails to release the worker within its bound.
+
+        Beginner note:
+            The lock is never simulated. The event keeps the real transaction
+            open until the other connection has proved it cannot change the source.
+        """
+        acquired = lock(session, issue_id, expected_revision=expected_revision)
+        held.set()
+        assert release.wait(30), "Writer probe did not release the approval"
+        return acquired
+
+    monkeypatch.setattr(repository, "lock_ipo_scoring_state", hold_approval)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        approval = pool.submit(
+            repository.approve_extraction_proposal, proposal.id,
+            reviewed_by_email="reviewer@example.com", data_dir=tmp_path,
+            session_factory=postgres_session_factory,
+        )
+        try:
+            assert held.wait(15), "Approval did not acquire its row lock"
+            with pytest.raises(OperationalError) as blocked, postgres_session_factory() as writer:
+                # This test-only setting bounds the server wait. If the storage
+                # helper omits the shared lock, its unrelated document-row write
+                # succeeds and the expected database error is absent.
+                writer.execute(text("SET LOCAL lock_timeout = '250ms'"))
+                if change == "filing_date":
+                    storage.update_ipo_document_row(
+                        writer, issue.id, document.id, {"filing_date": dt.date(2026, 10, 1)},
+                    )
+                elif change == "cache_sha":
+                    storage.update_ipo_document_cache_if_source_matches(
+                        writer, issue.id, document.id,
+                        expected_document_url=document.document_url,
+                        expected_document_type=document.document_type,
+                        values={"content_sha256": "b" * 64},
+                    )
+                else:
+                    storage.insert_ipo_document(writer, issue.id, {
+                        "document_type": "rhp", "document_url": "https://www.sebi.gov.in/new.pdf",
+                        "source_confidence": "high", "parse_status": "not_downloaded",
+                    })
+            assert getattr(blocked.value.orig, "sqlstate", None) == "55P03"
+        finally:
+            # Assertion failures must release the real transaction too, otherwise
+            # executor shutdown would obscure the original test failure.
+            release.set()
+        assert approval.result(timeout=15).source_content_sha256 == digest
+    assert len(repository.list_manual_extractions(issue.id, session_factory=postgres_session_factory)) == 1
 
 
 def _cached_document(file_session_factory, data_dir: Path, *, priced: bool = True):
@@ -1196,26 +1373,38 @@ def test_database_enforces_one_pending_proposal_per_document(
 
 @pytest.mark.parametrize("unknown", [True, False])
 def test_unknown_or_stale_baseline_cannot_overwrite_manual_evidence(
-    file_session_factory, tmp_path, unknown,
+    approval_session_factory: SessionFactory, tmp_path: Path, unknown: bool,
 ):
-    """HIGH source matching never authorizes replacement of newer human evidence."""
+    """HIGH source matching never authorizes replacement of newer human evidence.
+
+    Args:
+        approval_session_factory: Isolated transactions on either supported backend.
+        tmp_path: Private cache containing the verified source bytes.
+        unknown: Whether the captured proposal lacks a trusted baseline entirely.
+
+    Beginner note:
+        Both databases must reject an unknown or consumed manual authority token,
+        even when the newer human record has a backdated timestamp. Chronological
+        sorting cannot substitute for the separate manual revision counter.
+    """
     from backend.ipo import repository
 
-    issue, document, digest = _cached_document(file_session_factory, tmp_path)
-    context = repository.load_manual_edit_context(issue.id, document.id, session_factory=file_session_factory)
-    proposal = _submit(issue.id, document.id, digest, file_session_factory,
+    session_factory = approval_session_factory
+    issue, document, digest = _cached_document(session_factory, tmp_path)
+    context = repository.load_manual_edit_context(issue.id, document.id, session_factory=session_factory)
+    proposal = _submit(issue.id, document.id, digest, session_factory,
                        data_dir=tmp_path, baseline_context=None if unknown else context)
     repository.submit_manual_extraction(
         issue.id, repository._proposal_payload_to_manual_data(proposal.payload, document.id),
         entered_by_email="human@example.com", expected_context=context, data_dir=tmp_path,
-        now=lambda: dt.datetime(2000, 1, 1, tzinfo=dt.UTC), session_factory=file_session_factory,
+        now=lambda: dt.datetime(2000, 1, 1, tzinfo=dt.UTC), session_factory=session_factory,
     )
     with pytest.raises(repository.IpoProposalConflictError) as error:
         approve_extraction_proposal(proposal.id, reviewed_by_email="reviewer@example.com",
                                     accept_authority_change=True,
-                                    data_dir=tmp_path, session_factory=file_session_factory)
+                                    data_dir=tmp_path, session_factory=session_factory)
     assert error.value.code == ("unknown_manual_baseline" if unknown else "manual_revision_changed")
-    assert len(repository.list_manual_extractions(issue.id, session_factory=file_session_factory)) == 1
+    assert len(repository.list_manual_extractions(issue.id, session_factory=session_factory)) == 1
 
 
 @pytest.mark.parametrize("change", ["newer_source", "conflicting_terms"])
@@ -1485,30 +1674,38 @@ def test_human_approval_requires_explicit_authority_change_decision(
 
 
 def test_two_proposals_with_same_baseline_commit_only_one_revision(
-    file_session_factory, tmp_path: Path, monkeypatch,
+    approval_session_factory: SessionFactory, tmp_path: Path, monkeypatch,
 ) -> None:
     """Two verified sources cannot both consume the same manual authority token.
+
+    Args:
+        approval_session_factory: Independent transactions on the selected database.
+        tmp_path: Private cache shared by both proposal-verification workers.
+        monkeypatch: Installs the barrier after real citation verification.
 
     Beginner note:
         The barrier lets both approvals finish slow verification before either
         reaches the final lock. One transaction wins; the other's fresh scalar
         read detects that win even though its own proposal is still pending.
+        The same assertion runs on SQLite and PostgreSQL: a SQLite-wide writer
+        lock alone is not evidence that PostgreSQL row serialization works.
     """
     from concurrent.futures import ThreadPoolExecutor
     from threading import Barrier
 
     from backend.ipo import repository
 
-    issue, document, digest = _cached_document(file_session_factory, tmp_path)
+    session_factory = approval_session_factory
+    issue, document, digest = _cached_document(session_factory, tmp_path)
     other = create_document(issue.id, IpoDocumentData(document_type="drhp",
         document_url="https://www.sebi.gov.in/other.pdf", filing_date=dt.date(2024, 1, 1),
-        source_confidence=Confidence.HIGH), session_factory=file_session_factory)
-    with file_session_factory() as session:
+        source_confidence=Confidence.HIGH), session_factory=session_factory)
+    with session_factory() as session:
         update_ipo_document_cache_if_source_matches(session, issue.id, other.id,
             expected_document_url=other.document_url, expected_document_type=other.document_type,
             values={"file_path": f"ipo/documents/{digest}.pdf", "content_sha256": digest,
                     "downloaded_at": _NOW, "parse_status": "pending"})
-    proposals = [_submit(issue.id, source.id, digest, file_session_factory, data_dir=tmp_path)
+    proposals = [_submit(issue.id, source.id, digest, session_factory, data_dir=tmp_path)
                  for source in (document, other)]
     both_verified = Barrier(2)
     verify = repository._verify_cited_receipts_from_cached_pdf
@@ -1546,34 +1743,42 @@ def test_two_proposals_with_same_baseline_commit_only_one_revision(
         """
         try:
             return repository.approve_extraction_proposal(proposal.id, reviewed_by_email="human@example.com",
-                accept_authority_change=True, data_dir=tmp_path, session_factory=file_session_factory)
+                accept_authority_change=True, data_dir=tmp_path, session_factory=session_factory)
         except repository.IpoProposalConflictError as exc:
             return exc.code
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(approve, proposals))
     assert sum(result == "manual_revision_changed" for result in results) == 1
-    assert len(repository.list_manual_extractions(issue.id, session_factory=file_session_factory)) == 1
+    assert len(repository.list_manual_extractions(issue.id, session_factory=session_factory)) == 1
     assert repository.load_manual_edit_context(issue.id, document.id,
-                                               session_factory=file_session_factory).manual_revision == 1
+                                               session_factory=session_factory).manual_revision == 1
 
 
 @pytest.mark.parametrize("change", ["filing_date", "content_sha256", "file_path", "document_url", "document_type"])
 def test_source_mutation_during_verification_rejects_before_manual_insert(
-    file_session_factory, tmp_path: Path, monkeypatch, change: str,
+    approval_session_factory: SessionFactory, tmp_path: Path, monkeypatch, change: str,
 ) -> None:
     """A writer that wins before approval's final lock invalidates its checked source.
+
+    Args:
+        approval_session_factory: Real independent transactions on either backend.
+        tmp_path: Private PDF cache for the pending proposal.
+        monkeypatch: Inserts a committed source mutation after verification.
+        change: Authority-bearing source field changed by that transaction.
 
     Beginner note:
         The interleaving occurs synchronously after PDF receipt verification and
         before the lock; no timing assumptions are needed. Its rejection must
         leave both manual evidence and the original pending proposal intact.
+        Both backends must reload current committed source data after locking.
     """
     from backend.ipo import repository
     from backend.storage import ipo_repository as storage
 
-    issue, document, digest = _cached_document(file_session_factory, tmp_path)
-    proposal = _submit(issue.id, document.id, digest, file_session_factory, data_dir=tmp_path)
+    session_factory = approval_session_factory
+    issue, document, digest = _cached_document(session_factory, tmp_path)
+    proposal = _submit(issue.id, document.id, digest, session_factory, data_dir=tmp_path)
     verify = repository._verify_cited_receipts_from_cached_pdf
     def mutate_after_verify(*args, **kwargs):
         """Commit a source edit between citation verification and final approval.
@@ -1591,14 +1796,14 @@ def test_source_mutation_during_verification_rejects_before_manual_insert(
         value = {"filing_date": dt.date(2026, 10, 1), "content_sha256": "b" * 64,
                  "file_path": "ipo/documents/replaced.pdf", "document_url": "https://www.sebi.gov.in/new.pdf",
                  "document_type": "drhp"}[change]
-        with file_session_factory() as session:
+        with session_factory() as session:
             storage.update_ipo_document_row(session, issue.id, document.id, {change: value})
     monkeypatch.setattr(repository, "_verify_cited_receipts_from_cached_pdf", mutate_after_verify)
     with pytest.raises(IpoValidationError, match="changed before approval"):
         approve_extraction_proposal(proposal.id, reviewed_by_email="human@example.com",
-            data_dir=tmp_path, session_factory=file_session_factory)
-    assert repository.list_manual_extractions(issue.id, session_factory=file_session_factory) == []
-    assert list_extraction_proposals(issue_id=issue.id, session_factory=file_session_factory) == [proposal]
+            data_dir=tmp_path, session_factory=session_factory)
+    assert repository.list_manual_extractions(issue.id, session_factory=session_factory) == []
+    assert list_extraction_proposals(issue_id=issue.id, session_factory=session_factory) == [proposal]
 
 
 def test_approval_rejects_a_source_url_relabelled_after_proposal_submission(

@@ -70,3 +70,18 @@ for a coherent snapshot; this remains a single-writer research application.
 
 Migration `20260927ipo014` follows `20260921ipo013`, preserves immutable history,
 partial indexes and ownership checks, and can downgrade without rewriting history.
+
+## Database-specific regression evidence
+
+The same authority scenarios run through both disposable database fixtures: two
+proposals competing for one manual revision, an unknown or stale baseline, a human
+save during PDF verification, and a source mutation before the final lock. They
+use production persistence and deterministic scheduling hooks. The PostgreSQL
+fixture is mandatory in hosted CI; local absence is reported as a skip.
+
+A separate PostgreSQL probe pauses a real approval after it acquires the issue
+state lock. Competing filing-date, cached-hash and document-insertion operations
+must receive PostgreSQL's lock-unavailable SQLSTATE before approval is released.
+A transaction-local lock timeout bounds the test without changing application
+configuration. This proves database blocking directly rather than inferring it
+from a sleep or from SQLite's database-wide serialization.
