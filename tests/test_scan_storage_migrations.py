@@ -977,34 +977,18 @@ def test_ensure_database_schema_detects_schema_drift(monkeypatch, tmp_path: Path
 
 
 def _reflect_schema(engine) -> dict[str, dict[str, object]]:
-    """Return a comparable {table: columns/indexes/foreign_keys} structure.
+    """Reflect full enforcement contracts and dispose this test-owned engine.
 
-    Alembic's bookkeeping ``alembic_version`` table is skipped so a migrated
-    database and a ``create_all`` database describe the same application schema.
-    The engine is disposed before returning.
+    Beginner note:
+        The reusable fingerprint also powers PostgreSQL and image verification;
+        the wrapper retains this module's existing engine ownership convention.
     """
-    inspector = inspect(engine)
-    schema: dict[str, dict[str, object]] = {}
-    for table in inspector.get_table_names():
-        if table == "alembic_version":
-            continue
-        columns = {
-            column["name"]: (str(column["type"]), bool(column["nullable"]))
-            for column in inspector.get_columns(table)
-        }
-        indexes = {index["name"] for index in inspector.get_indexes(table)}
-        foreign_keys = {
-            (
-                tuple(fk["constrained_columns"]),
-                fk["referred_table"],
-                tuple(fk["referred_columns"]),
-                fk.get("options", {}).get("ondelete"),
-            )
-            for fk in inspector.get_foreign_keys(table)
-        }
-        schema[table] = {"columns": columns, "indexes": indexes, "foreign_keys": foreign_keys}
-    engine.dispose()
-    return schema
+    from backend.storage.schema_verification import reflect_schema
+
+    try:
+        return reflect_schema(engine)
+    finally:
+        engine.dispose()
 
 
 def test_valid005_backfills_attempts_and_only_missing_computed_benchmarks(monkeypatch, tmp_path: Path):
