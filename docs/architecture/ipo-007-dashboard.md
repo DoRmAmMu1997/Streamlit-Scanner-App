@@ -8,14 +8,16 @@ reads, and a thin page (`ui/ipo_page.py`) renders whatever the builder
 returned. No network call and no scoring happen during render; the compute
 pass is the IPO-008 job or the page's explicit re-score action.
 
-`build_dashboard_snapshot` denormalizes each issue's stored state — latest
+`build_dashboard_snapshot` denormalizes each issue's stored state — current selected
 evaluation (with its contribution receipt), manual-profile presence, cached
 document counts, pending proposal count — into frozen `IpoDashboardRow`
 values. Pure selectors implement the seven spec sections: Available filings,
 Open IPOs, Upcoming IPOs (RHP stage), DRHP watchlist, Recommended, Not
 Recommended, and the Missing data queue (no verified profile, no downloaded
 prospectus, a factor the verdict flagged missing, or a proposal awaiting
-review). `top_positive_and_risk_reasons` ranks stored contributions against
+review, or stale/unverified evaluation). Recommended and Not Recommended
+sections require semantic freshness; historical verdicts remain in All.
+`top_positive_and_risk_reasons` ranks stored contributions against
 `PDF_WEIGHTS` (>=75% of weight is a headline strength, <=35% a headline
 risk); missing factors are excluded because "could not check" and "checked
 and weak" are deliberately different messages.
@@ -40,7 +42,10 @@ and weak" are deliberately different messages.
   (hiding is UX; the app dispatch capability check is the boundary). It runs
   the same `rescore_issue` service the job uses — repository work only —
   counts outcomes without letting one failure abort the rest, records an
-  audit event, and invalidates the five-minute snapshot cache.
+  audit event, and rebuilds the snapshot. There is no actionable snapshot cache:
+  each rerun checks input revision, model and time-derived semantics at one UTC
+  instant. Calculation and verification time are displayed separately from
+  overall display activity.
 
 ## Testing
 
@@ -49,14 +54,19 @@ missing-data queue rules, strength/risk selection, and snapshot
 denormalization over monkeypatched repositories.
 `tests/test_app_ipo_page.py` smoke-tests the renderer against a fake ``st``
 with every repository seam stubbed (proving render purity), plus the label
-map, filter semantics, spec column contract, and the re-score audit/cache
+map, filter semantics, spec column contract, and the re-score audit/refresh
 path. `tests/test_app_orchestration.py` pins the navigation entry, the
 re-export identity, and the keyword-only capability boundary.
 
 > PR #108 hardening: scored and unscored rows expose registered DRHP/RHP source
 > documents; `last_updated` is the newest relevant issue/document/profile/
 > proposal/subscription/enrichment/evaluation time; `evaluation_stale` routes
-> newer evidence back to the review queue. Positives sort by awarded points,
+> unverified evidence or changed model/time eligibility back to the review queue. Positives sort by awarded points,
 > risks by lost points with factor-order ties. Every scored expander renders all
 > seven typed breakdown rows, and untrusted text is escaped before any
 > Markdown-capable Streamlit label/caption.
+
+The transaction and freshness authority is [IPO-013](ipo-013-current-evaluation-state.md).
+Cache downloads and unapproved proposal changes may update display activity but
+do not alone stale a verified score. A still-fresh GMP observation can require
+reverification without creating a new historical calculation.

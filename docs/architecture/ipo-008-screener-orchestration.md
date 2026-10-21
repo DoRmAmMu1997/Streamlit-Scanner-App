@@ -18,24 +18,21 @@ and writes nothing — missing data never becomes a fabricated score.
 
 ## Inputs fingerprint (the idempotency anchor)
 
-Before persisting, the service computes a SHA-256 over exactly what scoring
-consumed: the three rule versions (`ipo-006-v1`, factor and flag versions),
-the extraction id + source SHA-256, the issue's updated-at/status/price
-band, the newest subscription snapshot identity, every enrichment signal id,
-and two *time-derived* facts — the set of GMP signals still inside the
-staleness window and whether the issue is inside its near-close demand
-window. Hashing derived facts instead of the clock keeps re-runs no-ops
-until the passage of time would actually change a factor or flag. When the
-newest stored evaluation carries the same model version and fingerprint the
-service reports `skipped_unchanged`; the fingerprint is stored on
-`ipo_scores.inputs_fingerprint` (legacy ipo-001-v1 rows keep `NULL`).
+The service hashes semantic evidence, source digests, canonical registered source
+URLs, ratio/authority/rule versions, subscription facts and usable enrichment.
+The current scorer version is `ipo-013-v3`; database ids, mutation revisions and
+raw wall time remain excluded. GMP eligibility includes the exact five-day
+threshold and expires strictly after it. Near-close uses the existing UTC date.
 
-The hardened implementation supersedes the volatile identities named above:
-it hashes rule/ratio/authority versions, source SHA and normalized approved
-values, ratio statuses/results, subscription facts, usable semantic enrichment
-facts, typed debt-purpose evidence, GMP freshness, and the near-close state.
-Database row ids are excluded, and a partial unique index closes concurrent
-check/insert races.
+A revision-validated detached snapshot feeds calculation. Conditional publication
+locks the issue state before inserting/reusing the unique complete immutable pair.
+A -> B -> A selects historical A again. Unchanged content reports
+`skipped_unchanged` while updating evaluated revision and actual verification time.
+Historical calculation time and receipt bytes never change. Reads never certify
+freshness or insert history. Snapshot and publication conflicts share at most three
+total attempts, after which the job reports a typed retryable per-issue failure.
+Production rechecks time eligibility before publication; explicit aware `as_of`
+freezes the business clock. See [IPO-013](ipo-013-current-evaluation-state.md).
 
 ## Failure and configuration semantics
 
