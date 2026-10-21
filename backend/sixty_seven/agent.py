@@ -63,8 +63,10 @@ from backend.fundamentals.screener_in_client import ScreenerInFetchError, fetch_
 from backend.scanning.result_contract import (
     AIProvenance,
     EvidenceReference,
+    ai_provenance_from_mapping,
     normalize_secret_safe_json,
     sanitize_evidence_url,
+    validate_sha256_digest,
 )
 from backend.security import (
     BLOCKED_EVIDENCE_RESPONSE,
@@ -382,7 +384,23 @@ def _research_payload_has_prompt_injection(payload: dict[str, Any]) -> bool:
 def _research_evidence_references(
     symbol: str, payload: dict[str, Any]
 ) -> list[EvidenceReference]:
-    """Hash full research records while persisting only safe labels and URLs."""
+    """Hash full research records while persisting only safe labels and URLs.
+
+    Args:
+        symbol: Normalized company symbol for the trusted Screener.in URL.
+        payload: Validated request-local research records collected by the tool.
+
+    Returns:
+        References containing only bounded labels, sanitized URLs, and hashes.
+
+    Raises:
+        _ResearchEvidenceError: If a supplied search link cannot be sanitized.
+
+    Beginner note:
+        Missing search links may represent evidence without a web citation.
+        A supplied unsafe link must instead fail the evaluation: converting it
+        to None would falsely mark external evidence as intentionally local.
+    """
     references = [
         EvidenceReference(
             source_label="Screener.in snapshot",
@@ -395,7 +413,12 @@ def _research_evidence_references(
     for item in payload.get("search_results", []):
         if not isinstance(item, dict):
             continue
-        sanitized_url = sanitize_evidence_url(item.get("link"))
+        supplied_link = item.get("link")
+        sanitized_url = sanitize_evidence_url(supplied_link)
+        if supplied_link is not None and sanitized_url is None:
+            # Sanitization failure is different from an intentionally absent URL.
+            # The existing research-error path publishes no verdict or cache.
+            raise _ResearchEvidenceError("MalformedResearchEvidence")
         domain = ""
         if sanitized_url:
             domain = urlsplit(sanitized_url).netloc.lower()
@@ -420,66 +443,13 @@ def _provenance_json(provenance: AIProvenance) -> dict[str, Any]:
 
 
 def _provenance_from_json(value: Any) -> AIProvenance:
-    if not isinstance(value, dict):
-        raise ValueError("Cached AI provenance must be an object.")
-    references = value.get("evidence_references", [])
-    if not isinstance(references, list):
-        raise ValueError("Cached evidence references must be a list.")
-    cache_hit = value.get("cache_hit")
-    if not isinstance(cache_hit, bool):
-        raise ValueError("Cached AI provenance cache_hit must be boolean.")
-    generated_at = datetime.fromisoformat(str(value["generated_at"]))
-    if generated_at.tzinfo is None:
-        generated_at = generated_at.replace(tzinfo=UTC)
-    parsed_references: list[EvidenceReference] = []
-    for item in references:
-        if not isinstance(item, dict):
-            raise ValueError("Cached evidence reference must be an object.")
-        source_label = str(redact_text(str(item.get("source_label") or ""))).strip()
-        if not source_label:
-            raise ValueError("Cached evidence reference requires a source label.")
-        raw_url = item.get("sanitized_url")
-        sanitized_url = sanitize_evidence_url(raw_url)
-        if raw_url is not None and sanitized_url != raw_url:
-            raise ValueError("Cached evidence URL is not canonical and safe.")
-        parsed_references.append(
-            EvidenceReference(
-                source_label=source_label[:160],
-                sanitized_url=sanitized_url,
-                sha256=_validated_sha256(item.get("sha256")),
-            )
-        )
-    return AIProvenance(
-        model_name=str(value["model_name"]),
-        prompt_version=str(value["prompt_version"]),
-        prompt_sha256=_validated_sha256(value["prompt_sha256"]),
-        generated_at=generated_at.astimezone(UTC),
-        cache_hit=cache_hit,
-        evidence_references=parsed_references,
-        input_context_hash=(
-            _validated_sha256(value["input_context_hash"])
-            if value.get("input_context_hash") is not None
-            else None
-        ),
-        verdict=str(value["verdict"]) if value.get("verdict") is not None else None,
-        confidence=value.get("confidence"),
-        decision_reason=(
-            str(value["decision_reason"])
-            if value.get("decision_reason") is not None
-            else None
-        ),
-    )
+    """Compatibility wrapper around the shared cached-provenance contract."""
+    return ai_provenance_from_mapping(value)
 
 
 def _validated_sha256(value: Any) -> str:
-    digest = str(value or "").strip().lower()
-    if len(digest) != 64:
-        raise ValueError("Cached receipt hash must be a full SHA-256 digest.")
-    try:
-        int(digest, 16)
-    except ValueError as exc:
-        raise ValueError("Cached receipt hash must be hexadecimal.") from exc
-    return digest
+    """Compatibility wrapper retained for callers of the old private helper."""
+    return validate_sha256_digest(value, field_name="Cached receipt hash")
 
 
 class _ResearchEvidenceError(Exception):

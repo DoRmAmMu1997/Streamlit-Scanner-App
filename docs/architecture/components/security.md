@@ -152,6 +152,22 @@ never interpolate narrative evidence, URLs, paths, or raw financial values.
 | Symbol | Contract |
 |---|---|
 | `sanitize_evidence_url(value)` | Redact, SSRF-screen (`is_safe_http_url`), and strip credentials/query/fragment — the only URL form stored in an AI receipt. |
+| `EvidenceReference` | Enforce a redacted source label capped at 160 characters, an optional canonical safe URL, and a complete lowercase SHA-256 digest at direct construction. `sanitized_url=None` is reserved for intentionally local evidence. |
+| `evidence_reference_from_mapping(value)` | Require all three reference fields, then parse cache/persistence mappings through the same model-level evidence contract; malformed objects, unsafe supplied URLs, and incomplete or non-string hashes raise `ValueError`. Explicit `sanitized_url=None` remains valid for local evidence; omission is malformed. |
+| `ai_provenance_from_mapping(value)` | Validate signed cache provenance after HMAC verification. This checks required model/prompt fields, receipt hashes, timestamps, cache flags, and every evidence reference without performing a network request. |
+| `validate_sha256_digest(value, *, field_name)` | Require exactly 64 hexadecimal text characters and return the lowercase digest. Values of other types are never string-coerced. |
+
+**Caller responsibilities.** URL validation here proves that a stored citation
+is safe and canonical enough for a receipt. It does not authorize a server-side
+fetch. A component that later dereferences a URL must repeat its own destination,
+DNS, redirect, content-type, and size checks. Cache consumers must first verify
+the envelope HMAC and then parse provenance with `ai_provenance_from_mapping`;
+either failure is a cache miss. Locally derived chart/context evidence must pass
+`None` explicitly rather than inventing a URL. The 67 Ka Funda research producer
+rejects a supplied search link that fails sanitization as malformed research,
+without publishing a verdict or cache; an absent link remains distinct from an
+unsafe external citation. Repository persistence repeats the same mapping
+validation so a caller cannot bypass the domain model.
 
 ### Prompt-injection quarantine — `backend/security/prompt_injection.py`
 | Symbol | Contract |
