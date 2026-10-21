@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import datetime as dt
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, cast
 
@@ -20,6 +21,7 @@ import streamlit as st
 
 from backend.auth.session import AuthenticatedUser
 from backend.config import get_settings
+from backend.ipo.approval import IpoManualEditContext, current_document_id, same_source
 from backend.ipo.manual_extraction import (
     IpoAmountUnit,
     IpoManualExtractionData,
@@ -43,6 +45,7 @@ from backend.ipo.repository import (
     list_extraction_proposals,
     list_issues,
     list_manual_extractions,
+    load_manual_edit_context,
     reject_extraction_proposal,
     submit_manual_extraction,
 )
@@ -54,6 +57,99 @@ from ui.common import _neutralize_markdown, _redact_secrets
 # appears even on the very first (no prior revision) entry for an IPO.
 _PEER_METRIC_COLUMNS: tuple[str, ...] = tuple(metric.value for metric in IpoPeerMetric)
 _PEER_EDITOR_COLUMNS: tuple[str, ...] = ("company_name", "source_page", *_PEER_METRIC_COLUMNS)
+
+
+@dataclass(frozen=True)
+class _ManualDraft:
+    """Retain one source-bound editing snapshot across Streamlit reruns.
+
+    Attributes:
+        context: Authority captured when editing began, retained until reload.
+        seed: Approved values allowed to initialize fresh widgets, if any.
+        form_key: Namespace binding issue, document, hash, revision and generation.
+        copied: Whether pages must be cleared and every copied fact reverified.
+
+    Beginner note:
+        Latest database state and the user's loaded draft are different things.
+        Replacing the context on a routine rerun could authorize stale typed
+        values against a newer revision. Keep that baseline immutable instead.
+    """
+
+    context: IpoManualEditContext
+    seed: IpoManualExtractionRecord | None
+    form_key: str
+    copied: bool = False
+
+
+def _manual_draft(
+    current: IpoManualEditContext,
+    *,
+    state: MutableMapping[str, Any],
+    reload: bool = False,
+    copy_previous: bool = False,
+) -> _ManualDraft:
+    """Reuse a loaded draft or explicitly create a fresh widget namespace.
+
+    Args:
+        current: Coherent, newly read source/manual snapshot from the backend.
+        state: This browser session's mutable state, supplied by the page.
+        reload: Explicitly discard old inputs and capture current authority.
+        copy_previous: Explicitly seed values from the draft's captured prior
+            evidence. It never refreshes the retained authority baseline.
+
+    Returns:
+        Draft whose seed and copy flag tell renderers which values to show and
+        whether citation pages must start blank before source verification.
+
+    Raises:
+        IpoValidationError: If reload and copy are requested together or there
+            is no captured previous evidence to copy.
+
+    Beginner note:
+        Widget values persist by key. Each source switch or explicit reset gets
+        a new generation, so A-B-A cannot revive A's abandoned values. Only the
+        old draft's field namespace is cleared; source selection and other pages
+        survive. Routine reruns keep both input widgets and the original baseline.
+    """
+    if reload and copy_previous:
+        raise IpoValidationError("Reload evidence before starting a separate copy action.")
+    stored = state.get("ipo_manual_edit_draft")
+    previous = stored if isinstance(stored, _ManualDraft) else None
+    same = previous is not None and same_source(previous.context.document, current.document)
+    if same and not reload and not copy_previous:
+        return cast(_ManualDraft, previous)
+
+    # Copying uses the captured previous evidence, even if an external save has
+    # since changed the database. Only explicit reload may advance the baseline.
+    context = previous.context if same and previous is not None and not reload else current
+    profile = context.latest_profile
+    if copy_previous and profile is None:
+        raise IpoValidationError("There is no saved evidence to copy.")
+    same_seed_source = (
+        profile is not None
+        and profile.source_document_id == context.document.id
+        and profile.source_content_sha256 == context.document.content_sha256
+        and profile.source_document_url == context.document.document_url
+    )
+    seed = profile if copy_previous or same_seed_source else None
+    prior_generation = state.get("ipo_manual_draft_generation", 0)
+    generation = prior_generation + 1 if type(prior_generation) is int and prior_generation >= 0 else 1
+    form_key = (
+        f"draft_{context.issue.id}_{context.document.id}_{context.document.content_sha256}"
+        f"_{context.manual_revision}_{generation}"
+    )
+    if previous is not None:
+        prefix = _widget_key(previous.form_key, "")
+        # Iterate a snapshot because deleting keys mutates the supplied mapping.
+        # Action buttons use a different prefix and may already be instantiated;
+        # these field widgets have not been rendered in the new form yet.
+        for key in list(state):
+            if key.startswith(prefix):
+                del state[key]
+    draft = _ManualDraft(context=context, seed=seed, form_key=form_key, copied=copy_previous)
+    state["ipo_manual_draft_generation"] = generation
+    state["ipo_manual_edit_draft"] = draft
+    return draft
 
 
 def _is_blank(value: object) -> bool:
@@ -329,12 +425,55 @@ def _render_proposal_review(authenticated_user: AuthenticatedUser) -> None:
     with st.expander("Proposed values (with page citations)", expanded=False):
         st.json(dict(proposal.payload))
 
+    review_ready = False
+    accept_authority_change = False
+    if proposal.baseline_manual_revision is None or proposal.document_id is None:
+        st.warning("This proposal has no trusted manual baseline. "
+                   "Use fresh manual review below; rejection remains available.")
+    else:
+        try:
+            context = load_manual_edit_context(proposal.issue_id, proposal.document_id)
+            review_ready = context.manual_revision == proposal.baseline_manual_revision
+            if not review_ready:
+                st.warning("Newer manual evidence exists. Reload and re-enter reviewed evidence below; "
+                           "this draft cannot be approved.")
+            else:
+                inventory = list_documents(proposal.issue_id)
+                cap = proposal.payload.get("price_band_high")
+                changed_cap = cap is not None and context.issue.price_band_high is not None and (
+                    Decimal(str(cap)) != context.issue.price_band_high
+                )
+                previous = context.latest_profile
+                source = next((item for item in inventory if previous is not None
+                               and item.id == previous.source_document_id), None)
+                unknown_previous = previous is not None and (
+                    source is None or source.filing_date is None
+                    or source.document_url != previous.source_document_url
+                    or source.content_sha256 != previous.source_content_sha256
+                )
+                if current_document_id(inventory) != proposal.document_id or changed_cap or unknown_previous:
+                    st.warning("Review this source's chronology and the recorded issue terms "
+                               "before replacing evidence.")
+                    st.caption(_neutralize_markdown(_redact_secrets(
+                        f"Recorded cap: {context.issue.price_band_high}; proposed cap: {cap or 'unchanged'}."
+                    )))
+                    accept_authority_change = st.checkbox(
+                        "I explicitly accept this source and any changed issue terms after reviewing them",
+                        key=f"ipo_proposal_authority_{proposal.id}",
+                    )
+                st.caption("The manual baseline is current. "
+                           "Source bytes and citations will be checked again on approval.")
+        except Exception:  # noqa: BLE001 - a failed authority read must disable approval without leaking storage details.
+            review_ready = False
+            st.warning("Current evidence could not be checked. Reload before approving this proposal.")
+
     approve_column, reject_column = st.columns(2)
     with approve_column:
         approve_clicked = st.button(
             "Approve as immutable revision",
             key=f"ipo_proposal_approve_{proposal.id}",
             type="primary",
+            disabled=not review_ready,
         )
     with reject_column:
         reject_reason = st.text_input(
@@ -344,11 +483,12 @@ def _render_proposal_review(authenticated_user: AuthenticatedUser) -> None:
             "Reject proposal", key=f"ipo_proposal_reject_{proposal.id}"
         )
 
-    if approve_clicked:
+    if approve_clicked and review_ready:
         try:
             revision = approve_extraction_proposal(
                 proposal.id,
                 reviewed_by_email=authenticated_user.email,
+                accept_authority_change=accept_authority_change,
                 data_dir=get_settings().data_dir,
             )
         except (IpoValidationError, IpoNotFoundError) as exc:
@@ -382,12 +522,21 @@ def _render_entry_workflow(
     authenticated_user: AuthenticatedUser,
     issues: Sequence[Any],
 ) -> None:
-    """Render issue selection, complete entry form, latest profile, and history.
+    """Render source-bound evidence editing while retaining the loaded baseline.
+
+    Args:
+        authenticated_user: Trusted administrator identity used for attribution.
+        issues: Available issues already loaded by the authorized page.
+
+    Returns:
+        None. Renders fields, safe validation messages and immutable history.
 
     Beginner note:
         Only verified cached DRHP/RHP records are offered. Selecting a source
         does not trust its metadata forever: the repository re-hashes its bytes
-        during submission before it creates an immutable revision.
+        during submission before it creates an immutable revision. Each draft
+        retains its original context across reruns; newer evidence prompts an
+        explicit reload rather than silently rebinding old typed values.
     """
     issue_labels = {
         _neutralize_markdown(f"{issue.company_name} (#{issue.id})"): issue
@@ -437,18 +586,59 @@ def _render_entry_workflow(
             f"URL: {selected_document.document_url}"
         )
     )
+    try:
+        current_context = load_manual_edit_context(selected_issue.id, selected_document.id)
+    except (IpoValidationError, IpoNotFoundError) as exc:
+        st.error(_neutralize_markdown(_redact_secrets(str(exc))))
+        return
+    except Exception:  # noqa: BLE001 - storage errors must not expose connection details.
+        st.error("The selected evidence could not be loaded. Reload the page and try again.")
+        return
+    reload_after_save = bool(st.session_state.pop("ipo_manual_reload_after_save", False))
+    # Streamlit accepts integer or string keys and normalizes them to strings;
+    # this helper owns only its explicit string namespace within that mapping.
+    draft_state = cast(MutableMapping[str, Any], st.session_state)
+    draft = _manual_draft(current_context, state=draft_state, reload=reload_after_save)
+    notice = st.session_state.pop("ipo_manual_save_notice", None)
+    if isinstance(notice, str):
+        st.success(notice)
+    stale = draft.context.manual_revision != current_context.manual_revision
+    reload_column, copy_column = st.columns(2)
+    if reload_column.button("Reload latest evidence", key=f"ipo_manual_reload_{draft.form_key}"):
+        draft = _manual_draft(current_context, state=draft_state, reload=True)
+        stale = False
+    if copy_column.button(
+        "Copy previous values", key=f"ipo_manual_copy_{draft.form_key}",
+        disabled=stale or draft.context.latest_profile is None,
+        help="Copy values and units, then enter and verify page citations for this prospectus.",
+    ):
+        draft = _manual_draft(current_context, state=draft_state, copy_previous=True)
+    # A reload replaces the retained baseline within this very rerun. Render
+    # feedback afterward so a newly valid form cannot keep an already-emitted
+    # stale warning until another interaction; the save gate uses the same flag.
+    if stale:
+        st.warning("Newer evidence has been saved. Reload latest evidence before saving this draft.")
+    if draft.copied and draft.seed is not None:
+        st.caption(_neutralize_markdown(_redact_secrets(
+            f"Values copied from revision #{draft.seed.id} ({draft.seed.source_document_url}). "
+            "Enter citations for this prospectus."
+        )))
 
-    with st.form(f"ipo_manual_extraction_{selected_issue.id}"):
+    # Buttons above use a separate namespace; resets can clear the old source's
+    # field keys before these widgets are instantiated. Source selection survives.
+    with st.form(f"ipo_manual_extraction_{draft.form_key}"):
         financial_unit, issue_unit, share_unit = _render_unit_controls(
-            selected_issue.id, latest
+            draft.form_key, draft.seed
         )
-        period_rows = _render_period_controls(selected_issue.id, latest)
-        scalar_values = _render_scalar_controls(selected_issue.id, latest)
-        peer_rows = _render_peer_controls(selected_issue.id, latest)
-        submitted = st.form_submit_button("Save immutable revision", type="primary")
+        period_rows = _render_period_controls(draft.form_key, draft.seed, clear_citations=draft.copied)
+        scalar_values = _render_scalar_controls(draft.form_key, draft.seed, clear_citations=draft.copied)
+        peer_rows = _render_peer_controls(draft.form_key, draft.seed, clear_citations=draft.copied)
+        submitted = st.form_submit_button("Save immutable revision", type="primary", disabled=stale)
 
     if submitted:
         try:
+            if financial_unit is None or issue_unit is None or share_unit is None:
+                raise IpoValidationError("Select the reported financial, issue and share units before saving.")
             payload = _build_payload(
                 source_document_id=selected_document.id,
                 financial_amount_unit=financial_unit,
@@ -463,24 +653,50 @@ def _render_entry_workflow(
                 payload,
                 entered_by_email=authenticated_user.email,
                 data_dir=get_settings().data_dir,
+                expected_context=draft.context,
+                verify_copied_citations=draft.copied,
             )
         except (IpoValidationError, IpoNotFoundError) as exc:
             st.error(_neutralize_markdown(_redact_secrets(str(exc))))
         except Exception:  # noqa: BLE001 - UI must fail safely without raw exception text.
             st.error("The IPO revision could not be saved. Check logs for the safe error code.")
         else:
-            st.success(f"Saved immutable IPO revision #{latest.id}.")
+            # The next run reads the committed revision and creates new field
+            # keys. Do not mutate already-instantiated widget values in this run.
+            st.session_state["ipo_manual_save_notice"] = f"Saved immutable IPO revision #{latest.id}."
+            st.session_state["ipo_manual_reload_after_save"] = True
+            st.rerun()
 
-    _render_latest_and_history(selected_issue.id, latest)
+    _render_latest_and_history(selected_issue.id, current_context.latest_profile)
 
 
-def _format_decimal(value: Decimal | None, default: str = "0") -> str:
-    """Format a stored Decimal for an editable text widget without float loss."""
+def _format_decimal(value: Decimal | None, default: str = "") -> str:
+    """Format reported Decimal text while keeping missing facts visibly empty.
+
+    Args:
+        value: Exact stored value, or None for an unentered fact.
+        default: Text to show for a missing value; blank by default.
+
+    Returns:
+        Decimal text without a float conversion, or the supplied empty default.
+
+    Beginner note:
+        Zero is a financial assertion. A fresh source must not silently acquire
+        zero-valued facts merely because its form has not been filled in yet.
+    """
     return format(value, "f") if value is not None else default
 
 
-def _widget_key(issue_id: int, field_name: str) -> str:
-    """Build the stable Streamlit key for one issue-specific form field.
+def _widget_key(issue_id: int | str, field_name: str) -> str:
+    """Build a field key from a legacy issue ID or a complete draft namespace.
+
+    Args:
+        issue_id: Integer for legacy callers or the page's source-bound form key.
+        field_name: Stable field name; empty text returns its namespace prefix.
+
+    Returns:
+        A key preserving existing integer-ID compatibility while allowing the
+        form to bind fields to document, hash, loaded revision and generation.
 
     Beginner note:
     Streamlit carries widget state across page reruns. Including the issue ID
@@ -496,37 +712,44 @@ def _enum_index(options: Sequence[Any], selected: Any | None) -> int:
 
 
 def _render_unit_controls(
-    issue_id: int,
+    issue_id: int | str,
     latest: IpoManualExtractionRecord | None,
-) -> tuple[IpoAmountUnit, IpoAmountUnit, IpoShareUnit]:
-    """Render source-reported unit selectors while preserving a revision's units."""
+) -> tuple[IpoAmountUnit | None, IpoAmountUnit | None, IpoShareUnit | None]:
+    """Render reported units from the approved seed or require an explicit choice.
+
+    Args:
+        issue_id: Legacy integer ID or the current source-bound draft namespace.
+        latest: Approved same-source values or explicitly copied values to seed.
+
+    Returns:
+        Financial, issue and share units; any unselected unit remains None.
+
+    Beginner note:
+        A missing source unit must not silently become crores or lakhs. Explicit
+        copy may preserve the previous units, but the backend verifies them anew
+        against every cited fact in the selected PDF before copied data is saved.
+    """
     amount_units = tuple(IpoAmountUnit)
     share_units = tuple(IpoShareUnit)
     columns = st.columns(3)
     financial_unit = columns[0].selectbox(
         "Financial statement unit",
         amount_units,
-        index=_enum_index(
-            amount_units, latest.financial_amount_unit if latest else IpoAmountUnit.CRORE_INR
-        ),
+        index=_enum_index(amount_units, latest.financial_amount_unit) if latest else None,
         format_func=lambda unit: unit.value.replace("_", " ").upper(),
         key=_widget_key(issue_id, "financial_amount_unit"),
     )
     issue_unit = columns[1].selectbox(
         "Issue amount unit",
         amount_units,
-        index=_enum_index(
-            amount_units, latest.issue_amount_unit if latest else IpoAmountUnit.CRORE_INR
-        ),
+        index=_enum_index(amount_units, latest.issue_amount_unit) if latest else None,
         format_func=lambda unit: unit.value.replace("_", " ").upper(),
         key=_widget_key(issue_id, "issue_amount_unit"),
     )
     share_unit = columns[2].selectbox(
         "Equity share unit",
         share_units,
-        index=_enum_index(
-            share_units, latest.equity_share_unit if latest else IpoShareUnit.LAKH_SHARES
-        ),
+        index=_enum_index(share_units, latest.equity_share_unit) if latest else None,
         format_func=lambda unit: unit.value.replace("_", " ").upper(),
         key=_widget_key(issue_id, "equity_share_unit"),
     )
@@ -534,10 +757,20 @@ def _render_unit_controls(
 
 
 def _render_period_controls(
-    issue_id: int,
+    issue_id: int | str,
     latest: IpoManualExtractionRecord | None,
+    *,
+    clear_citations: bool = False,
 ) -> list[dict[str, object]]:
     """Render three annual income-statement rows with value-level citations.
+
+    Args:
+        issue_id: Legacy integer ID or source-bound draft namespace.
+        latest: Approved values used only to initialize this namespace.
+        clear_citations: Whether copied values require newly entered pages.
+
+    Returns:
+        Browser values for three periods; dates and pages stay empty when unknown.
 
     Beginner note:
     PBT and finance cost are raw source facts, not ratios. Capturing them beside
@@ -546,11 +779,10 @@ def _render_period_controls(
     """
     st.markdown("#### Annual financials")
     defaults = list(latest.periods) if latest else []
-    current_year = dt.date.today().year
     rows: list[dict[str, object]] = []
     for index in range(3):
         period = defaults[index] if index < len(defaults) else None
-        default_date = period.period_end if period else dt.date(current_year - 2 + index, 3, 31)
+        default_date = period.period_end if period else None
         st.markdown(f"**FY{index + 1}**")
         date_column, revenue_column, ebitda_column, pat_column = st.columns(4)
         pbt_column, finance_cost_column = st.columns(2)
@@ -570,7 +802,7 @@ def _render_period_controls(
                     "Revenue page",
                     min_value=1,
                     step=1,
-                    value=period.revenue_page if period else 1,
+                    value=period.revenue_page if period and not clear_citations else None,
                     key=_widget_key(issue_id, f"revenue_page_{index}"),
                 ),
                 "ebitda": ebitda_column.text_input(
@@ -582,7 +814,7 @@ def _render_period_controls(
                     "EBITDA page",
                     min_value=1,
                     step=1,
-                    value=period.ebitda_page if period else 1,
+                    value=period.ebitda_page if period and not clear_citations else None,
                     key=_widget_key(issue_id, f"ebitda_page_{index}"),
                 ),
                 "pat": pat_column.text_input(
@@ -594,7 +826,7 @@ def _render_period_controls(
                     "PAT page",
                     min_value=1,
                     step=1,
-                    value=period.pat_page if period else 1,
+                    value=period.pat_page if period and not clear_citations else None,
                     key=_widget_key(issue_id, f"pat_page_{index}"),
                 ),
                 "profit_before_tax": pbt_column.text_input(
@@ -610,8 +842,8 @@ def _render_period_controls(
                     step=1,
                     value=(
                         period.profit_before_tax_page
-                        if period and period.profit_before_tax_page is not None
-                        else 1
+                        if period and not clear_citations
+                        else None
                     ),
                     key=_widget_key(issue_id, f"profit_before_tax_page_{index}"),
                 ),
@@ -628,8 +860,8 @@ def _render_period_controls(
                     step=1,
                     value=(
                         period.finance_cost_page
-                        if period and period.finance_cost_page is not None
-                        else 1
+                        if period and not clear_citations
+                        else None
                     ),
                     key=_widget_key(issue_id, f"finance_cost_page_{index}"),
                 ),
@@ -639,18 +871,24 @@ def _render_period_controls(
 
 
 def _sourced_text_control(
-    issue_id: int,
+    issue_id: int | str,
     label: str,
     field_name: str,
     latest: IpoManualExtractionRecord | None,
     *,
-    blank_when_missing: bool = False,
-) -> tuple[str, int]:
+    clear_citations: bool = False,
+) -> tuple[str, int | None]:
     """Render one required decimal input beside its required source page.
 
-    ``blank_when_missing`` is reserved for IPO-005 additions on a legacy revision.
-    Showing an empty widget forces an administrator to transcribe the real value;
-    defaulting those newly introduced facts to zero would fabricate evidence.
+    Args:
+        issue_id: Legacy integer ID or source-bound draft namespace.
+        label: Human-readable field name.
+        field_name: Attribute and widget suffix for the financial value.
+        latest: Approved seed, if the user has chosen to reuse its values.
+        clear_citations: Whether a copied value needs a new source page.
+
+    Returns:
+        Decimal text and a page number, with missing values/pages left blank.
 
     Beginner note:
         This helper only collects browser values. The domain object validates them
@@ -662,24 +900,34 @@ def _sourced_text_control(
     stored_page = getattr(latest, f"{field_name}_page") if latest else None
     value = value_column.text_input(
         label,
-        value=_format_decimal(stored_value, "" if blank_when_missing else "0"),
+        value=_format_decimal(stored_value),
         key=_widget_key(issue_id, field_name),
     )
     page = page_column.number_input(
         f"{label} page",
         min_value=1,
         step=1,
-        value=stored_page if stored_page is not None else 1,
+        value=stored_page if not clear_citations else None,
         key=_widget_key(issue_id, f"{field_name}_page"),
     )
     return value, page
 
 
 def _render_scalar_controls(
-    issue_id: int,
+    issue_id: int | str,
     latest: IpoManualExtractionRecord | None,
+    *,
+    clear_citations: bool = False,
 ) -> dict[str, object]:
     """Render every required singleton fact and its page-level provenance.
+
+    Args:
+        issue_id: Legacy integer ID or source-bound draft namespace.
+        latest: Approved seed for values and, when permitted, page references.
+        clear_citations: Whether copied values must start without source pages.
+
+    Returns:
+        Named browser values and page references for strict payload conversion.
 
     Beginner note:
     Historical/current shares support EPS and book value, while post-issue shares
@@ -688,29 +936,29 @@ def _render_scalar_controls(
     """
     st.markdown("#### Balance sheet, issue, and ownership facts")
     labels = {
-        "net_worth": ("Net worth", False),
-        "total_debt": ("Total debt", False),
-        "cash": ("Cash", False),
-        "cash_flow_from_operations": ("Cash flow from operations", False),
-        "equity_shares": ("Equity shares used for EPS / book value", False),
-        "eps": ("Reported EPS (INR per share)", False),
-        "nav_book_value": ("Reported NAV / book value (INR per share)", False),
-        "fresh_issue_amount": ("Fresh issue amount", False),
-        "ofs_amount": ("OFS amount", False),
-        "promoter_holding_pre_issue": ("Promoter holding before issue (%)", False),
-        "promoter_holding_post_issue": ("Promoter holding after issue (%)", False),
-        "total_assets": ("Total assets", True),
-        "current_liabilities": ("Current liabilities", True),
-        "post_issue_equity_shares": ("Post-issue equity shares", True),
+        "net_worth": "Net worth",
+        "total_debt": "Total debt",
+        "cash": "Cash",
+        "cash_flow_from_operations": "Cash flow from operations",
+        "equity_shares": "Equity shares used for EPS / book value",
+        "eps": "Reported EPS (INR per share)",
+        "nav_book_value": "Reported NAV / book value (INR per share)",
+        "fresh_issue_amount": "Fresh issue amount",
+        "ofs_amount": "OFS amount",
+        "promoter_holding_pre_issue": "Promoter holding before issue (%)",
+        "promoter_holding_post_issue": "Promoter holding after issue (%)",
+        "total_assets": "Total assets",
+        "current_liabilities": "Current liabilities",
+        "post_issue_equity_shares": "Post-issue equity shares",
     }
     values: dict[str, object] = {}
-    for field_name, (label, blank_when_missing) in labels.items():
+    for field_name, label in labels.items():
         value, page = _sourced_text_control(
             issue_id,
             label,
             field_name,
             latest,
-            blank_when_missing=blank_when_missing,
+            clear_citations=clear_citations,
         )
         values[field_name] = value
         values[f"{field_name}_page"] = page
@@ -726,24 +974,40 @@ def _render_scalar_controls(
         "Objects page",
         min_value=1,
         step=1,
-        value=latest.objects_of_issue_page if latest else 1,
+        value=latest.objects_of_issue_page if latest and not clear_citations else None,
         key=_widget_key(issue_id, "objects_of_issue_page"),
     )
     return values
 
 
 def _render_peer_controls(
-    issue_id: int,
+    issue_id: int | str,
     latest: IpoManualExtractionRecord | None,
+    *,
+    clear_citations: bool = False,
 ) -> list[dict[str, object]]:
-    """Render dynamic peer rows with allowlisted metric columns only."""
+    """Render peer values in this draft's namespace with source pages kept separate.
+
+    Args:
+        issue_id: Legacy integer ID or source-bound draft namespace.
+        latest: Approved peer rows to seed, if any.
+        clear_citations: Whether copied rows need new source-page references.
+
+    Returns:
+        Edited peer dictionaries containing only the configured metric columns.
+
+    Beginner note:
+        Copying a peer's numbers does not copy its page authority. Clear that
+        column while retaining useful values, and keep the data editor under the
+        same source-bound namespace as every other financial field.
+    """
     st.markdown("#### Peer valuation")
     rows = []
     if latest is not None:
         rows = [
             {
                 "company_name": peer.company_name,
-                "source_page": peer.source_page,
+                "source_page": None if clear_citations else peer.source_page,
                 **{
                     metric.value: _format_decimal(peer.metrics.get(metric), "")
                     for metric in IpoPeerMetric

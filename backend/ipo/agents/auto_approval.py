@@ -11,7 +11,10 @@ Beginner note — why this is narrow on purpose:
 Auto-approval is off unless an operator sets ``IPO_AUTO_APPROVE_HIGH_CONFIDENCE``,
 and even then it only touches ``HIGH`` confidence proposals, which by
 definition are the ones where the host already re-resolved *every* cited value
-from the real PDF bytes. Anything weaker still waits for a person. The
+from the real PDF bytes. The proposal must also belong to the one current
+prospectus, retain a trusted manual baseline and agree with recorded issue
+terms. Confidence alone supplies none of that authority. Anything weaker or
+ambiguous still waits for a person. The
 resulting revision is attributed to a reserved automation identity, so an
 autonomous approval can never be mistaken for a human attestation in the audit
 trail.
@@ -27,14 +30,18 @@ from typing import Final
 
 from backend.audit import record_audit_event
 from backend.config import get_ipo_auto_approve_high_confidence
+from backend.ipo.approval import current_document_id, has_conflicting_current_terms
 from backend.ipo.models import (
     Confidence,
+    IpoExtractionProposalRecord,
     IpoExtractionProposalStatus,
 )
 from backend.ipo.repository import (
     AuditRecorder,
+    IpoProposalConflictError,
     SessionFactory,
     approve_extraction_proposal,
+    list_documents,
     list_extraction_proposals,
 )
 from backend.observability import EVENT_IPO_PROPOSAL_AUTO_APPROVED, log_event
@@ -50,12 +57,26 @@ AUTOMATION_ACTOR_EMAIL: Final = "ipo-automation@screener.local"
 
 @dataclass(frozen=True)
 class IpoAutoApprovalOutcome:
-    """What one auto-approval pass converted, skipped, or failed on."""
+    """Separate successful evidence writes, required review and execution failures.
+
+    Attributes:
+        approved: Proposal IDs converted to immutable evidence.
+        skipped_low_confidence: Pending proposals whose facts are not fully verified.
+        failed: Selected issue attempts that failed during loading or approval.
+        disabled: Whether the feature switch prevented all queue access.
+        skipped_needs_review: HIGH proposals lacking current source or baseline authority.
+
+    Beginner note:
+        A review-required proposal is not an execution failure and remains in the
+        queue. Confidence describes extraction quality; it cannot resolve source
+        chronology or authorize replacing evidence corrected by a human.
+    """
 
     approved: tuple[int, ...] = ()
     skipped_low_confidence: int = 0
     failed: int = 0
     disabled: bool = False
+    skipped_needs_review: int = 0
 
 
 def auto_approve_ready_proposals(
@@ -68,7 +89,7 @@ def auto_approve_ready_proposals(
     approver: Callable[..., object] = approve_extraction_proposal,
     session_factory: SessionFactory = session_scope,
 ) -> IpoAutoApprovalOutcome:
-    """Approve every pending HIGH-confidence proposal, when explicitly enabled.
+    """Approve at most one current, fully verified proposal per selected issue.
 
     Args:
         issue_id: Restrict the pass to one issue; ``None`` scans the queue.
@@ -91,6 +112,9 @@ def auto_approve_ready_proposals(
         Failures are counted, never raised: one malformed proposal must not
         stop the screener run or block its siblings. A proposal that fails
         here simply stays pending for a human, which is the safe direction.
+        Full document inventory determines the current source before proposal
+        readiness is considered. The approver repeats authority checks under its
+        transaction lock; this initial selection is only a queue-processing hint.
     """
     active = (
         get_ipo_auto_approve_high_confidence() if enabled is None else bool(enabled)
@@ -111,20 +135,59 @@ def auto_approve_ready_proposals(
         wanted = set(issue_ids)
         pending = [proposal for proposal in pending if proposal.issue_id in wanted]
     approved: list[int] = []
-    skipped = 0
+    skipped = sum(proposal.confidence is not Confidence.HIGH for proposal in pending)
+    needs_review = 0
     failed = 0
+    by_issue: dict[int, list[IpoExtractionProposalRecord]] = {}
     for proposal in pending:
-        if proposal.confidence is not Confidence.HIGH:
-            # MEDIUM and weaker carry unverified values by definition.
-            skipped += 1
+        by_issue.setdefault(proposal.issue_id, []).append(proposal)
+    for queued in by_issue.values():
+        high = [proposal for proposal in queued if proposal.confidence is Confidence.HIGH]
+        if not high:
             continue
+        # Establish a bounded log identity even if loading the inventory fails.
+        # No approval occurs until its actual current source is selected below.
+        proposal = high[0]
         try:
+            inventory = list_documents(proposal.issue_id, session_factory=session_factory)
+            selected_document = current_document_id(inventory)
+            candidates = [item for item in queued if item.document_id == selected_document]
+            if selected_document is None or len(candidates) != 1:
+                needs_review += len(high)
+                continue
+            proposal = candidates[0]
+            if (
+                proposal.confidence is not Confidence.HIGH
+                or proposal.baseline_manual_revision is None
+                or proposal.needs_review_reasons
+            ):
+                # Never fall back to a ready old DRHP when the current RHP is
+                # missing, weak, unbound, or still needs factual review.
+                needs_review += len(high)
+                continue
+            needs_review += len(high) - 1
+            if has_conflicting_current_terms(proposal, inventory, queued):
+                raise IpoProposalConflictError(
+                    "conflicting_proposal_terms", "Current prospectus proposals contain conflicting issue terms."
+                )
             revision = approver(
                 proposal.id,
                 reviewed_by_email=AUTOMATION_ACTOR_EMAIL,
                 data_dir=data_dir,
+                require_current_candidate=True,
                 session_factory=session_factory,
             )
+        except IpoProposalConflictError as exc:
+            # Source/manual authority can change after queue selection. The
+            # transactional recheck rejects that race without making it a retry
+            # of an older candidate or leaking the exception's source text.
+            needs_review += 1
+            log_event(
+                logger, EVENT_IPO_PROPOSAL_AUTO_APPROVED,
+                proposal_id=proposal.id, issue_id=proposal.issue_id,
+                outcome="needs_review", reason_code=exc.code,
+            )
+            continue
         except Exception as exc:  # noqa: BLE001 - see the guarantee below
             # A proposal that cannot convert stays pending for a human, and
             # its siblings still process. The catch is deliberately broad
@@ -169,4 +232,5 @@ def auto_approve_ready_proposals(
         approved=tuple(approved),
         skipped_low_confidence=skipped,
         failed=failed,
+        skipped_needs_review=needs_review,
     )

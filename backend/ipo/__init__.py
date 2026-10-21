@@ -7,6 +7,7 @@ business logic; it only re-exports reviewed public contracts. Keeping that list
 explicit also prevents an internal helper from accidentally becoming public.
 """
 
+from backend.ipo.approval import IpoManualEditContext
 from backend.ipo.documents import (
     IpoDocumentDownloadError,
     IpoDocumentDownloadErrorCode,
@@ -72,6 +73,7 @@ from backend.ipo.models import (
 )
 from backend.ipo.repository import (
     IpoNotFoundError,
+    IpoProposalConflictError,
     approve_extraction_proposal,
     create_document,
     create_financial,
@@ -106,6 +108,7 @@ from backend.ipo.repository import (
     list_manual_extractions,
     list_subscriptions,
     load_ipo_factor_inputs_snapshot,
+    load_manual_edit_context,
     record_enrichment_signals,
     reject_extraction_proposal,
     submit_extraction_proposal,
@@ -187,6 +190,7 @@ __all__ = [
     "IpoIssueData",
     "IpoIssueRecord",
     "IpoIssueType",
+    "IpoManualEditContext",
     "IpoManualExtractionData",
     "IpoManualExtractionRecord",
     "IpoManualPeriodData",
@@ -194,6 +198,7 @@ __all__ = [
     "IpoPeerMetric",
     "IpoPeerValuationData",
     "IpoPerShareReconciliation",
+    "IpoProposalConflictError",
     "IpoRatioAnalysis",
     "IpoRatioName",
     "IpoRatioReceipt",
@@ -253,6 +258,7 @@ __all__ = [
     "list_manual_extractions",
     "list_subscriptions",
     "load_ipo_factor_inputs_snapshot",
+    "load_manual_edit_context",
     "record_enrichment_signals",
     "reject_extraction_proposal",
     "rescore_issue",

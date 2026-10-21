@@ -145,3 +145,42 @@ default-off path, HIGH-only selection, the automation identity, and failure
 isolation. `tests/test_ipo_enrichment.py` and `tests/test_ipo_caution_flags.py`
 pin the parser discipline and the containment rule — including a pair proving
 identical numbers differ only by provenance.
+
+
+## IPO-014 approval authority and source-bound editing
+
+[Source-bound approval ADR](ipo-014-source-bound-approval.md) defines the current authority boundary.
+Manual history has a separate monotonic generation: every manual or approved
+extraction write increments it atomically with its complete evidence and scoring
+invalidation. Enrichment and cache activity do not increment this manual token.
+Extraction captures its source and manual baseline before parsing or agent retries;
+HIGH confidence establishes citation matching, not permission to replace newer
+human evidence. Legacy NULL and stale baselines cannot be approved, including by
+an administrator. Keep the proposal history and use fresh manual review/re-entry.
+
+Automation selects one unambiguous latest dated RHP (or DRHP only without an RHP)
+from the complete filing inventory before checking readiness. An unready latest
+source never permits fallback to an older draft. Final approval repeats chronology,
+manual baseline and issue-term checks under the shared state lock. Human acceptance
+of a noncurrent source or changed terms requires an explicit review decision; this
+cannot bypass baseline, ownership, hashes, citation matching or pending-review CAS.
+
+Manual forms retain their loaded baseline across reruns. Source/SHA changes and
+explicit reload clear the prior widget namespace; a concurrent manual save preserves
+the draft for inspection but disables stale save. A different source starts blank.
+**Copy previous values** names the supplying revision and source, clears all pages,
+and requires new citations to match the newly selected PDF deterministically before
+saving. Ordinary hand-entered evidence remains a human attestation. Successful save
+reloads the draft context. No copy action runs an agent or downloads a source.
+
+
+### Latest-equivalent pending term claims
+
+Before automatically applying a cap, compare eligible pending HIGH claims from all
+DRHP/RHPs dated exactly the same as the selected current source. Matching manual
+baseline and source URL/SHA are required. Decimal-unequal non-null caps require
+review even when the stored issue cap is unknown. Equal or missing claims do not
+create conflicts; older drafts and rejected history are not current authority.
+This policy runs both during queue selection and again on fresh rows under the
+approval state lock, preventing a proposal inserted during PDF verification from
+being missed. No older candidate is tried when this comparison rejects approval.

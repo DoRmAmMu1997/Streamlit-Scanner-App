@@ -414,3 +414,81 @@ def test_document_deletion_retains_immutable_source_snapshots(
     assert retained.source_document_url == document.document_url
     assert retained.source_record_hash == document.record_hash
     assert retained.source_content_sha256 == digest
+
+
+def test_bound_manual_draft_rejects_a_later_backdated_save(file_session_factory, tmp_path):
+    """An old browser draft must not replace a correction, even if backdated."""
+    from backend.ipo import repository
+
+    issue, document, _path, _digest = _cached_document(file_session_factory, tmp_path)
+    assert hasattr(repository, "load_manual_edit_context"), "manual drafts need a coherent source-bound baseline"
+    context = repository.load_manual_edit_context(issue.id, document.id, session_factory=file_session_factory)
+    assert context.manual_revision == 0
+    first = submit_manual_extraction(
+        issue.id, _payload(source_document_id=document.id), entered_by_email="admin@example.com",
+        expected_context=context, data_dir=tmp_path, session_factory=file_session_factory,
+    )
+    newer = repository.load_manual_edit_context(issue.id, document.id, session_factory=file_session_factory)
+    assert newer.manual_revision == 1
+    assert newer.latest_profile is not None
+    assert newer.latest_profile.id == first.id
+    submit_manual_extraction(
+        issue.id, _payload(source_document_id=document.id, net_worth="90"),
+        entered_by_email="admin@example.com", expected_context=newer, data_dir=tmp_path,
+        now=lambda: dt.datetime(2000, 1, 1, tzinfo=dt.UTC), session_factory=file_session_factory,
+    )
+    with pytest.raises(repository.IpoProposalConflictError) as error:
+        submit_manual_extraction(
+            issue.id, _payload(source_document_id=document.id, net_worth="70"),
+            entered_by_email="admin@example.com", expected_context=newer, data_dir=tmp_path,
+            session_factory=file_session_factory,
+        )
+    assert error.value.code == "manual_revision_changed"
+    assert len(list_manual_extractions(issue.id, session_factory=file_session_factory)) == 2
+
+
+
+def test_programmatic_manual_save_captures_before_file_verification(
+    file_session_factory, tmp_path: Path, monkeypatch,
+) -> None:
+    """Omitted browser context still protects a direct call's verification window.
+
+    Beginner note:
+        A real nested human save commits after the outer call captured its
+        baseline but before hashing returns. The outer save must fail, preserving
+        the human correction and exactly one generation increment.
+    """
+    from backend.ipo import repository
+
+    issue, document, _path, _digest = _cached_document(file_session_factory, tmp_path)
+    verify = repository.verify_cached_document_file
+    inserted = False
+    def concurrent_save(source, **kwargs):
+        """Commit a nested human correction while the outer save is verifying.
+
+        Args:
+            source: Original cached source forwarded to the real verifier.
+            **kwargs: Cache-verification options forwarded unchanged.
+
+        Returns:
+            The original verified-cache result after the human write commits.
+
+        Beginner note:
+            Set the one-shot flag before the nested public save because it uses
+            this verifier too. Returning the original result lets the outer call
+            continue and prove that its final baseline check detects the edit.
+        """
+        nonlocal inserted
+        result = verify(source, **kwargs)
+        if not inserted:
+            inserted = True
+            repository.submit_manual_extraction(issue.id, _payload(source_document_id=document.id, net_worth="99"),
+                entered_by_email="human@example.com", data_dir=tmp_path, session_factory=file_session_factory)
+        return result
+    monkeypatch.setattr(repository, "verify_cached_document_file", concurrent_save)
+    with pytest.raises(repository.IpoProposalConflictError) as error:
+        repository.submit_manual_extraction(issue.id, _payload(source_document_id=document.id),
+            entered_by_email="stale@example.com", data_dir=tmp_path, session_factory=file_session_factory)
+    assert error.value.code == "manual_revision_changed"
+    records = repository.list_manual_extractions(issue.id, session_factory=file_session_factory)
+    assert len(records) == 1 and records[0].net_worth == Decimal("99")

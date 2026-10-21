@@ -11,18 +11,22 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
+import sys
+from collections.abc import Iterator
 from decimal import Decimal
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 import pytest
 
 from backend.auth.roles import Role
 from backend.auth.session import AuthenticatedUser
+from backend.ipo.approval import IpoManualEditContext
 from backend.ipo.manual_extraction import IpoAmountUnit, IpoPeerMetric, IpoShareUnit
 from backend.ipo.models import (
     Confidence,
+    IpoDocumentParseStatus,
     IpoExtractionProposalRecord,
     IpoExtractionProposalStatus,
     IpoValidationError,
@@ -30,6 +34,258 @@ from backend.ipo.models import (
 from ui import ipo_manual_page
 
 ADMIN = AuthenticatedUser("admin@example.com", "Admin", role=Role.ADMIN)
+
+
+def _draft_context(document_id: int, *, revision: int = 0, profile: Any = None) -> IpoManualEditContext:
+    """Build detached authority fields without opening application storage.
+
+    Args:
+        document_id: Source whose identity the simulated form selects.
+        revision: Captured manual generation, independent of source identity.
+        profile: Optional captured prior evidence used only as a seed.
+
+    Returns:
+        Context with the complete source-binding fields read by the UI helper.
+
+    Beginner note:
+        Database ownership and revision races have real-repository regressions.
+        These tests isolate browser-session transitions and deliberately never
+        fall back to the configured application database.
+    """
+    digest = f"{document_id:064x}"
+    return IpoManualEditContext(
+        issue=cast(Any, SimpleNamespace(id=7)),
+        document=cast(Any, SimpleNamespace(
+            id=document_id, issue_id=7, document_type="rhp",
+            document_url=f"https://www.sebi.gov.in/filings/{document_id}.pdf",
+            filing_date=dt.date(2026, 1, document_id), content_sha256=digest,
+            file_path=f"ipo/documents/{digest}.pdf", parse_status=IpoDocumentParseStatus.PENDING,
+        )),
+        manual_revision=revision, latest_profile=profile,
+    )
+
+
+def test_manual_draft_source_switch_clears_old_fields_without_losing_selection() -> None:
+    """A-B-A must create a fresh draft instead of reviving A's unsaved widget values.
+
+    Beginner note:
+        Issue-only keys previously reused facts and pages for a different PDF.
+        The source-bound namespace must change on every switch, and cleanup
+        must remove only its own fields while retaining useful source selection.
+    """
+    assert hasattr(ipo_manual_page, "_manual_draft")
+    state: dict[str, Any] = {"ipo_7_source_document": "selected source", "other_page": "keep"}
+    first = ipo_manual_page._manual_draft(_draft_context(1), state=state)
+    value_key = ipo_manual_page._widget_key(first.form_key, "net_worth")
+    page_key = ipo_manual_page._widget_key(first.form_key, "net_worth_page")
+    state[value_key], state[page_key] = "999", 9
+    second = ipo_manual_page._manual_draft(_draft_context(2), state=state)
+    returned = ipo_manual_page._manual_draft(_draft_context(1), state=state)
+    assert len({first.form_key, second.form_key, returned.form_key}) == 3
+    assert value_key not in state and page_key not in state
+    assert second.seed is None and returned.seed is None
+    assert state["ipo_7_source_document"] == "selected source"
+    assert state["other_page"] == "keep"
+
+
+def test_manual_draft_keeps_loaded_baseline_until_explicit_reload() -> None:
+    """A rerun must not give stale typed values a newer baseline behind the user's back.
+
+    Beginner note:
+        Another administrator may save while the form is open. Keep the old
+        draft and baseline so the backend rejects stale submission; only an
+        explicit reload replaces it with a fresh context and widget namespace.
+    """
+    assert hasattr(ipo_manual_page, "_manual_draft")
+    state: dict[str, Any] = {}
+    original = ipo_manual_page._manual_draft(_draft_context(1, revision=1), state=state)
+    newer = _draft_context(1, revision=2)
+    assert ipo_manual_page._manual_draft(newer, state=state) is original
+    assert original.context.manual_revision == 1
+    reloaded = ipo_manual_page._manual_draft(newer, state=state, reload=True)
+    assert reloaded.context.manual_revision == 2
+    assert reloaded.form_key != original.form_key
+
+
+def test_copy_action_is_explicit_and_cannot_silently_refresh_the_baseline() -> None:
+    """Copying supplies values only and preserves the draft's original authority context.
+
+    Beginner note:
+        The captured previous record belongs to source A. Selecting B starts
+        blank; only an explicit copy creates a seed, marks citations for fresh
+        verification and clears B's old widgets. A newer supplied context cannot
+        quietly bless that old draft as current.
+    """
+    assert hasattr(ipo_manual_page, "_manual_draft")
+    previous: Any = SimpleNamespace(
+        source_document_id=1, source_content_sha256=f"{1:064x}",
+        source_document_url="https://www.sebi.gov.in/filings/1.pdf",
+    )
+    state: dict[str, Any] = {}
+    original = ipo_manual_page._manual_draft(_draft_context(2, revision=1, profile=previous), state=state)
+    assert original.seed is None and original.copied is False
+    copied = ipo_manual_page._manual_draft(
+        _draft_context(2, revision=2), state=state, copy_previous=True,
+    )
+    assert copied.seed is previous and copied.copied is True
+    assert copied.context is original.context
+    assert copied.context.manual_revision == 1
+    assert copied.form_key != original.form_key
+
+
+def _manual_entry_test_app() -> None:
+    """Run the actual entry renderer in Streamlit's isolated script harness.
+
+    Beginner note:
+        Imports live inside the function because AppTest executes its source as
+        a new script. Repository facades are replaced by offline test snapshots.
+    """
+    from types import SimpleNamespace
+
+    from backend.auth.roles import Role
+    from backend.auth.session import AuthenticatedUser
+    from ui import ipo_manual_page
+
+    ipo_manual_page._render_entry_workflow(
+        AuthenticatedUser("admin@example.com", "Admin", role=Role.ADMIN),
+        [SimpleNamespace(id=7, company_name="Fixture Ltd")],
+    )
+
+
+def _install_entry_contexts(monkeypatch: pytest.MonkeyPatch, contexts: dict[int, IpoManualEditContext]) -> None:
+    """Replace entry-page reads with controlled snapshots and no database access.
+
+    Args:
+        monkeypatch: Fixture that restores the real facades after the test.
+        contexts: Mutable source snapshots; replacing one simulates another save.
+
+    Returns:
+        None. Installs only the four read/display seams used by these scenarios.
+
+    Beginner note:
+        Real widgets, state cleanup and form disabling remain active. Stubbing
+        the reads prevents a UI test from accidentally opening application storage.
+    """
+    monkeypatch.setattr(ipo_manual_page, "list_documents", lambda _id: [item.document for item in contexts.values()])
+    monkeypatch.setattr(ipo_manual_page, "get_latest_manual_profile", lambda _id: None)
+    monkeypatch.setattr(ipo_manual_page, "load_manual_edit_context", lambda _issue, document: contexts[document])
+    monkeypatch.setattr(ipo_manual_page, "_render_latest_and_history", lambda *_args: None)
+
+
+@pytest.fixture
+def _preserve_spawn_main() -> Iterator[None]:
+    """Restore pytest's process entry module after Streamlit's script harness.
+
+    Yields:
+        None while a test runs real Streamlit script reruns.
+
+    Beginner note:
+        AppTest replaces sys.modules['__main__'] with its generated script.
+        Without restoration, later spawned PDF workers try to execute that
+        temporary script without AppTest's injected arguments and crash. Restore
+        the original entry module even when a widget assertion fails.
+    """
+    original_main = sys.modules["__main__"]
+    try:
+        yield
+    finally:
+        sys.modules["__main__"] = original_main
+
+
+@pytest.mark.usefixtures("_preserve_spawn_main")
+def test_real_manual_widgets_reset_on_a_b_a_source_switch(monkeypatch) -> None:
+    """Exercise actual reruns so source switching cannot relabel stale widget state.
+
+    Beginner note:
+        Comparing key strings alone cannot prove Streamlit drops old values.
+        Type an amount and page into A, select B and return to A; both new forms
+        must show empty source-bound fields while retaining the source selector.
+        An incomplete submit sends those fields through AppTest's form protocol
+        without persisting evidence. Assert the dirty state first so a discarded
+        test input cannot make the later empty-field checks pass vacuously.
+    """
+    from streamlit.testing.v1 import AppTest
+
+    _install_entry_contexts(monkeypatch, {1: _draft_context(1), 2: _draft_context(2)})
+
+    def forbidden_save(*_args, **_kwargs):
+        """Keep the source-switch regression entirely outside persistence.
+
+        Raises:
+            AssertionError: An incomplete fixture unexpectedly reaches storage.
+
+        Beginner note:
+            Only form widget state should be committed to the test runner. The
+            missing units must prevent an application evidence write.
+        """
+        raise AssertionError("Incomplete source-switch form reached persistence")
+
+    monkeypatch.setattr(ipo_manual_page, "submit_manual_extraction", forbidden_save)
+    app = AppTest.from_function(_manual_entry_test_app, default_timeout=15).run()
+    assert not app.exception
+    next(widget for widget in app.text_input if widget.label == "Net worth").set_value("999")
+    next(widget for widget in app.number_input if widget.label == "Net worth page").set_value(9)
+    next(widget for widget in app.button if widget.label == "Save immutable revision").click().run()
+    assert not app.exception
+    assert any("Select the reported" in error.value for error in app.error)
+    assert next(widget for widget in app.text_input if widget.label == "Net worth").value == "999"
+    assert next(widget for widget in app.number_input if widget.label == "Net worth page").value == 9
+    for index in (1, 0):
+        next(widget for widget in app.selectbox if widget.label == "Cached source document").select_index(index).run()
+        assert not app.exception
+        assert next(widget for widget in app.text_input if widget.label == "Net worth").value == ""
+        assert next(widget for widget in app.number_input if widget.label == "Net worth page").value is None
+        assert next(widget for widget in app.selectbox if widget.label == "Financial statement unit").value is None
+
+
+@pytest.mark.usefixtures("_preserve_spawn_main")
+def test_real_manual_form_retains_stale_input_until_explicit_reload(monkeypatch) -> None:
+    """External saves disable stale submission without silently replacing the draft.
+
+    Beginner note:
+        The administrator can inspect their typed value after a concurrent save.
+        Explicit reload clears it and advances the loaded baseline; backend
+        revision checks still protect the later race between rendering and saving.
+        AppTest now batches form edits until its submit button is clicked, just
+        like the browser sends form data. A deliberately invalid submission
+        records the entered value without saving evidence. Browser checks cover
+        the separate, not-yet-submitted client buffer that AppTest does not model.
+    """
+    from streamlit.testing.v1 import AppTest
+
+    contexts = {1: _draft_context(1)}
+    _install_entry_contexts(monkeypatch, contexts)
+
+    def forbidden_save(*_args, **_kwargs):
+        """Refuse persistence while exercising the real form submission protocol.
+
+        Raises:
+            AssertionError: The incomplete form unexpectedly reaches storage.
+
+        Beginner note:
+            Empty required unit selections make this an unsaved draft. The test
+            must not accidentally commit evidence just to initialize widget state.
+        """
+        raise AssertionError("Incomplete form reached manual persistence")
+
+    monkeypatch.setattr(ipo_manual_page, "submit_manual_extraction", forbidden_save)
+    app = AppTest.from_function(_manual_entry_test_app, default_timeout=15).run()
+    next(widget for widget in app.text_input if widget.label == "Net worth").set_value("999")
+    next(widget for widget in app.button if widget.label == "Save immutable revision").click().run()
+    assert not app.exception
+    assert any("Select the reported" in error.value for error in app.error)
+    assert next(widget for widget in app.text_input if widget.label == "Net worth").value == "999"
+    contexts[1] = _draft_context(1, revision=1)
+    app.run()
+    assert not app.exception
+    assert next(widget for widget in app.text_input if widget.label == "Net worth").value == "999"
+    assert app.session_state["ipo_manual_edit_draft"].context.manual_revision == 0
+    assert next(widget for widget in app.button if widget.label == "Save immutable revision").disabled
+    next(widget for widget in app.button if widget.label == "Reload latest evidence").click().run()
+    assert not app.exception
+    assert app.session_state["ipo_manual_edit_draft"].context.manual_revision == 1
+    assert next(widget for widget in app.text_input if widget.label == "Net worth").value == ""
+    assert not any("Newer evidence" in warning.value for warning in app.warning)
 
 
 def test_widget_keys_are_scoped_to_the_selected_issue() -> None:
@@ -420,7 +676,7 @@ class _ReviewFakeStreamlit(_FakeStreamlit):
 
 def test_review_section_approves_with_the_reviewer_identity(monkeypatch) -> None:
     """Approve must call the repository with the signed-in admin as attestor."""
-    proposal = _proposal_record()
+    proposal = _proposal_record(baseline_manual_revision=0)
     fake_st = _ReviewFakeStreamlit(
         button_clicks={f"ipo_proposal_approve_{proposal.id}": True}
     )
@@ -437,6 +693,9 @@ def test_review_section_approves_with_the_reviewer_identity(monkeypatch) -> None
     )
     monkeypatch.setattr(ipo_manual_page, "approve_extraction_proposal", _approve)
 
+    context = _draft_context(3)
+    monkeypatch.setattr(ipo_manual_page, "load_manual_edit_context", lambda *_args: context)
+    monkeypatch.setattr(ipo_manual_page, "list_documents", lambda *_args: [context.document])
     ipo_manual_page._render_proposal_review(ADMIN)
 
     assert approvals[0]["proposal_id"] == proposal.id
@@ -554,3 +813,93 @@ def test_review_section_surfaces_validation_errors_safely(monkeypatch) -> None:
 
     assert fake_st.successes == []
     assert any("non\\-empty reason" in message for message in fake_st.errors)
+
+
+
+def test_unknown_baseline_review_never_calls_approval(monkeypatch) -> None:
+    """An unknown baseline routes reviewers to manual re-entry without losing reject.
+
+    Beginner note:
+        Even a stale browser click cannot trigger approval after the button is
+        disabled. The repository independently enforces the same boundary.
+    """
+    proposal = _proposal_record()
+    fake = _ReviewFakeStreamlit(button_clicks={f"ipo_proposal_approve_{proposal.id}": True})
+    monkeypatch.setattr(ipo_manual_page, "st", fake)
+    monkeypatch.setattr(ipo_manual_page, "list_extraction_proposals", lambda **_kwargs: [proposal])
+    def forbidden(*_args, **_kwargs):
+        """Fail if an unknown-baseline browser click reaches the write boundary.
+
+        Raises:
+            AssertionError: Always, because this fixture must never be called.
+
+        Beginner note:
+            The fake button reports an old click even when disabled. The page's
+            current authorization decision must suppress the backend call itself.
+        """
+        raise AssertionError("unknown-baseline review reached the approver")
+    monkeypatch.setattr(ipo_manual_page, "approve_extraction_proposal", forbidden)
+    ipo_manual_page._render_proposal_review(ADMIN)
+    assert any("no trusted manual baseline" in warning for warning in fake.warnings)
+    assert fake.successes == []
+
+
+@pytest.mark.usefixtures("_preserve_spawn_main")
+def test_real_copy_clears_every_citation_and_peer_editor_source(monkeypatch) -> None:
+    """Explicit copying retains amounts and units but clears all prior PDF pages.
+
+    Beginner note:
+        A peer editor has its own persistent widget state; clearing ordinary
+        text inputs alone would leave old peer citations attached to a new PDF.
+        This exercises real widgets and inspects the resulting displayed table.
+    """
+    from streamlit.testing.v1 import AppTest
+    from test_ipo_manual_repository import _payload
+
+    data = _payload(source_document_id=1)
+    profile = SimpleNamespace(**vars(data), id=22, source_content_sha256=f"{1:064x}",
+                              source_document_url="https://www.sebi.gov.in/filings/1.pdf")
+    _install_entry_contexts(monkeypatch, {2: _draft_context(2, revision=1, profile=profile)})
+    app = AppTest.from_function(_manual_entry_test_app, default_timeout=15).run()
+    assert next(widget for widget in app.text_input if widget.label == "Net worth").value == ""
+    next(widget for widget in app.button if widget.label == "Copy previous values").click().run()
+    assert not app.exception
+    assert next(widget for widget in app.text_input if widget.label == "Net worth").value == "80.0000"
+    assert all(widget.value is None for widget in app.number_input)
+    assert next(widget for widget in app.selectbox
+                if widget.label == "Financial statement unit").value == IpoAmountUnit.CRORE_INR
+    peer_table = app.dataframe[0].value
+    assert peer_table.iloc[0]["company_name"] == "Peer One Ltd"
+    assert pd.isna(peer_table.iloc[0]["source_page"])
+    expected_revision = ipo_manual_page._neutralize_markdown("revision #22")
+    expected_source = ipo_manual_page._neutralize_markdown("1.pdf")
+    assert any(expected_revision in widget.value and expected_source in widget.value for widget in app.caption)
+
+
+def test_review_read_failure_disables_approval_after_context_load(monkeypatch) -> None:
+    """Partial authority reads must not leave a previously true approval gate open."""
+    proposal = _proposal_record(baseline_manual_revision=0)
+    fake = _ReviewFakeStreamlit(button_clicks={f"ipo_proposal_approve_{proposal.id}": True})
+    monkeypatch.setattr(ipo_manual_page, "st", fake)
+    monkeypatch.setattr(ipo_manual_page, "list_extraction_proposals", lambda **_kwargs: [proposal])
+    monkeypatch.setattr(ipo_manual_page, "load_manual_edit_context", lambda *_args: _draft_context(3))
+    def unavailable(*_args):
+        """Model an inventory failure after the manual context loaded successfully.
+
+        Raises:
+            RuntimeError: Always, to interrupt the second authority read.
+
+        Beginner note:
+            An earlier successful check cannot leave approval enabled when a
+            later required read fails. No real database outage is needed here.
+        """
+        raise RuntimeError("fixture inventory unavailable")
+    monkeypatch.setattr(ipo_manual_page, "list_documents", unavailable)
+    approvals = []
+    def approve(*_args, **_kwargs):
+        """Return a revision so only an unauthorized call fails the assertion."""
+        approvals.append(True)
+        return SimpleNamespace(id=99)
+    monkeypatch.setattr(ipo_manual_page, "approve_extraction_proposal", approve)
+    ipo_manual_page._render_proposal_review(ADMIN)
+    assert approvals == []

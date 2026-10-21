@@ -112,3 +112,5 @@ the same PR.
 - [VALID-005 forward-return integrity and retry scheduling](valid-005-forward-return-integrity.md) — immutable receipts, short transactions, fair stock and benchmark retries.
 
 - **[ipo-013-current-evaluation-state.md](ipo-013-current-evaluation-state.md)** — immutable IPO history, mutable verified selection, revision/CAS publication and semantic/time freshness.
+
+- [IPO-014 source-bound approval](ipo-014-source-bound-approval.md): manual generations, locked approval authority, current filing selection and safe manual draft/copy transitions.

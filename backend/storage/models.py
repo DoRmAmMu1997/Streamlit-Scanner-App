@@ -1353,6 +1353,7 @@ class IpoScoringState(Base):
     __tablename__ = "ipo_scoring_state"
     __table_args__ = (
         CheckConstraint("input_revision >= 0", name="ck_ipo_scoring_state_input_revision"),
+        CheckConstraint("manual_revision >= 0", name="ck_ipo_scoring_state_manual_revision"),
         CheckConstraint(
             "evaluated_revision >= 0 AND evaluated_revision <= input_revision",
             name="ck_ipo_scoring_state_evaluated_revision",
@@ -1361,6 +1362,7 @@ class IpoScoringState(Base):
 
     issue_id: Mapped[int] = mapped_column(ForeignKey("ipo_issues.id", ondelete="CASCADE"), primary_key=True)
     input_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    manual_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     current_score_id: Mapped[int | None] = mapped_column(ForeignKey("ipo_scores.id", ondelete="SET NULL"))
     evaluated_revision: Mapped[int | None] = mapped_column(Integer)
     last_verified_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
@@ -1527,6 +1529,10 @@ class IpoExtractionProposal(Base):
     __tablename__ = "ipo_extraction_proposals"
     __table_args__ = (
         CheckConstraint(
+            "baseline_manual_revision IS NULL OR baseline_manual_revision >= 0",
+            name="ck_ipo_extraction_proposals_manual_baseline",
+        ),
+        CheckConstraint(
             "status IN ('pending', 'approved', 'rejected')",
             name="ck_ipo_extraction_proposals_status",
         ),
@@ -1601,6 +1607,7 @@ class IpoExtractionProposal(Base):
         nullable=True,
         index=True,
     )
+    baseline_manual_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
     document_url_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(
         String(16), nullable=False, default="pending", server_default="pending"
