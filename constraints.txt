@@ -10,9 +10,9 @@
 # streamlit 1.58 is the floor for pandas 3.x: 1.55 caps pandas<3, so the two
 # pins move together. 1.58 also makes starlette/uvicorn required rather than
 # optional extras, and drops tornado.
-streamlit==1.66.0
+streamlit==1.66.1
 authlib==1.9.1
-pandas==3.0.6
+pandas==3.1.0
 numpy==2.5.4
 pyarrow==26.0.0
 requests==2.34.2
@@ -25,11 +25,11 @@ PyYAML==6.0.3
 beautifulsoup4==4.15.0
 lxml==6.1.3
 pdfplumber==0.11.10
-claude-agent-sdk==0.2.168
-SQLAlchemy==2.1.4
+claude-agent-sdk==0.2.173
+SQLAlchemy==2.1.6
 # Keep Alembic pinned with SQLAlchemy so local migrations and CI use the same
 # migration behavior every time.
-alembic==1.20.0
+alembic==1.20.1
 # `psycopg[binary]` installs both distributions; pin each one so CI and
 # deployments use the same PostgreSQL driver implementation.
 psycopg==3.3.6
