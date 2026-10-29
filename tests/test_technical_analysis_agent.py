@@ -14,6 +14,7 @@ import json
 import pandas as pd
 import pytest
 
+from backend.ai_cache_integrity import sign_cache_envelope
 from backend.fundamentals.fundamental_agent import AgentRunResult
 from backend.fundamentals.fundamentals_cache import FundamentalsCache
 from backend.technical import technical_agent as technical_agent_module
@@ -317,6 +318,7 @@ def test_agent_rejects_tampered_cached_receipt_and_recomputes(tmp_path):
     cache_key = agent._cache_model_key("DEMO", candles, levels)
     envelope = cache.get_verdict("DEMO", cache_key, data_date)
     envelope["provenance"]["evidence_references"][0]["sha256"] = "not-a-hash"
+    envelope = sign_cache_envelope(envelope, key=agent._cache_signing_key)
     cache.set_verdict("DEMO", cache_key, data_date, envelope)
     runner.verdict = _sample_verdict(confidence=4)
     runner.calls = 0
@@ -326,6 +328,34 @@ def test_agent_rejects_tampered_cached_receipt_and_recomputes(tmp_path):
     assert runner.calls == 1
     assert result.verdict is not None and result.verdict.confidence == 4
     assert result.provenance.cache_hit is False
+
+
+def test_agent_recomputes_signed_cache_when_reference_url_field_is_missing(tmp_path):
+    """A missing field must not impersonate explicit None for local chart input.
+
+    Beginner note:
+        A real cache writer includes sanitized_url even for local evidence. A
+        re-signed incomplete mapping must be recomputed after HMAC verification.
+    """
+    cache = FundamentalsCache(cache_dir=tmp_path)
+    runner = _FakeRunner(_sample_verdict(confidence=8))
+    agent = TechnicalAnalysisAgent(model="test-model", cache=cache, runner=runner)
+    candles = _sample_candles()
+    levels = _sample_levels()
+    agent.evaluate("DEMO", candles, levels)
+    data_date = str(candles.iloc[-1]["timestamp"])[:10]
+    cache_key = agent._cache_model_key("DEMO", candles, levels)
+    envelope = cache.get_verdict("DEMO", cache_key, data_date)
+    del envelope["provenance"]["evidence_references"][0]["sanitized_url"]
+    envelope = sign_cache_envelope(envelope, key=agent._cache_signing_key)
+    cache.set_verdict("DEMO", cache_key, data_date, envelope)
+    runner.verdict = _sample_verdict(confidence=4)
+
+    result = agent.evaluate("DEMO", candles, levels)
+
+    assert result.verdict is not None and result.verdict.confidence == 4
+    assert result.provenance.cache_hit is False
+    assert all(ref.sanitized_url is None for ref in result.provenance.evidence_references)
 
 
 def test_agent_recomputes_when_cached_envelope_contains_non_finite_json(tmp_path):

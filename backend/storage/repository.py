@@ -15,7 +15,6 @@ session ownership outside the repository makes it easy for SCAN-003 to wrap
 from __future__ import annotations
 
 import datetime as dt
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, is_dataclass
 from decimal import Decimal, InvalidOperation
@@ -49,7 +48,6 @@ _AI_EVALUATION_OUTCOMES = frozenset({"approved", "rejected", "error"})
 _UNIVERSE_OBSERVATION_STATUSES = frozenset(
     {"valid", "missing", "unreadable", "legacy_unknown"}
 )
-_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 @dataclass(frozen=True)
@@ -1536,7 +1534,10 @@ def _validated_ai_provenance(
     confidence: Decimal | None,
     decision_reason: str | None,
 ) -> dict[str, Any]:
-    from backend.scanning.result_contract import sanitize_evidence_url
+    from backend.scanning.result_contract import (
+        evidence_reference_from_mapping,
+        validate_sha256_digest,
+    )
 
     if not isinstance(value, Mapping):
         raise ValueError("AI evaluation provenance must be a mapping.")
@@ -1558,22 +1559,18 @@ def _validated_ai_provenance(
         raise ValueError("AI provenance evidence_references must be a list.")
     evidence: list[dict[str, Any]] = []
     for item in evidence_value:
-        if not isinstance(item, Mapping):
-            raise ValueError("Each evidence reference must be a mapping.")
-        source_label = str(item.get("source_label") or "").strip()
-        if not source_label:
-            raise ValueError("Evidence reference requires a source_label.")
+        reference = evidence_reference_from_mapping(item)
         evidence.append(
             {
-                "source_label": source_label,
-                "sanitized_url": sanitize_evidence_url(item.get("sanitized_url")),
-                "sha256": _full_sha256(item.get("sha256"), "evidence sha256"),
+                "source_label": reference.source_label,
+                "sanitized_url": reference.sanitized_url,
+                "sha256": reference.sha256,
             }
         )
 
     input_context_hash = provenance.get("input_context_hash")
     normalized_context_hash = (
-        _full_sha256(input_context_hash, "input_context_hash")
+        validate_sha256_digest(input_context_hash, field_name="input_context_hash")
         if input_context_hash is not None
         else None
     )
@@ -1624,10 +1621,12 @@ def _validated_ai_provenance(
 
 
 def _full_sha256(value: Any, field_name: str) -> str:
-    normalized = str(value or "").strip().lower()
-    if not _SHA256_RE.fullmatch(normalized):
-        raise ValueError(f"AI provenance {field_name} must be a full SHA-256.")
-    return normalized
+    from backend.scanning.result_contract import validate_sha256_digest
+
+    return validate_sha256_digest(
+        value,
+        field_name=f"AI provenance {field_name}",
+    )
 
 
 def _as_utc_datetime(value: Any, *, required: bool) -> dt.datetime | None:
